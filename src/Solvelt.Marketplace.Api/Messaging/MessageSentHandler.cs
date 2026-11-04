@@ -32,7 +32,6 @@ public sealed class MessageSentHandler : IProjectionHandler
 
         MessageThread? thread;
         string? orderNumber = null, sellerOrderNumber = null;
-        Guid? sellerRefId = null;
         if (kind == "order")
         {
             var mid = FulfilmentProjector.Str(d, "marketplaceOrderId");
@@ -55,7 +54,7 @@ public sealed class MessageSentHandler : IProjectionHandler
                 c.Db.MessageThreads.Add(thread);
             }
             else if (convKey is not null && convKey != thread.ConversationKey) return HandlerOutcome.Skipped("conversation id does not match the order's thread");
-            (orderNumber, sellerOrderNumber, sellerRefId) = (order.Number, group.SellerOrderNumber, group.SellerId);
+            (orderNumber, sellerOrderNumber) = (order.Number, group.SellerOrderNumber);
         }
         else if (kind == "product")
         {
@@ -86,8 +85,7 @@ public sealed class MessageSentHandler : IProjectionHandler
         var outbox = new OutboxWriter(c.Db, c.Time);
         Notifier.AddForAccount(c.Db, outbox, c.Time, thread.AccountId, NotificationKinds.MessageReceived, c.Event.Id, orderNumber, sellerOrderNumber,
             new Dictionary<string, object?> { ["sellerName"] = thread.SellerName, ["subject"] = thread.Subject, ["threadId"] = thread.Id });
-        var (rcptOrder, rcptSeller) = thread.GroupId is not null ? (sellerOrderNumber, sellerRefId) : (null, thread.ListingId is { } lid ? await c.Db.CatalogListings.AsNoTracking().Where(x => x.Id == lid).Select(x => (Guid?)x.SellerId).FirstOrDefaultAsync(ct) : null);
-        outbox.Enqueue(MessageService.ReceiptType, new MessageService.ReceiptPayload(pmid, "delivered", rcptOrder, rcptSeller), $"receipt:{pmid}:delivered");
+        outbox.Enqueue(MessageService.ReceiptType, new MessageService.ReceiptPayload(pmid, "delivered"), $"receipt:{pmid}:delivered");
         return HandlerOutcome.Applied();
     }
 
