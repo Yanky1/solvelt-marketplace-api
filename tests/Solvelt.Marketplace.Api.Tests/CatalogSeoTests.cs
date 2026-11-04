@@ -1,4 +1,5 @@
 using System.Net;
+using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
@@ -86,7 +87,10 @@ public class CatalogSeoTests : IAsyncLifetime
     [Fact]
     public async Task An_archived_listing_is_410_and_a_portal_that_no_longer_has_it_is_410()
     {
-        Assert.Equal("gone", Code(await Get($"{B}/listings/retired-spice-gift-set", HttpStatusCode.Gone)));             // archived in the seed
+        var fx0 = Fixture(_f);
+        fx0.Upsert(Id("hamantaschen-box"), l => l with { Status = "Archived" });                                         // public, then archived
+        await Sync(_f);
+        Assert.Equal("gone", Code(await Get($"{B}/listings/hamantaschen-gift-box", HttpStatusCode.Gone)));
         var fx = Fixture(_f);
         var honey = Row(_f, Id("honey-cake"));
         fx.Upsert(honey.Id, l => l);
@@ -94,6 +98,48 @@ public class CatalogSeoTests : IAsyncLifetime
         fx.Remove(honey.Id);
         await Sync(_f);
         await Get($"{B}/listings/honey-cake-for-rosh-hashanah", HttpStatusCode.Gone);
+    }
+
+    [Fact]
+    public async Task A_draft_that_was_never_public_is_404_even_after_an_unlist_event()
+    {
+        var fx = Fixture(_f);
+        var template = fx.All().First(l => l.Type == "product");
+        var draft = fx.Add(Copy(template, Guid.NewGuid(), "Secret Draft Item") with { Status = "Draft" });
+        await Sync(_f);
+        await Event(_f, _c, "listing.unlisted", draft.Id, draft.Version);                                   // the portal says it was unlisted: it was never listed
+        await Get($"{B}/listings/{draft.Id}", HttpStatusCode.NotFound);
+        await Get($"{B}/listings/secret-draft-item", HttpStatusCode.NotFound);
+        Assert.False(WithDb(_f, db => db.CatalogListings.Single(l => l.Id == draft.Id).WasPublic));
+    }
+
+    [Fact]
+    public async Task A_listing_first_seen_archived_is_404_but_one_archived_after_being_public_is_410()
+    {
+        var fx = Fixture(_f);
+        var template = fx.All().First(l => l.Type == "product");
+        var neverPublic = fx.Add(Copy(template, Guid.NewGuid(), "Born Archived") with { Status = "Archived" });
+        var wasPublic = fx.Add(Copy(template, Guid.NewGuid(), "Public Then Archived"));
+        await Sync(_f);
+        fx.Upsert(wasPublic.Id, l => l with { Status = "Archived" });
+        await Sync(_f);
+        await Get($"{B}/listings/born-archived", HttpStatusCode.NotFound);
+        await Get($"{B}/listings/public-then-archived", HttpStatusCode.Gone);
+        Assert.True(WithDb(_f, db => db.CatalogListings.Single(l => l.Id == wasPublic.Id).WasPublic));
+        Assert.False(WithDb(_f, db => db.CatalogListings.Single(l => l.Id == neverPublic.Id).WasPublic));
+    }
+
+    [Fact]
+    public async Task Once_public_always_public_for_the_gone_rule_even_after_a_relist_and_a_second_unlist()
+    {
+        var babka = Row(_f, Id("babka-chocolate"));
+        await Event(_f, _c, "listing.unlisted", babka.Id, babka.Version);
+        Fixture(_f).Upsert(babka.Id, l => l);
+        await Sync(_f);
+        await Get($"{B}/listings/chocolate-babka");
+        var again = Row(_f, babka.Id);
+        await Event(_f, _c, "listing.unlisted", again.Id, again.Version);
+        await Get($"{B}/listings/chocolate-babka", HttpStatusCode.Gone);
     }
 
     [Fact]
@@ -204,7 +250,9 @@ public class CatalogSeoTests : IAsyncLifetime
         var cats = (await Get($"{B}/sitemap/categories")).GetProperty("items").EnumerateArray().ToDictionary(i => i.GetProperty("key").GetString()!, i => i.GetProperty("lastModified").GetDateTimeOffset().UtcDateTime);
         Assert.Equal(13, cats.Count);                                                           // all 13 categories have something visible below them
         var rootNewest = Shown().Where(l => Row(_f, l.Id).CategoryId is var c && new[] { "bakery", "meat-poultry", "wine-spirits", "pantry" }.Any(k => FixtureCatalogSource.Id("category:" + k) == c)).Max(l => l.UpdatedAt).UtcDateTime;
-        Assert.Equal(rootNewest, cats["food-drink"]);                                           // a category carries the newest time of its subtree
+        // a category carries the newest of: its subtree's listings and the change times of the category rows in it (the sync stamped them at the first run, after the seed's listing times)
+        var rowTimes = WithDb(_f, db => db.CatalogCategories.Where(c => new[] { "food-drink", "bakery", "meat-poultry", "wine-spirits", "pantry" }.Contains(c.Slug)).Select(c => c.UpdatedAt).ToList()).Max().UtcDateTime;
+        Assert.Equal(rowTimes > rootNewest ? rowTimes : rootNewest, cats["food-drink"], TimeSpan.FromMilliseconds(1));
 
         var brands = (await Get($"{B}/sitemap/brands")).GetProperty("items").EnumerateArray().Select(i => i.GetProperty("key").GetString()).ToList();
         Assert.Equal(9, brands.Count);
@@ -225,4 +273,154 @@ public class CatalogSeoTests : IAsyncLifetime
         Assert.DoesNotContain("books", cats);
         Assert.Equal(12, cats.Count);
     }
+}
+
+public class CatalogSitemapValidatorTests : IAsyncLifetime
+{
+    private TestFactory _f = null!;
+    private HttpClient _c = null!;
+    private const string B = "/api/v1/catalog";
+    public async Task InitializeAsync() { _f = new TestFactory(); await CatalogKit.Sync(_f); _c = _f.CreateClient(); }
+    public Task DisposeAsync() { _c.Dispose(); _f.Dispose(); return Task.CompletedTask; }
+
+    private static Guid Id(string slug) => FixtureCatalogSource.Id("listing:" + slug);
+    private static DateTimeOffset RoundDown(DateTimeOffset t) => new(t.UtcTicks - t.UtcTicks % TimeSpan.TicksPerSecond, TimeSpan.Zero);
+
+    [Theory]
+    [InlineData("listings")]
+    [InlineData("categories")]
+    [InlineData("brands")]
+    [InlineData("sellers")]
+    public async Task Every_sitemap_page_has_an_ETag_and_a_Last_Modified_of_its_newest_entry(string kind)
+    {
+        var res = await _c.GetAsync($"{B}/sitemap/{kind}");
+        res.EnsureSuccessStatusCode();
+        var page = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+        var newest = page.GetProperty("items").EnumerateArray().Max(i => i.GetProperty("lastModified").GetDateTimeOffset());
+        Assert.NotNull(res.Headers.ETag);
+        Assert.Matches("^\"[0-9a-f]{32}\"$", res.Headers.ETag!.Tag);
+        Assert.Equal(RoundDown(newest), res.Content.Headers.LastModified);
+        Assert.Equal("public, max-age=5", res.Headers.CacheControl?.ToString());
+    }
+
+    [Fact]
+    public async Task A_conditional_request_gets_304_with_no_body_until_the_page_changes()
+    {
+        var first = await _c.GetAsync($"{B}/sitemap/listings");
+        var etag = first.Headers.ETag!.Tag;
+        var req = new HttpRequestMessage(HttpMethod.Get, $"{B}/sitemap/listings"); req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+        var second = await _c.SendAsync(req);
+        Assert.Equal(HttpStatusCode.NotModified, second.StatusCode);
+        Assert.Empty(await second.Content.ReadAsByteArrayAsync());
+        Assert.Equal(etag, second.Headers.ETag!.Tag);
+        Assert.Equal("public, max-age=5", second.Headers.CacheControl?.ToString());                       // a 304 is cacheable like the 200 it stands for
+        foreach (var other in new[] { "\"nope\"", "W/\"nope\"" })
+        {
+            var r = new HttpRequestMessage(HttpMethod.Get, $"{B}/sitemap/listings"); r.Headers.TryAddWithoutValidation("If-None-Match", other);
+            Assert.Equal(HttpStatusCode.OK, (await _c.SendAsync(r)).StatusCode);
+        }
+        var star = new HttpRequestMessage(HttpMethod.Get, $"{B}/sitemap/listings"); star.Headers.TryAddWithoutValidation("If-None-Match", "*");
+        Assert.Equal(HttpStatusCode.NotModified, (await _c.SendAsync(star)).StatusCode);
+        // the page changes: a new ETag
+        Fixture(_f).Upsert(Id("honey-cake"), l => l with { Title = "Honey Cake Renamed" });
+        await CatalogKit.Sync(_f);
+        var again = new HttpRequestMessage(HttpMethod.Get, $"{B}/sitemap/listings"); again.Headers.TryAddWithoutValidation("If-None-Match", etag);
+        var changed = await _c.SendAsync(again);
+        Assert.Equal(HttpStatusCode.OK, changed.StatusCode);
+        Assert.NotEqual(etag, changed.Headers.ETag!.Tag);
+    }
+
+    [Fact]
+    public async Task If_Modified_Since_is_honoured_to_the_second_and_If_None_Match_wins_when_both_are_sent()
+    {
+        var first = await _c.GetAsync($"{B}/sitemap/listings");
+        var lastModified = first.Content.Headers.LastModified!.Value;
+        HttpRequestMessage Req(string name, string value) { var r = new HttpRequestMessage(HttpMethod.Get, $"{B}/sitemap/listings"); r.Headers.TryAddWithoutValidation(name, value); return r; }
+        Assert.Equal(HttpStatusCode.NotModified, (await _c.SendAsync(Req("If-Modified-Since", lastModified.ToString("R")))).StatusCode);              // exactly the time: not modified
+        Assert.Equal(HttpStatusCode.OK, (await _c.SendAsync(Req("If-Modified-Since", lastModified.AddSeconds(-1).ToString("R")))).StatusCode);        // one second older: modified
+        Assert.Equal(HttpStatusCode.NotModified, (await _c.SendAsync(Req("If-Modified-Since", lastModified.AddSeconds(1).ToString("R")))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _c.SendAsync(Req("If-Modified-Since", "not a date"))).StatusCode);
+        var both = Req("If-Modified-Since", lastModified.AddDays(1).ToString("R")); both.Headers.TryAddWithoutValidation("If-None-Match", "\"stale\"");
+        Assert.Equal(HttpStatusCode.OK, (await _c.SendAsync(both)).StatusCode);                          // the ETag does not match, so the date is not consulted
+    }
+
+    [Fact]
+    public async Task A_category_or_brand_last_modified_cannot_move_backwards_when_its_newest_listing_leaves()
+    {
+        var fx = Fixture(_f);
+        var later = DateTimeOffset.UtcNow.AddDays(3);
+        fx.Upsert(Id("babka-chocolate"), l => l with { UpdatedAt = later });                          // the newest listing of bakery and of mazel-bakery
+        await CatalogKit.Sync(_f);
+        async Task<(DateTimeOffset Cat, DateTimeOffset Brand)> Times()
+        {
+            var cats = await CatalogKit.Json(_c, $"{B}/sitemap/categories");
+            var brands = await CatalogKit.Json(_c, $"{B}/sitemap/brands");
+            DateTimeOffset T(JsonElement p, string key) => p.GetProperty("items").EnumerateArray().Single(i => i.GetProperty("key").GetString() == key).GetProperty("lastModified").GetDateTimeOffset();
+            return (T(cats, "bakery"), T(brands, "mazel-bakery"));
+        }
+        var before = await Times();
+        Assert.Equal(later.UtcDateTime, before.Cat.UtcDateTime, TimeSpan.FromMilliseconds(1));
+        var babka = CatalogKit.Row(_f, Id("babka-chocolate"));
+        await CatalogKit.Event(_f, _c, "listing.unlisted", babka.Id, babka.Version);                 // the newest listing leaves
+        var after = await Times();
+        // the newest listing left, but the row's own change time (when the sync first saw it) is the floor: it can fall back to that and no further
+        var floorCat = Infrastructure.WebhookTestKit.WithDb(_f, db => db.CatalogCategories.Where(c => c.Slug == "bakery").Select(c => c.UpdatedAt).Single());
+        var floorBrand = Infrastructure.WebhookTestKit.WithDb(_f, db => db.CatalogBrands.Where(b => b.Slug == "mazel-bakery").Select(b => b.UpdatedAt).Single());
+        Assert.True(after.Cat >= floorCat.AddMilliseconds(-1) && after.Brand >= floorBrand.AddMilliseconds(-1));
+        Assert.True(after.Cat >= RoundDown(floorCat));
+    }
+
+    [Fact]
+    public async Task The_category_and_brand_floors_are_their_own_change_times()
+    {
+        var future = DateTimeOffset.UtcNow.AddDays(30);
+        Infrastructure.WebhookTestKit.WithDb(_f, db => db.CatalogCategories.Where(c => c.Slug == "bakery").ExecuteUpdate(s => s.SetProperty(c => c.UpdatedAt, future)));
+        Infrastructure.WebhookTestKit.WithDb(_f, db => db.CatalogBrands.Where(b => b.Slug == "challah-corner").ExecuteUpdate(s => s.SetProperty(b => b.UpdatedAt, future)));
+        var cats = await CatalogKit.Json(_c, $"{B}/sitemap/categories");
+        var brands = await CatalogKit.Json(_c, $"{B}/sitemap/brands");
+        DateTimeOffset T(JsonElement p, string key) => p.GetProperty("items").EnumerateArray().Single(i => i.GetProperty("key").GetString() == key).GetProperty("lastModified").GetDateTimeOffset();
+        Assert.Equal(future.UtcDateTime, T(cats, "bakery").UtcDateTime, TimeSpan.FromMilliseconds(2));        // newer than any listing: the row's own time wins
+        Assert.Equal(future.UtcDateTime, T(brands, "challah-corner").UtcDateTime, TimeSpan.FromMilliseconds(2));
+        Assert.True(T(cats, "food-drink") >= T(cats, "bakery"));                                              // and the parent carries the newest below it
+    }
+
+    [Fact]
+    public async Task A_category_rename_by_the_feed_moves_its_last_modified_forward()
+    {
+        var before = (await CatalogKit.Json(_c, $"{B}/sitemap/categories")).GetProperty("items").EnumerateArray().Single(i => i.GetProperty("key").GetString() == "pantry").GetProperty("lastModified").GetDateTimeOffset();
+        _f.Clock.Advance(TimeSpan.FromDays(400));                                                             // after every listing time in the seed
+        var cat = Fixture(_f).Categories().Single(c => c.Slug == "pantry");
+        Fixture(_f).SetCategory(cat with { Name = "Pantry Renamed" });
+        await CatalogKit.Sync(_f);
+        var after = (await CatalogKit.Json(_c, $"{B}/sitemap/categories")).GetProperty("items").EnumerateArray().Single(i => i.GetProperty("key").GetString() == "pantry").GetProperty("lastModified").GetDateTimeOffset();
+        Assert.True(after > before);
+        Assert.Equal(_f.Clock.GetUtcNow().UtcDateTime, after.UtcDateTime, TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    public async Task A_brand_storefront_shows_a_seller_that_really_has_its_listings()
+    {
+        // the brand feed names another seller than the one whose listings carry the brand
+        var other = FixtureCatalogSource.Id("seller:glatt");
+        Infrastructure.WebhookTestKit.WithDb(_f, db => db.CatalogBrands.Where(b => b.Slug == "challah-corner").ExecuteUpdate(s => s.SetProperty(b => b.SellerId, other)));
+        var b = await CatalogKit.Json(_c, $"{B}/brands/challah-corner");
+        Assert.Equal("Mazel Bakery", b.GetProperty("seller").GetProperty("displayName").GetString());        // the seller of the 3 listings, not the brand row's claim
+        // a brand row naming a seller that does not exist is no 500 either
+        Infrastructure.WebhookTestKit.WithDb(_f, db => db.CatalogBrands.Where(b2 => b2.Slug == "challah-corner").ExecuteUpdate(s => s.SetProperty(b2 => b2.SellerId, Guid.NewGuid())));
+        Assert.Equal("Mazel Bakery", (await CatalogKit.Json(_c, $"{B}/brands/challah-corner")).GetProperty("seller").GetProperty("displayName").GetString());
+    }
+
+    [Fact]
+    public async Task The_sellers_facet_is_capped_like_the_brands()
+    {
+        var fx = Fixture(_f);
+        var template = fx.All().First(l => l.Type == "product");
+        for (var i = 0; i < 520; i++)
+            fx.Add(Copy(template, Guid.NewGuid()) with { Seller = new SellerRef(Guid.NewGuid(), $"Seller {i:D4}", true) });
+        await CatalogKit.Sync(_f);
+        var facets = (await CatalogKit.Json(_c, $"{B}/listings?facets=true&pageSize=1")).GetProperty("facets");
+        Assert.Equal(500, facets.GetProperty("sellers").GetArrayLength());
+    }
+
+    private static ListingSnapshot Copy(ListingSnapshot t, Guid id) => CatalogKit.Copy(t, id);
 }

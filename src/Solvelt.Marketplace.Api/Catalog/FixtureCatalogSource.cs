@@ -58,6 +58,7 @@ public sealed class FixtureCatalogSource : ICatalogSource
 
     /// <summary>Reference data the portal adds or changes (tests: clashing slugs, deep or cyclic trees, oversized names).</summary>
     public void SetCategory(CategoryDto c) { lock (_lock) { var i = _categories.FindIndex(x => x.Id == c.Id); if (i < 0) _categories.Add(c); else _categories[i] = c; } }
+    public IReadOnlyList<CategoryDto> Categories() { lock (_lock) return _categories.ToList(); }
     public void AddBrand(BrandDto b) { lock (_lock) _brands.Add(b); }
 
     /// <summary>A reference-data change (the brand feed): the next sync sees the new name.</summary>

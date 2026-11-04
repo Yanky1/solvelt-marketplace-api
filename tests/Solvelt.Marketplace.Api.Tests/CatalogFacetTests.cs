@@ -227,8 +227,14 @@ public class CatalogFacetTests : IAsyncLifetime
     {
         var f = (await Get($"{L}?brand=challah-corner&facets=true")).GetProperty("facets").GetProperty("price");
         Assert.Equal((650L, 1450L), (f.GetProperty("minCents").GetInt64(), f.GetProperty("maxCents").GetInt64()));
-        var priced = (await Get($"{L}?brand=challah-corner&priceMin=900&facets=true")).GetProperty("facets").GetProperty("price");
+        // priceMin=1000 leaves only the 1450 rolls: if the price facet obeyed its own filter its minimum would be 1450, not 650
+        var priced = (await Get($"{L}?brand=challah-corner&priceMin=1000&facets=true")).GetProperty("facets").GetProperty("price");
         Assert.Equal((650L, 1450L), (priced.GetProperty("minCents").GetInt64(), priced.GetProperty("maxCents").GetInt64()));   // the price facet ignores the price filter
+        var capped = (await Get($"{L}?brand=challah-corner&priceMax=700&facets=true")).GetProperty("facets").GetProperty("price");
+        Assert.Equal((650L, 1450L), (capped.GetProperty("minCents").GetInt64(), capped.GetProperty("maxCents").GetInt64()));    // ... and so does the maximum side
+        // the other facets DO obey the price filter
+        var brands = (await Get($"{L}?priceMin=1000&facets=true")).GetProperty("facets").GetProperty("brands").EnumerateArray().Sum(b => b.GetProperty("count").GetInt32());
+        Assert.Equal(Total(await Get($"{L}?priceMin=1000")), brands);
         var none = (await Get($"{L}?kosher=Nobody&facets=true")).GetProperty("facets");
         Assert.Equal(JsonValueKind.Null, none.GetProperty("price").GetProperty("minCents").ValueKind);
         Assert.Equal(JsonValueKind.Null, none.GetProperty("price").GetProperty("maxCents").ValueKind);
@@ -355,16 +361,110 @@ public class CatalogFacetTests : IAsyncLifetime
         await Get($"{L}?sort=price_asc&cursor={cursor}");
     }
 
-    [Fact]
-    public async Task A_cursor_with_a_non_numeric_key_is_a_clean_400_not_a_500()
+    /// <summary>A real cursor for the request, with its key replaced: the fingerprint stays right, so only the KEY check can refuse it.</summary>
+    private async Task<string> Forged(string query, string newKey)
     {
-        var forged = new ListingCursor("price_asc", "not-a-number", Guid.NewGuid()).Encode();
-        var res = await _c.GetAsync($"{L}?sort=price_asc&cursor={forged}");
+        var real = (await Get($"{L}?{query}&pageSize=2")).GetProperty("nextCursor").GetString()!;
+        var c = ListingCursor.Decode(real)!;
+        return (c with { Key = newKey }).Encode();
+    }
+
+    [Theory]
+    [InlineData("sort=price_asc", "not-a-number")]
+    [InlineData("sort=price_asc", "-5")]
+    [InlineData("sort=price_asc", "1000000000001")]
+    [InlineData("sort=newest", "99999999999999999999")]
+    [InlineData("sort=newest", "abc")]
+    [InlineData("sort=title", "UPPER")]
+    [InlineData("sort=title", "has space")]
+    [InlineData("sort=title", "nul\0byte")]            // PostgreSQL: 22021 on a NUL in a text value
+    [InlineData("sort=title", "caf\u00e9")]
+    [InlineData("q=challah&sort=relevance", "x")]
+    [InlineData("q=challah&sort=relevance", "NaN")]
+    [InlineData("q=challah&sort=relevance", "1e999")]
+    public async Task A_cursor_with_a_key_we_never_wrote_is_a_clean_400_not_a_500(string query, string key)
+    {
+        var res = await _c.GetAsync($"{L}?{query}&cursor={await Forged(query, key)}");
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
-        var forgedDate = new ListingCursor("newest", "99999999999999999999", Guid.NewGuid()).Encode();
-        Assert.Equal(HttpStatusCode.BadRequest, (await _c.GetAsync($"{L}?cursor={forgedDate}")).StatusCode);
-        var forgedScore = new ListingCursor("relevance", "x", Guid.NewGuid()).Encode();
-        Assert.Equal(HttpStatusCode.BadRequest, (await _c.GetAsync($"{L}?q=challah&cursor={forgedScore}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_null_part_in_a_cursor_is_refused()
+    {
+        // ["title", null, "<id>", "<fingerprint>"]: a null key used to reach Key.Length (a 500)
+        var real = ListingCursor.Decode((await Get($"{L}?sort=title&pageSize=2")).GetProperty("nextCursor").GetString()!)!;
+        foreach (var json in new[] { $"[\"title\",null,\"{real.Id}\",\"{real.Fingerprint}\"]", $"[\"title\",\"a\",null,\"{real.Fingerprint}\"]", $"[\"title\",\"a\",\"{real.Id}\",null]", $"[null,\"a\",\"{real.Id}\",\"{real.Fingerprint}\"]" })
+        {
+            var cursor = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            Assert.Equal(HttpStatusCode.BadRequest, (await _c.GetAsync($"{L}?sort=title&cursor={cursor}")).StatusCode);
+        }
+        // the exact cursor from the review
+        Assert.Equal(HttpStatusCode.BadRequest, (await _c.GetAsync($"{L}?sort=title&cursor=WyJ0aXRsZSIsbnVsbCwiZmZiNWVkN2QtOGZhYi00ZWM5LWJkYzMtYjM1ZGQwMzZkYmQ3Il0")).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_relevance_cursor_is_refused_when_the_search_box_was_cleared()
+    {
+        var cursor = (await Get($"{L}?q=challah&pageSize=1")).GetProperty("nextCursor").GetString()!;
+        Assert.Equal(HttpStatusCode.OK, (await _c.GetAsync($"{L}?q=challah&pageSize=1&cursor={cursor}")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await _c.GetAsync($"{L}?sort=relevance&pageSize=1&cursor={cursor}")).StatusCode);      // no q: the newest order would run, and parse a score as a date
+        Assert.Equal(HttpStatusCode.BadRequest, (await _c.GetAsync($"{L}?pageSize=1&cursor={cursor}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Relevance_without_a_query_is_the_newest_order_and_continues_with_its_own_cursor()
+    {
+        var first = await Get($"{L}?sort=relevance&pageSize=3");
+        var cursor = first.GetProperty("nextCursor").GetString()!;
+        var second = await Get($"{L}?sort=relevance&pageSize=3&cursor={cursor}");               // used to be refused: the cursor said "newest", the request said "relevance"
+        Assert.Equal(Slugs(await Get($"{L}?sort=newest&pageSize=6")).Skip(3).ToList(), Slugs(second));
+        Assert.Equal(HttpStatusCode.OK, (await _c.GetAsync($"{L}?sort=newest&pageSize=3&cursor={cursor}")).StatusCode);      // the same order, so the same cursor
+    }
+
+    [Fact]
+    public async Task A_cursor_only_continues_the_request_it_came_from()
+    {
+        string Cursor(JsonElement page) => page.GetProperty("nextCursor").GetString()!;
+        var basePage = await Get($"{L}?type=product&brand=mazel-bakery&pageSize=2");
+        var cursor = Cursor(basePage);
+        Assert.Equal(HttpStatusCode.OK, (await _c.GetAsync($"{L}?type=product&brand=mazel-bakery&pageSize=2&cursor={cursor}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _c.GetAsync($"{L}?type=product&brand=mazel-bakery&pageSize=3&facets=true&cursor={cursor}")).StatusCode);   // page size and facets are not part of what it identifies
+        foreach (var other in new[] { "type=service&brand=mazel-bakery", "type=product&brand=challah-corner", "type=product", "type=product&brand=mazel-bakery&available=true",
+                                      "type=product&brand=mazel-bakery&priceMin=1", "type=product&brand=mazel-bakery&kosher=OU", "type=product&brand=mazel-bakery&q=cake", "type=product&brand=mazel-bakery&sort=title",
+                                      "type=product&brand=mazel-bakery&category=bakery", "type=product&brand=mazel-bakery&seller=" + FixtureCatalogSource.Id("seller:mazel") })
+            Assert.Equal(HttpStatusCode.BadRequest, (await _c.GetAsync($"{L}?{other}&pageSize=2&cursor={cursor}")).StatusCode);
+        // the order of parameters, and attr values listed in another order, do not matter
+        var withAttrs = Cursor(await Get($"{L}?attr=kosher-status:dairy&attr=kosher-status:pareve&kosher=OU&pageSize=2"));
+        Assert.Equal(HttpStatusCode.OK, (await _c.GetAsync($"{L}?pageSize=2&kosher=OU&attr=kosher-status:pareve&attr=kosher-status:dairy&cursor={withAttrs}")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("attr=a%00:b")]
+    [InlineData("attr=a:b%00")]
+    [InlineData("kosher=O%00U")]
+    [InlineData("delivery=ships%00")]
+    [InlineData("brand=x%00y")]
+    [InlineData("category=x%00y")]
+    [InlineData("seller=%00")]
+    [InlineData("type=%00")]
+    [InlineData("sort=title%00")]
+    [InlineData("priceMin=1%00")]
+    [InlineData("cursor=a%00b")]
+    [InlineData("attr=a%07:b")]
+    [InlineData("kosher=O%0AU")]
+    public async Task A_control_character_in_a_parameter_is_a_400_not_a_database_error(string query)
+        => Assert.Equal("invalid_query", Code(await Bad(query)));
+
+    [Fact]
+    public async Task A_control_character_in_a_path_is_a_404_not_a_500()
+    {
+        // (a NUL in the path never reaches us: the host refuses it itself; the other control characters do)
+        await Get("/api/v1/catalog/listings/x%07y", HttpStatusCode.NotFound);
+        await Get("/api/v1/catalog/listings/x%0Ay", HttpStatusCode.NotFound);
+        await Get("/api/v1/catalog/brands/x%07y", HttpStatusCode.NotFound);
+        await Get("/api/v1/catalog/sellers/%07", HttpStatusCode.NotFound);
+        await Get("/api/v1/catalog/sitemap/%07", HttpStatusCode.NotFound);
+        Assert.Equal(0, Total(await Get($"{L}?q=%00")));             // q is normalised, so a NUL is just a word break: a search with no words finds nothing
     }
 
     [Fact]

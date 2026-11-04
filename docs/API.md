@@ -68,7 +68,7 @@ against the signed body, then the projection (one database transaction).
 
 ## Catalog (public, anonymous, read-only)
 All four endpoints use the `public` rate limit (headers: see "Headers the web server must send"). Money is whole **cents** (`long`), currency `USD`; times are UTC ISO 8601.
-Only **visible** listings are ever returned (CONTRACT.md §2): last known portal status `Active`, seller active, and not unlisted. A listing that is not visible, or does not exist, is a `404 not_found`, with no hint which, with one exception: **a listing that was public and has been unlisted, archived or removed answers `410 { "code": "gone" }`** (by slug or id), so search engines drop it quickly. A suspended seller's listings, drafts, listings we only heard an event about, and unknown ids stay `404`. Slugs never change (M1-32), so there is nothing to redirect except `/…/{id}` to the slug: the detail response by id carries the canonical `slug`.
+Only **visible** listings are ever returned (CONTRACT.md §2): last known portal status `Active`, seller active, and not unlisted. A listing that is not visible, or does not exist, is a `404 not_found`, with no hint which, with one exception: **a listing that WAS public (it was visible at some point) and has been unlisted, archived or removed answers `410 { "code": "gone" }`** (by slug or id), so search engines drop it quickly. A suspended seller's listings, drafts, listings first seen archived or unlisted (never public), listings we only heard an event about, and unknown ids stay `404`. Slugs never change (M1-32), so there is nothing to redirect except `/…/{id}` to the slug: the detail response by id carries the canonical `slug`.
 **Unlisting is immediate**: a `listing.unlisted` portal event hides a listing at once, so catalog responses must not be cached for longer than a few seconds. They say so themselves: every `200` carries `Cache-Control: public, max-age=5`, every other status (including `429`) `no-store`.
 Images are an id plus dimensions: the bytes come from the portal and are served by our own CDN path (a later workstream). Data comes from the portal catalog feed (provisional request C1; it also carries optional per-listing `searchTerms`, see M2-01); until it exists the API serves a seed of about 40 listings in Development.
 
@@ -101,9 +101,8 @@ Brands with at least one visible listing, by name (at most 500). `sellerId` (an 
 | `attr` | Repeatable `key:value` filter on any attribute (`attr=kosher-status:dairy`). Values of one key are alternatives (OR), different keys all have to hold (AND). At most 12 pairs, 10 values per key, keys up to 100 and values up to 60 characters, else `400` |
 | `facets` | `true` adds a `facets` object (see below); anything but `true`/`false` is `400` |
 | `sort` | `relevance` (default when `q` is given; without `q` it behaves as `newest`), `newest` (default otherwise), `best_selling` (placeholder: the newest order until M3 records sales), `price_asc`, `price_desc`, `title`. Equal sort values break on id. `page` numbers are positions: if listings change between two requests, a page can repeat or skip an item. Use `cursor` for a walk that never repeats or drops one |
-| `cursor` | Opaque `nextCursor` of the previous page, for the same filters and sort. Use it instead of `page` (both is `400`; a cursor of another sort or a forged one is `400`). A cursor is a position, so new listings arriving between two requests never shift or repeat items |
-
-Every parameter except `attr` may be given once; a repeat is `400`.
+| `cursor` | Opaque `nextCursor` of the previous page. It continues **the request it came from**: the same filters, `q` and sort (page size and `facets` may change), otherwise `400`; so do a cursor for another sort, a forged or malformed one, and a cursor together with `page`. A cursor is a position (sort value + id), so listings added or removed between two requests never shift or repeat items; but if the **sort value of a listing itself changes** between two pages (a price edit, a title change), that listing can appear twice or be skipped, as in any keyset paging. |
+Every parameter except `attr` may be given once; a repeat is `400`. A control character (such as NUL) in any parameter except `q`, or in a cursor, is `400 invalid_query`; in a path it is `404`.
 | `page` | 1-based, default 1 (at most 100000) |
 | `pageSize` | Default 24, at most 100 |
 
@@ -141,7 +140,8 @@ Storefront data for the brand and seller pages; `404` when the brand or seller i
 ```
 
 ### `GET /api/v1/catalog/sitemap/{kind}?page=&pageSize=`
-`kind` is `listings` (key = slug, last modified = the portal's updated time), `categories` and `brands` (key = slug; last modified = the newest update among their visible listings, a category counts its whole subtree) or `sellers` (key = id; same rule). Only entries with at least one visible listing appear, so an unlisted listing leaves at once. `pageSize` 1 to 5000 (default 1000), ordered by id so pages are stable; anything else `400`, an unknown kind `404`.
+Every page carries `ETag` and `Last-Modified` (its newest entry, to the second) and answers `304` to `If-None-Match` (or, when that is absent, `If-Modified-Since`).
+`kind` is `listings` (key = slug, last modified = the portal's updated time), `categories` and `brands` (key = slug; last modified = the newer of the row's own change and the newest update among their visible listings, a category counts its whole subtree and the changes of the categories in it, so it does not move backwards when a listing leaves) or `sellers` (key = id; same rule). Only entries with at least one visible listing appear, so an unlisted listing leaves at once. `pageSize` 1 to 5000 (default 1000), ordered by id so pages are stable; anything else `400`, an unknown kind `404`.
 ```json
 { "kind": "listings", "page": 1, "pageSize": 1000, "total": 40, "totalPages": 1, "items": [ { "key": "classic-braided-challah", "lastModified": "2026-09-04T09:00:00+00:00" } ] }
 ```

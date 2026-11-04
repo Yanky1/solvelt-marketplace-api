@@ -45,7 +45,9 @@ public class CatalogCacheControlTests : IAsyncLifetime
     public async Task Errors_are_never_cached()
     {
         Assert.Equal("no-store", await CacheControl($"{B}/listings/no-such-listing", HttpStatusCode.NotFound));
-        Assert.Equal("no-store", await CacheControl($"{B}/listings/retired-spice-gift-set", HttpStatusCode.Gone));        // a 410 is final, but "final" is decided by us, not by a cache
+        Fixture(_f).Upsert(FixtureCatalogSource.Id("listing:babka-chocolate"), l => l with { Status = "Archived" });
+        await Sync(_f);
+        Assert.Equal("no-store", await CacheControl($"{B}/listings/chocolate-babka", HttpStatusCode.Gone));               // a 410 is final, but "final" is decided by us, not by a cache
         Assert.Equal("no-store", await CacheControl($"{B}/listings?sort=nonsense", HttpStatusCode.BadRequest));
         Assert.Equal("no-store", await CacheControl($"{B}/sitemap/nonsense", HttpStatusCode.NotFound));
     }

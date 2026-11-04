@@ -22,6 +22,8 @@ public sealed class CatalogBrand
     public string Slug { get; set; } = "";
     public string Name { get; set; } = "";
     public Guid? LogoImageId { get; set; }
+    /// <summary>When the brand row was created or last changed by the feed: a floor for its sitemap last-modified time.</summary>
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 public sealed class CatalogCategory
@@ -31,6 +33,8 @@ public sealed class CatalogCategory
     public string Slug { get; set; } = "";
     public string Name { get; set; } = "";
     public int SortOrder { get; set; }
+    /// <summary>When the category row was created or last changed by the feed: a floor for its sitemap last-modified time (so it cannot move backwards when its newest listing leaves).</summary>
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 public static class ListingTypes
@@ -75,6 +79,8 @@ public sealed class CatalogListing
     public long? UnlistedVersion { get; set; }
     /// <summary>Derived: Status Active, not a stub, not unlisted. The seller's flag is joined at query time.</summary>
     public bool Visible { get; set; }
+    /// <summary>True once the listing has ever been <see cref="Visible"/>. Only a listing that was public can be "gone" (410); a draft, or one first seen archived, is a plain 404 (M2-16).</summary>
+    public bool WasPublic { get; set; }
     public bool IsStub { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -93,7 +99,11 @@ public sealed class CatalogListing
 
     public bool IsUnlisted => UnlistedVersion is { } u && u >= Version;
 
-    public void RecomputeVisibility() => Visible = !IsStub && Status == "Active" && !IsUnlisted;
+    public void RecomputeVisibility()
+    {
+        Visible = !IsStub && Status == "Active" && !IsUnlisted;
+        if (Visible) WasPublic = true;
+    }
 }
 
 public sealed class CatalogVariant
