@@ -5,6 +5,7 @@ using Solvelt.Marketplace.Api.Data;
 using Microsoft.Extensions.DependencyInjection;
 using Solvelt.Marketplace.Api.Payments;
 using Solvelt.Marketplace.Api.Services;
+using Solvelt.Marketplace.Api.Tests.Infrastructure;
 using static Solvelt.Marketplace.Api.Tests.Infrastructure.WebhookTestKit;
 
 namespace Solvelt.Marketplace.Api.Tests;
@@ -476,5 +477,48 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         var pay = await Pay(b.Id);
         Assert.Equal(0, pay.ExternalRefundedCents);                                  // it is OUR money that left, not a dashboard refund
         Assert.Equal(18000, pay.RefundedCents);
+    }
+
+    [Theory]
+    [InlineData("hold_expired")]
+    [InlineData("hold_not_confirmable")]
+    public async Task A_portal_409_on_confirm_refunds_the_payment_in_full_and_reports_no_sale(string code)
+    {
+        await Ready();
+        var (b, _) = await PaidNotConfirmed();
+        _portal.ConfirmFailNext = (HttpStatusCode.Conflict, code);
+        await Drain();
+        Assert.Equal(1, _portal.ConfirmCalls);                                           // a definitive answer is not retried
+        var pay = await Pay(b.Id);
+        Assert.Equal(BookingPaymentStatus.Void, pay.Status);
+        Assert.Equal("confirm_" + code, pay.FailureCode);
+        Assert.Equal(BookingStatus.Expired, (await Row(b.Id)).Status);
+        Assert.Equal(24000, Stripe.Refunds.Sum(r => r.AmountCents));                     // all of it goes back
+        Assert.Empty(_portal.PaymentEvents);                                             // the portal never recorded a sale, so it hears of no refund either
+    }
+
+    [Fact]
+    public async Task An_event_flagged_predecessorDead_makes_us_read_the_booking_and_apply_it()
+    {
+        await Ready();
+        var b = await NewHold();
+        _portal.Holds.Single().Status = "Confirmed";                                     // the portal confirmed it; that event went dead and we never heard
+        Assert.Equal(BookingStatus.Hold, (await Row(b.Id)).Status);
+        var body = Body($"evt-reminder-{++_n}", "booking.reminder", Now, new Dictionary<string, object?> { ["booking"] = Ref(b) });
+        body = "{\"predecessorDead\":true," + body.TrimStart()[1..];
+        Assert.Equal(HttpStatusCode.OK, (await Post(_k.Http, WebhookTestKit.Request(_k.F, body))).Status);
+        await Drain();
+        Assert.Equal(BookingStatus.Confirmed, (await Row(b.Id)).Status);
+    }
+
+    [Fact]
+    public async Task An_event_without_the_flag_does_not_trigger_a_reconcile()
+    {
+        await Ready();
+        var b = await NewHold();
+        _portal.Holds.Single().Status = "Confirmed";
+        await PortalEvent("booking.reminder", Now, b);
+        await Drain();
+        Assert.Equal(BookingStatus.Hold, (await Row(b.Id)).Status);                      // nothing read the portal: only the flagged event does
     }
 }

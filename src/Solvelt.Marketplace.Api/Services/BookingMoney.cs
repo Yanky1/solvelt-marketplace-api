@@ -4,6 +4,7 @@ using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Payments;
 using Solvelt.Marketplace.Api.Portal;
+using Solvelt.Marketplace.Api.Portal.Webhooks;
 
 namespace Solvelt.Marketplace.Api.Services;
 
@@ -65,5 +66,38 @@ public sealed class BookingLateCancelHandler(ISignedPortalClient portal) : IOutb
         catch (PortalNotConfiguredException) { return OutboxResult.Retry("portal_not_configured"); }
         if (r.Status is 404 or 409) return OutboxResult.Delivered();
         return PortalOutcome.From(r);
+    }
+}
+
+/// <summary>
+/// The portal flagged an event with <c>predecessorDead</c> (an earlier event of this booking was given up on): read the booking and apply it, then replay what was parked. A finished row is left alone
+/// (decision O-10); the portal answering 404 is nothing to do. Retried by the outbox.
+/// </summary>
+public sealed class BookingReconcileHandler(MarketplaceDb db, ISignedPortalClient portal, BookingService bookings, PortalEventProcessor events, TimeProvider time) : IOutboxHandler
+{
+    public const string Type = "portal.booking-reconcile";
+    public sealed record Payload(string MarketplaceBookingId);
+    public static string DedupeKey(string eventId) => "booking-reconcile:" + eventId;
+    public IReadOnlyCollection<string> Types { get; } = [Type];
+
+    public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
+    {
+        Payload? p;
+        try { p = message.Payload is null ? null : JsonSerializer.Deserialize<Payload>(message.Payload, PortalJson.Options); }
+        catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
+        if (p is null || string.IsNullOrWhiteSpace(p.MarketplaceBookingId)) return OutboxResult.Dead("invalid_payload");
+        var row = await db.Bookings.FirstOrDefaultAsync(b => b.MarketplaceBookingId == p.MarketplaceBookingId, ct);
+        if (row is null || BookingStatus.IsTerminal(row.Status)) return OutboxResult.Delivered();
+        PortalResult<PortalBookingSummary> r;
+        try { r = await portal.GetBookingAsync(p.MarketplaceBookingId, ct); }
+        catch (PortalUnavailableException) { return OutboxResult.Retry("portal_unavailable"); }
+        catch (PortalNotConfiguredException) { return OutboxResult.Retry("portal_not_configured"); }
+        if (r.Status == 404) return OutboxResult.Delivered();
+        if (!r.IsSuccess || r.Value is not { } s) return PortalOutcome.From(r);
+        if (!string.Equals(s.MarketplaceBookingId, row.MarketplaceBookingId, StringComparison.Ordinal)) return OutboxResult.Dead("booking_mismatch");
+        await bookings.ApplySummaryAsync(row, s, time.GetUtcNow().ToUniversalTime(), ct);
+        db.ChangeTracker.Clear();
+        await events.ReplayParkedAsync(BookingEventHandler.Aggregate, p.MarketplaceBookingId, ct);
+        return OutboxResult.Delivered();
     }
 }
