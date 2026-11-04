@@ -328,6 +328,28 @@ public class HttpCatalogSourceTests
     }
 
     [Fact]
+    public async Task A_variant_priced_above_the_checkout_limit_is_stored_as_not_purchasable_and_the_others_are_untouched()
+    {
+        var limit = SnapshotLimits.MaxUnitPriceCents;
+        Assert.Equal(99_999_999L, limit);
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        object V(int n, long cents) => new { variantId = G(n), values = new[] { $"V{n}" }, price = new { amountMinor = cents, currency = "USD" }, availability = new { state = "in_stock" } };
+        var rig = PortalFor(f, _ => Page([
+            Doc(1, 10, d => { d["price"] = new { amountMinor = limit, currency = "USD" }; }),                                           // exactly at the limit: still buyable
+            Doc(2, 10, d => { d["price"] = new { amountMinor = limit + 1, currency = "USD" }; }),                                       // one cent over: not purchasable
+            Doc(3, 10, d => d["variants"] = new[] { V(31, 1000), V(32, limit + 1) }),                                                  // only the dear variant is affected
+        ], "10"));
+        await Run(f, rig.Source);
+        Assert.True(Assert.Single(CatalogKit.Row(f, G(1)).Variants).Available);
+        var over = CatalogKit.Row(f, G(2));
+        Assert.False(Assert.Single(over.Variants).Available);
+        Assert.True(over.Visible);                                                                                                    // the listing is still shown (as sold out), not hidden
+        Assert.Equal(limit + 1, over.Variants[0].PriceCents);                                                                         // the price is kept as sent
+        var mixed = CatalogKit.Row(f, G(3)).Variants.OrderBy(v => v.SortOrder).ToList();
+        Assert.Equal([true, false], mixed.Select(v => v.Available));
+    }
+
+    [Fact]
     public async Task A_tombstone_for_a_listing_we_never_held_creates_nothing_and_an_older_one_changes_nothing()
     {
         using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
