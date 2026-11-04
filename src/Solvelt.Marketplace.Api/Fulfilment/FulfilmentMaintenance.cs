@@ -12,13 +12,21 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time)
 {
     public const int RedactAfterDays = 90;
     public const string Redacted = "Redacted";
-    public sealed record Result(int LabelsCleared, int OrdersRedacted);
+    public const int PositionRetentionHours = 24;
+    public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0);
 
     public async Task<Result> RunAsync(CancellationToken ct = default)
     {
         var now = time.GetUtcNow().ToUniversalTime();
         var labels = await db.OrderReturns.Where(r => r.LabelUrl != null && r.LabelUrlExpiresAt != null && r.LabelUrlExpiresAt <= now)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.LabelUrl, (string?)null).SetProperty(r => r.LabelTrackingUrl, (string?)null), ct);
+
+        // live positions: at most 24 h; proof links: at their expiry (the images themselves are never stored)
+        var posCut = now.AddHours(-PositionRetentionHours);
+        var positions = await db.OrderShipments.Where(x => x.PositionAt != null && x.PositionAt <= posCut)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.PositionLat, (double?)null).SetProperty(x => x.PositionLng, (double?)null).SetProperty(x => x.PositionAt, (DateTimeOffset?)null), ct);
+        var proofs = await db.OrderShipments.Where(x => x.ProofJson != null && x.ProofExpiresAt != null && x.ProofExpiresAt <= now)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.ProofJson, (string?)null), ct);
 
         var cutoff = now.AddDays(-RedactAfterDays);
         var candidates = await db.Orders.AsNoTracking().Where(o => o.Status == OrderStatus.Placed && o.ShipName != Redacted).Select(o => o.Id).Take(500).ToListAsync(ct);
@@ -38,6 +46,6 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time)
                 .SetProperty(r => r.LabelUrl, (string?)null).SetProperty(r => r.LabelTrackingUrl, (string?)null), ct);
             redacted++;
         }
-        return new Result(labels, redacted);
+        return new Result(labels, redacted, positions, proofs);
     }
 }
