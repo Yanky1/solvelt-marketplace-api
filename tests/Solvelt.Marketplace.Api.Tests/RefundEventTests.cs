@@ -454,4 +454,51 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal(ReserveOutcome.ExceedsPaid, await svc.ReserveAsync(orderId, null, 401, 0, "raw-2", "t", false, null, default));
         Assert.Equal(ReserveOutcome.Reserved, await svc.ReserveAsync(orderId, null, 400, 0, "raw-3", "t", false, null, default));
     }
+
+    // ---- the money part commits whatever the buyer-facing projection does (orchestrator note on M5) ----
+
+    [Fact]
+    public async Task A_projection_that_throws_is_rolled_back_alone_and_the_reservation_beside_it_commits()
+    {
+        var (o, g, line) = await Three();
+        using var scope = _k.F.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        var evt = new Solvelt.Marketplace.Api.Portal.Webhooks.PortalEvent("evt-iso", "refund.issued", _k.F.Clock.GetUtcNow(), JsonDocument.Parse("{}").RootElement.Clone());
+        var ctx = new Solvelt.Marketplace.Api.Portal.Webhooks.ProjectionContext(db, evt, scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Portal.Webhooks.ProjectionStore>(), _k.F.Clock);
+        await using (var tx = await db.Database.BeginTransactionAsync())
+        {
+            Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(o.Id, g.Id, 4587, 0, [new PortalRefundLine(line, 1)], null, false, false, "iso-1", "t", "iso"), false, default));
+            await PortalRefundHandler.RunIsolatedAsync(ctx, async (c, ct) =>
+            {
+                // the projection writes something and then fails half way
+                var l = await c.Db.OrderLines.FirstAsync(x => x.GroupId == g.Id, ct);
+                l.Title = "WRITTEN BY THE FAILING PROJECTION";
+                await c.Db.SaveChangesAsync(ct);
+                throw new InvalidOperationException("malformed field");
+            }, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, default);
+            await db.SaveChangesAsync();
+            await tx.CommitAsync();
+        }
+        var after = await Order(o.Number);
+        Assert.Equal(4587, after.Groups.Single().RefundedCents);                          // the money part is there
+        Assert.Equal(1, after.Lines.Single().RefundedQuantity);
+        Assert.NotEqual("WRITTEN BY THE FAILING PROJECTION", after.Lines.Single().Title);   // and the projection's own write is gone
+        Assert.Equal(1, await _k.Db(db2 => db2.OrderRefunds.CountAsync(r => r.Key == "iso-1")));
+        Assert.Equal(1, await _k.Db(db2 => db2.OutboxMessages.CountAsync(m => m.Type == "stripe.refund")));   // the Stripe refund is queued
+    }
+
+    [Fact]
+    public async Task Malformed_line_elements_are_skipped_not_thrown_and_the_projection_runs_only_when_money_moved()
+    {
+        var (o, g, line) = await Three();
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "m1", AmountCents = 100, ShippingCents = 0, Lines = new object[] { "not an object" } }));
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "m2", AmountCents = 100, ShippingCents = 0, Lines = new object[] { new { marketplaceLineId = line, quantity = "1", amountCents = 100 } } }));   // a string quantity
+        Assert.Empty(await _k.Db(db => db.OrderRefunds.AsNoTracking().ToListAsync()));
+        // a refused or repeated refund leaves the buyer-facing projection alone; a reserved one projects (a refund is recorded for the seller order)
+        Assert.Equal("applied", await RefundLines(o, g, "ok-1", line, 1, 4587));
+        var projected = await _k.Db(db => db.Set<Solvelt.Marketplace.Api.Data.SellerOrderState>().AsNoTracking().CountAsync());
+        Assert.Equal("applied", await RefundLines(o, g, "ok-1", line, 1, 4587, id: "pe-other-id"));   // the same refund under another event id: a duplicate, no second projection
+        Assert.Equal(projected, await _k.Db(db => db.Set<Solvelt.Marketplace.Api.Data.SellerOrderState>().AsNoTracking().CountAsync()));
+    }
 }
