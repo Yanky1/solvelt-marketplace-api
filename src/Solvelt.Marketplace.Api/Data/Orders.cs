@@ -129,7 +129,7 @@ public sealed class OrderLine
 public static class RefundStatus
 {
     /// <summary>The amount is reserved against the cap and a Stripe refund is queued.</summary>
-    public const string Reserved = "reserved", Succeeded = "succeeded", Rejected = "rejected";
+    public const string Reserved = "reserved", Succeeded = "succeeded", Rejected = "rejected", Failed = "failed";
 }
 
 /// <summary>

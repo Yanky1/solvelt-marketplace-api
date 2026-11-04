@@ -62,16 +62,18 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
             var lines = ParseLines(data, out var lineSum);
             // amountCents is the sum of the lines (tax included) plus shipping (portal answer to C9) plus the shipping tax when the portal sends it (C8). A payload that does not add up is not acted on: money moves only on consistent data.
             var shippingTax = Num(data, "shippingTaxCents") ?? 0;   // C8 (brief N8): the amount is lines (with their tax) + shipping + shipping tax
-            if (shippingTax < 0 || lines is null || (lines.Count > 0 && lineSum + shipping + shippingTax != total)) { log.LogError("Portal refund.issued for order {Number} is inconsistent (lines do not add up to the amount); nothing was reserved", order.Number); return HandlerOutcome.Skipped("inconsistent refund amounts"); }
+            if (shippingTax < 0 || shippingTax > MaxPortalCents || total > MaxPortalCents || lines is null || (lines.Count > 0 && Sum3(lineSum, shipping, shippingTax) != total)) { log.LogError("Portal refund.issued for order {Number} is inconsistent (lines do not add up to the amount); nothing was reserved", order.Number); return HandlerOutcome.Skipped("inconsistent refund amounts"); }
             request = new PortalRefund(order.Id, group.Id, total, shipping, lines.Select(l => new PortalRefundLine(l.Id, l.Quantity)).ToList(), Num(data, "taxCents"), false, false, "portal:" + rid, Str(data, "reason") ?? "portal_refund", rid, Num(data, "shippingTaxCents"));
         }
         else
         {
-            if (Num(data, "refundDueCents") is not { } due || due <= 0) return HandlerOutcome.Skipped("no refund due");
+            if (Num(data, "refundDueCents") is not { } due || due <= 0 || due > MaxPortalCents) return HandlerOutcome.Skipped("no refund due");
             // A full cancel returns TotalCents minus what was already returned (tax and shipping included); a partial remainder cancel (partial:true) the cancelled units' line amounts, tax included, no shipping.
             var partial = data.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
-            var lines = ParseLines(data, out _);
+            var lines = ParseLines(data, out var cancelLineSum);
             if (lines is null) return HandlerOutcome.Skipped("invalid cancellation lines");
+            // A partial remainder cancel refunds the cancelled units, so it must NAME them, and their amounts (tax included) must add up to what is due; anything else is not acted on (review R6).
+            if (partial && (lines.Count == 0 || (cancelLineSum > 0 && cancelLineSum != due))) { log.LogError("Portal order.cancelled (partial) for order {Number} is inconsistent (lines {Lines}, amounts {Sum} vs due {Due}); nothing was reserved", order.Number, lines.Count, cancelLineSum, due); return HandlerOutcome.Skipped("inconsistent partial cancellation"); }
             // R3: events can arrive out of order. A full cancel's due amount is TotalCents minus what the portal has already returned (its own figure, `previouslyRefundedCents`, once it sends it): if
             // that is more than we have applied for this seller order, an earlier refund.issued is still on its way and the cancel must NOT run first (it would refund everything left and the
             // earlier refund would then be refused: the buyer short, the units wrong). It is parked and replayed by the maintenance loop; a log error says so once it has waited too long.
@@ -102,6 +104,15 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
     }
 
     /// <summary><c>lines: [{ marketplaceLineId, quantity, amountCents? }]</c>. Null when malformed; empty when absent.</summary>
+    /// <summary>No money figure from the portal is believed above this (a hundred million dollars): every product of two such figures still fits a long, so the proration arithmetic cannot wrap.</summary>
+    public const long MaxPortalCents = 10_000_000_000;
+
+    private static long Sum3(long a, long b, long c)
+    {
+        try { return checked(a + b + c); }
+        catch (OverflowException) { return -1; }   // never equal to a positive amount
+    }
+
     private static List<(string Id, int Quantity)>? ParseLines(JsonElement data, out long amountSum)
     {
         amountSum = 0;
@@ -112,7 +123,7 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
         {
             if (l.ValueKind != JsonValueKind.Object) return null;   // a non-object element is a malformed payload, not an exception
             if (Str(l, "marketplaceLineId") is not { Length: > 0 and <= 100 } id || Num(l, "quantity") is not { } q || q <= 0 || q > 10_000) return null;
-            if (l.TryGetProperty("amountCents", out var a)) { if (a.ValueKind != JsonValueKind.Number || !a.TryGetInt64(out var amount) || amount < 0) return null; amountSum += amount; }
+            if (l.TryGetProperty("amountCents", out var a)) { if (a.ValueKind != JsonValueKind.Number || !a.TryGetInt64(out var amount) || amount < 0) return null; try { amountSum = checked(amountSum + amount); } catch (OverflowException) { return null; } }
             result.Add((id, (int)q));
         }
         return result;
