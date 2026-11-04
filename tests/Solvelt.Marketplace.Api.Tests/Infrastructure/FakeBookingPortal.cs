@@ -78,6 +78,8 @@ public sealed class FakeBookingPortal
     /// <summary>Travel fee the portal adds when a quote is accepted (price = quote + travel fee).</summary>
     public long QuoteTravelFeeCents { get; set; }
     public bool LoseQuoteAnswer { get; set; }
+    /// <summary>Portal N8: accepting a quote returns a HOLD (10 minutes) instead of a confirmed booking.</summary>
+    public bool QuoteAcceptCreatesHold { get; set; }
     public int QuoteRequestCalls, QuoteAcceptCalls;
     public (HttpStatusCode Status, string Code)? AcceptFailNext { get; set; }
 
@@ -122,7 +124,7 @@ public sealed class FakeBookingPortal
             var start = j.GetProperty("start").GetDateTimeOffset();
             if (!q.Slots.Contains(start)) return Err(HttpStatusCode.UnprocessableEntity, "slot_not_offered");
             if (_byMid.Values.Any(h => h.ServiceId == q.ServiceId && h.Start == start && h.Status is "Hold" or "Requested" or "Confirmed")) return Err(HttpStatusCode.Conflict, "slot_unavailable");
-            var hold = new Hold { Mid = mid, ServiceId = q.ServiceId, Start = start, Location = "customer", Minutes = q.Minutes, Price = q.Price + QuoteTravelFeeCents, ExpiresAt = _clock.GetUtcNow(), BodyText = c.BodyText, Status = Instant ? "Confirmed" : "Requested" };
+            var hold = new Hold { Mid = mid, ServiceId = q.ServiceId, Start = start, Location = "customer", Minutes = q.Minutes, Price = q.Price + QuoteTravelFeeCents, ExpiresAt = QuoteAcceptCreatesHold ? _clock.GetUtcNow().AddMinutes(10) : _clock.GetUtcNow(), BodyText = c.BodyText, Status = QuoteAcceptCreatesHold ? "Hold" : Instant ? "Confirmed" : "Requested" };
             _byMid[mid] = hold; q.Status = "Accepted"; q.AcceptedMid = mid;
             return FakePortal.Json(HttpStatusCode.Created, Wrap(hold, true));
         }

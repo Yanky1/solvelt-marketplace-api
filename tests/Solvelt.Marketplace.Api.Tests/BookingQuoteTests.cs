@@ -268,4 +268,32 @@ public sealed class BookingQuoteTests : BookingFlowBase
         Assert.Equal(40000, r.PriceCents);                                     // numbers stay
         Assert.NotNull((await QRow(open.Id)).AddrLine1);
     }
+
+    [Fact]
+    public async Task N8_accepting_a_quote_can_return_a_hold_which_then_follows_the_normal_hold_pay_confirm_flow()
+    {
+        await Ready();
+        _portal.QuoteAcceptCreatesHold = true;
+        var (q, slots) = await Quoted();
+        var accepted = await Json(await Send(HttpMethod.Post, $"/api/v1/quotes/{q.Id}/accept", _jane, new { start = slots[0] }));
+        var id = accepted.GetProperty("booking").GetProperty("id").GetGuid();
+        var b = await Row(id);
+        Assert.Equal(BookingStatus.Hold, b.Status);
+        Assert.Null(b.PaymentDueAt);                                          // no unpaid-booking timer: the hold expires by itself, with no fee
+        Assert.Equal(Now.AddMinutes(10), b.HoldExpiresAt);
+        Assert.True((await Checkout(id)).IsSuccessStatusCode);
+        var intent = IntentOf(b.MarketplaceBookingId);
+        Stripe.Capture(intent.Id);
+        await PostStripe(StripeEvent("payment_intent.succeeded", intent.Id, b.MarketplaceBookingId, 40000));
+        await Drain();
+        Assert.Equal(1, _portal.ConfirmCalls);                                // the normal confirm after the payment
+        Assert.Equal(BookingStatus.Confirmed, (await Row(id)).Status);
+        Assert.Single(_portal.PaymentEvents);
+        // an unpaid quote hold is never cancelled by the upkeep timer (it lapses on its own)
+        var (q2, s2) = await Quoted();
+        var second = await Json(await Send(HttpMethod.Post, $"/api/v1/quotes/{q2.Id}/accept", _jane, new { start = s2[1] }));
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(45));
+        using var scope = _k.F.Services.CreateScope();
+        Assert.Equal(0, (await scope.ServiceProvider.GetRequiredService<BookingMaintenance>().RunAsync()).Cancelled);
+    }
 }
