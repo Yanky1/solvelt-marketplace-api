@@ -98,6 +98,8 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
 
         var listingIds = cart.Groups.SelectMany(g => g.Lines).Select(l => l.ListingId).Distinct().ToList();
         var facts = await db.CatalogListings.AsNoTracking().Where(l => listingIds.Contains(l.Id)).Select(l => new { l.Id, l.CategoryId }).ToListAsync(ct);
+        var variantIds = cart.Groups.SelectMany(g => g.Lines).Select(l => l.VariantId).Distinct().ToList();
+        var variantWeights = await db.CatalogVariants.AsNoTracking().Where(v => variantIds.Contains(v.Id)).Select(v => new { v.Id, v.WeightGrams }).ToDictionaryAsync(v => v.Id, v => v.WeightGrams, ct);
         var attrs = await db.CatalogAttributes.AsNoTracking().Where(x => listingIds.Contains(x.ListingId) && (x.Key == "weight" || x.Key == "delivery")).ToListAsync(ct);
         var categories = await db.CatalogCategories.AsNoTracking().Select(c => new { c.Id, c.ParentId, c.Slug }).ToDictionaryAsync(c => c.Id, ct);
         var exemptRoots = taxOptions.Value.ExemptRootCategories;
@@ -112,7 +114,9 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
             try { s = await settings.GetAsync(g.SellerId, g.BrandId, ct); }
             catch (ShippingUnavailableException) { return (QuoteStatus.ShippingUnavailable, null, null); }
             // The group's weight is known only when EVERY line's is (decision O-15); one unknown makes weight-based speeds unavailable.
-            var lineWeights = g.Lines.Select(l => ShippingRates.Grams(attrs.FirstOrDefault(x => x.ListingId == l.ListingId && x.Key == "weight")?.Value) is { } gr ? gr * l.Quantity : (long?)null).ToList();
+            // The weight comes from the variant (portal C7: the product's weight on listing and variant, null = unknown, never 0); the older "weight" attribute is the fallback while a snapshot has none.
+            var lineWeights = g.Lines.Select(l => (variantWeights.GetValueOrDefault(l.VariantId) is > 0 and var vw ? vw
+                : ShippingRates.Grams(attrs.FirstOrDefault(x => x.ListingId == l.ListingId && x.Key == "weight")?.Value)) is { } gr ? gr * l.Quantity : (long?)null).ToList();
             long? weight = lineWeights.All(w => w is not null) ? lineWeights.Sum(w => w!.Value) : null;
             var priced = ShippingRates.Options(s, country, g.SubtotalCents, weight, today, shippingOptions.Value);
             var opts = priced.Options;

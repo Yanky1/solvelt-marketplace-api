@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Carts;
 using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Checkout;
@@ -389,6 +390,23 @@ public sealed class QuoteTests : IDisposable
         var again = Group(await Ok(await Quote(new { address = Addr() })), ChallahCorner);
         Assert.Equal(1500 + 300, Price(again, "overnight"));                          // 550 g -> 1 kg
         Assert.Equal(0, again.GetProperty("unavailableSpeeds").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task L_C7_the_variants_weight_is_used_first_and_a_group_of_known_variant_weights_is_priced()
+    {
+        PortalAnswers();
+        await Cart(("challah-classic", 1, 0), ("challah-whole-wheat", 1, 0));      // the wheat challah has no weight attribute
+        var wheatListing = CatalogKit.ListingId("challah-whole-wheat");
+        await _k.Db(db => db.CatalogVariants.Where(v => v.ListingId == wheatListing).ExecuteUpdateAsync(s => s.SetProperty(v => v.WeightGrams, (int?)450)).ContinueWith(_ => 0));   // portal C7: the variant carries the weight
+        var g = Group(await Ok(await Quote(new { address = Addr() })), ChallahCorner);
+        Assert.Equal(0, g.GetProperty("unavailableSpeeds").GetArrayLength());
+        Assert.Equal(1500 + 300, Price(g, "overnight"));                              // 550 g + 450 g = 1 kg
+        // the variant's weight wins over the older attribute
+        var classicListing = CatalogKit.ListingId("challah-classic");
+        await _k.Db(db => db.CatalogVariants.Where(v => v.ListingId == classicListing).ExecuteUpdateAsync(s => s.SetProperty(v => v.WeightGrams, (int?)2000)).ContinueWith(_ => 0));
+        var heavy = Group(await Ok(await Quote(new { address = Addr() })), ChallahCorner);
+        Assert.Equal(1500 + 3 * 300, Price(heavy, "overnight"));                      // 2000 g + 450 g -> 3 kg
     }
 
     private HttpRequestMessage Get(string path)

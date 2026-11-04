@@ -31,7 +31,12 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
 
         PortalResult<CreateOrderResponse> result;
         CreateOrderRequest request;
-        try { request = BuildRequest(order, portalOptions.Value.PerGroupShipping); }
+        try
+        {
+            var variantIds = order.Lines.Select(l => l.VariantId).Distinct().ToList();
+            var syntheticVariants = (await db.CatalogVariants.AsNoTracking().Where(v => variantIds.Contains(v.Id) && v.IsDefault).Select(v => v.Id).ToListAsync(ct)).ToHashSet();
+            request = BuildRequest(order, portalOptions.Value.PerGroupShipping, syntheticVariants);
+        }
         catch (InvalidShippingException ex)
         {
             // never sent: the portal would refuse it with a 422 and nothing would be created. The order stays paid and the message dies where a person sees it (the speeds we quote are always in the enum, so this is a bug alarm).
@@ -47,8 +52,8 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         return PortalOutcome.From(result);
     }
 
-    /// <summary>The ingest body, from stored ids and server amounts only. A line names its product by ids, never by SKU (CONTRACT.md §3).</summary>
-    public static CreateOrderRequest BuildRequest(MarketplaceOrder o, bool perGroupShipping = false)
+    /// <summary>The ingest body, from stored ids and server amounts only. A line names its product by ids, never by SKU (CONTRACT.md §3). A synthetic variant (a listing the portal sent with none) is sent as <c>variantId: null</c>: its id is the listing id.</summary>
+    public static CreateOrderRequest BuildRequest(MarketplaceOrder o, bool perGroupShipping = false, IReadOnlySet<Guid>? syntheticVariants = null)
     {
         var groups = o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId).ToList();
         var lines = new List<OrderLineRequest>();
@@ -59,7 +64,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
             for (var i = 0; i < gl.Count; i++)
             {
                 var l = gl[i];
-                lines.Add(new OrderLineRequest(l.MarketplaceLineId, l.SellerId, l.BrandId, l.ListingId, l.VariantId, l.Quantity, l.UnitPriceCents, 0, l.TaxCents + shipTax[i]));
+                lines.Add(new OrderLineRequest(l.MarketplaceLineId, l.SellerId, l.BrandId, l.ListingId, syntheticVariants?.Contains(l.VariantId) == true ? null : l.VariantId, l.Quantity, l.UnitPriceCents, 0, l.TaxCents + shipTax[i]));
             }
         }
         var (method, speed) = IngestMapping.OrderMethodAndSpeed(groups);
