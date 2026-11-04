@@ -216,6 +216,58 @@ public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, 
     public const string StripeRefundType = "stripe.booking-refund";
     public sealed record RefundPayload(string Key);
 
+    /// <summary>
+    /// Reserves what can be refunded NOW (what is left of the capture after refunds and what a chargeback holds) and DEFERS the rest as a <c>deferred</c> refund that
+    /// <see cref="ReleaseDeferredAsync"/> reserves when the dispute is won or closed (decision M4-17): a refund the buyer is owed is never dropped because a chargeback was open at the time. Returns
+    /// how much was deferred; anything that is neither reserved nor deferred is logged as an ALERT.
+    /// </summary>
+    public async Task<long> ReserveOrDeferAsync(Guid paymentId, long wanted, string key, string reason, bool reportToPortal, ILogger log, CancellationToken ct)
+    {
+        if (wanted <= 0) return 0;
+        var pay = await db.BookingPayments.AsNoTracking().Where(p => p.Id == paymentId).Select(p => new { p.BookingId, p.CapturedCents, p.RefundedCents, p.DisputedCents }).FirstOrDefaultAsync(ct);
+        if (pay is null) return 0;
+        var available = Math.Max(0, pay.CapturedCents - pay.RefundedCents - pay.DisputedCents);
+        var now = Math.Min(wanted, available);
+        if (now > 0)
+        {
+            var outcome = await ReserveAsync(paymentId, now, key, reason, reportToPortal, ct);
+            if (outcome is BookingReserveOutcome.ExceedsCaptured or BookingReserveOutcome.NotCaptured)
+            {
+                log.LogError("ALERT: the {Reason} refund of {Amount} cents on booking payment {Payment} could not be reserved ({Outcome}); the buyer is owed it and a person must look", reason, now, paymentId, outcome);
+                return wanted;
+            }
+        }
+        var rest = wanted - now;
+        if (rest > 0 && pay.DisputedCents > 0)
+        {
+            var dkey = key + ":deferred";
+            if (!await db.BookingRefunds.AnyAsync(r => r.Key == dkey, ct))
+            {
+                var t = time.GetUtcNow().ToUniversalTime();
+                db.BookingRefunds.Add(new BookingRefund { Id = Guid.NewGuid(), Key = dkey, PaymentId = paymentId, BookingId = pay.BookingId, AmountCents = rest, Reason = reason, Status = RefundStatus.Deferred, ReportToPortal = reportToPortal, CreatedAt = t, UpdatedAt = t });
+                log.LogWarning("A {Reason} refund of {Amount} cents is deferred until the chargeback on booking payment {Payment} is decided", reason, rest, paymentId);
+            }
+        }
+        else if (rest > 0) log.LogError("ALERT: {Rest} cents of the {Reason} refund on booking payment {Payment} cannot be refunded (nothing is left of the capture); a person must look", rest, reason, paymentId);
+        return rest;
+    }
+
+    /// <summary>Reserves deferred refunds of a payment, oldest first, as far as the cap now allows (a won or closed dispute released its hold). Idempotent: a deferred row becomes reserved exactly once.</summary>
+    public async Task ReleaseDeferredAsync(Guid paymentId, CancellationToken ct)
+    {
+        var rows = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == paymentId && r.Status == RefundStatus.Deferred).OrderBy(r => r.CreatedAt).ToListAsync(ct);
+        foreach (var r in rows)
+        {
+            var took = await db.BookingPayments.Where(p => p.Id == paymentId && p.RefundedCents + r.AmountCents <= p.CapturedCents - p.DisputedCents)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents + r.AmountCents), ct);
+            if (took == 0) continue;
+            var flipped = await db.BookingRefunds.Where(x => x.Id == r.Id && x.Status == RefundStatus.Deferred)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, RefundStatus.Reserved).SetProperty(x => x.UpdatedAt, time.GetUtcNow()), ct);
+            if (flipped == 0) { await db.BookingPayments.Where(p => p.Id == paymentId).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents - r.AmountCents), ct); continue; }
+            outbox.Enqueue(StripeRefundType, new RefundPayload(r.Key), $"refund:{r.Key}");
+        }
+    }
+
     public async Task<BookingReserveOutcome> ReserveAsync(Guid paymentId, long amountCents, string key, string reason, bool reportToPortal, CancellationToken ct)
     {
         if (amountCents <= 0) throw new ArgumentOutOfRangeException(nameof(amountCents));

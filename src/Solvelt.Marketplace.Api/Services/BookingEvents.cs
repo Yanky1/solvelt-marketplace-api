@@ -169,18 +169,27 @@ public sealed class BookingEventHandler(ILogger<BookingEventHandler> log) : IPro
     /// <summary>Reserves a refund of at most what is left of the booking's captured payment, reported to the portal as <c>refund.processed</c> (it recorded the sale). Idempotent per booking and reason.</summary>
     private async Task RefundAsync(ProjectionContext c, Booking b, long wanted, string reason, CancellationToken ct)
     {
-        var pay = await c.Db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.BookingId == b.Id && p.Kind == "booking" && p.Status == BookingPaymentStatus.Captured, ct);
-        if (pay is null) return;
-        if (!pay.ReportedToPortal)
+        var outbox = new OutboxWriter(c.Db, c.Time);
+        var refunds = new BookingRefundService(c.Db, outbox, c.Time);
+        var now = c.Time.GetUtcNow().ToUniversalTime();
+        // Two tries: a confirm racing this event may report the sale between our read and our update, which turns "unreported" into "reported" under us.
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            // The portal never recorded this sale (the confirm is still retrying, or failed): there is nothing to refund AS a sale, so the refund must not be reported as one. Everything is
-            // voided and given back instead, and a late confirm finds the payment void (decision M4-15).
-            await BookingMoney.VoidCapturedAsync(c.Db, new BookingRefundService(c.Db, new OutboxWriter(c.Db, c.Time), c.Time), log, pay, reason + "_unreported", c.Time.GetUtcNow().ToUniversalTime(), ct);
+            var pay = await c.Db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.BookingId == b.Id && p.Kind == "booking" && p.Status == BookingPaymentStatus.Captured, ct);
+            if (pay is null) return;
+            if (!pay.ReportedToPortal)
+            {
+                // The portal never recorded this sale (the confirm is still retrying, or failed): there is nothing to refund AS a sale, so the refund must not be reported as one. Everything is
+                // voided and given back instead, and a late confirm finds the payment void (decision M4-15).
+                if (await BookingMoney.VoidCapturedAsync(c.Db, refunds, log, pay, reason + "_unreported", now, ct)) return;
+                continue;                                                                  // it was reported meanwhile: refund it as the sale it now is
+            }
+            var amount = Math.Min(wanted, pay.CapturedCents - pay.RefundedCents);
+            if (amount <= 0) return;
+            // Less what a chargeback holds; the rest waits and is reserved when the dispute is decided (M4-17). Never silent: an unreservable amount is an ALERT.
+            await refunds.ReserveOrDeferAsync(pay.Id, amount, $"{reason}:{b.MarketplaceBookingId}", reason, true, log, ct);
             return;
         }
-        var amount = Math.Min(wanted, pay.CapturedCents - pay.RefundedCents);
-        if (amount <= 0) return;
-        await new BookingRefundService(c.Db, new OutboxWriter(c.Db, c.Time), c.Time).ReserveAsync(pay.Id, amount, $"{reason}:{b.MarketplaceBookingId}", reason, true, ct);
     }
 
     /// <summary>
