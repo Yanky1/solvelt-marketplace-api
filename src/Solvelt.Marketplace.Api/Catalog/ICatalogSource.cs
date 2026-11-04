@@ -22,7 +22,10 @@ public sealed record CategoryDto(Guid Id, Guid? ParentId, string Slug, string Na
 public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, Guid? LogoImageId);
 
 /// <summary>A page of the feed in ascending (version, id) order. <see cref="NextCursor"/> is opaque; pass it back as <c>since</c>.</summary>
-public sealed record ListingPage(IReadOnlyList<ListingSnapshot> Items, string? NextCursor, bool HasMore);
+public sealed record ListingPage(IReadOnlyList<ListingSnapshot> Items, string? NextCursor, bool HasMore, IReadOnlyList<ListingTombstone>? Tombstones = null);
+
+/// <summary>The feed says a listing we may know is no longer public (portal tombstone). <see cref="Reason"/> is informational (an unknown reason is treated as "unlisted").</summary>
+public sealed record ListingTombstone(Guid Id, long Version, string Reason);
 
 /// <summary>Where listings come from: the fixture today, the portal's signed catalog feed (C1) later.</summary>
 public interface ICatalogSource
@@ -46,7 +49,7 @@ public sealed class EmptyCatalogSource : ICatalogSource
 
 public static class CatalogSourceSelection
 {
-    /// <summary>The configured source name; when none is configured, the seed fixture in Development/Testing and an empty catalog everywhere else.</summary>
+    /// <summary>The configured source name; when none is configured, the seed fixture in Development/Testing and the portal's signed feed (Http) everywhere else.</summary>
     public static string Resolve(string? configured, bool devLike)
-        => string.IsNullOrWhiteSpace(configured) ? (devLike ? "Fixture" : "None") : configured.Trim();
+        => string.IsNullOrWhiteSpace(configured) ? (devLike ? "Fixture" : "Http") : configured.Trim();
 }

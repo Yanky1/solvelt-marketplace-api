@@ -244,6 +244,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             foreach (var snapshot in page.Items)
                 if (await ApplySnapshotAsync(snapshot, ct)) applied++; else skipped++;
+            foreach (var t in page.Tombstones ?? []) if (await ApplyTombstoneAsync(t, ct)) applied++;
             await db.SaveChangesAsync(ct);
             await WriteCursorAsync(next, ct);       // inside the transaction: a lost lease rolls the whole page back
             await tx.CommitAsync(ct);
@@ -257,6 +258,12 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             db.ChangeTracker.Clear();
         }
 
+        foreach (var t in page.Tombstones ?? [])
+        {
+            if (await ApplyTombstoneAsync(t, ct)) counts.Applied++;
+            await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
+        }
         foreach (var snapshot in page.Items)
         {
             try
@@ -340,6 +347,25 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         l.Row++;
         await db.SaveChangesAsync(ct);
         db.ChangeTracker.Clear();
+    }
+
+    /// <summary>
+    /// A feed tombstone for a listing we hold hides it at that version (the same state an unlist event leaves, and finished: nothing is left to fetch). A newer
+    /// snapshot (a re-listing) shows it again. A listing we never held stays unknown, because there is nothing to hide. The caller saves.
+    /// </summary>
+    private async Task<bool> ApplyTombstoneAsync(ListingTombstone t, CancellationToken ct)
+    {
+        if (t.Version < 1) return false;
+        var l = await db.CatalogListings.FirstOrDefaultAsync(x => x.Id == t.Id, ct);
+        if (l is null) return false;
+        if (t.Version < l.Version) return false;                                  // older than what we hold: stale
+        l.KnownVersion = Math.Max(l.KnownVersion, t.Version);
+        l.UnlistedVersion = Math.Max(l.UnlistedVersion ?? 0, t.Version);
+        l.Version = Math.Max(l.Version, t.Version);
+        l.FetchAttempts = 0; l.NextFetchAt = null;
+        l.RecomputeVisibility();
+        l.Row++;
+        return true;
     }
 
     // ---------- apply ----------

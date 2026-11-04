@@ -85,9 +85,8 @@ public static class StartupValidator
         else if (BaseUrlProblem(config["Portal:BaseUrl"]!, requireHttps: true) is { } baseUrlProblem) problems.Add(baseUrlProblem);
         var catalogSource = config["Catalog:Source"];
         if (string.Equals(catalogSource, "Fixture", StringComparison.OrdinalIgnoreCase)) problems.Add("Catalog:Source=Fixture (seed data) must not be used outside Development/Testing.");
-        else if (string.Equals(catalogSource, "Http", StringComparison.OrdinalIgnoreCase)) problems.Add("Catalog:Source=Http is not available yet (the portal catalog feed, contract change C1, is not built): use None.");
-        else if (!string.IsNullOrWhiteSpace(catalogSource) && !string.Equals(catalogSource, "None", StringComparison.OrdinalIgnoreCase))
-            problems.Add($"Catalog:Source '{catalogSource}' is not valid (None; Http once the portal feed exists).");
+        else if (!string.IsNullOrWhiteSpace(catalogSource) && !string.Equals(catalogSource, "None", StringComparison.OrdinalIgnoreCase) && !string.Equals(catalogSource, "Http", StringComparison.OrdinalIgnoreCase))
+            problems.Add($"Catalog:Source '{catalogSource}' is not valid (Http, the default; or None).");
         // Mail: without a provider no buyer could verify an address or reset a password, so start-up fails instead of letting mail die in the outbox (M1-50).
         var provider = config["Email:Provider"];
         if (string.IsNullOrWhiteSpace(provider)) problems.Add("Email:Provider (env Email__Provider) is required: Smtp.");

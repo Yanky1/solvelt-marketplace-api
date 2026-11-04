@@ -300,13 +300,12 @@ public class CatalogConfigurationTests
     [InlineData(null)]
     [InlineData("None")]
     [InlineData("none")]
-    public void Production_accepts_no_catalog(string? source) => Assert.Empty(Validate(source));      // was "no catalog or the portal feed": Http is refused until it exists (M2-15)
+    public void Production_accepts_no_setting_and_none(string? source) => Assert.Empty(Validate(source));      // no setting now means the portal feed (M2-17)
 
     [Theory]
     [InlineData("Http")]
     [InlineData("http")]
-    public void Production_refuses_the_portal_feed_until_it_is_built(string source)
-        => Assert.Contains(Validate(source), p => p.Contains("Http") && p.Contains("not available"));
+    public void Production_accepts_the_portal_feed(string source) => Assert.Empty(Validate(source));      // built and tested in M2-17; it was refused until then
 
     [Theory]
     [InlineData("Fixture")]
@@ -316,8 +315,8 @@ public class CatalogConfigurationTests
     [Theory]
     [InlineData(null, true, "Fixture")]
     [InlineData("", true, "Fixture")]
-    [InlineData(null, false, "None")]
-    [InlineData("  ", false, "None")]
+    [InlineData(null, false, "Http")]
+    [InlineData("  ", false, "Http")]
     [InlineData("None", true, "None")]
     [InlineData("Http", false, "Http")]
     [InlineData(" Fixture ", false, "Fixture")]
@@ -335,7 +334,7 @@ public class CatalogConfigurationTests
         using var fixture = new TestFactory();
         Assert.IsType<FixtureCatalogSource>(fixture.Services.GetRequiredService<ICatalogSource>());
         using var http = new TestFactory(new() { ["Catalog:Source"] = "Http" });
-        Assert.Throws<NotSupportedException>(() => http.Services.GetRequiredService<ICatalogSource>());
+        Assert.IsType<HttpCatalogSource>(http.Services.GetRequiredService<ICatalogSource>());
         using var bad = new TestFactory(new() { ["Catalog:Source"] = "Magic" });
         Assert.Throws<InvalidOperationException>(() => bad.Services.GetRequiredService<ICatalogSource>());
     }
