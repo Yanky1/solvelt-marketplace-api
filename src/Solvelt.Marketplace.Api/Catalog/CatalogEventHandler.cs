@@ -20,6 +20,13 @@ public sealed class CatalogEventHandler : IProjectionHandler
     /// <summary>A unique placeholder (the slug column is unique); replaced by a real slug when the snapshot arrives.</summary>
     internal static string StubSlug(Guid id) => "~" + id.ToString("N");
 
+    /// <summary>A hidden placeholder for a listing we only know by id (an event, or a snapshot waiting for its category).</summary>
+    internal static CatalogListing NewStub(Guid id, DateTimeOffset now) => new()
+    {
+        Id = id, Status = "Unknown", IsStub = true, Visible = false, FirstSeenAt = now, CreatedAt = now, UpdatedAt = now, Slug = StubSlug(id), Title = "", TitleSort = "",
+        KnownVersion = 0, Version = 0, Currency = "USD",
+    };
+
     public async Task<HandlerOutcome> HandleAsync(ProjectionContext c, CancellationToken ct)
     {
         var data = c.Event.Data;
@@ -32,13 +39,10 @@ public sealed class CatalogEventHandler : IProjectionHandler
         var listing = await c.Db.CatalogListings.FirstOrDefaultAsync(l => l.Id == id, ct);
         if (listing is null)
         {
-            listing = new CatalogListing
-            {
-                Id = id, Status = "Unknown", IsStub = true, Visible = false, FirstSeenAt = now, CreatedAt = now, UpdatedAt = now, Slug = StubSlug(id), Title = "", TitleSort = "",
-                KnownVersion = 0, Version = 0, Currency = "USD",
-            };
+            listing = NewStub(id, now);
             c.Db.CatalogListings.Add(listing);
         }
+        if (version > listing.KnownVersion) { listing.FetchAttempts = 0; listing.NextFetchAt = null; }    // a newer version than we were waiting for: fetch it now
         listing.KnownVersion = Math.Max(listing.KnownVersion, version);
         if (c.Event.Type == Unlisted) listing.UnlistedVersion = Math.Max(listing.UnlistedVersion ?? 0, version);
         listing.RecomputeVisibility();
