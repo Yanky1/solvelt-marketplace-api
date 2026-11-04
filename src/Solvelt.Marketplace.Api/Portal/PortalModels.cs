@@ -63,6 +63,18 @@ public sealed record AvailabilityProvider(Guid ProviderId, string TimeZone);
 public sealed record AvailabilitySlot(DateTimeOffset StartAt, DateTimeOffset EndAt, IReadOnlyList<Guid> ProviderIds);
 public sealed record ServiceAvailability(int DurationMinutes, long PriceCents, IReadOnlyList<AvailabilityProvider> Providers, IReadOnlyList<AvailabilitySlot> Slots);
 
+// ---- bookings (SERVICES.md §6) ----
+public sealed record IntakeAnswerBody(string Id, string Answer);
+/// <summary>The booking body (<c>POST /bookings/holds</c> and <c>POST /bookings</c>). <c>Start</c> is the slot the portal itself listed; the portal re-validates it, the price and the duration.</summary>
+public sealed record BookingRequestBody(string MarketplaceBookingId, Guid ServiceId, Guid? ProviderId, DateTimeOffset Start, int? DurationMinutes, string Location,
+    IReadOnlyList<string> AddOnIds, PortalBuyer Buyer, PortalAddress? Address, IReadOnlyList<IntakeAnswerBody>? IntakeAnswers = null);
+public sealed record BookingConfirmBody(PortalBuyer Buyer, PortalAddress? Address, IReadOnlyList<IntakeAnswerBody>? IntakeAnswers = null);
+/// <summary>The portal's booking summary. Every amount is the portal's (long cents); <c>OnlineInstructions</c> (the meeting link) is only present for a confirmed online booking.</summary>
+public sealed record PortalBookingSummary(Guid BookingId, string? Number, string MarketplaceBookingId, string Status, Guid? ServiceId, Guid? ProviderId, string? Location,
+    DateTimeOffset? StartAt, DateTimeOffset? EndAt, int DurationMinutes, DateTimeOffset? HoldExpiresAt, DateTimeOffset? ApprovalDeadline, long PriceCents, long AddOnsCents,
+    long TravelFeeCents, long TotalCents, long CancellationFeeCents, long AdditionalChargeCents, DateTimeOffset? ProposedStartAt, int RescheduleCount, string? OnlineInstructions);
+public sealed record BookingResponse(bool Created, PortalBookingSummary Booking);
+
 // ---- POST /payment-events (PAYMENTS.md §6) ----
 public static class PaymentEventTypes
 {

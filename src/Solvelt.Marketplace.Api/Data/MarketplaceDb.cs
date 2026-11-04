@@ -41,6 +41,9 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<OrderCancelRequest> OrderCancelRequests => Set<OrderCancelRequest>();
     public DbSet<OrderReturn> OrderReturns => Set<OrderReturn>();
     public DbSet<OrderReturnLine> OrderReturnLines => Set<OrderReturnLine>();
+    public DbSet<Booking> Bookings => Set<Booking>();
+    public DbSet<BookingPayment> BookingPayments => Set<BookingPayment>();
+    public DbSet<BookingRefund> BookingRefunds => Set<BookingRefund>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

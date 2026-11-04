@@ -1,4 +1,5 @@
-using Microsoft.Extensions.Options;
+using Solvelt.Marketplace.Api.Outbox;
+using Solvelt.Marketplace.Api.Portal.Webhooks;
 
 namespace Solvelt.Marketplace.Api.Services;
 
@@ -11,12 +12,23 @@ public static class ServicesModule
     {
         services.Configure<ServicesOptions>(configuration.GetSection("Services"));
         services.AddSingleton<AvailabilityCache>();
+        services.Configure<BookingOptions>(configuration.GetSection("Bookings"));
+        services.AddScoped<BookingService>();
+        services.AddScoped<BookingMaintenance>();
+        if (!env.IsEnvironment("Testing")) services.AddHostedService<BookingWorker>();
+        services.AddSingleton<IProjectionHandler, BookingEventHandler>();
+        services.AddScoped<BookingPaymentService>();
+        services.AddScoped<BookingRefundService>();
+        services.AddScoped<BookingPaymentEvents>();
+        services.AddScoped<IOutboxHandler, BookingConfirmHandler>();
+        services.AddScoped<IOutboxHandler, BookingStripeRefundHandler>();
         return services;
     }
 
     public static IEndpointRouteBuilder MapMarketplaceServices(this IEndpointRouteBuilder app)
     {
         app.MapServices();
+        app.MapBookings();
         return app;
     }
 }

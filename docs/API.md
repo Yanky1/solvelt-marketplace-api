@@ -193,6 +193,16 @@ Public, public rate limit. Query: `location` (`online|customer|seller`, required
 `200 { durationMinutes, priceCents, providers: [{ providerId, timeZone }], slots: [{ startAt, endAt, providerIds }], from, to, fetchedAt }`, slot times are UTC instants sorted ascending; show them in the provider's `timeZone` and the buyer's zone. `Cache-Control: public, max-age=15`; the server caches the portal answer at most 30 s.
 Errors: `404` not a visible service; `422 validation_failed` (field errors) or a portal-validated `outside_service_area | location_not_offered | duration | add_on | provider_required`; `503 availability_unavailable` (retry).
 
+### Bookings (signed-in buyer; `Authorization: Bearer`, `Cache-Control: private, no-store`)
+| Call | Body | Answer |
+|---|---|---|
+| `POST /api/v1/bookings/holds` (header `Idempotency-Key`: 8-100 characters of `A-Za-z0-9-_.:`) | `{ listingId, start, location, durationMinutes?, providerId?, addOnIds?, address?, phone? }`; `address` `{ name?, line1, line2?, city, region?, postalCode, country, lat?, lng? }` is required for `customer`. No price, total or end time exists: send the `start` of a slot from the availability list | `201 { created: true, booking }` (or `200 { created: false, booking }` for a repeated key); `409 slot_unavailable` (someone else holds it: choose another), `409 idempotency_conflict`, `404` (not a service), `422 validation_failed`, `422 too_many_holds`, `422 outside_service_area | location_not_offered | duration | add_on | provider_required | quote_required`, `503 booking_unavailable` (retry with the SAME key) |
+| `POST /api/v1/bookings/{id}/checkout` | `{ intake?: [{ id, answer }] (max 30), phone? }` (no amount exists) | `200 { booking, payment: { provider: "stripe", clientSecret, publishableKey } }` the SAME intent when repeated or sent twice in parallel; `404`, `409 hold_expired` (choose a time again), `409 already_paid`, `409 not_payable`, `422 validation_failed | amount_too_small | payment_rejected`, `503 payments_unavailable`. The booking is confirmed (`status` becomes `Confirmed` or `Requested`) after Stripe reports the payment: poll `GET /bookings/{id}` |
+| `GET /api/v1/bookings` | - | `{ bookings: [BookingView] }` newest first, no meeting link |
+| `GET /api/v1/bookings/{id}` | - | `BookingView`; another buyer's booking or a failed hold attempt is `404` |
+
+`BookingView`: `id, number, listingId, status` (`Hold | Requested | Confirmed | Rescheduled | InProgress | Completed | Declined | Expired | CancelledByBuyer | CancelledBySeller | NoShow`), `location, startAt, endAt, durationMinutes, currency, priceCents, addOnsCents, travelFeeCents, totalCents` (the portal's amounts), `holdExpiresAt` + `holdExpired` (show a 10 minute countdown), `approvalDeadline, proposedStartAt, cancellationFeeCents, refundDueCents, noShowFeeCents, additionalChargeCents, rescheduleCount, addOnIds, onlineInstructions` (the meeting link: detail view of a confirmed booking only), `failureCode, createdAt`.
+
 ## Auth (buyers)
 All bodies are JSON. The web server holds the session token in its own HttpOnly cookie and sends `Authorization: Bearer <token>`. Auth endpoints share the strict per-client-IP rate limit (`RateLimits:AuthPerMinute`, default 10), forwarded as described above. This is the contract the web app assumed (its W1-21), confirmed.
 

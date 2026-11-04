@@ -25,6 +25,12 @@ public interface ISignedPortalClient
     Task<PortalResult<LocalDeliveryEligibility>> CheckLocalDeliveryEligibilityAsync(LocalDeliveryEligibilityRequest request, CancellationToken ct = default);
     Task<PortalResult<ServiceAvailability>> GetServiceAvailabilityAsync(ServiceAvailabilityQuery query, CancellationToken ct = default);
     Task<PortalResult<PaymentEventResponse>> SendPaymentEventAsync(PaymentEventRequest request, CancellationToken ct = default);
+    /// <summary><c>POST /bookings/holds</c>: reserve a slot for 10 minutes (idempotent on <c>marketplaceBookingId</c>).</summary>
+    Task<PortalResult<BookingResponse>> CreateBookingHoldAsync(BookingRequestBody request, CancellationToken ct = default);
+    /// <summary><c>POST /bookings/{mid}/confirm</c>: turns a hold into Confirmed (instant) or Requested (request mode). The portal re-checks an expired hold and may answer 409.</summary>
+    Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string marketplaceBookingId, BookingConfirmBody body, CancellationToken ct = default);
+    /// <summary><c>GET /bookings/{mid}</c>.</summary>
+    Task<PortalResult<PortalBookingSummary>> GetBookingAsync(string marketplaceBookingId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -77,6 +83,15 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
         if (q.AddOns is { Count: > 0 } a) qs.Add($"addOns={string.Join(",", a.Select(Uri.EscapeDataString))}");
         return Call<ServiceAvailability>(HttpMethod.Get, $"{ApiBase}/services/{q.ServiceId:D}/availability?{string.Join("&", qs)}", null, Retry.Standard, ct);
     }
+
+    public Task<PortalResult<BookingResponse>> CreateBookingHoldAsync(BookingRequestBody r, CancellationToken ct = default)
+        => Call<BookingResponse>(HttpMethod.Post, $"{ApiBase}/bookings/holds", r, Retry.Standard, ct);
+
+    public Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string mid, BookingConfirmBody b, CancellationToken ct = default)
+        => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/confirm", b, Retry.Standard, ct);
+
+    public Task<PortalResult<PortalBookingSummary>> GetBookingAsync(string mid, CancellationToken ct = default)
+        => Call<PortalBookingSummary>(HttpMethod.Get, $"{ApiBase}/bookings/{Id(mid)}", null, Retry.Standard, ct);
 
     public Task<PortalResult<PaymentEventResponse>> SendPaymentEventAsync(PaymentEventRequest r, CancellationToken ct = default)
     {
