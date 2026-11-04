@@ -176,3 +176,27 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         return OutboxResult.Delivered();
     }
 }
+
+/// <summary>
+/// Cancels a PaymentIntent of a closed order (superseded or expired), with retries: an intent that stays payable is the one thing we must never leave behind. A Stripe refusal means it can no
+/// longer be cancelled (it already succeeded, or is already cancelled): nothing to do here, the webhook refunds a payment that landed.
+/// </summary>
+public sealed class StripeCancelHandler(IPaymentProvider payments) : IOutboxHandler
+{
+    public const string Type = "stripe.cancel";
+    public sealed record Payload(string IntentId);
+    public static string DedupeKey(string intentId) => "cancel:" + intentId;
+    public IReadOnlyCollection<string> Types { get; } = [Type];
+
+    public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
+    {
+        Payload? p;
+        try { p = message.Payload is null ? null : JsonSerializer.Deserialize<Payload>(message.Payload, PortalJson.Options); }
+        catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
+        if (p is null || string.IsNullOrEmpty(p.IntentId)) return OutboxResult.Dead("invalid_payload");
+        try { await payments.CancelIntentAsync(p.IntentId, "cancel:" + p.IntentId, ct); }
+        catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
+        catch (PaymentRejectedException) { return OutboxResult.Delivered(); }
+        return OutboxResult.Delivered();
+    }
+}
