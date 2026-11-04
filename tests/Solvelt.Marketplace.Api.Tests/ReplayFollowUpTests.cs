@@ -63,25 +63,56 @@ public class ReplayFollowUpTests
 
     // ---------- (b) the in-read body cap, over a real socket ----------
 
+    /// <summary>Sends the signed event over a raw TCP connection as <c>Transfer-Encoding: chunked</c> with no Content-Length, in 8 KB chunks. Returns the status code.</summary>
+    private static async Task<int> RawChunkedPost(TestFactory f, Uri address, string body)
+    {
+        var signed = Request(f, body);                                                    // only to harvest the signed headers
+        var head = new StringBuilder("POST /api/portal/webhooks HTTP/1.1\r\n");
+        head.Append("Host: ").Append(address.Authority).Append("\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n");
+        foreach (var h in signed.Headers) head.Append(h.Key).Append(": ").Append(string.Join(",", h.Value)).Append("\r\n");
+        head.Append("\r\n");
+        Assert.DoesNotContain("Content-Length", head.ToString(), StringComparison.OrdinalIgnoreCase);
+        using var tcp = new System.Net.Sockets.TcpClient();
+        await tcp.ConnectAsync(address.Host, address.Port);
+        var stream = tcp.GetStream();
+        var bytes = Encoding.UTF8.GetBytes(body);
+        try
+        {
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(head.ToString()));
+            for (var i = 0; i < bytes.Length; i += 8192)
+            {
+                var n = Math.Min(8192, bytes.Length - i);
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(n.ToString("x") + "\r\n"));
+                await stream.WriteAsync(bytes.AsMemory(i, n));
+                await stream.WriteAsync("\r\n"u8.ToArray());
+            }
+            await stream.WriteAsync("0\r\n\r\n"u8.ToArray());
+        }
+        catch (IOException) { /* the server answered and closed before we finished: read what it said */ }
+        using var reader = new StreamReader(stream, Encoding.ASCII);
+        var statusLine = await reader.ReadLineAsync();
+        Assert.NotNull(statusLine);
+        return int.Parse(statusLine!.Split(' ')[1]);
+    }
+
     [Fact]
-    public async Task The_body_cap_holds_for_a_really_chunked_request_over_a_real_socket()
+    public async Task The_body_cap_holds_for_a_chunked_request_with_no_content_length_over_a_real_socket()
     {
         const int cap = 262144;
         using var f = new TestFactory();
-        f.UseKestrel();                                   // a real Kestrel server: the in-process test server adds a Content-Length, a real chunked body has none
+        f.UseKestrel();                                   // a real Kestrel server, a real socket: there is no declared length for the early check to see
         f.StartServer();
-        var c = f.CreateClient();
-        Assert.Equal("http", c.BaseAddress!.Scheme);
+        var address = f.CreateClient().BaseAddress!;
         var baseLen = Encoding.UTF8.GetByteCount(Body("chunkA", "big.type", T0, new { pad = "" }));
-        var atCap = Request(f, Body("chunkA", "big.type", T0.AddHours(-1), new { pad = new string('x', cap - baseLen) }), chunked: true);
-        Assert.Null(atCap.Content!.Headers.ContentLength);                                            // sent as Transfer-Encoding: chunked
-        Assert.Equal(HttpStatusCode.OK, (await Post(c, atCap)).Status);
+        var atCap = Body("chunkA", "big.type", T0.AddHours(-1), new { pad = new string('x', cap - baseLen) });
+        Assert.Equal(cap, Encoding.UTF8.GetByteCount(atCap));
+        Assert.Equal(200, await RawChunkedPost(f, address, atCap));                                   // exactly at the cap: accepted
         var over = Body("chunkB", "big.type", T0.AddHours(-1), new { pad = new string('x', cap - baseLen + 1) });
         Assert.Equal(cap + 1, Encoding.UTF8.GetByteCount(over));
-        var res = await Post(c, Request(f, over, chunked: true));
-        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, res.Status);                              // one byte over: only the in-read cap can see it
-        Assert.Contains("too_large", res.Json);
-        Assert.Equal(1, WithDb(f, db => db.PortalInboundEvents.Count()));
+        Assert.Equal(413, await RawChunkedPost(f, address, over));                                    // one byte over: only the in-read cap can see it
+        var huge = Body("chunkC", "big.type", T0.AddHours(-1), new { pad = new string('x', 2 * 1024 * 1024) });
+        Assert.Equal(413, await RawChunkedPost(f, address, huge));
+        Assert.Equal(1, WithDb(f, db => db.PortalInboundEvents.Count()));                             // only the one at the cap was stored
     }
 
     // ---------- (c) the claim, deterministically ----------
@@ -186,6 +217,9 @@ public class ReplayFollowUpTests
         Volatile.Write(ref known, true);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Replay(f, cts.Token));
         Assert.Equal(InboundStatus.Parked, WithDb(f, db => db.PortalInboundEvents.Single().Status));   // nothing half-applied
+        // a shutdown is not a failure of the event: no "could not be re-applied" warning, and the handler was not asked again
+        Assert.DoesNotContain(f.Logs.Lines, l => l.Contains("could not be re-applied now"));
+        Assert.Equal(2, h.Calls);                                                                       // the delivery that parked it and the one cancelled replay
     }
 
     // ---------- (e) a disconnect between "saved" and "committed" must not undo the work ----------
