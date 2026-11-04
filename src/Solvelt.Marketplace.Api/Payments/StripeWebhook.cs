@@ -218,6 +218,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         var amount = evt.Long("amount");
         var status = evt.Str("status");
         if (intentId is null || disputeId is null || amount is null || status is null) return StripeOutcome.Unmatched;
+        if (await bookingEvents.OwnsIntentAsync(intentId, ct)) return await bookingEvents.DisputeAsync(evt, ct);   // a booking's intent (M4-15); orders below are untouched
         var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstOrDefaultAsync(o => o.PaymentIntentId == intentId, ct);
         if (order is null) return StripeOutcome.Unmatched;
         var portalStatus = status switch

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Outbox;
+using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
 
 namespace Solvelt.Marketplace.Api.Services;
@@ -17,7 +18,7 @@ namespace Solvelt.Marketplace.Api.Services;
 /// group, so a late one is not lost behind a newer status event, yet none of them can reopen a finished booking.
 /// What this handler does NOT do: money (refunds and fees are decided by the payment slice from the values stored here) and messages (<c>message.sent</c> is M5's).
 /// </summary>
-public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace) : IProjectionHandler
+public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace, ILogger<BookingEventHandler> log) : IProjectionHandler
 {
     public const string Requested = "booking.requested", Confirmed = "booking.confirmed", Declined = "booking.declined", TimeProposed = "booking.time_proposed",
         Rescheduled = "booking.rescheduled", RescheduleRequested = "booking.reschedule_requested", RescheduleDecided = "booking.reschedule_decided", Cancelled = "booking.cancelled",
@@ -39,6 +40,12 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
         // Our row exists from before the hold call; its portal id arrives with the portal's answer. An event that beats the answer waits (replayed when the id is stored).
         if (b.PortalBookingId is null) return HandlerOutcome.Parked(Aggregate, b.MarketplaceBookingId, "portal booking id not stored yet");
         if (!EventRefs.Matches(bref, b.MarketplaceBookingId, b.PortalBookingId.Value)) return HandlerOutcome.Skipped("portal booking id does not match");
+
+        // A finished row stays finished whatever order the events arrive in AND whoever finished it: the buyer's cancel, the upkeep and the confirm handler set a terminal status from a portal
+        // ANSWER, which the projection store never sees, so the handler checks the row itself. Only a repeat of the same end (the cancellation event that triggers the refund) and the extra-charge
+        // request that follows completion are let through (decision M4-15).
+        if (BookingStatus.IsTerminal(b.Status) && !(Target(c.Event.Type, data) == b.Status || (c.Event.Type == ExtraCharge && b.Status == BookingStatus.Completed)))
+            return HandlerOutcome.Skipped("the booking is finished");
 
         var now = c.Time.GetUtcNow().ToUniversalTime();
         var key = b.MarketplaceBookingId;
@@ -74,10 +81,13 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
                 if (!await Step("status", BookingStatus.Declined, "declined")) return Done(false);
                 b.ProposedStartAt = null; b.HoldExpiresAt = null; b.ApprovalDeadline = null; ClearPending(b);
                 await RefundAsync(c, b, long.MaxValue, "declined", ct);       // the buyer paid up front: a declined request returns everything that is left
+                await BookingMoney.QueueCancelPendingIntentsAsync(c.Db, new OutboxWriter(c.Db, c.Time), b.Id, null, null, ct);
                 break;
             case HoldExpired:
                 if (!await Step("status", BookingStatus.Expired, "expired")) return Done(false);
                 b.HoldExpiresAt = null; ClearPending(b);
+                // An intent behind a lapsed hold must not stay payable (a payment that still lands is refunded, but not offering it is better).
+                await BookingMoney.QueueCancelPendingIntentsAsync(c.Db, new OutboxWriter(c.Db, c.Time), b.Id, null, null, ct);
                 break;
             case TimeProposed:
                 if (!await Step("proposal")) return Done(false);
@@ -109,6 +119,7 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
                 // Money back: a seller cancellation returns everything; a buyer's returns what the portal says is due (total minus its policy fee). The fee stays inside the
                 // original payment, so no second charge exists (decision M4-09).
                 await RefundAsync(c, b, byBuyer ? Money(data, "refundDueCents") ?? Math.Max(0, b.TotalCents - b.CancellationFeeCents) : b.TotalCents, "cancelled", ct);
+                await BookingMoney.QueueCancelPendingIntentsAsync(c.Db, new OutboxWriter(c.Db, c.Time), b.Id, null, null, ct);
                 break;
             }
             case Started:
@@ -134,6 +145,8 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
                 if (b.ExtraChargeState is ExtraChargeStates.Paid) break;      // an amount already paid is never replaced by a later request
                 b.AdditionalChargeCents = Math.Max(0, Money(data, "amountCents") ?? 0);
                 b.ExtraChargeState = b.AdditionalChargeCents > 0 ? ExtraChargeStates.Requested : null;   // a changed amount needs a new consent
+                // An intent opened for an earlier amount must not stay payable next to the new request.
+                await BookingMoney.QueueCancelPendingIntentsAsync(c.Db, new OutboxWriter(c.Db, c.Time), b.Id, PaymentKinds.ExtraCharge, b.AdditionalChargeCents, ct);
                 break;
             case Reminder:
             {
@@ -161,14 +174,30 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
     }
 
     /// <summary>Reserves a refund of at most what is left of the booking's captured payment, reported to the portal as <c>refund.processed</c> (it recorded the sale). Idempotent per booking and reason.</summary>
-    private static async Task RefundAsync(ProjectionContext c, Booking b, long wanted, string reason, CancellationToken ct)
+    private async Task RefundAsync(ProjectionContext c, Booking b, long wanted, string reason, CancellationToken ct)
     {
         var pay = await c.Db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.BookingId == b.Id && p.Kind == "booking" && p.Status == BookingPaymentStatus.Captured, ct);
         if (pay is null) return;
+        if (!pay.ReportedToPortal)
+        {
+            // The portal never recorded this sale (the confirm is still retrying, or failed): there is nothing to refund AS a sale, so the refund must not be reported as one. Everything is
+            // voided and given back instead, and a late confirm finds the payment void (decision M4-15).
+            await BookingMoney.VoidCapturedAsync(c.Db, new BookingRefundService(c.Db, new OutboxWriter(c.Db, c.Time), c.Time), log, pay, reason + "_unreported", c.Time.GetUtcNow().ToUniversalTime(), ct);
+            return;
+        }
         var amount = Math.Min(wanted, pay.CapturedCents - pay.RefundedCents);
         if (amount <= 0) return;
         await new BookingRefundService(c.Db, new OutboxWriter(c.Db, c.Time), c.Time).ReserveAsync(pay.Id, amount, $"{reason}:{b.MarketplaceBookingId}", reason, true, ct);
     }
+
+    /// <summary>The status an event moves a booking TO, or null for facts that do not change the status.</summary>
+    private static string? Target(string type, JsonElement data) => type switch
+    {
+        Requested => BookingStatus.Requested, Confirmed => BookingStatus.Confirmed, Rescheduled => BookingStatus.Rescheduled, Started => BookingStatus.InProgress,
+        Declined => BookingStatus.Declined, HoldExpired => BookingStatus.Expired, Completed => BookingStatus.Completed, NoShow => BookingStatus.NoShow,
+        Cancelled => string.Equals(Str(data, "cancelledBy"), "seller", StringComparison.OrdinalIgnoreCase) ? BookingStatus.CancelledBySeller : BookingStatus.CancelledByBuyer,
+        _ => null,
+    };
 
     private static void ClearPending(Booking b) { b.RequiresBuyerConsent = false; b.RescheduleRequestedStartAt = null; if (b.ExtraChargeState is ExtraChargeStates.Requested or ExtraChargeStates.Consented) b.ExtraChargeState = null; }
 

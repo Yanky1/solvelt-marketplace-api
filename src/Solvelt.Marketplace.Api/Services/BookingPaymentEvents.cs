@@ -68,8 +68,17 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, BookingRefundService 
         if (captured == 0) return StripeOutcome.Ignored;     // a repeat
         if (extra)
         {
-            // The sale is already known to the portal: report the extra charge (its own event id; the portal retries 404/409 until the booking and sale are there, and caps it at what it asked for).
-            await db.Bookings.Where(b => b.Id == booking.Id).ExecuteUpdateAsync(s => s.SetProperty(b => b.ExtraChargeState, ExtraChargeStates.Paid).SetProperty(b => b.UpdatedAt, now).SetProperty(b => b.Version, b => b.Version + 1), ct);
+            // Paid is reached ONCE and only from the consent the buyer gave for exactly this amount: a payment for a superseded request (the provider changed the amount), for a declined one, or for
+            // one that was already paid by another intent fails this update and is refunded in full instead of being kept (decision M4-15).
+            var paidState = await db.Bookings.Where(b => b.Id == booking.Id && b.ExtraChargeState == ExtraChargeStates.Consented && b.AdditionalChargeCents == amount)
+                .ExecuteUpdateAsync(s => s.SetProperty(b => b.ExtraChargeState, ExtraChargeStates.Paid).SetProperty(b => b.UpdatedAt, now).SetProperty(b => b.Version, b => b.Version + 1), ct);
+            if (paidState == 0)
+            {
+                await db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.Status, BookingPaymentStatus.Void).SetProperty(p => p.FailureCode, "extra_not_consented").SetProperty(p => p.UpdatedAt, now), ct);
+                await refunds.ReserveAsync(pay.Id, amount, $"void:{pay.Key}", "extra_not_consented", false, ct);
+                await MailAsync(booking.AccountId, "Your additional payment is being refunded", "The additional charge you paid is no longer the one requested (it was changed, declined or already paid), so the payment is being refunded in full to your card (it can take a few days to show).", $"void:{pay.Key}", ct);
+                return StripeOutcome.Applied;
+            }
             await db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.ReportedToPortal, true), ct);
             outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.ExtraCharge, null, booking.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, amount, now));
             return StripeOutcome.Applied;
@@ -88,18 +97,65 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, BookingRefundService 
         return StripeOutcome.Applied;
     }
 
-    /// <summary>A refund made outside this system (the Stripe dashboard): recorded against the cap so we can never refund the same money again, and logged for a person.</summary>
+    /// <summary>
+    /// A refund made outside this system (the Stripe dashboard). Stripe's <c>amount_refunded</c> is cumulative; what is OURS is what Stripe confirmed for our own refunds (status Succeeded), so
+    /// the rest is external. It is recorded with a compare-and-swap on the external total (two events racing record one refund once, and a refund of ours that is merely reserved can no longer hide
+    /// one made in the dashboard), counted against the cap, and logged for a person (decision M4-15).
+    /// </summary>
     public async Task<StripeOutcome> ChargeRefundedAsync(StripeEnvelope evt, CancellationToken ct)
     {
         var intentId = evt.Str("payment_intent");
         var refunded = evt.Long("amount_refunded");
         if (intentId is null || refunded is null) return StripeOutcome.Unmatched;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.IntentId == intentId, ct);
+            if (pay is null) return StripeOutcome.Unmatched;
+            var ours = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == pay.Id && r.Status == RefundStatus.Succeeded).SumAsync(r => (long?)r.AmountCents, ct) ?? 0;
+            var delta = refunded.Value - ours - pay.ExternalRefundedCents;
+            if (delta <= 0) return StripeOutcome.Ignored;                                            // ours, or already recorded
+            var seen = pay.ExternalRefundedCents;
+            var won = await db.BookingPayments.Where(p => p.Id == pay.Id && p.ExternalRefundedCents == seen)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.ExternalRefundedCents, p => p.ExternalRefundedCents + delta).SetProperty(p => p.RefundedCents, p => p.RefundedCents + delta), ct);
+            if (won == 1)
+            {
+                log.LogError("A booking payment was refunded {Delta} cents outside this system; it is recorded against the cap and needs a person to tell the seller", delta);
+                return StripeOutcome.Applied;
+            }
+        }
+        throw new InvalidOperationException("booking refund counters kept moving");                     // the event is retried
+    }
+
+    /// <summary>
+    /// <c>charge.dispute.*</c> for a booking intent: told to the portal with <c>marketplaceBookingId</c> (our own event id, the portal dedupes on it), ordered like the order path (an older event for a
+    /// dispute is dropped, nothing follows a closed one), and the amount at stake is held back from refunds while the dispute is open or lost, so we never refund money a chargeback already took.
+    /// </summary>
+    public async Task<StripeOutcome> DisputeAsync(StripeEnvelope evt, CancellationToken ct)
+    {
+        var intentId = evt.Str("payment_intent");
+        var disputeId = evt.Str("id");
+        var amount = evt.Long("amount");
+        var status = evt.Str("status");
+        if (intentId is null || disputeId is null || amount is null || status is null) return StripeOutcome.Unmatched;
         var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.IntentId == intentId, ct);
-        if (pay is null) return StripeOutcome.Unmatched;
-        if (refunded <= pay.RefundedCents) return StripeOutcome.Ignored;     // ours (or already recorded)
-        var delta = refunded.Value - pay.RefundedCents;
-        await db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents + delta), ct);
-        log.LogError("A booking payment was refunded {Delta} cents outside this system; it is recorded and needs a person to tell the seller", delta);
+        var booking = pay is null ? null : await db.Bookings.AsNoTracking().FirstOrDefaultAsync(b => b.Id == pay.BookingId, ct);
+        if (pay is null || booking is null) return StripeOutcome.Unmatched;
+        var portalStatus = status switch { "needs_response" => "needs_response", "under_review" => "under_review", "won" => "won", "lost" => "lost", "warning_closed" => "warning_closed", _ => null };
+        if (portalStatus is null) return StripeOutcome.Ignored;
+        var closed = portalStatus is "won" or "lost" or "warning_closed";
+        var state = await db.DisputeStates.FirstOrDefaultAsync(d => d.DisputeId == disputeId, ct);
+        if (state is not null && (state.Closed || evt.Created < state.LastCreated)) return StripeOutcome.Ignored;
+        if (state is null) db.DisputeStates.Add(new DisputeState { DisputeId = disputeId, LastCreated = evt.Created, Closed = closed });
+        else { state.LastCreated = evt.Created; state.Closed = closed; }
+        // What a chargeback holds: the amount while it is open or lost; nothing once it is won or was only an inquiry that closed.
+        var held = portalStatus is "won" or "warning_closed" ? 0 : Math.Clamp(amount.Value, 0, pay.CapturedCents);
+        await db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.DisputedCents, held), ct);
+        // The portal can only book a dispute against a sale it recorded.
+        if (!pay.ReportedToPortal) return StripeOutcome.Applied;
+        var type = evt.Type == "charge.dispute.created" ? PaymentEventTypes.DisputeCreated : closed ? PaymentEventTypes.DisputeClosed : PaymentEventTypes.DisputeUpdated;
+        DateTimeOffset? due = evt.Object.TryGetProperty("evidence_details", out var ed) && ed.ValueKind == JsonValueKind.Object && ed.TryGetProperty("due_by", out var d2) && d2.TryGetInt64(out var unix) ? DateTimeOffset.FromUnixTimeSeconds(unix) : null;
+        var createdAt = evt.Created > 0 ? DateTimeOffset.FromUnixTimeSeconds(evt.Created) : (DateTimeOffset?)null;
+        outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{booking.MarketplaceBookingId}", type, new DisputeData(disputeId, null, null, booking.MarketplaceBookingId, amount.Value, portalStatus, null, pay.Currency, evt.Str("reason"), due, createdAt));
         return StripeOutcome.Applied;
     }
 
@@ -121,6 +177,20 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
     public sealed record Payload(Guid BookingId, Guid PaymentId);
     public IReadOnlyCollection<string> Types { get; } = [Type];
 
+    private async Task VoidClosedAsync(Booking b, BookingPayment pay, string email, string code, bool cancelAtPortal, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var now = time.GetUtcNow().ToUniversalTime();
+        if (await BookingMoney.VoidCapturedAsync(db, refunds, log, pay, code, now, ct))
+        {
+            outbox.EnqueueEmail(new EmailMessage(email, "We couldn't confirm your booking",
+                "The time you chose could not be confirmed, so your payment is being refunded in full to your card (it can take a few days to show). Please choose another time.\n"), "mail:void:" + pay.Key);
+            if (cancelAtPortal) outbox.Enqueue(BookingLateCancelHandler.Type, new BookingLateCancelHandler.Payload(b.MarketplaceBookingId), "late-cancel:" + b.MarketplaceBookingId);
+            await db.SaveChangesAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
     public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
     {
         Payload? p;
@@ -134,6 +204,14 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == b.AccountId).Select(a => new { a.DisplayName, a.RelayEmail, Email = a.Email! }).FirstOrDefaultAsync(ct);
         if (account is null) return OutboxResult.Dead("account_missing");
 
+        // A booking we already show as over (the hold lapsed while this message waited, the buyer cancelled) is never confirmed: confirming it could charge the buyer for a booking that
+        // is not theirs. The payment is voided and refunded in full instead, and no sale is reported (decision M4-15).
+        if (BookingStatus.IsTerminal(b.Status))
+        {
+            await VoidClosedAsync(b, pay, account.Email, "booking_closed", false, ct);
+            return OutboxResult.Delivered();
+        }
+
         var addr = b.AddrLine1 is null ? null : new PortalAddress(b.AddrName ?? "", b.AddrLine1, b.AddrLine2, b.AddrCity ?? "", b.AddrRegion, b.AddrPostalCode ?? "", b.AddrCountry ?? "", b.AddrLat, b.AddrLng);
         IReadOnlyList<IntakeAnswerBody>? intake = null;
         if (b.IntakeJson is { } ij) { try { intake = JsonSerializer.Deserialize<List<IntakeAnswerBody>>(ij, PortalJson.Options); } catch (JsonException) { } }
@@ -145,7 +223,17 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         if (r.IsSuccess && r.Value is { } s && string.Equals(s.MarketplaceBookingId, b.MarketplaceBookingId, StringComparison.Ordinal) && (s.ServiceId is null || s.ServiceId == b.ListingId))
         {
             await using var tx = await db.Database.BeginTransactionAsync(ct);
-            await bookings.ApplySummaryAsync(b, s, now, ct);
+            await db.Entry(b).ReloadAsync(ct);                                  // the row as it is NOW: an event may have closed it while the portal call was running
+            if (!await bookings.ApplySummaryAsync(b, s, now, ct))
+            {
+                await tx.RollbackAsync(CancellationToken.None);
+                db.ChangeTracker.Clear();
+                var fresh = await db.Bookings.AsNoTracking().FirstAsync(x => x.Id == b.Id, ct);
+                if (!BookingStatus.IsTerminal(fresh.Status)) return OutboxResult.Retry("booking_changed");      // a parallel writer: the portal confirm is idempotent, try again
+                // The portal confirmed a booking that is over on our side: refund everything, report no sale, and cancel it there.
+                await VoidClosedAsync(fresh, pay, account.Email, "booking_closed", true, ct);
+                return OutboxResult.Delivered();
+            }
             var marked = await db.BookingPayments.Where(x => x.Id == pay.Id && !x.ReportedToPortal).ExecuteUpdateAsync(x => x.SetProperty(y => y.ReportedToPortal, true).SetProperty(y => y.UpdatedAt, now), ct);
             if (marked == 1)
             {
