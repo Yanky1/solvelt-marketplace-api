@@ -29,6 +29,12 @@ public interface ISignedPortalClient
     Task<PortalResult<BookingResponse>> CreateBookingHoldAsync(BookingRequestBody request, CancellationToken ct = default);
     /// <summary><c>POST /bookings/{mid}/confirm</c>: turns a hold into Confirmed (instant) or Requested (request mode). The portal re-checks an expired hold and may answer 409.</summary>
     Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string marketplaceBookingId, BookingConfirmBody body, CancellationToken ct = default);
+    /// <summary><c>POST /bookings/{mid}/cancellations</c> (idempotent on the booking and <c>requestId</c>): the portal decides the fee by policy.</summary>
+    Task<PortalResult<PortalBookingSummary>> CancelBookingAsync(string marketplaceBookingId, BookingCancelBody body, CancellationToken ct = default);
+    /// <summary><c>POST /bookings/{mid}/reschedule-requests</c>: applied at once (instant services) or pending (request mode); idempotent on <c>requestId</c>.</summary>
+    Task<PortalResult<PortalBookingSummary>> RescheduleBookingAsync(string marketplaceBookingId, BookingRescheduleBody body, CancellationToken ct = default);
+    /// <summary><c>POST /bookings/{mid}/proposal-responses</c>: accept or decline the time the provider proposed.</summary>
+    Task<PortalResult<PortalBookingSummary>> RespondToProposalAsync(string marketplaceBookingId, BookingProposalBody body, CancellationToken ct = default);
     /// <summary><c>GET /bookings/{mid}</c>.</summary>
     Task<PortalResult<PortalBookingSummary>> GetBookingAsync(string marketplaceBookingId, CancellationToken ct = default);
 }
@@ -89,6 +95,15 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string mid, BookingConfirmBody b, CancellationToken ct = default)
         => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/confirm", b, Retry.Standard, ct);
+
+    public Task<PortalResult<PortalBookingSummary>> CancelBookingAsync(string mid, BookingCancelBody b, CancellationToken ct = default)
+        => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/cancellations", b, Retry.Standard, ct);
+
+    public Task<PortalResult<PortalBookingSummary>> RescheduleBookingAsync(string mid, BookingRescheduleBody b, CancellationToken ct = default)
+        => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/reschedule-requests", b, Retry.Standard, ct);
+
+    public Task<PortalResult<PortalBookingSummary>> RespondToProposalAsync(string mid, BookingProposalBody b, CancellationToken ct = default)
+        => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/proposal-responses", b, Retry.Standard, ct);
 
     public Task<PortalResult<PortalBookingSummary>> GetBookingAsync(string mid, CancellationToken ct = default)
         => Call<PortalBookingSummary>(HttpMethod.Get, $"{ApiBase}/bookings/{Id(mid)}", null, Retry.Standard, ct);
