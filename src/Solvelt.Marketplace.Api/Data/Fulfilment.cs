@@ -64,6 +64,23 @@ public sealed class OrderShipment
     public string? TrackingStatus { get; set; }
     public string? TrackingStatusDetail { get; set; }
     public DateTimeOffset? Eta { get; set; }
+    /// <summary>Local delivery: the promised window and the first name of the driver (first name only, as the portal sends it).</summary>
+    public DateTimeOffset? EtaWindowStart { get; set; }
+    public DateTimeOffset? EtaWindowEnd { get; set; }
+    public string? DriverFirstName { get; set; }
+    /// <summary>Carrier timeline: JSON array of <c>{status, detail, location, at}</c>, newest last, at most 30 entries.</summary>
+    public string? TrackingEventsJson { get; set; }
+    /// <summary>
+    /// Coarse driver position (about 100 m), present only while the buyer's stop is next. Kept at most 24 h (<see cref="PositionAt"/>), cleared by the next event that carries none, by delivery,
+    /// and by the maintenance job. Never logged.
+    /// </summary>
+    public double? PositionLat { get; set; }
+    public double? PositionLng { get; set; }
+    public DateTimeOffset? PositionAt { get; set; }
+    /// <summary>Proof of delivery: portal-relative short-lived signed links (JSON array of path+query), kept only until <see cref="ProofExpiresAt"/>. The images are fetched and served by us.</summary>
+    public string? ProofJson { get; set; }
+    public DateTimeOffset? ProofExpiresAt { get; set; }
+    public string? Placement { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
 
@@ -185,6 +202,10 @@ internal sealed class FulfilmentConfiguration : IEntityTypeConfiguration<SellerO
         b.Property(s => s.TrackingUrl).HasMaxLength(500);
         b.Property(s => s.TrackingStatus).HasMaxLength(40);
         b.Property(s => s.TrackingStatusDetail).HasMaxLength(200);
+        b.Property(s => s.DriverFirstName).HasMaxLength(60);
+        b.Property(s => s.TrackingEventsJson).HasMaxLength(8000);
+        b.Property(s => s.ProofJson).HasMaxLength(2000);
+        b.Property(s => s.Placement).HasMaxLength(40);
         b.HasIndex(s => new { s.GroupId, s.PortalShipmentId }).IsUnique();
     }
 
