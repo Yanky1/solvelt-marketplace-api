@@ -19,6 +19,7 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
 {
     private int _n;
     private readonly Dictionary<Guid, Func<HttpResponseMessage>> _files = new();
+    private Func<HttpResponseMessage>? _receiptAnswer, _reportAnswer;
 
     public MessagingAttachmentTests()
     {
@@ -26,8 +27,8 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         {
             var m = System.Text.RegularExpressions.Regex.Match(c.PathAndQuery, "/attachments/([0-9a-f-]{36})$");
             if (m.Success && _files.TryGetValue(Guid.Parse(m.Groups[1].Value), out var f)) return f();
-            if (c.PathAndQuery.Contains("/receipts")) return FakePortal.Json(HttpStatusCode.OK, "{}");
-            if (c.PathAndQuery == "/api/internal/v1/content/reports") return FakePortal.Json(HttpStatusCode.Created, "{}");
+            if (c.PathAndQuery.Contains("/receipts")) return _receiptAnswer?.Invoke() ?? FakePortal.Json(HttpStatusCode.OK, "{}");
+            if (c.PathAndQuery == "/api/internal/v1/content/reports") return _reportAnswer?.Invoke() ?? FakePortal.Json(HttpStatusCode.Created, "{}");
             return null;
         };
     }
@@ -282,6 +283,56 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         Assert.Equal(0, await _k.Db(db => db.MessageAttachmentData.CountAsync()));                       // the bytes are deleted
         Assert.Equal("", await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.Text).SingleAsync()));   // and so is the text: hidden is gone, not only not shown
         Assert.Equal("Asked for payment off the platform", await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.ModerationNote).SingleAsync()));
+    }
+
+    // ------------------------------------------------------------------ portal N3: ids are unique per seller only
+
+    [Fact]
+    public async Task N3_Receipts_and_reports_name_the_seller_so_a_message_id_two_sellers_share_is_not_ambiguous()
+    {
+        var (o, g) = await Placed();
+        var (thread, msg, _, pid) = await Reported(o, g);                                                 // sends the "delivered" receipt and the report
+        await Drain();
+        var r = Assert.Single(Portal($"messages/{pid}/receipts"), c => c.BodyText.Contains("delivered"));
+        var rb = JsonDocument.Parse(r.BodyText).RootElement;
+        Assert.Equal((g.SellerOrderNumber, g.SellerId.ToString()), (rb.GetProperty("sellerOrderNumber").GetString(), rb.GetProperty("sellerId").GetString()));
+        var rep = JsonDocument.Parse(Assert.Single(Portal("content/reports")).BodyText).RootElement;
+        Assert.Equal((g.SellerOrderNumber, g.SellerId.ToString()), (rep.GetProperty("sellerOrderNumber").GetString(), rep.GetProperty("sellerId").GetString()));
+        // and the read receipt, when the buyer opens the thread
+        await Get($"/api/v1/messages/threads/{thread}");
+        var read = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/messages/threads/{thread}/read"); read.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Http.SendAsync(read)).StatusCode);
+        await Drain();
+        var readBody = JsonDocument.Parse(Portal($"messages/{pid}/receipts").Single(c => c.BodyText.Contains("\"read\"")).BodyText).RootElement;
+        Assert.Equal(g.SellerOrderNumber, readBody.GetProperty("sellerOrderNumber").GetString());
+    }
+
+    [Theory]
+    [InlineData("ambiguous_message")]
+    [InlineData("ambiguous_target")]
+    public async Task N3_An_ambiguous_answer_is_permanent_it_is_dead_lettered_and_never_retried(string code)
+    {
+        var (o, g) = await Placed();
+        _receiptAnswer = () => FakePortal.Json((HttpStatusCode)422, $"{{\"code\":\"{code}\",\"message\":\"x\"}}");
+        _reportAnswer = () => FakePortal.Json((HttpStatusCode)422, $"{{\"code\":\"{code}\",\"message\":\"x\"}}");
+        await Reported(o, g);
+        await Drain();
+        _k.F.Clock.Advance(TimeSpan.FromHours(3));
+        await Drain();
+        var dead = await _k.Db(db => db.OutboxMessages.AsNoTracking().Where(m => m.Type == "portal.message-receipt" || m.Type == "portal.content-report").ToListAsync());
+        Assert.NotEmpty(dead);
+        Assert.All(dead, m => { Assert.Equal("dead", m.Status); Assert.Equal(1, m.Attempts); Assert.Contains(code, m.LastError); });   // one attempt, no retries
+    }
+
+    [Fact]
+    public async Task N3_A_second_decision_on_a_report_answers_409_already_resolved_and_that_is_done()
+    {
+        var (o, g) = await Placed();
+        _reportAnswer = () => FakePortal.Json(HttpStatusCode.Conflict, "{\"code\":\"already_resolved\",\"message\":\"x\"}");
+        await Reported(o, g);
+        await Drain();
+        var report = await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "portal.content-report"));
+        Assert.Equal(("delivered", 1), (report.Status, report.Attempts));
     }
 
     // ------------------------------------------------------------------ retention
