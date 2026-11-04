@@ -337,6 +337,7 @@ public sealed class CheckoutTests : IDisposable
         var d = new Dictionary<string, string?>
         {
             ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40), ["Auth:EmailLinkKey"] = new string('d', 40),
+            ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example.com", ["Email:From"] = "no-reply@shop.example.com",
             ["Portal:BaseUrl"] = "https://portal.example.com", ["Marketplace:RelayDomain"] = "relay.example.com", ["Marketplace:PublicBaseUrl"] = "https://shop.example.com",
             ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=x",
         };

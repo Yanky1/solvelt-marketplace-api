@@ -12,8 +12,12 @@ public static class PortalOutcome
     public static OutboxResult From<T>(PortalResult<T> r)
     {
         if (r.IsSuccess) return OutboxResult.Delivered();
-        // Worth sending again later: the contract's retryable answers, a rate limit, a timeout, server errors and 401 (a key that is being rotated).
-        if (r.Retryable || r.Status is 401 or 408 or 429 || r.Status >= 500) return OutboxResult.Retry($"portal_{r.Status}");
+        // CONTRACT §1.1: never retry 401 or 413. A 401 means our key is wrong (an operator must fix it, then retry from the admin endpoint); a 413 never gets smaller.
+        if (r.Status is 401 or 413) return OutboxResult.Dead($"portal_{r.Status}");
+        // The portal's limiter is a one-minute fixed window, so a 429 is not tried again sooner than a minute.
+        if (r.Status == 429) return OutboxResult.Retry("portal_429", TimeSpan.FromSeconds(60));
+        // Worth sending again later: the contract's retryable answers, a timeout and server errors.
+        if (r.Retryable || r.Status is 408 || r.Status >= 500) return OutboxResult.Retry($"portal_{r.Status}");
         // Any other 4xx will not change by waiting (413, 422 such as exceeds_sale, ...): dead-letter it for a person to look at.
         return OutboxResult.Dead($"portal_{r.Status}_{Sanitize(r.Error?.Code)}");
     }
