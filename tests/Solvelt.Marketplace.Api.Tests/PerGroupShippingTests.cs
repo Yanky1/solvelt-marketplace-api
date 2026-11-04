@@ -156,4 +156,23 @@ public sealed class PerGroupShippingTests : OrderFlowBase
         var refunded = Portal("payment-events").Select(c => JsonDocument.Parse(c.BodyText).RootElement).Single(e => e.GetProperty("type").GetString() == "refund.processed");
         Assert.Equal("USD", refunded.GetProperty("data").GetProperty("currency").GetString());
     }
+
+    [Fact]
+    public async Task A_line_of_a_synthetic_default_variant_is_sent_without_a_variant_id_and_a_real_variant_keeps_its_id()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        await AddToCart("challah-classic");
+        var (number, intent, total) = await Checkout();
+        var cup = (await Order(number)).Lines.Single(l => l.ListingId == CatalogKit.ListingId("kiddush-cup-pewter")).VariantId;
+        await _k.Db(db => db.CatalogVariants.Where(v => v.Id == cup).ExecuteUpdateAsync(s => s.SetProperty(v => v.IsDefault, true)).ContinueWith(_ => 0));   // the portal sent this listing with no variants
+        await Pay(number, intent, total);
+        await Drain();
+        using var doc = JsonDocument.Parse(Assert.Single(Portal("orders")).BodyText);
+        var lines = doc.RootElement.GetProperty("lines").EnumerateArray().ToList();
+        var cupLine = lines.Single(l => l.GetProperty("productId").GetGuid() == CatalogKit.ListingId("kiddush-cup-pewter"));
+        Assert.False(cupLine.TryGetProperty("variantId", out _));                           // null is left out
+        var challah = lines.Single(l => l.GetProperty("productId").GetGuid() == CatalogKit.ListingId("challah-classic"));
+        Assert.True(challah.TryGetProperty("variantId", out var v) && v.GetGuid() != Guid.Empty);
+    }
 }
