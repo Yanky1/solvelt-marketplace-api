@@ -32,6 +32,9 @@ builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, 
 builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
 builder.Services.Configure<AdminOptions>(o => OptionsSetup.Admin(o, builder.Configuration, devLike));
 builder.Services.Configure<AuthOptions>(o => OptionsSetup.Auth(o, builder.Configuration, devLike));
+builder.Services.Configure<NotificationOptions>(o => OptionsSetup.Notifications(o, builder.Configuration, devLike));
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Notifications.UnsubscribeTokens>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Notifications.NotificationMailHandler>();
 builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();
 builder.Services.AddSingleton<PasswordService>();
@@ -170,6 +173,7 @@ app.MapCart();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
 Solvelt.Marketplace.Api.Fulfilment.ProofEndpoints.MapProofs(app);
+Solvelt.Marketplace.Api.Notifications.NotificationEndpoints.MapNotifications(app);
 app.MapStripeWebhooks();
 
 app.Run();
