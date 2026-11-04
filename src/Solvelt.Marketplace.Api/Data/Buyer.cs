@@ -12,11 +12,57 @@ public sealed class BuyerAccount
     public string DisplayName { get; set; } = "";
     public string? PasswordHash { get; set; }
     public DateTimeOffset? EmailVerifiedAt { get; set; }
+    /// <summary>Optional contact number (profile). Personal data: erased with the account.</summary>
+    public string? Phone { get; set; }
     /// <summary><c>relay-&lt;random&gt;@&lt;relay domain&gt;</c>, generated once, unique, the only address the portal and sellers see.</summary>
     public string RelayEmail { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+    /// <summary>When the account was soft-deleted: sign-in and every session stop at once; the personal data goes in the redaction job (<see cref="RedactedAt"/>).</summary>
     public DateTimeOffset? DeletedAt { get; set; }
+    /// <summary>When the personal data of a deleted account was erased (email, name, phone, password hash, addresses, links). The row stays as an opaque id for orders.</summary>
+    public DateTimeOffset? RedactedAt { get; set; }
+}
+
+/// <summary>A saved address book entry (US and international). Exactly one per buyer is the default, enforced by a partial unique index.</summary>
+public sealed class BuyerAddress
+{
+    public Guid Id { get; set; }
+    public Guid AccountId { get; set; }
+    public string FullName { get; set; } = "";
+    public string Line1 { get; set; } = "";
+    public string? Line2 { get; set; }
+    public string City { get; set; } = "";
+    public string? Region { get; set; }
+    public string PostalCode { get; set; } = "";
+    /// <summary>ISO 3166-1 alpha-2, upper case.</summary>
+    public string Country { get; set; } = "";
+    public string? Phone { get; set; }
+    public double? Lat { get; set; }
+    public double? Lng { get; set; }
+    public bool IsDefault { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+internal sealed class BuyerAddressConfiguration : IEntityTypeConfiguration<BuyerAddress>
+{
+    public void Configure(EntityTypeBuilder<BuyerAddress> b)
+    {
+        b.ToTable("buyer_addresses");
+        b.HasKey(a => a.Id);
+        b.Property(a => a.Id).ValueGeneratedNever();
+        b.Property(a => a.FullName).HasMaxLength(100).IsRequired();
+        b.Property(a => a.Line1).HasMaxLength(200).IsRequired();
+        b.Property(a => a.Line2).HasMaxLength(200);
+        b.Property(a => a.City).HasMaxLength(100).IsRequired();
+        b.Property(a => a.Region).HasMaxLength(100);
+        b.Property(a => a.PostalCode).HasMaxLength(20).IsRequired();
+        b.Property(a => a.Country).HasMaxLength(2).IsRequired();
+        b.Property(a => a.Phone).HasMaxLength(30);
+        b.HasIndex(a => new { a.AccountId, a.CreatedAt });
+        // The partial unique index "one default per buyer" is added in MarketplaceDb.OnModelCreating: its filter is provider specific.
+    }
 }
 
 /// <summary>An opaque session. Only the SHA-256 of the token is stored. Idle (sliding) and absolute expiry; revocable.</summary>

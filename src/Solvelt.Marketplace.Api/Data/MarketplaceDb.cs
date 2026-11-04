@@ -22,6 +22,7 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<BuyerAccount> BuyerAccounts => Set<BuyerAccount>();
     public DbSet<BuyerSession> BuyerSessions => Set<BuyerSession>();
     public DbSet<EmailToken> EmailTokens => Set<EmailToken>();
+    public DbSet<BuyerAddress> BuyerAddresses => Set<BuyerAddress>();
     public DbSet<SignInAttempt> SignInAttempts => Set<SignInAttempt>();
     public DbSet<SignInIpBudget> SignInIpBudgets => Set<SignInIpBudget>();
     public DbSet<Cart> Carts => Set<Cart>();
@@ -43,6 +44,10 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(MarketplaceDb).Assembly);
+
+        // Exactly one default address per buyer, enforced by the database whatever the application does under parallel requests (partial unique index).
+        modelBuilder.Entity<BuyerAddress>().HasIndex(a => a.AccountId).IsUnique().HasDatabaseName("ux_buyer_addresses_one_default")
+            .HasFilter(Database.IsSqlite() ? "\"IsDefault\" = 1" : "\"IsDefault\" = TRUE");
 
         // Listing titles sort by an ASCII key with a binary collation, so the order is the same on SQLite and PostgreSQL (whose default collation is locale based).
         modelBuilder.Entity<CatalogListing>().Property(l => l.TitleSort).UseCollation(Database.IsSqlite() ? "BINARY" : "C");

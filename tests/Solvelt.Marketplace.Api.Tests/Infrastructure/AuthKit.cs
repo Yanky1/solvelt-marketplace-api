@@ -46,6 +46,14 @@ public sealed class AuthKit : IDisposable
         return Http.SendAsync(r);
     }
 
+    public Task<HttpResponseMessage> Send(HttpMethod method, string path, object? body = null, string? token = null)
+    {
+        var r = new HttpRequestMessage(method, path);
+        if (body != null) r.Content = JsonContent.Create(body);
+        if (token != null) r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return Http.SendAsync(r);
+    }
+
     public Task<HttpResponseMessage> Get(string path, string? token)
     {
         var r = new HttpRequestMessage(HttpMethod.Get, path);
@@ -97,6 +105,8 @@ public sealed class AuthKit : IDisposable
         using var scope = F.Services.CreateScope();
         return await f(scope.ServiceProvider.GetRequiredService<MarketplaceDb>());
     }
+
+    public Task<BuyerAccount> Account2(Guid id) => Db(db => db.BuyerAccounts.AsNoTracking().FirstAsync(a => a.Id == id));
 
     public Task<BuyerAccount> Account(string email) => Db(db => db.BuyerAccounts.AsNoTracking().FirstAsync(a => a.Email == email));
 }

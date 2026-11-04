@@ -4,9 +4,9 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Auth;
 
 /// <summary>Retention for the auth tables (PII table): old sessions and links, placeholder rows, and the sign-in gate's memory.</summary>
-public sealed class AuthMaintenance(MarketplaceDb db, TimeProvider time)
+public sealed class AuthMaintenance(MarketplaceDb db, TimeProvider time, Outbox.OutboxWriter outbox)
 {
-    public sealed record Result(int Sessions, int Tokens, int Decoys, int GateRows);
+    public sealed record Result(int Sessions, int Tokens, int Decoys, int GateRows, int Redactions = 0);
 
     public async Task<Result> PurgeAsync(CancellationToken ct = default)
     {
@@ -22,6 +22,11 @@ public sealed class AuthMaintenance(MarketplaceDb db, TimeProvider time)
         // the sign-in gate forgets an address after two quiet days and a client after its hour is over (the budget window is an hour)
         var gate = await db.SignInAttempts.Where(a => a.UpdatedAt < now.AddHours(-48)).ExecuteDeleteAsync(ct);
         gate += await db.SignInIpBudgets.Where(b => b.WindowStart < now.AddHours(-2)).ExecuteDeleteAsync(ct);
-        return new Result(sessions, tokens, decoys, gate);
+        // a deleted account whose redaction has not happened within the hour (its message was lost or keeps failing) is queued again, at most once an hour
+        var stuck = await db.BuyerAccounts.AsNoTracking().Where(a => a.DeletedAt != null && a.DeletedAt < hour && a.RedactedAt == null).Select(a => a.Id).Take(200).ToListAsync(ct);
+        var queued = 0;
+        foreach (var id in stuck)
+            if (await outbox.TryEnqueueAsync(Account.AccountRedactionHandler.Type, new Account.AccountRedactionPayload(id), $"redact-sweep:{id:N}:{now.ToUnixTimeSeconds() / 3600}", ct: ct)) queued++;
+        return new Result(sessions, tokens, decoys, gate, queued);
     }
 }
