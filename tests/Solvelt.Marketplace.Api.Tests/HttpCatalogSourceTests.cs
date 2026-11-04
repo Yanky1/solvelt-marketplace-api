@@ -317,6 +317,59 @@ public class HttpCatalogSourceTests
         Assert.Equal("Mug 1 again", CatalogKit.Row(f, G(1)).Title);
     }
 
+    // ---------- weight and size (portal C7) ----------
+    [Fact]
+    public void Weight_and_dimensions_map_as_in_the_portals_catalog_example()
+    {
+        var variant = new { variantId = G(50), values = new[] { "S" }, price = new { amountMinor = 1850L, currency = "USD" }, weightGrams = 420, availability = new { state = "low_stock" } };
+        var s = Mapped(new Rig(), Doc(1, 10, d => { d["weightGrams"] = 420; d["dimensionsMm"] = new { l = 125, w = 80, h = 95 }; d["variants"] = new object[] { variant }; }));
+        Assert.Equal(420, Assert.Single(s.Variants).WeightGrams);
+        Assert.Equal(new DimensionsMm(125, 80, 95), s.Dimensions);
+    }
+
+    [Fact]
+    public void A_listing_without_variants_gives_its_weight_to_the_synthetic_line_and_a_variant_without_one_takes_the_products()
+    {
+        var plain = Mapped(new Rig(), Doc(1, 10, d => d["weightGrams"] = 1500));
+        Assert.Equal(1500, Assert.Single(plain.Variants).WeightGrams);
+        var s = Mapped(new Rig(), Doc(2, 10, d => { d["weightGrams"] = 300; d["variants"] = new object[] { new { variantId = G(50), values = new[] { "S" }, price = new { amountMinor = 2000L, currency = "USD" }, availability = new { state = "in_stock" } }, new { variantId = G(51), values = new[] { "M" }, price = new { amountMinor = 2000L, currency = "USD" }, weightGrams = 450, availability = new { state = "in_stock" } } }; }));
+        Assert.Equal([300, 450], s.Variants.Select(v => v.WeightGrams));
+    }
+
+    [Theory]
+    [InlineData(null)] [InlineData(0)] [InlineData(-5)] [InlineData("heavy")] [InlineData(1.5)] [InlineData(3000000000L)]
+    public void An_unknown_or_unusable_weight_is_null_never_zero(object? weight)
+    {
+        var s = Mapped(new Rig(), Doc(1, 10, d => d["weightGrams"] = weight));
+        Assert.Null(Assert.Single(s.Variants).WeightGrams);
+    }
+
+    [Theory]
+    [InlineData(null)] [InlineData(0, 80, 95)] [InlineData(125, -1, 95)] [InlineData(125, 80, "x")] [InlineData(125, 80)]
+    public void Dimensions_are_all_three_sides_or_none(params object?[] sides)
+    {
+        var s = Mapped(new Rig(), Doc(1, 10, d => { if (sides is null) d["dimensionsMm"] = null; else { var m = new Dictionary<string, object?>(); var keys = new[] { "l", "w", "h" }; for (var i = 0; i < sides.Length; i++) m[keys[i]] = sides[i]; d["dimensionsMm"] = m; } }));
+        Assert.Null(s.Dimensions);
+    }
+
+    [Fact]
+    public async Task Weight_and_dimensions_are_stored_and_follow_a_new_version()
+    {
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        var rig = PortalFor(f, since => since is null
+            ? Page([Doc(1, 10, d => { d["weightGrams"] = 420; d["dimensionsMm"] = new { l = 125, w = 80, h = 95 }; }), Doc(2, 10)], "10")
+            : Page([Doc(1, 11, d => { d["weightGrams"] = 500; d["dimensionsMm"] = new { l = 125, w = 80 }; })], "11"));
+        await Run(f, rig.Source);
+        var a = CatalogKit.Row(f, G(1));
+        Assert.Equal((420, 125, 80, 95), (Assert.Single(a.Variants).WeightGrams, a.LengthMm, a.WidthMm, a.HeightMm));
+        var b = CatalogKit.Row(f, G(2));
+        Assert.Equal((null, null, null, null), (Assert.Single(b.Variants).WeightGrams, b.LengthMm, b.WidthMm, b.HeightMm));
+        // the portal changes the weight and drops a side: a new version, the row follows (a stale weight would mis-price shipping)
+        await Run(f, rig.Source);                                                                    // the next page (since = the cursor) carries version 11
+        var c = CatalogKit.Row(f, G(1));
+        Assert.Equal((500, null, null, null), (Assert.Single(c.Variants).WeightGrams, c.LengthMm, c.WidthMm, c.HeightMm));
+    }
+
     [Fact]
     public async Task The_synthetic_default_variant_is_stored_flagged_so_checkout_can_tell_it_from_a_portal_variant()
     {

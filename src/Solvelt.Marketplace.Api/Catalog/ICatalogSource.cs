@@ -5,8 +5,10 @@ namespace Solvelt.Marketplace.Api.Catalog;
 
 public sealed record SellerRef(Guid Id, string DisplayName, bool Active);
 public sealed record BrandRef(Guid Id, string Name);
-/// <summary><see cref="IsDefault"/>: a synthetic line for a listing the portal sent with no variants. Its <see cref="Id"/> is the listing id, NOT a portal variant id: an order line for it sends productId with variantId null.</summary>
-public sealed record VariantDto(Guid Id, string Name, long PriceCents, long? CompareAtCents, bool Available, bool IsDefault = false);
+/// <summary><see cref="IsDefault"/>: a synthetic line for a listing the portal sent with no variants. Its <see cref="Id"/> is the listing id, NOT a portal variant id: an order line for it sends productId with variantId null. <see cref="WeightGrams"/>: shipping weight in grams (portal C7), null when unknown, never 0.</summary>
+public sealed record VariantDto(Guid Id, string Name, long PriceCents, long? CompareAtCents, bool Available, bool IsDefault = false, int? WeightGrams = null);
+/// <summary>Product size in millimetres (portal C7); only ever built when all three sides are known.</summary>
+public sealed record DimensionsMm(int L, int W, int H);
 public sealed record ImageDto(Guid Id, int Width, int Height, string Alt);
 public sealed record AttributeDto(string Key, string Value);
 public sealed record FaqDto(string Question, string Answer);
@@ -17,7 +19,7 @@ public sealed record ListingSnapshot(
     SellerRef Seller, BrandRef Brand, Guid CategoryId, string Currency,
     IReadOnlyList<VariantDto> Variants, IReadOnlyList<ImageDto> Images, IReadOnlyList<AttributeDto> Attributes, IReadOnlyList<FaqDto> Faqs,
     DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt,
-    IReadOnlyList<string>? SearchTerms = null);
+    IReadOnlyList<string>? SearchTerms = null, DimensionsMm? Dimensions = null);
 
 public sealed record CategoryDto(Guid Id, Guid? ParentId, string Slug, string Name, int SortOrder);
 public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, Guid? LogoImageId);

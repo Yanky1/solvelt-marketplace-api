@@ -82,6 +82,10 @@ public sealed class CatalogListing
     /// <summary>True once the listing has ever been <see cref="Visible"/>. Only a listing that was public can be "gone" (410); a draft, or one first seen archived, is a plain 404 (M2-16).</summary>
     public bool WasPublic { get; set; }
     public bool IsStub { get; set; }
+    /// <summary>Size in millimetres (portal C7); all three are set or none.</summary>
+    public int? LengthMm { get; set; }
+    public int? WidthMm { get; set; }
+    public int? HeightMm { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset FirstSeenAt { get; set; }
@@ -116,6 +120,8 @@ public sealed class CatalogVariant
     public bool Available { get; set; }
     /// <summary>A synthetic line for a listing with no variants at the portal: its id is the listing id and must never be sent to the portal as a variant id.</summary>
     public bool IsDefault { get; set; }
+    /// <summary>Shipping weight in grams (portal C7: the product's weight). Null = unknown, never 0 (decision O-15).</summary>
+    public int? WeightGrams { get; set; }
     public int SortOrder { get; set; }
 }
 
