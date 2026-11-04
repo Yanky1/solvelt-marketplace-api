@@ -25,3 +25,22 @@ public sealed class AuthMaintenance(MarketplaceDb db, TimeProvider time)
         return new Result(sessions, tokens, decoys, gate);
     }
 }
+
+/// <summary>
+/// Lets the auth purge run about every 15 minutes per instance instead of on every outbox poll (every 5 s): six DELETEs per poll on every instance, with no index that fits the
+/// predicates, was needless load (review of 44b5d27, L8). Every cutoff is an hour or more, so a quarter of an hour of delay changes nothing the buyer can see.
+/// </summary>
+public sealed class AuthPurgeSchedule(TimeSpan interval)
+{
+    private readonly object _lock = new();
+    private DateTimeOffset? _last;
+    public bool ShouldRun(DateTimeOffset now)
+    {
+        lock (_lock)
+        {
+            if (_last is { } last && now - last < interval) return false;
+            _last = now;
+            return true;
+        }
+    }
+}

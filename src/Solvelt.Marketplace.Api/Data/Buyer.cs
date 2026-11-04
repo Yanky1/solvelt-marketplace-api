@@ -16,6 +16,11 @@ public sealed class BuyerAccount
     public string RelayEmail { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+    /// <summary>
+    /// Bumped by a password reset and by sign-out-all. A session counts only while its <see cref="BuyerSession.Epoch"/> equals this, so a session created at the same
+    /// moment as the bump (a rotation racing a reset under READ COMMITTED) is dead on arrival instead of surviving it (review of 44b5d27, M3).
+    /// </summary>
+    public int SessionEpoch { get; set; }
     public DateTimeOffset? DeletedAt { get; set; }
 }
 
@@ -29,6 +34,8 @@ public sealed class BuyerSession
     public DateTimeOffset LastSeenAt { get; set; }
     /// <summary>When the buyer last proved who they are (password or passkey) in this session. Sensitive changes need it within 10 minutes (decision O-11).</summary>
     public DateTimeOffset AuthenticatedAt { get; set; }
+    /// <summary>The account's <see cref="BuyerAccount.SessionEpoch"/> when this session was made; a rotation copies it from the session it replaces.</summary>
+    public int Epoch { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset AbsoluteExpiresAt { get; set; }
     public DateTimeOffset? RevokedAt { get; set; }
