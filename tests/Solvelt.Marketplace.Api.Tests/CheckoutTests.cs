@@ -252,6 +252,21 @@ public sealed class CheckoutTests : IDisposable
     }
 
     [Fact]
+    public async Task Order_answers_are_never_cached_also_for_an_unknown_order_and_without_a_session()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        var number = (await Ok(await Checkout(s, new { address = Address() }))).GetProperty("orderNumber").GetString();
+        foreach (var (path, session) in new[] { ($"/api/v1/checkout/orders/{number}", s), ("/api/v1/checkout/orders/MP-NOPE", s), ($"/api/v1/checkout/orders/{number}", (string?)null) })
+        {
+            var r = new HttpRequestMessage(HttpMethod.Get, path);
+            if (session != null) r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session);
+            var res = await _k.Http.SendAsync(r);
+            Assert.Contains("no-store", string.Join(",", res.Headers.CacheControl?.ToString() ?? ""));
+        }
+    }
+
+    [Fact]
     public async Task A_buyer_reads_only_their_own_order()
     {
         var s = await Buyer();
@@ -280,7 +295,7 @@ public sealed class CheckoutTests : IDisposable
         }
     }
 
-    private static StripeHttpProvider Http(Script h, string? key = "sk_test_abc") => new(new HttpClient(h), Options.Create(new StripeOptions { SecretKey = key, BaseUrl = "https://stripe.test/" }));
+    private static StripeHttpProvider Http(Script h, string? key = "sk_test_abc") => new(new HttpClient(h), Options.Create(new StripeOptions { SecretKey = key, BaseUrl = "https://stripe.test/", InUseRetryDelayMs = 1 }));
     private static HttpResponseMessage J(HttpStatusCode s, string json) => new(s) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 
     [Fact]
@@ -321,6 +336,22 @@ public sealed class CheckoutTests : IDisposable
         await Assert.ThrowsAsync<PaymentsUnavailableException>(() => Http(new Script((_, _) => throw new HttpRequestException("down"))).CreateIntentAsync(1000, "usd", "k", new Dictionary<string, string>(), default));
         await Assert.ThrowsAsync<PaymentsUnavailableException>(() => Http(new Script((_, _) => J(HttpStatusCode.OK, "{}")), key: null).CreateIntentAsync(1000, "usd", "k", new Dictionary<string, string>(), default));
         await Assert.ThrowsAsync<ArgumentException>(() => Http(new Script((_, _) => J(HttpStatusCode.OK, "{}"))).CreateIntentAsync(1000, "usd", "", new Dictionary<string, string>(), default));
+    }
+
+    [Fact]
+    public async Task A_409_idempotency_key_in_use_is_asked_again_with_the_same_key_and_gives_up_as_try_again_after_the_retries()
+    {
+        // the first request with the key is still running at Stripe: two 409s, then its result
+        var n = 0;
+        var h = new Script((_, _) => ++n < 3 ? J(HttpStatusCode.Conflict, "{\"error\":{\"code\":\"idempotency_key_in_use\"}}") : J(HttpStatusCode.OK, "{\"id\":\"pi_1\",\"client_secret\":\"s\",\"status\":\"requires_payment_method\"}"));
+        var r = await Http(h).CreateIntentAsync(1000, "usd", "pi:MP-9", new Dictionary<string, string>(), default);
+        Assert.Equal("pi_1", r.Id);
+        Assert.Equal(3, h.Seen.Count);
+        Assert.All(h.Seen, x => Assert.Equal("pi:MP-9", x.Req.Headers.GetValues("Idempotency-Key").Single()));
+        // still busy after every retry: retryable, not final (4 requests = 1 + 3 retries)
+        var busy = new Script((_, _) => J(HttpStatusCode.Conflict, "{}"));
+        await Assert.ThrowsAsync<PaymentsUnavailableException>(() => Http(busy).CreateIntentAsync(1000, "usd", "k", new Dictionary<string, string>(), default));
+        Assert.Equal(4, busy.Seen.Count);
     }
 
     [Fact]

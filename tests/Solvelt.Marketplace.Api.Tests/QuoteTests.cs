@@ -235,6 +235,38 @@ public sealed class QuoteTests : IDisposable
     }
 
     [Fact]
+    public async Task A_group_of_local_only_listings_is_never_given_carrier_speeds()
+    {
+        var window = Guid.NewGuid();
+        PortalAnswers(c => FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
+        {
+            eligible = true, method = "local", feeCents = 400, timeZone = "America/New_York",
+            windows = new[] { new { windowId = window, date = "2026-11-06", start = "2026-11-06T17:00:00Z", end = "2026-11-06T19:00:00Z", remaining = 2 } },
+        })));
+        await Cart(("challah-classic", 1, 0));
+        var withShips = Group(await Ok(await Quote(new { address = Addr() })), ChallahCorner);
+        Assert.NotEmpty(withShips.GetProperty("shippingOptions").EnumerateArray());                  // ships AND delivers locally: both offered
+        // the listing now says delivery: local only
+        var listing = CatalogKit.ListingId("challah-classic");
+        await _k.Db(async db =>
+        {
+            var ships = db.CatalogAttributes.Where(x => x.ListingId == listing && x.Key == "delivery" && x.Value == "ships");
+            db.CatalogAttributes.RemoveRange(ships);
+            if (!db.CatalogAttributes.Any(x => x.ListingId == listing && x.Key == "delivery" && x.Value == "local")) db.CatalogAttributes.Add(new Solvelt.Marketplace.Api.Data.CatalogAttribute { ListingId = listing, Key = "delivery", Value = "local" });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        var q = await Ok(await Quote(new { address = Addr() }));
+        Assert.Empty(Group(q, ChallahCorner).GetProperty("shippingOptions").EnumerateArray());      // no carrier speed, though the address is in a shipping zone
+        Assert.False(q.GetProperty("canPay").GetBoolean());                                           // until a local window is chosen
+        var local = await Ok(await Quote(new { address = Addr(), selections = new[] { new { sellerId = Mazel, brandId = ChallahCorner, localWindowId = window, localDate = "2026-11-06" } } }));
+        Assert.True(local.GetProperty("canPay").GetBoolean());
+        // not eligible for local delivery: nothing to pay with at all
+        PortalAnswers(c => FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new { eligible = false, reason = "outside_zone" })));
+        Assert.False((await Ok(await Quote(new { address = Addr() }))).GetProperty("canPay").GetBoolean());
+    }
+
+    [Fact]
     public async Task A_failing_local_delivery_check_only_hides_local_delivery()
     {
         PortalAnswers(_ => throw new HttpRequestException("down"));
