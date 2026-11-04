@@ -80,7 +80,7 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
                 return StripeOutcome.Applied;
             }
             await db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.ReportedToPortal, true), ct);
-            outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.ExtraCharge, null, booking.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, amount, now));
+            outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.ExtraCharge, null, booking.MarketplaceBookingId, null, pay.IntentId!, pay.Currency.ToUpperInvariant(), amount, now));
             return StripeOutcome.Applied;
         }
         outbox.Enqueue(BookingConfirmHandler.Type, new BookingConfirmHandler.Payload(booking.Id, pay.Id), $"confirm:{booking.MarketplaceBookingId}");
@@ -194,7 +194,7 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
         DateTimeOffset? due = evt.Object.TryGetProperty("evidence_details", out var ed) && ed.ValueKind == JsonValueKind.Object && ed.TryGetProperty("due_by", out var d2) && d2.TryGetInt64(out var unix) ? DateTimeOffset.FromUnixTimeSeconds(unix) : null;
         var createdAt = evt.Created > 0 ? DateTimeOffset.FromUnixTimeSeconds(evt.Created) : (DateTimeOffset?)null;
         // The portal can only book a dispute against a sale it recorded: until the confirm has reported it, the event is queued but HELD, and the confirm releases it (L2).
-        outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{booking.MarketplaceBookingId}", type, new DisputeData(disputeId, null, null, booking.MarketplaceBookingId, amount.Value, portalStatus, null, pay.Currency, evt.Str("reason"), due, createdAt),
+        outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{booking.MarketplaceBookingId}", type, new DisputeData(disputeId, null, null, booking.MarketplaceBookingId, amount.Value, portalStatus, null, pay.Currency.ToUpperInvariant(), evt.Str("reason"), due, createdAt),
             pay.ReportedToPortal ? null : TimeSpan.FromDays(3650));
         return StripeOutcome.Applied;
     }
@@ -264,7 +264,7 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
             await db.Bookings.Where(x => x.Id == b.Id).ExecuteUpdateAsync(x => x.SetProperty(y => y.PaymentDueAt, (DateTimeOffset?)null).SetProperty(y => y.UpdatedAt, qnow).SetProperty(y => y.Version, y => y.Version + 1), ct);
             if (qmarked == 1)
             {
-                outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, null, pay.CapturedAt));
+                outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency.ToUpperInvariant(), null, pay.CapturedAt));
                 await db.SaveChangesAsync(ct);
             }
             await qtx.CommitAsync(ct);
@@ -305,7 +305,7 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
                 }
                 return OutboxResult.Delivered();
             }
-            outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, null, pay.CapturedAt));
+            outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency.ToUpperInvariant(), null, pay.CapturedAt));
             // A dispute that arrived before the sale was reported was held back: release it now that the portal knows the sale.
             await db.OutboxMessages.Where(m => m.Status == OutboxStatus.Pending && m.DedupeKey != null && m.DedupeKey.StartsWith("payment:dispute:") && m.DedupeKey.EndsWith(":" + b.MarketplaceBookingId))
                 .ExecuteUpdateAsync(m => m.SetProperty(x => x.NextAttemptAt, now), ct);
