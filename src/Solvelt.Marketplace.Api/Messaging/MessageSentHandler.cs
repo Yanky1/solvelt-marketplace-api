@@ -40,7 +40,8 @@ public sealed class MessageSentHandler : IProjectionHandler
             var order = await c.Db.Orders.AsNoTracking().Include(o => o.Groups).FirstOrDefaultAsync(o => o.Number == mid, ct);
             if (order is null) return HandlerOutcome.Skipped("unknown marketplace order");
             if (order.Groups.Any(g => g.SellerOrderId is null)) return HandlerOutcome.Parked("order", order.Number, "seller orders not stored yet");
-            var group = son is null ? (order.Groups.Count == 1 ? order.Groups[0] : null) : order.Groups.FirstOrDefault(g => g.SellerOrderNumber == son);   // equal numbers only
+            if (string.IsNullOrWhiteSpace(son)) return HandlerOutcome.Skipped("seller order number missing");   // our order number alone is not a match (M5 review G3)
+            var group = order.Groups.FirstOrDefault(g => g.SellerOrderNumber == son);   // equal numbers only
             if (group is null) return HandlerOutcome.Skipped("no such seller order on this order");
             thread = await c.Db.MessageThreads.FirstOrDefaultAsync(t => t.GroupId == group.Id && t.AccountId == order.AccountId, ct);
             if (thread is null)
@@ -58,7 +59,9 @@ public sealed class MessageSentHandler : IProjectionHandler
             if (string.IsNullOrWhiteSpace(convKey)) return HandlerOutcome.Skipped("conversation id missing");
             thread = await c.Db.MessageThreads.FirstOrDefaultAsync(t => t.ConversationKey == convKey && t.Kind == ThreadKinds.Product, ct);
             if (thread is null) return HandlerOutcome.Skipped("unknown product conversation");   // product threads are only ever started by the buyer
-            if (FulfilmentProjector.Str(d, "productId") is { } pid && Guid.TryParse(pid, out var g) && thread.ListingId != g) return HandlerOutcome.Skipped("conversation is about another product");
+            // OUR conversation id alone is not enough (M5 review G1): the portal must also name the product (a valid id equal to the thread's listing) and the seller of that listing.
+            if (!Guid.TryParse(FulfilmentProjector.Str(d, "productId"), out var productId) || thread.ListingId != productId) return HandlerOutcome.Skipped("conversation is about another product");
+            if (!Guid.TryParse(FulfilmentProjector.Str(d, "sellerId"), out var sellerId) || !await c.Db.CatalogListings.AsNoTracking().AnyAsync(l => l.Id == productId && l.SellerId == sellerId, ct)) return HandlerOutcome.Skipped("seller does not own the product");
         }
         else return HandlerOutcome.Skipped("unsupported message kind");
         if (thread.RedactedAt is not null) return HandlerOutcome.Skipped("thread closed");
