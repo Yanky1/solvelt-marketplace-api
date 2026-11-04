@@ -12,6 +12,15 @@ Rate limited endpoints answer `429 { code: "rate_limited" }` with `Retry-After`.
 | GET | `/api/v1/catalog/listings` | none | Paged, filterable, sortable listing cards |
 | GET | `/api/v1/catalog/suggest` | none | Autocomplete: listing, brand and category suggestions |
 | GET | `/api/v1/catalog/listings/{slugOrId}` | none | One listing in full |
+| POST | `/api/v1/auth/sign-up` | none | Create an account; `204` always for a valid body; see Auth |
+| POST | `/api/v1/auth/resend-verification` | none | `204` always |
+| POST | `/api/v1/auth/verify-email` | none | `204` or `400 invalid_token` |
+| POST | `/api/v1/auth/sign-in` | none | `200 { token, user }`; see Auth |
+| POST | `/api/v1/auth/sign-out` | Bearer | `204`; ends this session |
+| POST | `/api/v1/auth/sign-out-all` | Bearer | `204`; ends every session of this buyer |
+| POST | `/api/v1/auth/forgot-password` | none | `204` always |
+| POST | `/api/v1/auth/reset-password` | none | `204` or `400 invalid_token`; signs out everywhere |
+| GET | `/api/v1/account/me` | Bearer | `{ id, displayName, email }` |
 | GET | `/api/admin/outbox` | admin key | Outbox counts and recent messages (never payloads); see Operations |
 | POST | `/api/admin/outbox/{id}/retry` | admin key | Re-queue a dead message; see Operations |
 | GET | `/api/v1/ping` | none | Public rate limit bucket smoke endpoint (removed when the catalog endpoints land) |
@@ -29,7 +38,7 @@ The API sees every buyer request coming from the web server, so rate limits need
 Headers that are missing, malformed, stale or wrongly signed are ignored (the request is then limited together with every other unsigned request from the same peer), so always send all three.
 If headers are present but invalid (a key mismatch or clock skew puts every user into one bucket) the API counts it, logs a warning at most once a minute (the reason only, never an address or signature) and shows the count on `GET /health` as `forwarding.invalid`: a non-zero and growing value means the web tier and the API disagree on the key or the time.
 A captured header set can be replayed for 60 s to frame a victim's address, so **the API must be reachable only from the web tier, over TLS** (network policy or private networking); there is no nonce.
-`Authorization: Bearer <session token>` is added by the auth slice. Every response may carry `X-Correlation-Id` on a `500`.
+`Authorization: Bearer <session token>` is the buyer's session (see Auth). Every response may carry `X-Correlation-Id` on a `500`.
 
 ## `POST /api/portal/webhooks` (seller portal -> marketplace)
 Called only by the seller portal's outbox dispatcher (CONTRACT.md §1.2, docs/ORDERS.md §3.4). Not for the web server or browsers.
@@ -138,3 +147,20 @@ For operators and the future staff area (M7), not for browsers. Send `X-Solvelt-
 
 ### Delivery rules
 At least once. A failed message is retried after 30 s, 60 s, 120 s ... doubling, capped at 1 h, and is dead after 8 failures (or at once when waiting cannot help, such as a portal `422`). Configuration: `Outbox:MaxAttempts`, `BackoffSeconds`, `MaxBackoffSeconds`, `LeaseSeconds`, `BatchSize`, `PollSeconds`, `DeliveredPayloadRetentionDays`, `DeadPayloadRetentionDays`, `RowRetentionDays`.
+
+## Auth (buyers)
+All bodies are JSON. The web server holds the session token in its own HttpOnly cookie and sends `Authorization: Bearer <token>`. Auth endpoints share the strict per-client-IP rate limit (`RateLimits:AuthPerMinute`, default 10), forwarded as described above. This is the contract the web app assumed (its W1-21), confirmed.
+
+| Endpoint | Body | Answers |
+|---|---|---|
+| `POST /api/v1/auth/sign-up` | `{ email, password, displayName }` | `204` for a new, an unverified and an already registered address (same empty body); `422 { code: "validation_failed", errors: { email?, password?, displayName? } }` |
+| `POST /api/v1/auth/verify-email` | `{ token }` | `204`, or `400 { code: "invalid_token" }` (unknown, used, expired, wrong kind) |
+| `POST /api/v1/auth/resend-verification` | `{ email }` | `204` always; a new link replaces older ones; at most 3 mails an hour per address |
+| `POST /api/v1/auth/sign-in` | `{ email, password }` | `200 { token, user: { id, displayName } }`; `401 invalid_credentials` (wrong password and unknown address are identical); `403 email_not_verified` (only after the correct password); `429 rate_limited` with `Retry-After` (locked, or too many attempts) |
+| `POST /api/v1/auth/sign-out` | none | `204`; `401` without a valid token |
+| `POST /api/v1/auth/sign-out-all` | none | `204`; `401` without a valid token |
+| `POST /api/v1/auth/forgot-password` | `{ email }` | `204` always; mail only for a verified account |
+| `POST /api/v1/auth/reset-password` | `{ token, password }` | `204`, or `400 invalid_token`, or `422` for a weak password (the link is not used up); every session of the account ends |
+| `GET /api/v1/account/me` | none | `200 { id, displayName, email }`, or `401 { code: "unauthorized" }` |
+
+Rules: email is trimmed and lower-cased; password 10 to 128 characters and not the email address; display name 1 to 60 characters. The token returned by sign-in is 43 characters of base64url, shown once. Sessions end after 7 idle days (sliding) or 30 days in all. Five wrong passwords lock the account for 15 minutes. Links in mails open `<Marketplace:PublicBaseUrl>/verify-email?token=...` and `/reset-password?token=...` (24 h and 60 min); the pages must POST the token (a mail scanner opening the link then cannot use it up). The buyer is known to the portal only as a relay address and a name like "Jane B." (decision M1-47 and the PII table).
