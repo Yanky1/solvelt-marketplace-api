@@ -323,6 +323,42 @@ public class AuthHardeningTests
         Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token, password = Pw })).StatusCode);
     }
 
+    [Fact]
+    public async Task A_successful_verification_wipes_the_failures_it_collected()
+    {
+        using var k = new AuthKit(NoIpLimit());
+        await k.SignUp(Email);
+        var token = AuthKit.TokenIn((await k.Mail(Email)).Single(), "/verify-email");
+        for (var i = 0; i < 3; i++) Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token, password = Wrong })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token, password = Pw })).StatusCode);
+        // Three failures were carried over, five more would reach the delay if verification had left them behind.
+        for (var i = 0; i < 5; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post(SignIn, new { email = Email, password = Wrong })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await k.Post(SignIn, new { email = Email, password = Pw })).StatusCode);
+    }
+
+    [Fact]
+    public async Task Verify_email_answers_a_delayed_valid_token_exactly_like_an_invalid_one()
+    {
+        using var k = new AuthKit(NoIpLimit());
+        await k.SignUp(Email);
+        var token = AuthKit.TokenIn((await k.Mail(Email)).Single(), "/verify-email");
+        var invalid = new[] { "", "garbage", token[..^1] + (token[^1] == 'A' ? 'B' : 'A'), Guid.NewGuid().ToString("N") + ".x" };
+        async Task<(HttpStatusCode, string, string?)> Probe(string t, string pw)
+        {
+            var r = await k.Post("/api/v1/auth/verify-email", new { token = t, password = pw });
+            return (r.StatusCode, await r.Content.ReadAsStringAsync(), r.Headers.RetryAfter?.ToString());
+        }
+        var reference = await Probe("garbage", Pw);
+        Assert.Equal(HttpStatusCode.BadRequest, reference.Item1);
+        Assert.Null(reference.Item3);
+        // Push the real address into its delay with wrong passwords, then compare: a valid token under the gate must look like an invalid one (no 429, no Retry-After).
+        for (var i = 0; i < 7; i++) await Probe(token, Wrong);
+        Assert.Equal(reference, await Probe(token, Pw));
+        Assert.Equal(reference, await Probe(token, Wrong));
+        foreach (var t in invalid) Assert.Equal(reference, await Probe(t, Pw));
+        Assert.Null((await k.Account(Email)).EmailVerifiedAt);
+    }
+
     // ---------- F5: forgot and resend do the same work for every address ----------
 
     private static async Task<List<string>> Statements(AuthKit k, CommandLog log, string path, string email)
