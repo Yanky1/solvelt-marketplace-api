@@ -7,6 +7,19 @@ namespace Solvelt.Marketplace.Api.Portal.Webhooks;
 public sealed record PortalEvent(string Id, string Type, DateTimeOffset CreatedAt, JsonElement Data)
 {
     public const int MaxIdLength = 100, MaxTypeLength = 200;
+    /// <summary>How far past receipt time an event's <c>createdAt</c> may be before ordering clamps it (small clock differences are normal).</summary>
+    public static readonly TimeSpan FutureTolerance = TimeSpan.FromMinutes(5);
+
+    /// <summary>The portal's own <c>createdAt</c> as sent. <see cref="CreatedAt"/> is the ordering time handlers see (clamped, see <see cref="EffectiveTime"/>).</summary>
+    public DateTimeOffset RawCreatedAt { get; init; } = CreatedAt;
+
+    /// <summary>The ordering time: <c>min(createdAt, receivedAt + 5 min)</c>. Dates in the past are never changed.</summary>
+    public static DateTimeOffset EffectiveTime(DateTimeOffset raw, DateTimeOffset receivedAt)
+    {
+        var ceiling = receivedAt.ToUniversalTime() + FutureTolerance;
+        var r = raw.ToUniversalTime();
+        return r > ceiling ? ceiling : r;
+    }
 
     public static bool TryParse(ReadOnlySpan<byte> body, out PortalEvent? evt, out string error)
     {
@@ -23,7 +36,7 @@ public sealed record PortalEvent(string Id, string Type, DateTimeOffset CreatedA
                 !DateTimeOffset.TryParse(created, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var at))
             { error = "createdAt is required (ISO 8601)."; return false; }
             var data = root.TryGetProperty("data", out var d) ? d.Clone() : JsonDocument.Parse("{}").RootElement.Clone();
-            evt = new PortalEvent(id, type, at.ToUniversalTime(), data);
+            evt = new PortalEvent(id, type, at.ToUniversalTime(), data) { RawCreatedAt = at.ToUniversalTime() };
             return true;
         }
         catch (JsonException) { error = "The body is not valid JSON."; return false; }
@@ -41,6 +54,18 @@ public sealed record BookingRef(string MarketplaceBookingId, Guid BookingId, str
 
 public static class EventRefs
 {
+    /// <summary>
+    /// The matching rule as code (review hotspot): an event belongs to a stored order only when the marketplace id AND the portal id it carries are
+    /// <b>equal</b> to the stored ones. A portal id that is merely present, or a tracking number or SKU that happens to match, is not a match: another
+    /// seller's order could otherwise be altered by an event that names our marketplace order id. Every order handler must use this (or the booking twin).
+    /// </summary>
+    public static bool Matches(OrderRef? eventRef, string storedMarketplaceOrderId, Guid storedSellerOrderId)
+        => eventRef is not null && string.Equals(eventRef.MarketplaceOrderId, storedMarketplaceOrderId, StringComparison.Ordinal) && eventRef.SellerOrderId == storedSellerOrderId;
+
+    /// <summary>The booking twin of <see cref="Matches(OrderRef?, string, Guid)"/>.</summary>
+    public static bool Matches(BookingRef? eventRef, string storedMarketplaceBookingId, Guid storedBookingId)
+        => eventRef is not null && string.Equals(eventRef.MarketplaceBookingId, storedMarketplaceBookingId, StringComparison.Ordinal) && eventRef.BookingId == storedBookingId;
+
     /// <summary><c>data.order = {sellerOrderId, sellerOrderNumber, marketplaceOrderId}</c>; null unless both ids are present.</summary>
     public static OrderRef? Order(JsonElement data)
     {

@@ -26,6 +26,11 @@ public sealed class PortalInboundEvent
     public string Type { get; set; } = "";
     /// <summary>The portal's <c>createdAt</c> (UTC): the ordering key of the projections.</summary>
     public DateTimeOffset PortalCreatedAt { get; set; }
+    /// <summary>
+    /// The time projections order by: the portal's <c>createdAt</c>, but never later than receipt time + 5 minutes. A future-dated event (a clock bug)
+    /// must not freeze its aggregate against every real event that follows. Past dates are never changed.
+    /// </summary>
+    public DateTimeOffset OrderingAt { get; set; }
     public DateTimeOffset ReceivedAt { get; set; }
     public string Status { get; set; } = InboundStatus.Stored;
     public string? AggregateType { get; set; }
@@ -35,6 +40,8 @@ public sealed class PortalInboundEvent
     /// <summary>The raw signed body. Nulled by retention (see the PII table in DECISIONS); parked events keep it until applied.</summary>
     public string? PayloadJson { get; set; }
     public DateTimeOffset? PayloadPurgedAt { get; set; }
+    /// <summary>When a replay last tried and left this parked event parked: the sweep serves the longest-waiting aggregates first.</summary>
+    public DateTimeOffset? LastReplayAt { get; set; }
     /// <summary>Concurrency token: two replayers of the same parked event cannot both apply it.</summary>
     public int Version { get; set; }
 }
@@ -54,5 +61,6 @@ internal sealed class PortalInboundEventConfiguration : IEntityTypeConfiguration
         b.Property(e => e.Version).IsConcurrencyToken();
         b.HasIndex(e => new { e.Status, e.AggregateType, e.AggregateKey, e.PortalCreatedAt });
         b.HasIndex(e => e.ReceivedAt);
+        b.HasIndex(e => new { e.Status, e.LastReplayAt });
     }
 }

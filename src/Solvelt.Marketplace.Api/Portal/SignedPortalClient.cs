@@ -99,10 +99,20 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
         var total = TimeSpan.FromSeconds(Math.Clamp(o.TotalDeadlineSeconds, 1, 60));
         var started = time.GetTimestamp();
 
+        PortalResult<T>? lastAnswer = null;      // the last retryable answer, returned if the deadline ends the retrying
+        Exception? lastFailure = null;           // the last network failure, thrown (wrapped) if the deadline ends the retrying
+
         for (var attempt = 1; ; attempt++)
         {
             var last = attempt >= maxAttempts;
             var remaining = total - time.GetElapsedTime(started);
+            if (attempt > 1 && remaining <= TimeSpan.Zero)
+            {
+                // The backoff itself overran the deadline (the timer fired late): never start another attempt, and never build a timer from a
+                // negative delay. Answer with what the previous attempt produced.
+                if (lastAnswer is not null) return lastAnswer;
+                throw new PortalUnavailableException($"Portal unreachable after {attempt - 1} attempt(s).", lastFailure);
+            }
             var timestamp = time.GetUtcNow().ToUnixTimeSeconds().ToString();
             var nonce = PortalSigning.NewNonce();   // new per attempt, including retries
             var signature = PortalSigning.Sign(o.InboundSecret, PortalSigning.Canonical(timestamp, nonce, method.Method, pathAndQuery, bytes));
@@ -120,27 +130,35 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
             // The deadline timer runs on the injected TimeProvider so tests control it; an attempt never outlives the total budget.
             using var deadline = new CancellationTokenSource(attemptTimeout < remaining ? attemptTimeout : remaining, time);
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
-            HttpResponseMessage res;
-            string text;
-            try
+            HttpResponseMessage? res = null;
+            try   // the response is disposed on every path: success, retry, an oversized or broken body, a timeout
             {
-                res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
-                text = await ReadCapped(res, cts.Token);
-            }
-            catch (Exception ex) when (ex is HttpRequestException or IOException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
-            {
-                var delay = Backoff(o, attempt, null);
-                if (last || !HasBudgetFor(delay, started, total))
-                    throw new PortalUnavailableException($"Portal unreachable after {attempt} attempt(s).", ex);
-                await Task.Delay(delay, time, ct);
-                continue;
-            }
+                string text;
+                try
+                {
+                    res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                    text = await ReadCapped(res, cts.Token);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or IOException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+                {
+                    lastFailure = ex;
+                    lastAnswer = null;
+                    var delay = Backoff(o, attempt, null);
+                    if (last || !HasBudgetFor(delay, started, total))
+                        throw new PortalUnavailableException($"Portal unreachable after {attempt} attempt(s).", ex);
+                    await Task.Delay(delay, time, ct);
+                    continue;
+                }
 
-            using (res)
-            {
                 var status = (int)res.StatusCode;
                 var error = status is >= 200 and < 300 ? null : ParseError(text);
                 var transient = IsTransient(profile, status, error?.Code);
+                T? value = default;
+                if (error is null && text.Length > 0)
+                {
+                    try { value = JsonSerializer.Deserialize<T>(text, PortalJson.Options); } catch (JsonException) { }
+                }
+                var answer = new PortalResult<T>(status, value, error, attempt) { Retryable = transient };
                 // 429 is transient but never retried here: the portal's limiter is a fixed one-minute window without
                 // Retry-After, so short backoffs only add load. It is surfaced (Retryable) for the outbox to retry later.
                 if (transient && status != 429 && !last)
@@ -148,17 +166,15 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
                     var delay = Backoff(o, attempt, RetryAfterDelay(res));
                     if (HasBudgetFor(delay, started, total))
                     {
+                        lastAnswer = answer;
+                        lastFailure = null;
                         await Task.Delay(delay, time, ct);
                         continue;
                     }
                 }
-                T? value = default;
-                if (error is null && text.Length > 0)
-                {
-                    try { value = JsonSerializer.Deserialize<T>(text, PortalJson.Options); } catch (JsonException) { }
-                }
-                return new PortalResult<T>(status, value, error, attempt) { Retryable = transient };
+                return answer;
             }
+            finally { res?.Dispose(); }
         }
     }
 

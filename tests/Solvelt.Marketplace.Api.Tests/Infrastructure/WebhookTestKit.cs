@@ -24,8 +24,8 @@ public sealed class ScriptedHandler(params string[] types) : IProjectionHandler
         // default: a stand-in order handler. Unknown order -> parked; otherwise ordered, terminal-aware.
         var mid = c.Event.Data.GetProperty("order").GetProperty("marketplaceOrderId").GetString()!;
         lock (KnownOrders) { if (!KnownOrders.Contains(mid)) return HandlerOutcome.Parked("order", mid); }
-        var terminal = c.Event.Type is "order.cancelled" or "order.delivered" or "refund.issued" ? c.Event.Type : null;
-        if (!await c.Store.TryAdvanceAsync("order", mid, "status", c.Event.CreatedAt, terminal, ct)) return HandlerOutcome.Skipped("older or terminal");
+        var terminal = c.Event.Type switch { "order.cancelled" => TerminalStates.Cancelled, "order.delivered" => TerminalStates.Delivered, "refund.issued" => TerminalStates.Refunded, _ => null };
+        if (!await c.AdvanceAsync("order", mid, "status", terminal, ct)) return HandlerOutcome.Skipped("older or terminal");
         c.Db.ProjectionStates.Add(new ProjectionState { AggregateType = "marker", AggregateKey = c.Event.Id, FieldGroup = "applied", LastAppliedAt = c.Event.CreatedAt });
         return HandlerOutcome.Applied();
     }
@@ -45,11 +45,30 @@ public static class WebhookTestKit
     public static string Sign(string secret, string ts, string body)
         => "v1=" + Convert.ToHexString(HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(ts + "." + body))).ToLowerInvariant();
 
+    /// <summary>A read-once stream: it cannot seek, so StreamContent has no length and the request goes out chunked, without a Content-Length.</summary>
+    private sealed class ForwardOnlyStream(byte[] bytes) : Stream
+    {
+        private readonly MemoryStream _inner = new(bytes);
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) => _inner.ReadAsync(buffer, ct);
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     public static HttpRequestMessage Request(TestFactory f, string body, string? eventId = null, string? type = null, string? secret = null,
-        string? ts = null, string? sig = null, bool signed = true)
+        string? ts = null, string? sig = null, bool signed = true, bool chunked = false)
     {
         ts ??= f.Clock.GetUtcNow().ToUnixTimeSeconds().ToString();
-        var req = new HttpRequestMessage(HttpMethod.Post, WebhookEndpoint.Route) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        HttpContent content = chunked ? new StreamContent(new ForwardOnlyStream(Encoding.UTF8.GetBytes(body))) : new StringContent(body, Encoding.UTF8, "application/json");
+        if (chunked) content.Headers.ContentType = new("application/json");
+        var req = new HttpRequestMessage(HttpMethod.Post, WebhookEndpoint.Route) { Content = content };
         if (!signed) return req;
         using var doc = JsonDocument.Parse(body.Length > 0 && body.TrimStart().StartsWith('{') ? body : "{}");
         eventId ??= doc.RootElement.TryGetProperty("id", out var id) ? id.GetString() : "evt-none";

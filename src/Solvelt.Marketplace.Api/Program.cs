@@ -30,6 +30,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();
 builder.Services.AddSingleton<ProjectionRegistry>();
+builder.Services.AddSingleton<TerminalStateRules>();
 builder.Services.AddScoped<ProjectionStore>();
 builder.Services.AddScoped<PortalEventProcessor>();
 builder.Services.AddScoped<PortalEventMaintenance>();

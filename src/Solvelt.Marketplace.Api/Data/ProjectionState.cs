@@ -5,7 +5,7 @@ namespace Solvelt.Marketplace.Api.Data;
 
 /// <summary>
 /// Per aggregate and per field group: the portal <c>createdAt</c> of the last event applied (an older event never overwrites newer
-/// state) and the terminal state, if any (cancelled, refunded, delivered ... never reopened by a non-terminal event).
+/// state). The terminal state of an aggregate lives on ONE row per aggregate (field group <c>$terminal</c>), so it governs every field group.
 /// </summary>
 public sealed class ProjectionState
 {
@@ -13,6 +13,8 @@ public sealed class ProjectionState
     public string AggregateKey { get; set; } = "";
     public string FieldGroup { get; set; } = "";
     public DateTimeOffset LastAppliedAt { get; set; }
+    /// <summary>Id of the event that set <see cref="LastAppliedAt"/>: the deterministic tie-breaker when two events carry the same stored time.</summary>
+    public string? LastEventId { get; set; }
     public string? TerminalState { get; set; }
     public int Version { get; set; }
 }
@@ -27,6 +29,7 @@ internal sealed class ProjectionStateConfiguration : IEntityTypeConfiguration<Pr
         b.Property(s => s.AggregateKey).HasMaxLength(200);
         b.Property(s => s.FieldGroup).HasMaxLength(100);
         b.Property(s => s.TerminalState).HasMaxLength(50);
+        b.Property(s => s.LastEventId).HasMaxLength(100);
         b.Property(s => s.Version).IsConcurrencyToken();
     }
 }

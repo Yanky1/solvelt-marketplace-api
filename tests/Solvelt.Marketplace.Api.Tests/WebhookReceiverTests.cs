@@ -86,6 +86,23 @@ public class PortalEventParsingTests
     }
 
     [Fact]
+    public void A_handler_matches_a_stored_order_only_when_both_ids_are_equal_to_the_stored_ones()
+    {
+        var stored = Guid.NewGuid();
+        var mine = new OrderRef("MP-1", stored, "SO-1");
+        Assert.True(EventRefs.Matches(mine, "MP-1", stored));
+        Assert.False(EventRefs.Matches(mine with { SellerOrderId = Guid.NewGuid() }, "MP-1", stored));     // same marketplace id, another seller's order
+        Assert.False(EventRefs.Matches(mine with { MarketplaceOrderId = "MP-2" }, "MP-1", stored));        // same portal id, another marketplace order
+        Assert.False(EventRefs.Matches(mine with { MarketplaceOrderId = "mp-1" }, "MP-1", stored));        // ids are case sensitive
+        Assert.False(EventRefs.Matches((OrderRef?)null, "MP-1", stored));
+        var booking = new BookingRef("BK-1", stored, "B-1");
+        Assert.True(EventRefs.Matches(booking, "BK-1", stored));
+        Assert.False(EventRefs.Matches(booking with { BookingId = Guid.NewGuid() }, "BK-1", stored));
+        Assert.False(EventRefs.Matches(booking with { MarketplaceBookingId = "BK-2" }, "BK-1", stored));
+        Assert.False(EventRefs.Matches((BookingRef?)null, "BK-1", stored));
+    }
+
+    [Fact]
     public void Order_and_booking_refs_need_both_the_marketplace_id_and_the_portal_id()
     {
         static JsonElement J(object o) => JsonSerializer.SerializeToElement(o);
@@ -103,10 +120,15 @@ public class PortalEventParsingTests
 public class WebhookReceiverTests
 {
     private static TestFactory Factory(ScriptedHandler? handler = null, Dictionary<string, string?>? config = null)
-        => new(config, handler is null ? null : s => s.AddSingleton<IProjectionHandler>(handler));
+    {
+        var f = new TestFactory(config, handler is null ? null : s => s.AddSingleton<IProjectionHandler>(handler));
+        f.Clock.Advance(TimeSpan.FromHours(3));   // "now" is T0 + 3 h, so events dated T0 + minutes are in the past (future-dated events are clamped, see below)
+        return f;
+    }
 
     private static int Rows(TestFactory f) => WithDb(f, db => db.PortalInboundEvents.Count());
     private static int Markers(TestFactory f) => WithDb(f, db => db.ProjectionStates.Count(s => s.AggregateType == "marker"));
+    private static ProjectionState GroupRow(TestFactory f, string key, string group) => WithDb(f, db => db.ProjectionStates.AsNoTracking().Single(s => s.AggregateType == "order" && s.AggregateKey == key && s.FieldGroup == group));
 
     // ---------- verification before parsing, replay ----------
     [Fact]
@@ -259,51 +281,137 @@ public class WebhookReceiverTests
         Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e-new", "order.held", T0.AddMinutes(10), Order("MP-1"))))).Json));
         Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e-old", "order.accepted", T0.AddMinutes(5), Order("MP-1"))))).Json));
         Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e-newer", "order.accepted", T0.AddMinutes(11), Order("MP-1"))))).Json));
-        var state = WithDb(f, db => db.ProjectionStates.AsNoTracking().Single(s => s.AggregateType == "order" && s.AggregateKey == "MP-1"));
+        var state = GroupRow(f, "MP-1", "status");
         Assert.Equal(T0.AddMinutes(11), state.LastAppliedAt);
         Assert.Equal(2, Markers(f));
         Assert.Equal("skipped", WithDb(f, db => db.PortalInboundEvents.Single(e => e.Id == "e-old").Status));   // stored, acked, not applied
     }
 
     [Fact]
-    public async Task Terminal_states_are_never_reopened_by_an_older_or_newer_non_terminal_event()
+    public async Task Terminal_states_are_never_reopened_and_cancelled_is_absorbing()
     {
         var h = new ScriptedHandler("order.cancelled", "order.resumed", "order.delivered", "refund.issued", "order.accepted");
         h.KnownOrders.Add("MP-1");
         using var f = Factory(h);
         var c = f.CreateClient();
         Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e1", "order.cancelled", T0.AddMinutes(10), Order("MP-1"))))).Json));
-        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e2", "order.accepted", T0.AddMinutes(1), Order("MP-1"))))).Json));    // older
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e2", "order.accepted", T0.AddMinutes(1), Order("MP-1"))))).Json));    // older, non-terminal
         Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e3", "order.resumed", T0.AddMinutes(20), Order("MP-1"))))).Json));    // newer but non-terminal
-        // a later terminal event is a legitimate progression (delivered, then refunded) and is applied; an older terminal one is not
-        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e4", "refund.issued", T0.AddMinutes(30), Order("MP-1"))))).Json));
-        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e5", "order.delivered", T0.AddMinutes(12), Order("MP-1"))))).Json));
-        var state = WithDb(f, db => db.ProjectionStates.AsNoTracking().Single(s => s.AggregateType == "order"));
-        Assert.Equal(("refund.issued", T0.AddMinutes(30)), (state.TerminalState, state.LastAppliedAt));
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e4", "order.delivered", T0.AddMinutes(30), Order("MP-1"))))).Json));  // cancelled -> delivered is not a legal step (O-10)
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e5", "refund.issued", T0.AddMinutes(40), Order("MP-1"))))).Json));   // cancelled and refunded are absorbing
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e6", "order.cancelled", T0.AddMinutes(50), Order("MP-1"))))).Json));  // the same terminal state again is fine
+        var terminal = GroupRow(f, "MP-1", ProjectionStore.TerminalGroup);
+        Assert.Equal((TerminalStates.Cancelled, T0.AddMinutes(50)), (terminal.TerminalState, terminal.LastAppliedAt));
     }
 
     [Fact]
-    public async Task A_terminal_state_in_one_field_group_blocks_non_terminal_events_in_another()
+    public async Task Delivered_may_become_refunded_but_not_cancelled_and_an_older_terminal_event_is_ignored()
     {
+        var h = new ScriptedHandler("order.cancelled", "order.delivered", "refund.issued");
+        h.KnownOrders.Add("MP-1");
+        using var f = Factory(h);
+        var c = f.CreateClient();
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e1", "order.delivered", T0.AddMinutes(10), Order("MP-1"))))).Json));
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e2", "order.cancelled", T0.AddMinutes(20), Order("MP-1"))))).Json));  // delivered -> cancelled is not legal
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e3", "refund.issued", T0.AddMinutes(5), Order("MP-1"))))).Json));    // legal step, but older than delivered
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e4", "refund.issued", T0.AddMinutes(30), Order("MP-1"))))).Json));   // delivered -> refunded
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e5", "refund.issued", T0.AddMinutes(40), Order("MP-1"))))).Json));   // a second (partial) refund
+        Assert.Equal(TerminalStates.Refunded, GroupRow(f, "MP-1", ProjectionStore.TerminalGroup).TerminalState);
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e6", "order.delivered", T0.AddMinutes(50), Order("MP-1"))))).Json)); // refunded is absorbing
+    }
+
+    [Theory]
+    [InlineData("order", "cancelled", "cancelled", true)]
+    [InlineData("order", "cancelled", "refunded", false)]
+    [InlineData("order", "cancelled", "delivered", false)]
+    [InlineData("order", "cancelled", "completed", false)]
+    [InlineData("order", "refunded", "refunded", true)]
+    [InlineData("order", "refunded", "cancelled", false)]
+    [InlineData("order", "refunded", "delivered", false)]
+    [InlineData("order", "delivered", "cancelled", false)]
+    [InlineData("order", "delivered", "completed", true)]
+    [InlineData("order", "delivered", "refunded", true)]
+    [InlineData("order", "completed", "refunded", true)]       // goodwill refund after the return window
+    [InlineData("order", "completed", "cancelled", false)]
+    [InlineData("order", "completed", "delivered", false)]
+    [InlineData("booking", "completed", "refunded", false)]    // an aggregate type with no rules is absorbing
+    [InlineData("booking", "completed", "completed", true)]
+    public void The_terminal_step_table_follows_the_portal_state_machine(string aggregate, string from, string to, bool allowed)
+        => Assert.Equal(allowed, new TerminalStateRules().Allows(aggregate, from, to));
+
+    [Fact]
+    public void Other_modules_add_their_own_legal_steps()
+    {
+        var rules = new TerminalStateRules().Allow("booking", "completed", "refunded");
+        Assert.True(rules.Allows("booking", "completed", "refunded"));
+        Assert.False(rules.Allows("booking", "refunded", "completed"));
+    }
+
+    [Fact]
+    public async Task A_terminal_state_blocks_every_field_group_even_one_that_already_has_a_row()
+    {
+        // The review's repro: tracking@T0, then the order is cancelled, then tracking@T0+1h must NOT apply (the group already had a row).
         using var f = new TestFactory();
         using var scope = f.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
         var store = scope.ServiceProvider.GetRequiredService<ProjectionStore>();
-        Assert.True(await store.TryAdvanceAsync("order", "MP-9", "status", T0, "order.cancelled"));
+        Assert.True(await store.TryAdvanceAsync("order", "MP-9", "tracking", "e1", T0));
+        Assert.True(await store.TryAdvanceAsync("order", "MP-9", "status", "e2", T0.AddMinutes(1), TerminalStates.Cancelled));
         await db.SaveChangesAsync();
-        Assert.False(await store.TryAdvanceAsync("order", "MP-9", "tracking", T0.AddHours(1)));       // new group, same aggregate
-        Assert.True(await store.TryAdvanceAsync("order", "MP-9", "tracking", T0.AddHours(1), "order.delivered"));
+        Assert.False(await store.TryAdvanceAsync("order", "MP-9", "tracking", "e3", T0.AddHours(1)));
+        Assert.False(await store.TryAdvanceAsync("order", "MP-9", "address", "e4", T0.AddHours(1)));   // and a group with no row yet
+        Assert.True(await store.IsTerminalAsync("order", "MP-9"));
+        Assert.Equal(TerminalStates.Cancelled, await store.TerminalStateAsync("order", "MP-9"));
+        Assert.False(await store.IsTerminalAsync("order", "MP-10"));
+        Assert.Throws<ArgumentException>(() => store.TryAdvanceAsync("order", "MP-9", ProjectionStore.TerminalGroup, "e5", T0).GetAwaiter().GetResult());
     }
 
     [Fact]
-    public async Task Events_with_equal_times_both_apply()
+    public async Task A_terminal_event_older_than_the_current_terminal_state_is_ignored_even_from_another_field_group()
     {
+        // Only the terminal row can decide this: the "status" group has never seen an event, so its own ordering has nothing to compare against.
+        using var f = new TestFactory();
+        using var scope = f.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+        var store = scope.ServiceProvider.GetRequiredService<ProjectionStore>();
+        Assert.True(await store.TryAdvanceAsync("order", "MP-5", "tracking", "e1", T0.AddMinutes(10), TerminalStates.Delivered));
+        await db.SaveChangesAsync();
+        Assert.False(await store.TryAdvanceAsync("order", "MP-5", "status", "e2", T0.AddMinutes(5), TerminalStates.Refunded));    // a legal step, but older than delivered
+        Assert.True(await store.TryAdvanceAsync("order", "MP-5", "status", "e3", T0.AddMinutes(20), TerminalStates.Refunded));   // the same step, later
+        await db.SaveChangesAsync();
+        Assert.Equal(TerminalStates.Refunded, await store.TerminalStateAsync("order", "MP-5"));
+    }
+
+    [Fact]
+    public async Task Events_with_equal_times_are_ordered_by_event_id_whatever_order_they_arrive_in()
+    {
+        var h = new ScriptedHandler("order.accepted");
+        h.KnownOrders.Add("MP-1"); h.KnownOrders.Add("MP-2");
+        using var f = Factory(h);
+        var c = f.CreateClient();
+        // aggregate 1: a1 then b1 (same time): both apply
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("a1", "order.accepted", T0, Order("MP-1"))))).Json));
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("b1", "order.accepted", T0, Order("MP-1"))))).Json));
+        // aggregate 2: the same two events the other way round: b2 first, then a2 is the older one
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("b2", "order.accepted", T0, Order("MP-2"))))).Json));
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("a2", "order.accepted", T0, Order("MP-2"))))).Json));
+        // either way the aggregate ends on the event with the larger id
+        Assert.Equal("b1", GroupRow(f, "MP-1", "status").LastEventId);
+        Assert.Equal("b2", GroupRow(f, "MP-2", "status").LastEventId);
+    }
+
+    [Fact]
+    public async Task Times_are_compared_at_the_stored_microsecond_precision_with_the_event_id_as_tie_breaker()
+    {
+        // 100 ns apart: PostgreSQL stores microseconds, so two events inside one microsecond must not be ordered by the lost digits.
         var h = new ScriptedHandler("order.accepted");
         h.KnownOrders.Add("MP-1");
         using var f = Factory(h);
         var c = f.CreateClient();
-        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("a", "order.accepted", T0, Order("MP-1"))))).Json));
-        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("b", "order.accepted", T0, Order("MP-1"))))).Json));
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("a", "order.accepted", T0.AddTicks(4), Order("MP-1"))))).Json));
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("z", "order.accepted", T0.AddTicks(2), Order("MP-1"))))).Json));   // same microsecond: id decides, z > a
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("m", "order.accepted", T0.AddTicks(3), Order("MP-1"))))).Json));   // m < z
+        Assert.Equal(("z", T0), (GroupRow(f, "MP-1", "status").LastEventId, GroupRow(f, "MP-1", "status").LastAppliedAt));
     }
 
     // ---------- parking ----------
@@ -329,8 +437,8 @@ public class WebhookReceiverTests
             Assert.Equal(2, await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1"));
         Assert.Equal(2, Markers(f));
         Assert.All(WithDb(f, db => db.PortalInboundEvents.AsNoTracking().ToList()), e => Assert.Equal(InboundStatus.Applied, e.Status));
-        var state = WithDb(f, db => db.ProjectionStates.AsNoTracking().Single(s => s.AggregateType == "order"));
-        Assert.Equal(("order.delivered", T0.AddMinutes(20)), (state.TerminalState, state.LastAppliedAt));
+        var terminal = GroupRow(f, "MP-1", ProjectionStore.TerminalGroup);
+        Assert.Equal((TerminalStates.Delivered, T0.AddMinutes(20)), (terminal.TerminalState, terminal.LastAppliedAt));
         using (var scope = f.Services.CreateScope())
             Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1"));   // nothing left to do
     }
@@ -436,41 +544,211 @@ public class WebhookReceiverTests
         var codes = await Task.WhenAll(Enumerable.Range(1, 12).Select(i => Task.Run(() => DeliverWithRetries(i))));
         Assert.All(codes, s => Assert.Equal(HttpStatusCode.OK, s));
         Assert.Equal(12, Rows(f));
-        var state = WithDb(f, db => db.ProjectionStates.AsNoTracking().Single(s => s.AggregateType == "order"));
+        var state = GroupRow(f, "MP-1", "status");
         Assert.Equal(T0.AddMinutes(12), state.LastAppliedAt);   // never regressed by a late older event
     }
 
     [Fact]
-    public async Task Concurrent_replayers_apply_a_parked_event_once()
+    public async Task Concurrent_replayers_neither_throw_nor_apply_an_event_twice_even_when_the_handler_creates_the_first_state_row()
     {
-        // Each application writes a marker with a UNIQUE key, so a double application would show as two rows
-        // (the version claim, not a key collision, is what must stop the second replayer).
+        // The review's repro: on PostgreSQL the losers of a race to create the first projection_states row got a unique violation, which escaped as an
+        // exception and abandoned the rest of the aggregate's parked list. Each application also writes a marker with a UNIQUE key, so a double
+        // application would show as two rows (the claim, not a key collision, must stop the second replayer).
         var known = false;
-        var postgres = TestFactory.ResolveProvider(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER")) == "postgres";
-        using var overlap = new Barrier(8);
         var h = new ScriptedHandler("order.shipped")
         {
             Script = async c =>
             {
                 if (!Volatile.Read(ref known)) return HandlerOutcome.Parked("order", "MP-1");
+                if (!await c.AdvanceAsync("order", "MP-1", "status", ct: default)) return HandlerOutcome.Skipped("older");
                 c.Db.ProjectionStates.Add(new ProjectionState { AggregateType = "marker", AggregateKey = Guid.NewGuid().ToString("N"), FieldGroup = "applied", LastAppliedAt = c.Event.CreatedAt });
-                // PostgreSQL (read committed) lets every replayer read the parked row; hold them until all have, so the version claim
-                // is what decides. SQLite serialises writers on a file lock, so there the replayers cannot truly overlap.
-                if (postgres) overlap.SignalAndWait(TimeSpan.FromSeconds(3));
                 return HandlerOutcome.Applied();
             },
         };
         using var f = Factory(h);
-        await Post(f.CreateClient(), Request(f, Body("evt-p", "order.shipped", T0, Order("MP-1"))));
+        var client = f.CreateClient();
+        foreach (var (id, min) in new[] { ("p1", 1), ("p2", 2), ("p3", 3) })
+            await Post(client, Request(f, Body(id, "order.shipped", T0.AddMinutes(min), Order("MP-1"))));
+        Assert.Equal(3, WithDb(f, db => db.PortalInboundEvents.Count(e => e.Status == InboundStatus.Parked)));
         Volatile.Write(ref known, true);
-        var applied = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            using var scope = f.Services.CreateScope();
+            try { return (Ok: true, Count: await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1")); }
+            catch (Exception) { return (Ok: false, Count: 0); }
+        })));
+        Assert.All(results, r => Assert.True(r.Ok, "a replayer threw instead of treating a lost race as a skipped claim"));
+        using (var scope = f.Services.CreateScope()) await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1");   // whatever lost a race is picked up
+        var rows = WithDb(f, db => db.PortalInboundEvents.AsNoTracking().ToList());
+        Assert.DoesNotContain(rows, e => e.Status == InboundStatus.Parked);                          // nothing abandoned
+        Assert.Equal(rows.Count(e => e.Status == InboundStatus.Applied), Markers(f));                // one application per applied event, never two
+        Assert.Equal(T0.AddMinutes(3), GroupRow(f, "MP-1", "status").LastAppliedAt);                  // and the newest event won
+    }
+
+    [Fact]
+    public async Task A_replay_that_loses_the_race_to_create_the_first_state_row_against_a_live_event_leaves_its_event_parked()
+    {
+        // On PostgreSQL (read committed) a replay and a live webhook for the same aggregate can both find no state row and both insert it; the
+        // second committer gets a unique violation. For the replay that must be a lost race (its event stays parked), never an exception that
+        // abandons the rest of the list. SQLite serialises every writer on a file lock, so the race exists on PostgreSQL only (CI runs this there).
+        if (TestFactory.ResolveProvider(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER")) != "postgres") return;
+        var known = false;
+        var replayHasRead = new TaskCompletionSource();
+        var liveHasCommitted = new TaskCompletionSource();
+        var h = new ScriptedHandler("order.shipped", "order.accepted")
+        {
+            Script = async c =>
+            {
+                if (c.Event.Type == "order.accepted")                                      // the live event: creates and commits the state row
+                {
+                    await c.AdvanceAsync("order", "MP-1", "status");
+                    return HandlerOutcome.Applied();
+                }
+                if (!Volatile.Read(ref known)) return HandlerOutcome.Parked("order", "MP-1");
+                await c.AdvanceAsync("order", "MP-1", "status");                           // the replay: reads "no row", its insert is pending ...
+                replayHasRead.TrySetResult();
+                await liveHasCommitted.Task.WaitAsync(TimeSpan.FromSeconds(15));          // ... until the live event has committed its own row
+                return HandlerOutcome.Applied();                                           // its INSERT now violates the key
+            },
+        };
+        using var f = Factory(h);
+        var client = f.CreateClient();
+        await Post(client, Request(f, Body("p1", "order.shipped", T0.AddMinutes(1), Order("MP-1"))));
+        Volatile.Write(ref known, true);
+
+        var replay = Task.Run(async () =>
         {
             using var scope = f.Services.CreateScope();
             return await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1");
-        })));
-        Assert.Equal(1, applied.Sum());
-        Assert.Equal(1, Markers(f));
-        Assert.Equal(InboundStatus.Applied, WithDb(f, db => db.PortalInboundEvents.Single().Status));
+        });
+        await replayHasRead.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var live = await Post(client, Request(f, Body("live-1", "order.accepted", T0.AddMinutes(2), Order("MP-1"))));
+        Assert.Equal(HttpStatusCode.OK, live.Status);
+        liveHasCommitted.SetResult();
+        var applied = await replay.WaitAsync(TimeSpan.FromSeconds(15));                   // must not throw
+        Assert.Equal(0, applied);
+        Assert.Equal(InboundStatus.Parked, WithDb(f, db => db.PortalInboundEvents.Single(e => e.Id == "p1").Status));   // lost the race: still parked, nothing half-applied
+        Assert.Equal(0, Markers(f));
+        // the next pass sees the committed row and decides normally (p1 is older than the live event, so it is skipped, no longer parked)
+        using (var scope = f.Services.CreateScope()) await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1");
+        Assert.NotEqual(InboundStatus.Parked, WithDb(f, db => db.PortalInboundEvents.Single(e => e.Id == "p1").Status));
+    }
+
+    [Fact]
+    public async Task A_parked_event_is_claimed_before_it_is_applied_so_a_second_claim_gets_nothing()
+    {
+        var h = new ScriptedHandler("order.shipped");
+        using var f = Factory(h);
+        await Post(f.CreateClient(), Request(f, Body("p1", "order.shipped", T0, Order("MP-1"))));
+        h.KnownOrders.Add("MP-1");
+        // somebody else has already claimed it (its version moved on): our replay must skip it without applying anything
+        WithDb(f, db => db.PortalInboundEvents.ExecuteUpdate(s => s.SetProperty(e => e.Status, InboundStatus.Applied)));
+        using var scope = f.Services.CreateScope();
+        Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1"));
+        Assert.Equal(0, Markers(f));
+    }
+
+    // ---------- the sweep serves everyone ----------
+    [Fact]
+    public async Task Events_that_never_resolve_cannot_starve_the_sweep()
+    {
+        var h = new ScriptedHandler("order.shipped");
+        h.KnownOrders.Add("MP-OK");
+        using var f = Factory(h);
+        var c = f.CreateClient();
+        // 205 aggregates that will never appear, then one that can resolve, received last
+        for (var i = 0; i < 205; i++)
+        {
+            await Post(c, Request(f, Body($"never-{i:D3}", "order.shipped", T0, Order($"MP-NEVER-{i:D3}"))));
+            f.Clock.Advance(TimeSpan.FromMilliseconds(10));
+        }
+        h.KnownOrders.Remove("MP-OK");
+        await Post(c, Request(f, Body("resolvable", "order.shipped", T0, Order("MP-OK"))));
+        h.KnownOrders.Add("MP-OK");
+        Assert.Equal(206, WithDb(f, db => db.PortalInboundEvents.Count(e => e.Status == InboundStatus.Parked)));
+
+        async Task<int> Sweep() { using var s = f.Services.CreateScope(); return await s.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayAllParkedAsync(limit: 200); }
+        Assert.Equal(0, await Sweep());                                                              // the first 200 aggregates by age are the hopeless ones
+        Assert.Equal(200, WithDb(f, db => db.PortalInboundEvents.Count(e => e.LastReplayAt != null)));   // they are stamped as tried
+        Assert.Equal(1, await Sweep());                                                              // the never-tried ones go first now: the resolvable event is served
+        Assert.Equal(InboundStatus.Applied, WithDb(f, db => db.PortalInboundEvents.Single(e => e.Id == "resolvable").Status));
+        Assert.Equal(205, WithDb(f, db => db.PortalInboundEvents.Count(e => e.Status == InboundStatus.Parked)));
+    }
+
+    // ---------- future-dated events ----------
+    [Theory]
+    [InlineData(-3600, -3600)]     // the past is never changed
+    [InlineData(0, 0)]
+    [InlineData(299, 299)]
+    [InlineData(300, 300)]         // exactly the tolerance: unchanged
+    [InlineData(301, 300)]         // one second beyond: clamped to receipt + 5 minutes
+    [InlineData(86_400, 300)]
+    public void The_ordering_time_is_never_later_than_receipt_plus_five_minutes_and_the_past_is_untouched(int offsetSeconds, int expectedSeconds)
+    {
+        var received = new DateTimeOffset(2026, 11, 4, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal(received.AddSeconds(expectedSeconds), PortalEvent.EffectiveTime(received.AddSeconds(offsetSeconds), received));
+    }
+
+    [Fact]
+    public async Task A_future_dated_event_cannot_freeze_its_aggregate()
+    {
+        // The review's repro: createdAt in 2100 was applied and then every real event was skipped for ever.
+        var h = new ScriptedHandler("order.accepted");
+        h.KnownOrders.Add("MP-1");
+        using var f = Factory(h);
+        var c = f.CreateClient();
+        var received = f.Clock.GetUtcNow();
+        var future = new DateTimeOffset(2100, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e-future", "order.accepted", future, Order("MP-1"))))).Json));
+        var row = WithDb(f, db => db.PortalInboundEvents.Single(e => e.Id == "e-future"));
+        Assert.Equal(future, row.PortalCreatedAt);                                                    // the raw value is kept
+        Assert.Equal(received.AddMinutes(5), row.OrderingAt);                                          // ordering uses receipt + 5 minutes
+        Assert.Equal(received.AddMinutes(5), GroupRow(f, "MP-1", "status").LastAppliedAt);
+        Assert.Contains(f.Logs.Lines, l => l.Contains("in the future") && !l.Contains("2100"));        // clamping is logged, without payload values
+        // within the five minutes a real event is still older than the clamped one ...
+        Assert.Equal("skipped", StatusOf((await Post(c, Request(f, Body("e-now", "order.accepted", received, Order("MP-1"))))).Json));
+        // ... but not for ever: ten minutes later a real event applies
+        f.Clock.Advance(TimeSpan.FromMinutes(10));
+        Assert.Equal("applied", StatusOf((await Post(c, Request(f, Body("e-later", "order.accepted", f.Clock.GetUtcNow(), Order("MP-1"))))).Json));
+        Assert.Equal(f.Clock.GetUtcNow(), GroupRow(f, "MP-1", "status").LastAppliedAt);
+    }
+
+    [Fact]
+    public async Task A_parked_future_dated_event_keeps_the_ordering_time_it_was_given_when_it_was_received()
+    {
+        var h = new ScriptedHandler("order.shipped");
+        using var f = Factory(h);
+        var received = f.Clock.GetUtcNow();
+        await Post(f.CreateClient(), Request(f, Body("p-future", "order.shipped", new DateTimeOffset(2100, 1, 1, 0, 0, 0, TimeSpan.Zero), Order("MP-1"))));
+        f.Clock.Advance(TimeSpan.FromDays(3));                                                        // replayed much later: the ceiling must not move with the clock
+        h.KnownOrders.Add("MP-1");
+        using var scope = f.Services.CreateScope();
+        Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1"));
+        Assert.Equal(received.AddMinutes(5), WithDb(f, db => db.PortalInboundEvents.Single().OrderingAt));
+        Assert.Equal(received.AddMinutes(5), GroupRow(f, "MP-1", "status").LastAppliedAt);
+    }
+
+    // ---------- body cap without a Content-Length ----------
+    [Fact]
+    public async Task The_body_cap_also_holds_for_chunked_requests_without_a_content_length()
+    {
+        const int cap = 262144;
+        using var f = Factory();
+        var c = f.CreateClient();
+        var baseLen = Encoding.UTF8.GetByteCount(Body("chunkA", "big.type", T0, new { pad = "" }));
+        var atCap = Body("chunkA", "big.type", T0, new { pad = new string('x', cap - baseLen) });
+        var atCapRequest = Request(f, atCap, chunked: true);
+        Assert.Null(atCapRequest.Content!.Headers.ContentLength);                                      // really chunked
+        Assert.Equal(HttpStatusCode.OK, (await Post(c, atCapRequest)).Status);
+        var over = Body("chunkB", "big.type", T0, new { pad = new string('x', cap - baseLen + 1) });
+        Assert.Equal(cap + 1, Encoding.UTF8.GetByteCount(over));
+        var res = await Post(c, Request(f, over, chunked: true));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, res.Status);                                // only the in-read cap can catch this
+        Assert.Equal("too_large", CodeOf(res.Json));
+        var huge = Body("chunkC", "big.type", T0, new { pad = new string('x', 10 * 1024 * 1024) });
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await Post(c, Request(f, huge, chunked: true))).Status);
+        Assert.Equal(1, Rows(f));
     }
 
     // ---------- registry ----------
@@ -486,29 +764,50 @@ public class WebhookReceiverTests
 
     // ---------- retention ----------
     [Fact]
-    public async Task Retention_purges_payloads_then_rows_but_never_parked_events()
+    public async Task Retention_purges_payloads_then_rows_and_a_parked_event_expires_after_30_days()
     {
         using var f = new TestFactory();
         var c = f.CreateClient();
         await Post(c, Request(f, Body("old-stored", "x.y", T0, new { text = "hello" })));
-        await Post(c, Request(f, Body("old-parked", "x.z", T0)));
-        WithDb(f, db => { db.PortalInboundEvents.Single(e => e.Id == "old-parked").Status = InboundStatus.Parked; return db.SaveChanges(); });
+        await Post(c, Request(f, Body("old-parked", "message.sent", T0, new { text = "call me on jane.doe@example.com" })));
+        WithDb(f, db => { var e = db.PortalInboundEvents.Single(x => x.Id == "old-parked"); e.Status = InboundStatus.Parked; e.AggregateType = "order"; e.AggregateKey = "MP-1"; return db.SaveChanges(); });
         f.Clock.Advance(TimeSpan.FromDays(29));
         await Post(c, Request(f, Body("recent", "x.y", f.Clock.GetUtcNow(), new { text = "fresh" })));
 
-        async Task<(int, int)> Purge() { using var s = f.Services.CreateScope(); return await s.ServiceProvider.GetRequiredService<PortalEventMaintenance>().PurgeAsync(); }
-        Assert.Equal((0, 0), await Purge());                       // 29 days: nothing yet
+        async Task<PurgeResult> Purge() { using var s = f.Services.CreateScope(); return await s.ServiceProvider.GetRequiredService<PortalEventMaintenance>().PurgeAsync(); }
+        var day29 = await Purge();
+        Assert.Equal((0, 0, 0), (day29.PayloadsPurged, day29.RowsDeleted, day29.ParkedExpired));
+        Assert.Equal(1, day29.ParkedAging);                        // parked for 29 days: reported, not yet expired
+        Assert.NotNull(WithDb(f, db => db.PortalInboundEvents.Single(e => e.Id == "old-parked").PayloadJson));
         f.Clock.Advance(TimeSpan.FromDays(2));                     // 31 days after the old rows, 2 after "recent"
-        Assert.Equal((1, 0), await Purge());                       // old-stored payload dropped; parked keeps its payload
+        var day31 = await Purge();
+        Assert.Equal((1, 0, 1), (day31.PayloadsPurged, day31.RowsDeleted, day31.ParkedExpired));   // old-stored's payload dropped; the parked one expired
         var rows = WithDb(f, db => db.PortalInboundEvents.AsNoTracking().ToDictionary(e => e.Id));
         Assert.Null(rows["old-stored"].PayloadJson);
         Assert.NotNull(rows["old-stored"].PayloadPurgedAt);
-        Assert.NotNull(rows["old-parked"].PayloadJson);
+        Assert.Equal(InboundStatus.Skipped, rows["old-parked"].Status);
+        Assert.Null(rows["old-parked"].PayloadJson);               // the message text is gone with it
+        Assert.NotNull(rows["old-parked"].PayloadPurgedAt);
+        Assert.Contains("expired", rows["old-parked"].Note);
         Assert.NotNull(rows["recent"].PayloadJson);
         f.Clock.Advance(TimeSpan.FromDays(60));                    // 91 days after the old rows
-        var (_, deleted) = await Purge();
-        Assert.Equal(1, deleted);                                  // old-stored's id row is gone after 90 days; parked is never deleted
-        Assert.Equal(["old-parked", "recent"], WithDb(f, db => db.PortalInboundEvents.Select(e => e.Id).ToList()).Order().ToList());
+        var day91 = await Purge();
+        Assert.Equal(2, day91.RowsDeleted);                        // both old id rows are gone after 90 days (the expired one included)
+        Assert.Equal(["recent"], WithDb(f, db => db.PortalInboundEvents.Select(e => e.Id).ToList()));
+    }
+
+    [Fact]
+    public async Task A_parked_event_that_has_not_yet_expired_keeps_its_payload_and_can_still_be_applied()
+    {
+        var h = new ScriptedHandler("order.shipped");
+        using var f = Factory(h);
+        await Post(f.CreateClient(), Request(f, Body("p1", "order.shipped", T0, Order("MP-1"))));
+        f.Clock.Advance(TimeSpan.FromDays(29));
+        using (var scope = f.Services.CreateScope()) await scope.ServiceProvider.GetRequiredService<PortalEventMaintenance>().PurgeAsync();
+        h.KnownOrders.Add("MP-1");
+        using (var scope = f.Services.CreateScope())
+            Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<PortalEventProcessor>().ReplayParkedAsync("order", "MP-1"));
+        Assert.Equal(InboundStatus.Applied, WithDb(f, db => db.PortalInboundEvents.Single().Status));
     }
 
     [Fact]

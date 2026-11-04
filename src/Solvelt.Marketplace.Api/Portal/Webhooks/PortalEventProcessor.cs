@@ -15,10 +15,15 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
     public async Task<ProcessOutcome> ProcessAsync(PortalEvent evt, string rawBody, CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var receivedAt = time.GetUtcNow().ToUniversalTime();
+        var raw = evt.RawCreatedAt.ToUniversalTime();
+        var ordering = PortalEvent.EffectiveTime(raw, receivedAt);
+        if (ordering < raw)
+            log.LogWarning("Portal event of type {Type} is dated {AheadSeconds} s in the future; projections order it by receipt time + 5 minutes instead", evt.Type, (int)(raw - receivedAt).TotalSeconds);
         var row = new PortalInboundEvent
         {
-            Id = evt.Id, Type = evt.Type, PortalCreatedAt = evt.CreatedAt.ToUniversalTime(),
-            ReceivedAt = time.GetUtcNow().ToUniversalTime(), Status = InboundStatus.Stored, PayloadJson = rawBody,
+            Id = evt.Id, Type = evt.Type, PortalCreatedAt = raw, OrderingAt = ordering,
+            ReceivedAt = receivedAt, Status = InboundStatus.Stored, PayloadJson = rawBody,
         };
         db.PortalInboundEvents.Add(row);
         try { await db.SaveChangesAsync(ct); }
@@ -32,7 +37,7 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
 
         var outcome = await ApplyAsync(row, evt, ct);
         await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
+        await tx.CommitAsync(CancellationToken.None);   // a client disconnect must not leave the commit ambiguous
         log.LogInformation("Portal event of type {Type} {Outcome}", evt.Type, outcome);
         return outcome;
     }
@@ -46,7 +51,7 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
             row.Version++;
             return ProcessOutcome.Stored;
         }
-        var result = await handler.HandleAsync(new ProjectionContext(db, evt, store, time), ct);
+        var result = await handler.HandleAsync(new ProjectionContext(db, evt with { CreatedAt = row.OrderingAt }, store, time), ct);
         row.Status = result.Status;
         row.AggregateType = result.AggregateType;
         row.AggregateKey = result.AggregateKey;
@@ -63,49 +68,71 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
     }
 
     /// <summary>
-    /// Re-applies the parked events of one aggregate, oldest portal time first, each in its own transaction. Call it when the aggregate
-    /// appears (e.g. after our order-ingest call stored the seller order ids). Safe to run concurrently: a row is claimed by its version.
+    /// Re-applies the parked events of one aggregate, oldest ordering time first, each in its own transaction. Call it when the aggregate appears
+    /// (e.g. after our order-ingest call stored the seller order ids). Safe to run concurrently: a row is claimed first (see <see cref="ReplayOneAsync"/>),
+    /// and a replay that loses a race or hits a database conflict leaves its event parked for the next pass instead of aborting the rest of the list.
     /// </summary>
     public async Task<int> ReplayParkedAsync(string aggregateType, string aggregateKey, CancellationToken ct = default)
     {
         var ids = await db.PortalInboundEvents.AsNoTracking()
             .Where(e => e.Status == InboundStatus.Parked && e.AggregateType == aggregateType && e.AggregateKey == aggregateKey)
-            .OrderBy(e => e.PortalCreatedAt).ThenBy(e => e.Id).Select(e => e.Id).ToListAsync(ct);
+            .OrderBy(e => e.OrderingAt).ThenBy(e => e.Id).Select(e => e.Id).ToListAsync(ct);
         var applied = 0;
         foreach (var id in ids)
             if (await ReplayOneAsync(id, ct)) applied++;
+        // whatever is still parked has now been tried: the sweep serves other aggregates before it comes back to this one
+        var now = time.GetUtcNow().ToUniversalTime();
+        await db.PortalInboundEvents.Where(e => e.Status == InboundStatus.Parked && e.AggregateType == aggregateType && e.AggregateKey == aggregateKey)
+            .ExecuteUpdateAsync(s => s.SetProperty(e => e.LastReplayAt, (DateTimeOffset?)now), ct);
         return applied;
     }
 
-    /// <summary>Re-tries up to <paramref name="limit"/> parked events across all aggregates (for a periodic sweep). Returns how many left the parked state.</summary>
+    /// <summary>
+    /// A periodic sweep over parked events: up to <paramref name="limit"/> aggregates per call, the ones never tried or tried longest ago first, so
+    /// events that never resolve cannot starve the ones that can. Returns how many events left the parked state.
+    /// </summary>
     public async Task<int> ReplayAllParkedAsync(int limit = 200, CancellationToken ct = default)
     {
         var keys = await db.PortalInboundEvents.AsNoTracking().Where(e => e.Status == InboundStatus.Parked)
-            .OrderBy(e => e.PortalCreatedAt).Take(limit).Select(e => new { e.AggregateType, e.AggregateKey }).ToListAsync(ct);
+            .GroupBy(e => new { e.AggregateType, e.AggregateKey })
+            .Select(g => new { g.Key.AggregateType, g.Key.AggregateKey, LastReplay = g.Max(e => e.LastReplayAt), Oldest = g.Min(e => e.ReceivedAt) })
+            .OrderBy(x => x.LastReplay != null).ThenBy(x => x.LastReplay).ThenBy(x => x.Oldest)
+            .Take(Math.Max(1, limit)).ToListAsync(ct);
         var n = 0;
-        foreach (var k in keys.Distinct())
+        foreach (var k in keys)
             n += await ReplayParkedAsync(k.AggregateType!, k.AggregateKey!, ct);
         return n;
     }
 
+    /// <summary>
+    /// Claim first, then apply, in one transaction: the claim is an atomic <c>UPDATE ... WHERE status = parked AND version = v</c>, so of several
+    /// concurrent replayers exactly one proceeds and the others (0 rows) skip. A conflict inside the handler's own writes (two replayers creating the
+    /// same projection state row on PostgreSQL) rolls the claim back and counts as a lost claim: the event stays parked, nothing is half-applied.
+    /// </summary>
     private async Task<bool> ReplayOneAsync(string id, CancellationToken ct)
     {
         db.ChangeTracker.Clear();
+        var version = await db.PortalInboundEvents.AsNoTracking().Where(e => e.Id == id && e.Status == InboundStatus.Parked).Select(e => (int?)e.Version).FirstOrDefaultAsync(ct);
+        if (version is not { } v) return false;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            var row = await db.PortalInboundEvents.FirstOrDefaultAsync(e => e.Id == id && e.Status == InboundStatus.Parked, ct);
-            if (row?.PayloadJson is null) { await tx.RollbackAsync(CancellationToken.None); return false; }
-            if (!PortalEvent.TryParse(System.Text.Encoding.UTF8.GetBytes(row.PayloadJson), out var evt, out _)) { await tx.RollbackAsync(CancellationToken.None); return false; }
+            var claimed = await db.PortalInboundEvents.Where(e => e.Id == id && e.Status == InboundStatus.Parked && e.Version == v)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.Version, v + 1), ct);
+            if (claimed == 0) { await tx.RollbackAsync(CancellationToken.None); return false; }
+            var row = await db.PortalInboundEvents.FirstAsync(e => e.Id == id, ct);
+            if (row.PayloadJson is null || !PortalEvent.TryParse(System.Text.Encoding.UTF8.GetBytes(row.PayloadJson), out var evt, out _))
+            { await tx.RollbackAsync(CancellationToken.None); return false; }
             var outcome = await ApplyAsync(row, evt!, ct);
-            await db.SaveChangesAsync(ct);   // the version check makes a concurrent replayer fail here and roll back its side effects
-            await tx.CommitAsync(ct);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(CancellationToken.None);
             return outcome != ProcessOutcome.Parked;
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateException ex)   // includes DbUpdateConcurrencyException
         {
             await tx.RollbackAsync(CancellationToken.None);
             db.ChangeTracker.Clear();
+            log.LogWarning("A parked event could not be re-applied now ({ExceptionType}); it stays parked for the next pass", ex.GetType().Name);
             return false;
         }
     }

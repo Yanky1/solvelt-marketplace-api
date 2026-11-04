@@ -606,6 +606,111 @@ public class SignedPortalClientTests
         Assert.Single(rig.Portal.Calls);
     }
 
+    // ---------- review 4: the backoff outlives the deadline; responses are disposed; the past-date clamp ----------
+    [Fact]
+    public async Task A_backoff_timer_that_fires_after_the_total_deadline_returns_the_last_answer_instead_of_crashing()
+    {
+        // The review's repro: total 15 s, a 503 with Retry-After 10, then a 200, and the clock jumps 16 s while the client waits.
+        var rig = new Rig(o => { o.TotalDeadlineSeconds = 15; o.MaxAttempts = 5; });
+        rig.Portal.Respond(HttpStatusCode.ServiceUnavailable, "{\"code\":\"busy\"}", r => r.Headers.RetryAfter = new(TimeSpan.FromSeconds(10)))
+                  .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
+        var task = rig.Client.CreateOrderAsync(Order());
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 16);                                   // remaining is now negative when the timer fires
+        var res = await Within(task);                             // no ArgumentOutOfRangeException from a timer built with a negative delay
+        Assert.Equal((503, 1, true), (res.Status, res.Attempts, res.Retryable));
+        Assert.Equal("busy", res.Error!.Code);
+        Assert.Single(rig.Portal.Calls);                          // and no second attempt was started
+    }
+
+    [Fact]
+    public async Task A_network_failure_whose_backoff_outlives_the_deadline_throws_portal_unavailable_with_the_cause()
+    {
+        var rig = new Rig(o => { o.TotalDeadlineSeconds = 1; o.RetryBaseDelayMs = 1000; o.MaxAttempts = 5; });
+        rig.Portal.RespondTransportError().Respond(HttpStatusCode.OK, "{}");
+        var task = rig.Client.CreateOrderAsync(Order());
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 5);
+        var ex = await Assert.ThrowsAsync<PortalUnavailableException>(() => Within(task));
+        Assert.IsType<HttpRequestException>(ex.InnerException);
+        Assert.Single(rig.Portal.Calls);
+    }
+
+    /// <summary>A response body whose reads we script. Built on StreamContent so the cancellation token reaches each read, as with a real network body.</summary>
+    private sealed class ScriptedStream(Func<Memory<byte>, CancellationToken, ValueTask<int>> read) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) => read(buffer, ct);
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class TrackingContent(Stream body) : StreamContent(body)
+    {
+        public bool Disposed;
+        protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
+        public static TrackingContent Bytes(byte[] bytes) => new(new MemoryStream(bytes));
+        public static TrackingContent Failing() => new(new ScriptedStream((_, _) => throw new IOException("connection reset")));
+        public static TrackingContent Hanging() => new(new ScriptedStream(async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return 0; }));
+    }
+
+    [Fact]
+    public async Task The_response_is_disposed_when_the_body_is_oversized()
+    {
+        var rig = new Rig();
+        var content = TrackingContent.Bytes(new byte[3 * 1024 * 1024]);
+        rig.Portal.Respond(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        await Assert.ThrowsAsync<PortalResponseTooLargeException>(() => rig.Client.CreateOrderAsync(Order()));
+        Assert.True(content.Disposed);
+    }
+
+    [Fact]
+    public async Task The_response_is_disposed_when_reading_the_body_fails_and_on_every_retry()
+    {
+        var rig = new Rig();
+        var broken = new[] { TrackingContent.Failing(), TrackingContent.Failing() };
+        var ok = TrackingContent.Bytes("{\"created\":false,\"orders\":[]}"u8.ToArray());
+        rig.Portal.Respond(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = broken[0] })
+                  .Respond(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = broken[1] })
+                  .Respond(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = ok });
+        var res = await rig.Client.CreateOrderAsync(Order());
+        Assert.Equal(3, res.Attempts);
+        Assert.All(broken, b => Assert.True(b.Disposed));
+        Assert.True(ok.Disposed);                                 // also on the success path
+    }
+
+    [Fact]
+    public async Task The_response_is_disposed_when_the_attempt_times_out_while_reading_the_body()
+    {
+        var rig = new Rig(o => { o.AttemptTimeoutSeconds = 5; o.MaxAttempts = 1; });
+        var content = TrackingContent.Hanging();   // headers arrive, the body never does
+        rig.Portal.Respond(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        var task = rig.Client.CreateOrderAsync(Order());
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 5);
+        await Assert.ThrowsAsync<PortalUnavailableException>(() => Within(task));
+        Assert.True(content.Disposed);
+    }
+
+    [Fact]
+    public async Task A_retry_after_date_in_the_past_means_retry_now_even_when_a_backoff_is_configured()
+    {
+        // With a non-zero backoff base, an unclamped negative Retry-After would fall through to the exponential backoff (0.5 to 1 s on a clock
+        // nobody advances), so this call would hang. "Already past" must mean "now".
+        var rig = new Rig(o => o.RetryBaseDelayMs = 1000);
+        rig.Portal.Respond(_ => FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(rig.Clock.GetUtcNow().AddSeconds(-100))))
+                  .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
+        var res = await Within(rig.Client.CreateOrderAsync(Order()));
+        Assert.Equal((true, 2), (res.IsSuccess, res.Attempts));
+    }
+
     // ---------- DI wiring through the real app ----------
     [Fact]
     public async Task The_registered_client_in_the_real_app_signs_with_the_configured_secret_through_the_fake_portal()
