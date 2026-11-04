@@ -252,3 +252,10 @@ All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Contr
 * `POST /api/v1/orders/{number}/return-requests` `{ sellerOrderNumber, reason, comment?, lines: [{ lineId, quantity }] }` (+ optional `Idempotency-Key` header) → `202 { returnId, status }` or `422 quantity_exceeded`. `reason`: `damaged | not_as_described | wrong_item | no_longer_needed | other`.
 * `POST /api/v1/orders/{number}/delivery-confirmations` `{ sellerOrderNumber }` → `202`/`200`; time is the server's, any time field is ignored.
 * `POST /api/v1/orders/{number}/returns/{returnId}/label-link` → `{ labelUrl, labelUrlExpiresAt }` for an approved return.
+
+
+## Services (M4)
+### `GET /api/v1/services/{listingId}/availability`
+Public, public rate limit. Query: `location` (`online|customer|seller`, required), `from`/`to` (dates or instants; snapped to UTC days; default today + 14 days; at most 62 days; `from` is never in the past), `postalCode`, `lat`+`lng` (both), `providerId`, `minutes` (hourly services), `addOns` (comma separated ids).
+`200 { durationMinutes, priceCents, providers: [{ providerId, timeZone }], slots: [{ startAt, endAt, providerIds }], from, to, fetchedAt }`, slot times are UTC instants sorted ascending; show them in the provider's `timeZone` and the buyer's zone. `Cache-Control: public, max-age=15`; the server caches the portal answer at most 30 s.
+Errors: `404` not a visible service; `422 validation_failed` (field errors) or a portal-validated `outside_service_area | location_not_offered | duration | add_on | provider_required`; `503 availability_unavailable` (retry).
