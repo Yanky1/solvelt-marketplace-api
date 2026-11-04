@@ -42,6 +42,8 @@ public interface IPaymentProvider
     Task<string> GetIntentStatusAsync(string intentId, CancellationToken ct);
     /// <summary>What Stripe says has been refunded on the intent's charge so far, in cents (everything: ours and the dashboard's). A fresh read, the only truth about money that has left.</summary>
     Task<long> GetAmountRefundedAsync(string intentId, CancellationToken ct);
+    /// <summary>Reads an intent we created (status and client secret). Stripe forgets idempotency keys after 24 hours, so a second create for an old key would open a SECOND intent: callers reuse the stored one through this instead (M4-15).</summary>
+    Task<PaymentIntentResult> GetIntentAsync(string intentId, CancellationToken ct);
     Task<RefundResult> RefundAsync(string intentId, long amountCents, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct);
 }
 
@@ -57,6 +59,12 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
         };
         foreach (var (k, v) in metadata) form.Add(new($"metadata[{k}]", v));
         var json = await PostAsync("/v1/payment_intents", form, idempotencyKey, ct);
+        return new PaymentIntentResult(Str(json, "id"), Str(json, "client_secret"), Str(json, "status"));
+    }
+
+    public async Task<PaymentIntentResult> GetIntentAsync(string intentId, CancellationToken ct)
+    {
+        var json = await PostAsync($"/v1/payment_intents/{Uri.EscapeDataString(intentId)}", null, null, ct);
         return new PaymentIntentResult(Str(json, "id"), Str(json, "client_secret"), Str(json, "status"));
     }
 
@@ -128,6 +136,7 @@ public sealed class UnconfiguredPaymentProvider : IPaymentProvider
     public Task CancelIntentAsync(string i, string k, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<string> GetIntentStatusAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<long> GetAmountRefundedAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
+    public Task<PaymentIntentResult> GetIntentAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<RefundResult> RefundAsync(string i, long a, string k, IReadOnlyDictionary<string, string> m, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
 }
 
@@ -176,10 +185,25 @@ public sealed class FakePaymentProvider : IPaymentProvider
             var id = $"pi_fake_{Interlocked.Increment(ref _next):D6}";
             var result = new PaymentIntentResult(id, $"{id}_secret_{Guid.NewGuid():N}"[..40], "requires_payment_method");
             _intents[id] = new Intent(id, result.ClientSecret, amountCents, currency.ToLowerInvariant(), metadata);
-            _byKey[idempotencyKey] = (fp, result);
+            if (!ForgetKeysAfterCreate) _byKey[idempotencyKey] = (fp, result);
             return Task.FromResult(result);
         }
     }
+
+    public Task<PaymentIntentResult> GetIntentAsync(string intentId, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            MaybeFail();
+            if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
+            return Task.FromResult(new PaymentIntentResult(i.Id, i.ClientSecret, i.Cancelled ? "canceled" : i.CapturedCents > 0 ? "succeeded" : "requires_payment_method"));
+        }
+    }
+
+    /// <summary>Test hook: Stripe forgets idempotency keys after 24 hours, so a repeated create would open a NEW intent.</summary>
+    public void ForgetIdempotencyKeys() { lock (_lock) _byKey.Clear(); }
+    /// <summary>Test hook: every create is forgotten at once (a key that expired between two parallel requests).</summary>
+    public bool ForgetKeysAfterCreate { get; set; }
 
     public Task CancelIntentAsync(string intentId, string idempotencyKey, CancellationToken ct)
     {

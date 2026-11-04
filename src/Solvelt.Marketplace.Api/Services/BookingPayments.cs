@@ -20,7 +20,13 @@ public enum BookingCheckoutStatus { Ok, NotFound, NotPayable, Expired, Invalid, 
 /// (outbox, retried) and only then is <c>payment.captured</c> (kind <c>booking</c>) sent. If the booking cannot be honoured (the hold is gone, the portal refuses, the amount
 /// is not the one we priced) the payment is refunded in full and never reported as a sale.
 /// </summary>
-public sealed class BookingPaymentService(MarketplaceDb db, IPaymentProvider payments, IOptions<StripeOptions> stripe, TimeProvider time, ILogger<BookingPaymentService> log)
+/// <summary>Test seam (one instance per application, like M3's <c>CheckoutHooks</c>): awaited once, right after a booking's intent was created and before it is stored.</summary>
+public sealed class BookingHooks
+{
+    public Func<Task>? AfterIntentCreated { get; set; }
+}
+
+public sealed class BookingPaymentService(MarketplaceDb db, BookingHooks hooks, IPaymentProvider payments, IOptions<StripeOptions> stripe, OutboxWriter outbox, TimeProvider time, ILogger<BookingPaymentService> log)
 {
     public static string PaymentKey(string marketplaceBookingId) => $"pay:{marketplaceBookingId}:booking";
 
@@ -67,13 +73,26 @@ public sealed class BookingPaymentService(MarketplaceDb db, IPaymentProvider pay
         if (pay.AmountCents != b.TotalCents) return (BookingCheckoutStatus.NotPayable, null, null);   // the portal's price moved since the intent: never charge a different amount than the one shown
         try
         {
+            if (pay.IntentId is not null)
+            {
+                // Stripe forgets an idempotency key after 24 hours: creating again would open a SECOND intent for one booking. The stored one is read back instead (decision M4-15).
+                var again = await payments.GetIntentAsync(pay.IntentId, ct);
+                if (again.Status == "succeeded") return (BookingCheckoutStatus.AlreadyPaid, null, null);
+                if (again.Status == "canceled") return (BookingCheckoutStatus.NotPayable, null, null);
+                return (BookingCheckoutStatus.Ok, new BookingCheckoutResult(bookings.ToView(await db.Bookings.AsNoTracking().FirstAsync(x => x.Id == b.Id, ct), now), new CheckoutPayment("stripe", again.ClientSecret, stripe.Value.PublishableKey)), null);
+            }
             var intent = await payments.CreateIntentAsync(pay.AmountCents, pay.Currency, "pi:" + key,
                 new Dictionary<string, string> { ["marketplace_booking_id"] = b.MarketplaceBookingId, ["kind"] = PaymentKinds.Booking }, ct);
+            var hook = hooks.AfterIntentCreated; hooks.AfterIntentCreated = null;
+            if (hook is not null) await hook();
             await db.BookingPayments.Where(p => p.Id == pay.Id && p.IntentId == null).ExecuteUpdateAsync(s => s.SetProperty(p => p.IntentId, intent.Id), ct);
             var intentStored = await db.BookingPayments.AsNoTracking().Where(p => p.Id == pay.Id).Select(p => p.IntentId).FirstAsync(ct);
             if (intentStored != intent.Id)
             {
                 log.LogError("Booking {Mid} has two different payment intents (stored {Stored}, returned {Returned})", b.MarketplaceBookingId, intentStored, intent.Id);
+                // Only ONE intent is ever the booking's: the one that was stored first. The other must not stay payable.
+                outbox.Enqueue(StripeCancelHandler.Type, new StripeCancelHandler.Payload(intent.Id), StripeCancelHandler.DedupeKey(intent.Id));
+                await db.SaveChangesAsync(ct);
                 return (BookingCheckoutStatus.PaymentsUnavailable, null, null);
             }
             var view = bookings.ToView(await db.Bookings.AsNoTracking().FirstAsync(x => x.Id == b.Id, ct), now);
@@ -96,7 +115,7 @@ public enum ExtraChargeStatus { Ok, NotFound, NotRequested, AmountTooSmall, Paym
 /// portal sent (<c>booking.additional_charge_requested</c>), never a client value, and it is the cap: the payment is one intent per request amount, and a payment that no longer fits under the
 /// portal's cap when it lands is refunded instead of reported (the portal would refuse it: <c>exceeds_booking</c>).
 /// </summary>
-public sealed class ExtraChargeService(MarketplaceDb db, IPaymentProvider payments, IOptions<StripeOptions> stripe, TimeProvider time, ILogger<ExtraChargeService> log)
+public sealed class ExtraChargeService(MarketplaceDb db, IPaymentProvider payments, IOptions<StripeOptions> stripe, OutboxWriter outbox, TimeProvider time, ILogger<ExtraChargeService> log)
 {
     public static string PaymentKey(string mid, long amount) => $"pay:{mid}:extra:{amount}";
     private static readonly string[] Payable = [BookingStatus.Confirmed, BookingStatus.Rescheduled, BookingStatus.InProgress, BookingStatus.Completed];
@@ -115,7 +134,27 @@ public sealed class ExtraChargeService(MarketplaceDb db, IPaymentProvider paymen
         var consented = await db.Bookings.Where(x => x.Id == b.Id && x.AdditionalChargeCents == amount && (x.ExtraChargeState == ExtraChargeStates.Requested || x.ExtraChargeState == ExtraChargeStates.Consented))
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.ExtraChargeState, ExtraChargeStates.Consented).SetProperty(x => x.UpdatedAt, now).SetProperty(x => x.Version, x => x.Version + 1), ct);
         if (consented == 0) return (ExtraChargeStatus.NotRequested, null, 0);
-        var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.Key == key, ct);
+        // One payment per request amount, numbered when an earlier one was closed (declined, superseded, refunded): a closed intent is never reused, and a new request for the same amount gets a fresh one.
+        BookingPayment? pay = null;
+        try
+        {
+            for (var attempt = 0; attempt < 8; attempt++)
+            {
+                key = attempt == 0 ? PaymentKey(b.MarketplaceBookingId, amount) : $"{PaymentKey(b.MarketplaceBookingId, amount)}:{attempt}";
+                pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.Key == key, ct);
+                if (pay is null) break;
+                if (pay.Status == BookingPaymentStatus.Captured) return (ExtraChargeStatus.AlreadyPaid, null, amount);
+                if (pay.Status != BookingPaymentStatus.Pending) continue;                                         // void or failed: look at the next number
+                if (pay.IntentId is not null && (await payments.GetIntentAsync(pay.IntentId, ct)).Status == "canceled")
+                {
+                    await db.BookingPayments.Where(p => p.Id == pay.Id && p.Status == BookingPaymentStatus.Pending).ExecuteUpdateAsync(s => s.SetProperty(p => p.Status, BookingPaymentStatus.Void).SetProperty(p => p.FailureCode, "intent_cancelled"), ct);
+                    continue;
+                }
+                break;
+            }
+        }
+        catch (PaymentsUnavailableException) { return (ExtraChargeStatus.PaymentsUnavailable, null, amount); }
+        catch (PaymentRejectedException) { return (ExtraChargeStatus.PaymentRejected, null, amount); }
         if (pay is null)
         {
             db.BookingPayments.Add(new BookingPayment { Id = Guid.NewGuid(), Key = key, BookingId = b.Id, Kind = PaymentKinds.ExtraCharge, Currency = b.Currency, AmountCents = amount, Status = BookingPaymentStatus.Pending, CreatedAt = now, UpdatedAt = now });
@@ -125,10 +164,23 @@ public sealed class ExtraChargeService(MarketplaceDb db, IPaymentProvider paymen
         if (pay.Status != BookingPaymentStatus.Pending) return (ExtraChargeStatus.AlreadyPaid, null, amount);
         try
         {
+            if (pay.IntentId is not null)
+            {
+                var again = await payments.GetIntentAsync(pay.IntentId, ct);       // never a second intent for one request (Stripe forgets keys after 24 hours)
+                if (again.Status == "succeeded") return (ExtraChargeStatus.AlreadyPaid, null, amount);
+                if (again.Status == "canceled") return (ExtraChargeStatus.NotRequested, null, amount);
+                return (ExtraChargeStatus.Ok, new CheckoutPayment("stripe", again.ClientSecret, stripe.Value.PublishableKey), amount);
+            }
             var intent = await payments.CreateIntentAsync(amount, pay.Currency, "pi:" + key, new Dictionary<string, string> { ["marketplace_booking_id"] = b.MarketplaceBookingId, ["kind"] = PaymentKinds.ExtraCharge }, ct);
             await db.BookingPayments.Where(p => p.Id == pay.Id && p.IntentId == null).ExecuteUpdateAsync(s => s.SetProperty(p => p.IntentId, intent.Id), ct);
             var stored = await db.BookingPayments.AsNoTracking().Where(p => p.Id == pay.Id).Select(p => p.IntentId).FirstAsync(ct);
-            if (stored != intent.Id) { log.LogError("Extra charge of booking {Mid} has two different intents", b.MarketplaceBookingId); return (ExtraChargeStatus.PaymentsUnavailable, null, amount); }
+            if (stored != intent.Id)
+            {
+                log.LogError("Extra charge of booking {Mid} has two different intents", b.MarketplaceBookingId);
+                outbox.Enqueue(StripeCancelHandler.Type, new StripeCancelHandler.Payload(intent.Id), StripeCancelHandler.DedupeKey(intent.Id));
+                await db.SaveChangesAsync(ct);
+                return (ExtraChargeStatus.PaymentsUnavailable, null, amount);
+            }
             return (ExtraChargeStatus.Ok, new CheckoutPayment("stripe", intent.ClientSecret, stripe.Value.PublishableKey), amount);
         }
         catch (PaymentsUnavailableException) { return (ExtraChargeStatus.PaymentsUnavailable, null, amount); }
@@ -142,7 +194,11 @@ public sealed class ExtraChargeService(MarketplaceDb db, IPaymentProvider paymen
         if (b is null) return ExtraChargeStatus.NotFound;
         var n = await db.Bookings.Where(x => x.Id == b.Id && (x.ExtraChargeState == ExtraChargeStates.Requested || x.ExtraChargeState == ExtraChargeStates.Consented))
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.ExtraChargeState, ExtraChargeStates.Declined).SetProperty(x => x.UpdatedAt, time.GetUtcNow()).SetProperty(x => x.Version, x => x.Version + 1), ct);
-        return n == 1 ? ExtraChargeStatus.Ok : ExtraChargeStatus.NotRequested;
+        if (n == 0) return ExtraChargeStatus.NotRequested;
+        // Declining must also close what was already opened: an intent that stays payable is a way to pay for something the buyer refused.
+        await BookingMoney.QueueCancelPendingIntentsAsync(db, outbox, b.Id, PaymentKinds.ExtraCharge, null, ct);
+        await db.SaveChangesAsync(ct);
+        return ExtraChargeStatus.Ok;
     }
 }
 
@@ -165,7 +221,7 @@ public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, 
         if (await db.BookingRefunds.AnyAsync(r => r.Key == key, ct)) return BookingReserveOutcome.Duplicate;
         var pay = await db.BookingPayments.AsNoTracking().Where(p => p.Id == paymentId).Select(p => new { p.BookingId, p.CapturedCents }).FirstOrDefaultAsync(ct);
         if (pay is null || pay.CapturedCents <= 0) return BookingReserveOutcome.NotCaptured;
-        var n = await db.BookingPayments.Where(p => p.Id == paymentId && p.RefundedCents + amountCents <= p.CapturedCents)
+        var n = await db.BookingPayments.Where(p => p.Id == paymentId && p.RefundedCents + amountCents <= p.CapturedCents - p.DisputedCents)   // a chargeback has already taken its share
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents + amountCents), ct);
         if (n == 0) return BookingReserveOutcome.ExceedsCaptured;
         var now = time.GetUtcNow().ToUniversalTime();

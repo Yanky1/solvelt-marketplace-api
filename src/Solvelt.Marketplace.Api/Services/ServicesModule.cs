@@ -18,12 +18,14 @@ public static class ServicesModule
         services.AddScoped<BookingActions>();
         if (!env.IsEnvironment("Testing")) services.AddHostedService<BookingWorker>();
         services.AddSingleton<IProjectionHandler, BookingEventHandler>();
+        services.AddSingleton<BookingHooks>();
         services.AddScoped<BookingPaymentService>();
         services.AddScoped<BookingRefundService>();
         services.AddScoped<ExtraChargeService>();
         services.AddScoped<BookingPaymentEvents>();
         services.AddScoped<IOutboxHandler, BookingConfirmHandler>();
         services.AddScoped<IOutboxHandler, BookingStripeRefundHandler>();
+        services.AddScoped<IOutboxHandler, BookingLateCancelHandler>();
         return services;
     }
 

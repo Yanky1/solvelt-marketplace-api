@@ -33,6 +33,10 @@ public sealed class BookingPayment
     public long CapturedCents { get; set; }
     /// <summary>Sum of refunds RESERVED so far (before Stripe is called), never above <see cref="CapturedCents"/>.</summary>
     public long RefundedCents { get; set; }
+    /// <summary>Refunds made OUTSIDE this system (the Stripe dashboard), already counted in <see cref="RefundedCents"/>; the compare-and-swap key that keeps one such refund from being recorded twice.</summary>
+    public long ExternalRefundedCents { get; set; }
+    /// <summary>What an open or lost chargeback holds back: refunds may use only <c>CapturedCents - DisputedCents - RefundedCents</c> (a won or closed inquiry sets it back to 0).</summary>
+    public long DisputedCents { get; set; }
     public string? FailureCode { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

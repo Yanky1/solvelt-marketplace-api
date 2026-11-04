@@ -135,6 +135,17 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
             }
         }
 
+        if (row.Status == BookingStatus.Failed)
+        {
+            // The same key again after the portal refused it answers what it answered the first time (never a 200 for a hold that does not exist). A new attempt needs a new key.
+            var failed = row.FailureCode ?? "refused";
+            return failed switch
+            {
+                "slot_unavailable" or "no_provider" => new HoldResult(HoldStatus.SlotUnavailable, Code: failed),
+                "service_not_found" => new HoldResult(HoldStatus.NotFound, Code: failed),
+                _ => new HoldResult(HoldStatus.PortalRefused, Code: failed),
+            };
+        }
         if (row.Status != BookingStatus.HoldPending) return new HoldResult(HoldStatus.Ok, ToView(row, now), created);
         return await CallPortalHoldAsync(row, relayEmail, buyer.DisplayName, created, ct);
     }
@@ -193,9 +204,10 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
     }
 
     /// <summary>Copies the portal's authoritative values onto our row. Only ever moves a row forward out of HoldPending/Hold; a terminal row is left alone (decision O-10).</summary>
-    public async Task ApplySummaryAsync(Booking row, PortalBookingSummary s, DateTimeOffset now, CancellationToken ct)
+    /// <summary>True when the summary was stored. False when the row is already finished (a finished booking is never reopened by a portal ANSWER either) or a parallel writer stored a newer state first: callers that must know (the confirm handler) check it.</summary>
+    public async Task<bool> ApplySummaryAsync(Booking row, PortalBookingSummary s, DateTimeOffset now, CancellationToken ct)
     {
-        if (BookingStatus.IsTerminal(row.Status)) return;
+        if (BookingStatus.IsTerminal(row.Status)) return false;
         var status = BookingStatus.FromPortal(s.Status) ?? row.Status;
         row.PortalBookingId = s.BookingId; row.Number = s.Number; row.Status = status; row.ProviderId = s.ProviderId ?? row.ProviderId;
         row.StartAt = s.StartAt ?? row.StartAt; row.EndAt = s.EndAt ?? row.EndAt; row.DurationMinutes = s.DurationMinutes;
@@ -205,11 +217,12 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         if (s.Policy is { } pol) { row.PolicyCancelFreeHours = pol.CancelFreeHours; row.PolicyCancelFeePercent = pol.CancelFeePercent; row.PolicyNoShowFeePercent = pol.NoShowFeePercent; row.PolicyMaxReschedules = pol.MaxReschedules; }
         row.OnlineInstructions = BookingStatuses.RevealsMeetingLink(status) ? Cap(s.OnlineInstructions, 2000) : null;
         row.UpdatedAt = now; row.Version++;
-        try { await db.SaveChangesAsync(ct); }
+        try { await db.SaveChangesAsync(ct); return true; }
         catch (DbUpdateConcurrencyException)
         {
             // A parallel request (same key, or an event) already stored a newer state: keep theirs. Both answers came from the same portal booking.
             foreach (var e in db.ChangeTracker.Entries().ToList()) await e.ReloadAsync(ct);
+            return false;
         }
     }
 
