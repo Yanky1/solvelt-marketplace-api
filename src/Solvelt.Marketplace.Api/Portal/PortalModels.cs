@@ -50,7 +50,7 @@ public sealed record PortalBytes(int Status, byte[]? Body, string? ContentType, 
 public sealed record BuyerMessageBody(string MessageId, string ConversationId, string Kind, string? MarketplaceOrderId, string? SellerOrderNumber, Guid? ProductId,
     string BuyerName, string Text, DateTimeOffset SentAt);
 /// <summary><c>reporterRef</c> is an opaque reference for the reporter (never a name or e-mail).</summary>
-public sealed record ContentReportBody(string ReportId, string Kind, string TargetId, string Reason, string? Note, string ReporterRef, string? SellerOrderNumber = null, Guid? SellerId = null);
+public sealed record ContentReportBody(string ReportId, string Kind, string TargetId, string Reason, string? Note, string ReporterRef);
 
 /// <summary>The answer to <c>POST /returns/{id}/label-link</c>: a signed link valid about 24 h, bound to that one label.</summary>
 public sealed record ReturnLabelLink(string? LabelUrl, DateTimeOffset? LabelUrlExpiresAt, string? TrackingNumber, string? Carrier);
