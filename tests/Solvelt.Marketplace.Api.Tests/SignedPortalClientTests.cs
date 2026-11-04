@@ -548,13 +548,26 @@ public class SignedPortalClientTests
     public async Task Retry_after_may_be_an_http_date()
     {
         var rig = new Rig();
-        rig.Portal.Respond(_ => FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(rig.Clock.GetUtcNow().AddSeconds(7))))
+        // The date is the first request's own signed timestamp plus 7 s, so it is exact (an HTTP date has whole seconds) and does not depend on when the clock is read.
+        rig.Portal.Respond(c => FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(DateTimeOffset.FromUnixTimeSeconds(long.Parse(c.Timestamp)).AddSeconds(7))))
                   .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
         var task = rig.Client.CreateOrderAsync(Order());
-        while (!task.IsCompleted) { rig.Clock.Advance(TimeSpan.FromSeconds(1)); await Task.Delay(5); }
+        // The fake clock moves one second at a time and never past the date. A clock that kept running would make the retry's timestamp depend on how quickly the
+        // continuation is scheduled (this test used to fail under load for that reason), so the retry now lands exactly on the date, or the test fails.
+        DateTimeOffset? date = null;
+        while (!task.IsCompleted)
+        {
+            if (rig.Portal.Calls.Count > 0)
+            {
+                date ??= DateTimeOffset.FromUnixTimeSeconds(long.Parse(rig.Portal.Calls[0].Timestamp)).AddSeconds(7);
+                if (rig.Clock.GetUtcNow() < date) rig.Clock.Advance(TimeSpan.FromSeconds(1));
+            }
+            await Task.Delay(5);
+        }
         Assert.True((await task).IsSuccess);
         var ts = rig.Portal.Calls.Select(c => long.Parse(c.Timestamp)).ToList();
-        Assert.InRange(ts[1] - ts[0], 6, 9);
+        Assert.Equal(2, ts.Count);
+        Assert.Equal(7, ts[1] - ts[0]);          // waited for the date: not sooner (it would be 0) and not later (the clock is held at the date)
     }
 
     [Fact]
@@ -574,11 +587,16 @@ public class SignedPortalClientTests
         rig.Portal.Respond(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(TimeSpan.FromSeconds(600)))
                   .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
         var task = rig.Client.CreateOrderAsync(Order());
-        while (!task.IsCompleted) { rig.Clock.Advance(TimeSpan.FromSeconds(1)); await Task.Delay(5); }
+        // The clock stops at the cap (first timestamp + 30 s): a clock that kept running would make the second timestamp depend on scheduling speed.
+        while (!task.IsCompleted)
+        {
+            if (rig.Portal.Calls.Count > 0 && rig.Clock.GetUtcNow().ToUnixTimeSeconds() < long.Parse(rig.Portal.Calls[0].Timestamp) + 30) rig.Clock.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(5);
+        }
         var res = await task;
         Assert.Equal(2, res.Attempts);
         var ts = rig.Portal.Calls.Select(c => long.Parse(c.Timestamp)).ToList();
-        Assert.InRange(ts[1] - ts[0], 30, 32);
+        Assert.Equal(30, ts[1] - ts[0]);          // the 600 s Retry-After was cut to 30 s: not 600, and not shorter
     }
 
     [Fact]
