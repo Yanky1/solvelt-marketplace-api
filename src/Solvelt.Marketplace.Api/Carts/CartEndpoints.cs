@@ -52,6 +52,7 @@ public static class CartEndpoints
             AddStatus.NotPurchasable => Problems.Unprocessable("not_purchasable", "That option can't be added to the cart right now."),
             AddStatus.QuantityLimit => Problems.Unprocessable("quantity_limit", $"Choose between 1 and {CartLimits.MaxQuantityPerLine}."),
             AddStatus.TooManyLines => Problems.Unprocessable("cart_full", "Your cart is full. Remove something first."),
+            AddStatus.Busy => Problems.Json(503, "cart_busy", "Your cart is being updated. Please try again."),
             _ => Problems.Unprocessable("currency_mismatch", "Items in different currencies can't share a cart."),
         };
     }

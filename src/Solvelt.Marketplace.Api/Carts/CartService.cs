@@ -9,6 +9,8 @@ public sealed record CartOwner(Guid? AccountId, string? GuestToken);
 public static class CartLimits
 {
     public const int MaxQuantityPerLine = 20, MaxLines = 50;
+    /// <summary>The marketplace sells in one currency (decision M3-16). A line whose listing is priced in anything else is unavailable.</summary>
+    public const string Currency = "USD";
 }
 
 public static class CartLineStatus
@@ -25,11 +27,31 @@ public sealed record CartLineView(Guid Id, Guid ListingId, Guid VariantId, strin
 public sealed record CartGroupView(Guid SellerId, string SellerName, Guid BrandId, string BrandName, long SubtotalCents, IReadOnlyList<CartLineView> Lines);
 public sealed record CartView(string Currency, IReadOnlyList<CartGroupView> Groups, int ItemCount, long SubtotalCents, bool CanCheckout, string? CartToken = null);
 
-public enum AddStatus { Ok, NotFound, NotPurchasable, QuantityLimit, TooManyLines, CurrencyMismatch }
+public enum AddStatus { Ok, NotFound, NotPurchasable, QuantityLimit, TooManyLines, CurrencyMismatch, Busy }
 
-public sealed class CartService(MarketplaceDb db, TimeProvider time)
+/// <summary>Test seams (one instance per application, so parallel tests never see each other's): empty in production.</summary>
+public sealed class CartHooks
+{
+    /// <summary>Awaited just before a new cart row is inserted, so a test can make two requests reach the insert together.</summary>
+    public Func<Task>? BeforeCartInsert { get; set; }
+    /// <summary>Awaited by a merge after it took its locks and before it reads the guest lines.</summary>
+    public Func<Task>? InsideMerge { get; set; }
+}
+
+public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks hooks)
 {
     private DateTimeOffset Now => time.GetUtcNow().ToUniversalTime();
+
+    /// <summary>
+    /// Takes the cart's row lock by updating it (every writer of a cart's lines starts here: add, merge, quantity change; purge deletes the row, which takes the same lock) and stamps
+    /// <c>UpdatedAt</c>. False means the cart no longer exists (merged into a buyer's, purged): the caller starts over with a fresh cart. This one statement is what serialises an add
+    /// against a merge or a purge, makes the 50-line cap atomic, and keeps retention honest.
+    /// </summary>
+    private async Task<bool> LockAsync(Guid cartId, CancellationToken ct)
+    {
+        var now = Now;
+        return await db.Carts.Where(c => c.Id == cartId).ExecuteUpdateAsync(s => s.SetProperty(c => c.UpdatedAt, now), ct) == 1;
+    }
 
     private IQueryable<Data.Cart> Find(CartOwner o)
         => o.AccountId is { } a ? db.Carts.Where(c => c.AccountId == a)
@@ -46,6 +68,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
         if (o.AccountId is { } a) cart.AccountId = a;
         else { token = Tokens.New(); cart.GuestTokenHash = Tokens.Hash(token); }
         db.Carts.Add(cart);
+        if (hooks.BeforeCartInsert is { } hook) await hook();
         try { await db.SaveChangesAsync(ct); }
         catch (DbUpdateException) when (o.AccountId is not null)
         {
@@ -75,25 +98,30 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
         if (item is null || !item.Visible || !item.SellerActive) return (AddStatus.NotFound, null);
         if (item.Type != ListingTypes.Product || !item.Available) return (AddStatus.NotPurchasable, null);
 
-        var (cart, token) = await GetOrCreateAsync(o, ct);
-        var lines = await db.CartLines.AsNoTracking().Where(l => l.CartId == cart.Id).Select(l => new { l.VariantId, l.ListingId }).ToListAsync(ct);
-        if (!lines.Any(l => l.VariantId == variantId))
-        {
-            if (lines.Count >= CartLimits.MaxLines) return (AddStatus.TooManyLines, null);
-            var currencies = await db.CatalogListings.AsNoTracking().Where(l => lines.Select(x => x.ListingId).Contains(l.Id)).Select(l => l.Currency).Distinct().ToListAsync(ct);
-            if (currencies.Any(c => c != item.Currency)) return (AddStatus.CurrencyMismatch, null);
-        }
-        // One atomic statement: a parallel add of the same variant adds to the same row instead of failing or losing a quantity (capped at the limit).
+        if (item.Currency != CartLimits.Currency) return (AddStatus.CurrencyMismatch, null);
         var max = CartLimits.MaxQuantityPerLine;
-        await db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO cart_lines ("Id", "CartId", "ListingId", "VariantId", "Quantity", "SeenUnitPriceCents", "AddedAtMs")
-            VALUES ({Guid.NewGuid()}, {cart.Id}, {item.ListingId}, {variantId}, {quantity}, {item.PriceCents}, {Now.ToUnixTimeMilliseconds()})
-            ON CONFLICT ("CartId", "VariantId") DO UPDATE SET
-              "Quantity" = CASE WHEN cart_lines."Quantity" + {quantity} > {max} THEN {max} ELSE cart_lines."Quantity" + {quantity} END,
-              "SeenUnitPriceCents" = {item.PriceCents}
-            """, ct);
-        await TouchAsync(cart.Id, ct);
-        return (AddStatus.Ok, await BuildAsync(cart.Id, token, true, ct));
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var (cart, token) = await GetOrCreateAsync(o, ct);
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            // Under the cart's lock: the line count, the insert and the answer all see one consistent cart. A cart that vanished (merged, purged) is replaced, never written to.
+            if (!await LockAsync(cart.Id, ct)) { await tx.RollbackAsync(ct); db.ChangeTracker.Clear(); continue; }
+            var count = await db.CartLines.CountAsync(l => l.CartId == cart.Id, ct);
+            var has = await db.CartLines.AnyAsync(l => l.CartId == cart.Id && l.VariantId == variantId, ct);
+            if (!has && count >= CartLimits.MaxLines) { await tx.RollbackAsync(ct); return (AddStatus.TooManyLines, null); }
+            // One atomic statement: a parallel add of the same variant adds to the same row instead of failing or losing a quantity (capped at the limit).
+            var changed = await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO cart_lines ("Id", "CartId", "ListingId", "VariantId", "Quantity", "SeenUnitPriceCents", "AddedAtMs")
+                VALUES ({Guid.NewGuid()}, {cart.Id}, {item.ListingId}, {variantId}, {quantity}, {item.PriceCents}, {Now.ToUnixTimeMilliseconds()})
+                ON CONFLICT ("CartId", "VariantId") DO UPDATE SET
+                  "Quantity" = CASE WHEN cart_lines."Quantity" + {quantity} > {max} THEN {max} ELSE cart_lines."Quantity" + {quantity} END,
+                  "SeenUnitPriceCents" = {item.PriceCents}
+                """, ct);
+            if (changed != 1) { await tx.RollbackAsync(ct); continue; }   // never answer 200 for a line that was not stored
+            await tx.CommitAsync(ct);
+            return (AddStatus.Ok, await BuildAsync(cart.Id, token, true, ct));
+        }
+        return (AddStatus.Busy, null);
     }
 
     /// <summary>Sets a quantity (0 removes the line). Another buyer's line id is simply "not found".</summary>
@@ -101,6 +129,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
     {
         var cart = await Find(o).AsNoTracking().FirstOrDefaultAsync(ct);
         if (cart is null) return null;
+        if (!await LockAsync(cart.Id, ct)) return null;   // the cart is gone (merged, purged)
         var line = await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id).FirstOrDefaultAsync(ct);
         if (line is null) return null;
         if (quantity <= 0) await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id).ExecuteDeleteAsync(ct);
@@ -111,50 +140,53 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
             await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id)
                 .ExecuteUpdateAsync(s => s.SetProperty(l => l.Quantity, q).SetProperty(l => l.SeenUnitPriceCents, price ?? line.SeenUnitPriceCents), ct);   // seeing the cart again accepts the current price
         }
-        await TouchAsync(cart.Id, ct);
         return await BuildAsync(cart.Id, null, true, ct);
     }
 
-    /// <summary>Moves a guest cart into the buyer's cart at sign-in. Claim-first: only the request that deletes the guest cart merges it, so a retry or a parallel merge changes nothing.</summary>
+    /// <summary>
+    /// Moves a guest cart into the buyer's cart at sign-in. Under the row locks of BOTH carts (guest first, then the buyer's: a fixed order, so merges never deadlock) the guest lines are
+    /// read AFTER the claim, so an add that raced the merge either finished before it (and is merged) or waits and starts over on a new cart; nothing is lost and no 200 is a lie.
+    /// Only the request that finds and deletes the guest cart merges it: a retry, a parallel merge or an unknown token changes nothing.
+    /// </summary>
     public async Task<CartView> MergeGuestAsync(Guid accountId, string guestToken, CancellationToken ct)
     {
         var owner = new CartOwner(accountId, null);
         var guest = guestToken is { Length: > 0 and <= 100 } ? await db.Carts.AsNoTracking().FirstOrDefaultAsync(c => c.GuestTokenHash == Tokens.Hash(guestToken), ct) : null;
         if (guest is not null)
         {
-            var (mine, _) = await GetOrCreateAsync(owner, ct);
-            var lines = await db.CartLines.AsNoTracking().Where(l => l.CartId == guest.Id).ToListAsync(ct);
-            await using var tx = await db.Database.BeginTransactionAsync(ct);
-            var claimed = await db.Carts.Where(c => c.Id == guest.Id && c.GuestTokenHash == guest.GuestTokenHash).ExecuteDeleteAsync(ct);   // cascades to the lines
-            if (claimed == 1)
+            for (var attempt = 0; attempt < 3; attempt++)
             {
-                var have = (await db.CartLines.AsNoTracking().Where(l => l.CartId == mine.Id).Select(l => l.VariantId).ToListAsync(ct)).ToHashSet();
-                var max = CartLimits.MaxQuantityPerLine;
-                foreach (var l in lines.OrderBy(l => l.AddedAtMs))
+                var (mine, _) = await GetOrCreateAsync(owner, ct);
+                await using var tx = await db.Database.BeginTransactionAsync(ct);
+                if (!await LockAsync(guest.Id, ct)) { await tx.RollbackAsync(ct); break; }                       // already merged or purged by someone else
+                if (!await LockAsync(mine.Id, ct)) { await tx.RollbackAsync(ct); db.ChangeTracker.Clear(); continue; }   // the buyer's own cart was purged meanwhile: make a new one
+                if (hooks.InsideMerge is { } hook) await hook();
+                var lines = await db.CartLines.AsNoTracking().Where(l => l.CartId == guest.Id).ToListAsync(ct);
+                var claimed = await db.Carts.Where(c => c.Id == guest.Id && c.GuestTokenHash == guest.GuestTokenHash).ExecuteDeleteAsync(ct);   // cascades to the lines
+                if (claimed == 1)
                 {
-                    if (!have.Contains(l.VariantId)) { if (have.Count >= CartLimits.MaxLines) continue; have.Add(l.VariantId); }
-                    await db.Database.ExecuteSqlInterpolatedAsync($"""
-                        INSERT INTO cart_lines ("Id", "CartId", "ListingId", "VariantId", "Quantity", "SeenUnitPriceCents", "AddedAtMs")
-                        VALUES ({Guid.NewGuid()}, {mine.Id}, {l.ListingId}, {l.VariantId}, {l.Quantity}, {l.SeenUnitPriceCents}, {l.AddedAtMs})
-                        ON CONFLICT ("CartId", "VariantId") DO UPDATE SET
-                          "Quantity" = CASE WHEN cart_lines."Quantity" + {l.Quantity} > {max} THEN {max} ELSE cart_lines."Quantity" + {l.Quantity} END
-                        """, ct);
+                    var have = (await db.CartLines.AsNoTracking().Where(l => l.CartId == mine.Id).Select(l => l.VariantId).ToListAsync(ct)).ToHashSet();
+                    var max = CartLimits.MaxQuantityPerLine;
+                    foreach (var l in lines.OrderBy(l => l.AddedAtMs))
+                    {
+                        if (!have.Contains(l.VariantId)) { if (have.Count >= CartLimits.MaxLines) continue; have.Add(l.VariantId); }
+                        await db.Database.ExecuteSqlInterpolatedAsync($"""
+                            INSERT INTO cart_lines ("Id", "CartId", "ListingId", "VariantId", "Quantity", "SeenUnitPriceCents", "AddedAtMs")
+                            VALUES ({Guid.NewGuid()}, {mine.Id}, {l.ListingId}, {l.VariantId}, {l.Quantity}, {l.SeenUnitPriceCents}, {l.AddedAtMs})
+                            ON CONFLICT ("CartId", "VariantId") DO UPDATE SET
+                              "Quantity" = CASE WHEN cart_lines."Quantity" + {l.Quantity} > {max} THEN {max} ELSE cart_lines."Quantity" + {l.Quantity} END
+                            """, ct);
+                    }
                 }
                 await tx.CommitAsync(ct);
-                await TouchAsync(mine.Id, ct);
+                break;
             }
         }
         var cart = await Find(owner).AsNoTracking().FirstOrDefaultAsync(ct);
         return cart is null ? Empty() : await BuildAsync(cart.Id, null, true, ct);
     }
 
-    private Task TouchAsync(Guid cartId, CancellationToken ct)
-    {
-        var now = Now;
-        return db.Carts.Where(c => c.Id == cartId).ExecuteUpdateAsync(s => s.SetProperty(c => c.UpdatedAt, now), ct);
-    }
-
-    private static CartView Empty() => new("USD", [], 0, 0, false);
+    private static CartView Empty() => new(CartLimits.Currency, [], 0, 0, false);
 
     /// <summary>
     /// The cart as the catalog says it is NOW: prices, names, availability and visibility are re-read on every view; nothing a client sent is stored.
@@ -165,7 +197,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
         var rows = await (from cl in db.CartLines.AsNoTracking().Where(l => l.CartId == cartId)
                           join v in db.CatalogVariants.AsNoTracking() on cl.VariantId equals v.Id into vj
                           from v in vj.DefaultIfEmpty()
-                          join l in db.CatalogListings.AsNoTracking() on cl.ListingId equals l.Id into lj
+                          join l in db.CatalogListings.AsNoTracking() on (v == null ? cl.ListingId : v.ListingId) equals l.Id into lj
                           from l in lj.DefaultIfEmpty()
                           join s in db.CatalogSellers.AsNoTracking() on (l == null ? Guid.Empty : l.SellerId) equals s.Id into sj
                           from s in sj.DefaultIfEmpty()
@@ -174,7 +206,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
                           orderby cl.AddedAtMs, cl.Id
                           select new
                           {
-                              cl.Id, cl.ListingId, cl.VariantId, cl.Quantity, cl.SeenUnitPriceCents,
+                              cl.Id, ListingId = v == null ? cl.ListingId : v.ListingId, cl.VariantId, cl.Quantity, cl.SeenUnitPriceCents,
                               VName = v == null ? null : v.Name, v.PriceCents, v.CompareAtCents, VAvail = v != null && v.Available,
                               LTitle = l == null ? null : l.Title, LSlug = l == null ? null : l.Slug, LVisible = l != null && l.Visible, LType = l == null ? null : l.Type,
                               Currency = l == null ? null : l.Currency, SellerId = l == null ? Guid.Empty : l.SellerId, BrandId = l == null ? Guid.Empty : l.BrandId,
@@ -184,7 +216,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
             .OrderBy(i => i.SortOrder).Select(i => new { i.ListingId, i.Id }).ToListAsync(ct);
         var firstImage = imageIds.GroupBy(i => i.ListingId).ToDictionary(g => g.Key, g => g.First().Id);
 
-        var currency = rows.Select(r => r.Currency).FirstOrDefault(c => c is not null) ?? "USD";
+        var currency = CartLimits.Currency;
         var groups = new List<CartGroupView>();
         var canCheckout = rows.Count > 0;
         foreach (var g in rows.GroupBy(r => (r.SellerId, r.BrandId)))
@@ -192,7 +224,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
             var views = new List<CartLineView>();
             foreach (var r in g)
             {
-                var ok = r.VName is not null && r.LVisible && r.SellerActive && r.VAvail && r.LType == ListingTypes.Product;
+                var ok = r.VName is not null && r.LVisible && r.SellerActive && r.VAvail && r.LType == ListingTypes.Product && r.Currency == CartLimits.Currency;
                 if (!ok) canCheckout = false;
                 var unit = ok ? r.PriceCents : 0;
                 views.Add(new CartLineView(r.Id, r.ListingId, r.VariantId, r.LSlug ?? "", r.LTitle ?? "", r.VName ?? "",

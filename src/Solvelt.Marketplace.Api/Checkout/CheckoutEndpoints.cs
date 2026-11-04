@@ -57,6 +57,7 @@ public static class CheckoutEndpoints
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("ShippingUnavailable") => Problems.Json(503, "shipping_unavailable", "Delivery options are unavailable right now. Please try again in a moment."),
             CheckoutStatus.Quote when detail == "delivery_unavailable" => Problems.Json(409, "delivery_unavailable", "We can't deliver part of your cart to that address."),
             CheckoutStatus.Quote => Problems.Json(409, "cart_not_ready", "Your cart is empty or has items that are no longer available."),
+            CheckoutStatus.PriceChanged => Results.Json(new { code = "price_changed", message = "The price changed. Review the new total and confirm to continue.", quote = result!.Quote }, statusCode: 409),
             CheckoutStatus.AmountTooSmall => Problems.Unprocessable("amount_too_small", "The total is below the minimum we can charge."),
             CheckoutStatus.Superseded => Problems.Json(409, "checkout_superseded", "Another checkout of this cart replaced this one. Review your cart and pay again."),
             CheckoutStatus.NotPending => Problems.Json(409, "order_not_pending", "This order has already been paid or closed."),
