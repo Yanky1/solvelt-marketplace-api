@@ -9,7 +9,7 @@ public sealed class ServiceOptionsTests : IDisposable
 {
     private readonly AuthKit _k = new();
     private static readonly Guid Service = CatalogKit.ListingId("deep-house-cleaning");
-    private static readonly Guid Product = CatalogKit.ListingId("challah-6-braided");
+    private static readonly Guid Product = CatalogKit.ListingId("challah-classic");
     public void Dispose() => _k.Dispose();
     private int Calls => _k.F.Portal.VerifiedCalls.Count(c => c.PathAndQuery.EndsWith("/options"));
 

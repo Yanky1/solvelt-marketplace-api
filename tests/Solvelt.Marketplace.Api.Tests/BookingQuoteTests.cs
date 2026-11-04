@@ -67,7 +67,7 @@ public sealed class BookingQuoteTests : BookingFlowBase
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await AskQuote(QuoteBody(details: "short"))).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await AskQuote(new { listingId = Service, location = "customer", details = "Needs an address for sure" })).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await AskQuote(new { listingId = Service, location = "online", details = "A long enough description", preferredTimes = new[] { Now.AddDays(-1) } })).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await AskQuote(new { listingId = CatalogKit.ListingId("challah-6-braided"), location = "online", details = "A long enough description" })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await AskQuote(new { listingId = CatalogKit.ListingId("challah-classic"), location = "online", details = "A long enough description" })).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await Send(HttpMethod.Post, "/api/v1/quotes", null, QuoteBody(), "anon-quote-key-1")).StatusCode);
         Assert.Single(_portal.Quotes);
     }

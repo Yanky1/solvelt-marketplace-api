@@ -93,7 +93,8 @@ public static class ServiceOptionsEndpoint
     /// <summary><c>GET /api/v1/services/{listingId}/options</c>: public, visible service listings only.</summary>
     public static async Task<IResult> Get(Guid id, HttpContext http, MarketplaceDb db, ServiceOptionsCache cache, CancellationToken ct)
     {
-        if (!await db.CatalogListings.AsNoTracking().AnyAsync(l => l.Id == id && l.Type == ListingTypes.Service && l.Visible, ct)) return Problems.NotFound("This service is not available.");
+        http.Response.Headers.CacheControl = "no-store";   // only the 200 below may be cached
+        if (!await ServiceListings.Visible(db).AnyAsync(l => l.Id == id, ct)) return Problems.NotFound("This service is not available.");
         var view = await cache.GetAsync(id, ct);
         if (view is null) return Problems.Json(503, "options_unavailable", "This service's options can't be loaded right now. Try again in a moment.");
         http.Response.Headers.CacheControl = "public, max-age=60";

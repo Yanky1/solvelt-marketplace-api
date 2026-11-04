@@ -158,7 +158,7 @@ public sealed class BookingHoldTests : IDisposable
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Hold(_jane, Body(), key: "short")).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Hold(_jane, Body(_k.F.Clock.GetUtcNow().AddHours(-1)), "key-past-0001")).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Hold(_jane, new { listingId = Service, start = Slot(), location = "customer" }, "key-noaddr-1")).StatusCode);   // at-home needs an address
-        Assert.Equal(HttpStatusCode.NotFound, (await Hold(_jane, new { listingId = CatalogKit.ListingId("challah-6-braided"), start = Slot(), location = "online" }, "key-product-1")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Hold(_jane, new { listingId = CatalogKit.ListingId("challah-classic"), start = Slot(), location = "online" }, "key-product-1")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await Hold(_jane, new { listingId = Guid.NewGuid(), start = Slot(), location = "online" }, "key-nolist-01")).StatusCode);
         Assert.Empty(_portal.Holds);
 

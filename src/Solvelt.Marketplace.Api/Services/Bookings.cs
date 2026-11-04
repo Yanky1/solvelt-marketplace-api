@@ -102,7 +102,7 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         var errors = Validate(request, now);
         if (errors.Count > 0) return new HoldResult(HoldStatus.Invalid, Errors: errors);
         var r = request!;
-        var listing = await db.CatalogListings.AsNoTracking().Where(l => l.Id == r.ListingId && l.Type == ListingTypes.Service && l.Visible).Select(l => new { l.Id, l.Currency }).FirstOrDefaultAsync(ct);
+        var listing = await ServiceListings.Visible(db).Where(l => l.Id == r.ListingId).Select(l => new { l.Id, l.Currency }).FirstOrDefaultAsync(ct);
         if (listing is null) return new HoldResult(HoldStatus.NotFound);
 
         var hash = HashOf(r);
