@@ -193,6 +193,9 @@ Public, public rate limit. Query: `location` (`online|customer|seller`, required
 `200 { durationMinutes, priceCents, providers: [{ providerId, timeZone }], slots: [{ startAt, endAt, providerIds }], from, to, fetchedAt }`, slot times are UTC instants sorted ascending; show them in the provider's `timeZone` and the buyer's zone. `Cache-Control: public, max-age=15`; the server caches the portal answer at most 30 s.
 Errors: `404` not a visible service; `422 validation_failed` (field errors) or a portal-validated `outside_service_area | location_not_offered | duration | add_on | provider_required`; `503 availability_unavailable` (retry).
 
+### `GET /api/v1/services/{listingId}/options`
+Public. `200 { available, version, addOns: [{ id, name, description?, priceCents, extraMinutes }], intakeQuestions: [{ id, label, kind: text|longText|choice|yesNo|number, required, choices?, maxLength? }], providers: [{ providerId, displayName, photoImageId? }], assignment: leastBusy|roundRobin|buyerChoice, policy: { cancelFreeHours, cancelFeePercent, noShowFeePercent, maxReschedules, approvalHours }, travelFeeCents, serviceAreaPostalCodes?, serviceRadiusKm? }`. `available:false` with empty lists means the portal does not provide options yet: show the widget without add-ons and intake questions. `404` not a visible service, `503 options_unavailable`. `Cache-Control: public, max-age=60`. Send `addOnIds` and `intakeAnswers` (`checkout`) only with ids from this list; the portal validates them.
+
 ### Bookings (signed-in buyer; `Authorization: Bearer`, `Cache-Control: private, no-store`)
 | Call | Body | Answer |
 |---|---|---|
@@ -205,6 +208,7 @@ Errors: `404` not a visible service; `422 validation_failed` (field errors) or a
 | `POST /api/v1/bookings/{id}/acknowledge-reschedule` | - | `200 { booking }` clears `requiresBuyerConsent` (cancelling instead is free); `409 nothing_to_accept` |
 | `POST /api/v1/bookings/{id}/extra-charge/accept` | none (the amount is the provider's) | `200 { amountCents, payment: { provider, clientSecret, publishableKey } }` (same intent when repeated); `409 nothing_requested | already_paid`, `422 amount_too_small`, `503` |
 | `POST /api/v1/bookings/{id}/extra-charge/decline` | - | `204`; `409 nothing_requested` |
+| `GET /api/v1/bookings/{id}/calendar.ics` | - | `text/calendar` attachment for a Requested/Confirmed/Rescheduled/InProgress booking (no address, no meeting link); `404` otherwise |
 | `GET /api/v1/bookings` | - | `{ bookings: [BookingView] }` newest first, no meeting link |
 | `GET /api/v1/bookings/{id}` | - | `BookingView`; another buyer's booking or a failed hold attempt is `404` |
 

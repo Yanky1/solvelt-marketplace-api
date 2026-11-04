@@ -132,6 +132,7 @@ public static class ServiceEndpoints
     {
         var g = app.MapGroup("/api/v1/services").RequireRateLimiting(RateLimitPolicies.Public);
         g.MapGet("/{id:guid}/availability", Availability);
+        g.MapGet("/{id:guid}/options", ServiceOptionsEndpoint.Get);
         return app;
     }
 

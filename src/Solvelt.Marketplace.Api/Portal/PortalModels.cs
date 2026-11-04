@@ -90,6 +90,14 @@ public sealed record PortalBookingSummary(Guid BookingId, string? Number, string
 /// <summary>The policy snapshot the portal froze at booking time (SERVICES.md §4). Optional in the summary until the portal sends it (contract request); null means "unknown", never a guess.</summary>
 public sealed record PortalBookingPolicy(int? CancelFreeHours, int? CancelFeePercent, int? NoShowFeePercent, int? MaxReschedules, int? ApprovalHours);
 public sealed record BookingResponse(bool Created, PortalBookingSummary Booking);
+
+// ---- GET /services/{id}/options (contract request M4-C1; the portal has not shipped it yet, so every field is optional and the reader degrades) ----
+public sealed record ServiceAddOn(string? Id, string? Name, string? Description, long PriceCents, int ExtraMinutes);
+public sealed record IntakeQuestion(string? Id, string? Label, string? Kind, bool Required, IReadOnlyList<string>? Choices, int? MaxLength);
+public sealed record ServiceProviderInfo(Guid ProviderId, string? DisplayName, Guid? PhotoImageId);
+public sealed record ServiceTravel(long? FeeCents, IReadOnlyList<string>? ServiceAreaPostalCodes, double? ServiceRadiusKm);
+public sealed record ServiceOptionsDocument(Guid? ServiceId, string? Version, IReadOnlyList<ServiceAddOn>? AddOns, IReadOnlyList<IntakeQuestion>? IntakeQuestions,
+    IReadOnlyList<ServiceProviderInfo>? Providers, string? Assignment, PortalBookingPolicy? Policy, ServiceTravel? Travel);
 public sealed record BookingCancelBody(string RequestId, string? Reason);
 public sealed record BookingRescheduleBody(string RequestId, DateTimeOffset NewStart);
 public sealed record BookingProposalBody(bool Accept);
