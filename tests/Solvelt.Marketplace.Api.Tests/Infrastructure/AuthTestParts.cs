@@ -39,8 +39,9 @@ public sealed class CommandLog : DbCommandInterceptor
     {
         var t = text.TrimStart();
         var verb = t.Split(' ', 2)[0].ToUpperInvariant();
-        var table = System.Text.RegularExpressions.Regex.Match(t, "(?:FROM|INTO|UPDATE)\\s+\"?(\\w+)\"?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (Recording) lock (_lock) _seen.Add(verb + " " + (table.Success ? table.Groups[1].Value : "?"));
+        // a batched command (PostgreSQL sends several INSERTs at once) lists every table it touches, in order
+        var tables = System.Text.RegularExpressions.Regex.Matches(t, "(?:FROM|INTO|UPDATE)\\s+\"?(\\w+)\"?", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Select(m => m.Groups[1].Value).ToList();
+        if (Recording) lock (_lock) _seen.Add(verb + " " + (tables.Count > 0 ? string.Join("+", tables) : "?"));
         if (_failWhen is { } f && f(t)) { _failWhen = null; throw new InvalidOperationException("injected failure"); }
     }
 

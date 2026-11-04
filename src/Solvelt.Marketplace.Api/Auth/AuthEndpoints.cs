@@ -12,6 +12,7 @@ public static class AuthEndpoints
     public sealed record VerifyBody(string? Token, string? Password);
     public sealed record SignInBody(string? Email, string? Password);
     public sealed record ResetBody(string? Token, string? Password);
+    public sealed record PasswordBody(string? Password);
 
     public static IEndpointRouteBuilder MapAuth(this IEndpointRouteBuilder app)
     {
@@ -22,6 +23,8 @@ public static class AuthEndpoints
         auth.MapPost("/sign-in", SignIn).RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/forgot-password", ForgotPassword).RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/reset-password", ResetPassword).RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/reauthenticate", Reauthenticate).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/session/rotate", Rotate).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/sign-out", SignOut).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Public);
         auth.MapPost("/sign-out-all", SignOutAll).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Public);
         app.MapGet("/api/v1/account/me", Me).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Public);
@@ -92,6 +95,29 @@ public static class AuthEndpoints
         var r = await auth.ResetPasswordAsync(body.Token, body.Password!, ct);   // also refuses a password equal to the address, without using the link up
         if (r.PasswordProblem is { } problem) return Problems.Validation(new Dictionary<string, string> { ["password"] = problem });
         return r.Ok ? Results.NoContent() : Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
+    }
+
+    /// <summary>Step-up: <c>204</c> when the password is right (the session's authenticated_at moves to now), <c>401 invalid_credentials</c> when it is not, <c>429</c> with Retry-After when the gate says wait.</summary>
+    private static async Task<IResult> Reauthenticate(PasswordBody? body, AuthService auth, HttpContext ctx, ClientIpResolver ips, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(body?.Password)) return Problems.Validation(new Dictionary<string, string> { ["password"] = "Enter your password." });
+        if (body.Password.Length > 128) return Problems.Json(401, "invalid_credentials", "The password is not correct.");
+        var r = await auth.ReauthenticateAsync(ctx.Buyer(), body.Password, ips.Resolve(ctx), ct);
+        switch (r.Status)
+        {
+            case SignInStatus.Ok: return Results.NoContent();
+            case SignInStatus.TooManyAttempts:
+                ctx.Response.Headers.RetryAfter = (r.RetryAfterSeconds ?? 60).ToString();
+                return Problems.Json(429, "rate_limited", "Too many attempts. Try again later.");
+            default: return Problems.Json(401, "invalid_credentials", "The password is not correct.");
+        }
+    }
+
+    /// <summary><c>200 { token }</c>: a new session token; the old one is revoked.</summary>
+    private static async Task<IResult> Rotate(HttpContext ctx, AuthService auth, CancellationToken ct)
+    {
+        var token = await auth.RotateSessionAsync(ctx.Buyer(), ct);
+        return token is null ? Problems.Json(401, "unauthorized", "Sign in to continue.") : Results.Json(new { token });
     }
 
     private static async Task<IResult> SignOut(HttpContext ctx, AuthService auth, CancellationToken ct)

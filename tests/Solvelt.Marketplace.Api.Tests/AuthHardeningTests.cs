@@ -348,8 +348,8 @@ public class AuthHardeningTests
         var sequences = new List<List<string>>();
         foreach (var a in forgot) sequences.Add(await Statements(k, log, "/api/v1/auth/forgot-password", a));
         Assert.NotEmpty(sequences[0]);
-        Assert.Contains("INSERT email_tokens", sequences[0]);
-        Assert.Contains("INSERT outbox_messages", sequences[0]);
+        Assert.Contains(sequences[0], x => x.StartsWith("INSERT") && x.Contains("email_tokens"));
+        Assert.Contains(sequences[0], x => x.StartsWith("INSERT") && x.Contains("outbox_messages"));
         Assert.All(sequences, s => Assert.Equal(sequences[0], s));                           // the same statements, in the same order
 
         var resend = new[] { "unverified@example.com", Email, "ghost2@example.com" };       // a waiting account, a verified one (nothing to resend) and an unknown one
@@ -534,5 +534,151 @@ public class AuthHardeningTests
         Assert.Equal(3, await k.Db(db => db.EmailTokens.CountAsync()));
         Assert.Equal(new[] { "a-young" }, (await k.Db(db => db.SignInAttempts.Select(x => x.Key).ToListAsync())).ToArray());
         Assert.Equal(new[] { "i-young" }, (await k.Db(db => db.SignInIpBudgets.Select(x => x.Key).ToListAsync())).ToArray());
+    }
+
+    // ---------- step-up re-authentication and session rotation (orchestrator, for the web) ----------
+
+    private const string Reauth = "/api/v1/auth/reauthenticate", Rotate = "/api/v1/auth/session/rotate";
+
+    [Fact]
+    public async Task Reauthenticating_with_the_right_password_stamps_this_session_and_a_wrong_one_does_not()
+    {
+        using var k = new AuthKit(NoIpLimit());
+        var token = await k.VerifiedSession(Email);
+        var signedIn = k.F.Clock.GetUtcNow();
+        k.F.Clock.Advance(TimeSpan.FromMinutes(20));
+        var wrong = await k.Post(Reauth, new { password = Wrong }, token);
+        Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
+        Assert.Equal("invalid_credentials", (await Json(wrong)).GetProperty("code").GetString());
+        Assert.Equal(signedIn, (await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync())).AuthenticatedAt);   // unchanged
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", token)).StatusCode);                       // the session itself lives on
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post(Reauth, new { password = Pw }, token)).StatusCode);
+        Assert.Equal(k.F.Clock.GetUtcNow(), (await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync())).AuthenticatedAt);
+    }
+
+    [Fact]
+    public async Task Reauthenticating_only_touches_the_session_that_asked()
+    {
+        using var k = new AuthKit(NoIpLimit());
+        var first = await k.VerifiedSession(Email);
+        var second = (await (await k.Post(SignIn, new { email = Email, password = Pw })).Content.ReadFromJsonAsync<AuthKit.SignInResponse>())!.Token;
+        var t0 = k.F.Clock.GetUtcNow();
+        k.F.Clock.Advance(TimeSpan.FromMinutes(30));
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post(Reauth, new { password = Pw }, second)).StatusCode);
+        var rows = await k.Db(db => db.BuyerSessions.AsNoTracking().ToListAsync());
+        Assert.Equal(1, rows.Count(r => r.AuthenticatedAt == k.F.Clock.GetUtcNow()));
+        Assert.Equal(1, rows.Count(r => r.AuthenticatedAt == t0));                                                    // the other session did not move
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", first)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Reauthentication_shares_the_sign_in_gate_so_a_stolen_session_cannot_guess_for_free()
+    {
+        using var k = new AuthKit(NoIpLimit());
+        var token = await k.VerifiedSession(Email);
+        var results = new List<(HttpStatusCode, string?)>();
+        for (var i = 0; i < 8; i++)
+        {
+            var r = await k.Post(Reauth, new { password = Wrong }, token);
+            results.Add((r.StatusCode, r.Headers.TryGetValues("Retry-After", out var v) ? v.Single() : null));
+        }
+        Assert.Equal(6, results.Count(r => r.Item1 == HttpStatusCode.Unauthorized));                                 // the same six free tries ...
+        Assert.All(results.Skip(6), r => Assert.Equal((HttpStatusCode.TooManyRequests, "1"), r));                    // ... then the same delay
+        Assert.Equal((HttpStatusCode.TooManyRequests, "1"), await Try(k, Email, Pw));                                // and sign-in for this address waits too
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await k.Post(Reauth, new { password = Pw }, token)).StatusCode);   // even the right password, while delayed
+        k.F.Clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post(Reauth, new { password = Pw }, token)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Try(k, Email, Pw)).Status);                                           // success cleared the address for sign-in as well
+    }
+
+    [Fact]
+    public async Task Reauthentication_spends_the_same_per_ip_budget_as_sign_in()
+    {
+        using var k = new AuthKit(new() { ["Auth:SignInIpFailuresPerHour"] = "3", ["Auth:SignInFreeFailures"] = "100" });
+        var token = await k.VerifiedSession(Email);
+        for (var i = 0; i < 2; i++) await k.PostFrom("203.0.113.9", SignIn, new { email = $"ghost{i}@example.com", password = Wrong });
+        var r = new HttpRequestMessage(HttpMethod.Post, Reauth) { Content = JsonContent.Create(new { password = Wrong }) };
+        r.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        var ts = k.F.Clock.GetUtcNow().ToUnixTimeSeconds().ToString();
+        r.Headers.Add(ClientIpResolver.IpHeader, "203.0.113.9"); r.Headers.Add(ClientIpResolver.TimestampHeader, ts);
+        r.Headers.Add(ClientIpResolver.SignatureHeader, "v1=" + Convert.ToHexStringLower(System.Security.Cryptography.HMACSHA256.HashData(Encoding.UTF8.GetBytes(DevDefaults.WebForwardingKey), Encoding.UTF8.GetBytes($"{ts}\n203.0.113.9"))));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Http.SendAsync(r)).StatusCode);                          // the third failure from this address
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await k.PostFrom("203.0.113.9", SignIn, new { email = Email, password = Pw })).StatusCode);   // budget spent
+    }
+
+    [Fact]
+    public async Task Reauthentication_needs_a_session_and_a_password_of_sensible_length_and_does_one_hash_of_work()
+    {
+        CountingPasswordService? counting = null;
+        using var k = new AuthKit(NoIpLimit(), s => s.AddSingleton<PasswordService>(sp => counting = new CountingPasswordService(sp.GetRequiredService<IOptions<AuthOptions>>())));
+        var token = await k.VerifiedSession(Email);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post(Reauth, new { password = Pw }, null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post(Reauth, new { password = Pw }, token + "x")).StatusCode);
+        foreach (var missing in new object[] { new { }, new { password = "" } })
+        {
+            var r = await k.Post(Reauth, missing, token);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, r.StatusCode);
+            Assert.True((await Json(r)).GetProperty("errors").TryGetProperty("password", out _));
+        }
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post(Reauth, new { password = new string('x', 129) }, token)).StatusCode);
+        counting!.Reset();
+        await k.Post(Reauth, new { password = Wrong }, token);
+        Assert.Equal((1, 0), (counting.HashWork, counting.Hashes));
+        counting.Reset();
+        await k.Post(Reauth, new { password = Pw }, token);
+        Assert.Equal((1, 0), (counting.HashWork, counting.Hashes));
+    }
+
+    [Fact]
+    public async Task Rotating_gives_a_new_token_kills_the_old_one_and_keeps_the_sessions_age_and_proof_of_identity()
+    {
+        using var k = new AuthKit();
+        var old = await k.VerifiedSession(Email);
+        var before = await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync());
+        k.F.Clock.Advance(TimeSpan.FromDays(3));
+        var res = await k.Post(Rotate, null, old);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var fresh = (await Json(res)).GetProperty("token").GetString()!;
+        Assert.True(fresh.Length >= 43);
+        Assert.NotEqual(old, fresh);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", old)).StatusCode);              // the old cookie is dead
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);
+        var rows = await k.Db(db => db.BuyerSessions.AsNoTracking().OrderBy(s => s.CreatedAt).ToListAsync());
+        Assert.Equal(2, rows.Count);
+        Assert.NotNull(rows[0].RevokedAt);
+        Assert.Null(rows[1].RevokedAt);
+        Assert.Equal(before.AbsoluteExpiresAt, rows[1].AbsoluteExpiresAt);                                          // rotating does not lengthen a session
+        Assert.Equal(before.AuthenticatedAt, rows[1].AuthenticatedAt);                                              // and is not a proof of identity
+        Assert.Equal(Tokens.Hash(fresh), rows[1].TokenHash);
+        Assert.DoesNotContain(rows, r => r.TokenHash == fresh);                                                      // only the hash is stored
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post(Rotate, null, old)).StatusCode);                    // the old token cannot be rotated again
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post(Rotate, null, null)).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_rotated_session_cannot_outlive_the_original_absolute_limit()
+    {
+        using var k = new AuthKit();
+        var token = await k.VerifiedSession(Email);
+        for (var i = 0; i < 4; i++)
+        {
+            k.F.Clock.Advance(TimeSpan.FromDays(6));
+            token = (await Json(await k.Post(Rotate, null, token))).GetProperty("token").GetString()!;
+        }
+        k.F.Clock.Advance(TimeSpan.FromDays(5));                                                                    // day 29
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", token)).StatusCode);
+        k.F.Clock.Advance(TimeSpan.FromDays(1) + TimeSpan.FromSeconds(1));                                          // day 30: the first session's limit
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Twenty_parallel_rotations_of_one_token_make_exactly_one_new_session()
+    {
+        using var k = new AuthKit();
+        var token = await k.VerifiedSession(Email);
+        var results = await Task.WhenAll(Enumerable.Range(0, 20).Select(_ => Task.Run(() => k.Post(Rotate, null, token))));
+        Assert.Equal(1, results.Count(r => r.StatusCode == HttpStatusCode.OK));
+        Assert.Equal(19, results.Count(r => r.StatusCode == HttpStatusCode.Unauthorized));
+        Assert.Equal(1, await k.Db(db => db.BuyerSessions.CountAsync(s => s.RevokedAt == null)));
     }
 }

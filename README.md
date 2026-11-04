@@ -39,7 +39,8 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Email__Provider` | yes, `Smtp` (Development/Testing use an in-memory sink) | Without it the application does not start (decision M1-50) |
 | `Email__SmtpHost`, `Email__From` | yes with `Smtp` | SMTP server and the sender address |
 | `Email__SmtpPort`, `Email__SmtpUserName`, `Email__SmtpPassword`, `Email__SmtpUseTls`, `Email__SendTimeoutSeconds` | no | Defaults 587, none, none, true, 20 |
-| `Auth__PasswordIterations`, `Auth__SessionIdleDays`, `Auth__SessionAbsoluteDays`, `Auth__LockoutThreshold`, `Auth__LockoutMinutes` | no | Defaults 210000, 7, 30, 5, 15 (decisions M1-51 to M1-54) |
+| `Auth__PasswordIterations`, `Auth__SessionIdleDays`, `Auth__SessionAbsoluteDays` | no | Defaults 210000, 7, 30 (decisions M1-51 to M1-54) |
+| `Auth__SignInFreeFailures`, `Auth__SignInMaxDelaySeconds`, `Auth__SignInIpFailuresPerHour`, `Auth__MaxBodyBytes` | no | Sign-in gate and body cap, defaults 5, 900, 20, 16384 (decisions M1-63, M1-67) |
 | `Outbox__MaxAttempts`, `Outbox__BackoffSeconds`, `Outbox__MaxBackoffSeconds`, `Outbox__LeaseSeconds` | no | Defaults 8, 30, 3600, 120 (decision M1-47) |
 | `Marketplace__RelayDomain` | yes | Domain of the buyer relay emails |
 | `Marketplace__PublicBaseUrl` | yes | Public website URL (links in emails) |

@@ -136,6 +136,48 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         return new SignInResult(SignInStatus.Ok, token, account);
     }
 
+    /// <summary>
+    /// Step-up (decision O-11): the signed-in buyer proves the password again, which stamps <c>authenticated_at</c> on THIS session. The check passes through the
+    /// same gate as sign-in (same per-address delay, same per-IP budget), so a stolen or replayed session cannot be used to guess the password for free.
+    /// </summary>
+    public async Task<SignInResult> ReauthenticateAsync(BuyerPrincipal who, string password, string clientIp, CancellationToken ct)
+    {
+        var addressKey = gateKeys.Address(AuthValidation.NormaliseEmail(who.Email));
+        var ipKey = gateKeys.Ip(clientIp);
+        var claim = await gate.ClaimAsync(addressKey, ipKey, ct);
+        if (!claim.Allowed) return new SignInResult(SignInStatus.TooManyAttempts, RetryAfterSeconds: claim.RetryAfterSeconds);
+        var hash = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null).Select(a => a.PasswordHash).FirstOrDefaultAsync(ct);
+        if (hash is null) { passwords.BurnTime(password); return new SignInResult(SignInStatus.InvalidCredentials); }
+        if (!passwords.Verify(hash, password).Ok) return new SignInResult(SignInStatus.InvalidCredentials);
+        await gate.SucceededAsync(addressKey, ipKey, ct);
+        var now = Now;
+        await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.AuthenticatedAt, now), ct);
+        return new SignInResult(SignInStatus.Ok);
+    }
+
+    /// <summary>
+    /// Swaps the session token for a new one and revokes the old, so the web server can rotate after failures and a replayed old cookie dies. The new session keeps
+    /// the old one's absolute expiry and its <c>authenticated_at</c>: rotating neither lengthens a session nor counts as proving the password. The revoke is the
+    /// claim (one UPDATE), so two parallel rotations of one token give one new session. Null when the session is already gone.
+    /// </summary>
+    public async Task<string?> RotateSessionAsync(BuyerPrincipal who, CancellationToken ct)
+    {
+        var now = Now;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var claimed = await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        if (claimed != 1) return null;
+        var old = await db.BuyerSessions.AsNoTracking().Where(s => s.Id == who.SessionId).Select(s => new { s.AbsoluteExpiresAt, s.AuthenticatedAt }).FirstAsync(ct);
+        var token = Tokens.New();
+        db.BuyerSessions.Add(new BuyerSession
+        {
+            Id = Guid.NewGuid(), AccountId = who.AccountId, TokenHash = Tokens.Hash(token), CreatedAt = now, LastSeenAt = now, AuthenticatedAt = old.AuthenticatedAt,
+            ExpiresAt = Min(now.AddDays(Math.Max(1, O.SessionIdleDays)), old.AbsoluteExpiresAt), AbsoluteExpiresAt = old.AbsoluteExpiresAt,
+        });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return token;
+    }
+
     public async Task<string> CreateSessionAsync(Guid accountId, CancellationToken ct)
     {
         var now = Now;
