@@ -108,10 +108,8 @@ public sealed class CartReviewTests : IDisposable
                 Add(Variant("kiddush-cup-pewter"), 1, guest: token),
                 Add(Variant("kiddush-cup-pewter"), 1, guest: token));
             Assert.All(results, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
-            // every 200 add is somewhere: in the buyer's cart (it won) or in a fresh guest cart (it came after the merge); the totals must add up
-            var stored = Items(await View(bearer: buyer));
-            var guestLeft = (await _k.Db(db => db.CartLines.Where(l => l.Cart == null || true).SumAsync(l => l.Quantity)));
-            Assert.True(guestLeft >= stored);
+            // every 200 add is stored somewhere (the buyer's cart, or a fresh guest cart when it came after the merge): 1 + 1 + 1 units in all, none lost, none duplicated
+            Assert.Equal(3, await _k.Db(db => db.CartLines.SumAsync(l => l.Quantity)));
             await _k.Db(db => db.CartLines.ExecuteDeleteAsync());
             await _k.Db(db => db.Carts.ExecuteDeleteAsync());
             buyer = await _k.VerifiedSession($"race2-{round}@example.com");
@@ -129,9 +127,12 @@ public sealed class CartReviewTests : IDisposable
         Assert.Equal(10, results.Count(r => r.StatusCode == HttpStatusCode.UnprocessableEntity));
         Assert.Equal(50, LineCount(await View(guest: token)));
         Assert.Equal(50, await _k.Db(db => db.CartLines.CountAsync()));
-        var over = await Body(await Add(_extra[55], guest: token), HttpStatusCode.UnprocessableEntity);
+        // which variants made it in is the race's business; any variant that is NOT in the cart must now be refused, and one that is may still gain units
+        var inCart = (await View(guest: token)).GetProperty("groups").EnumerateArray().SelectMany(g => g.GetProperty("lines").EnumerateArray()).Select(l => l.GetProperty("variantId").GetGuid()).ToHashSet();
+        var absent = _extra.First(v => !inCart.Contains(v));
+        var over = await Body(await Add(absent, guest: token), HttpStatusCode.UnprocessableEntity);
         Assert.Equal("cart_full", over.GetProperty("code").GetString());
-        Assert.Equal(HttpStatusCode.OK, (await Add(_extra[0], guest: token)).StatusCode);   // another unit of a variant already in the cart is not a new line
+        Assert.Equal(HttpStatusCode.OK, (await Add(inCart.First(), guest: token)).StatusCode);   // another unit of a variant already in the cart is not a new line
     }
 
     [Fact]
@@ -195,11 +196,11 @@ public sealed class CartReviewTests : IDisposable
         var f = CatalogKit.Fixture(_k.F);
         var token = (await Body(await Add(Variant("challah-classic", 1)))).GetProperty("cartToken").GetString()!;     // Large
         await Add(Variant("kiddush-cup-pewter"), 1, guest: token);
-        await Add(Variant("challah-whole-wheat"), 1, guest: token);
+        await Add(Variant("roasting-chicken"), 1, guest: token);
         await Add(Variant("rugelach-assorted"), 1, guest: token);
         f.Upsert(CatalogKit.ListingId("challah-classic"), l => l with { Variants = l.Variants.Where(x => x.Name != "Large").ToList() });                // the variant is removed
         f.Upsert(CatalogKit.ListingId("kiddush-cup-pewter"), l => l with { Type = "service" });                                                               // a product that became a service
-        f.Upsert(CatalogKit.ListingId("challah-whole-wheat"), l => l with { Seller = l.Seller with { Active = false } });                                      // a suspended seller
+        f.Upsert(CatalogKit.ListingId("roasting-chicken"), l => l with { Seller = l.Seller with { Active = false } });                                      // a suspended seller
         await CatalogKit.Sync(_k.F);
         var v = await View(guest: token);
         var lines = v.GetProperty("groups").EnumerateArray().SelectMany(g => g.GetProperty("lines").EnumerateArray()).ToList();
@@ -258,7 +259,7 @@ public sealed class CartReviewTests : IDisposable
         for (var i = 45; i < 55; i++) Assert.Equal(HttpStatusCode.OK, (await Add(_extra[i], 1, guest: token)).StatusCode);
         var merged = await Body(await Send(HttpMethod.Post, "/api/v1/cart/merge", new { guestToken = token }, bearer: buyer));
         Assert.Equal(50, LineCount(merged));                                                         // 45 + the overlap (quantity added) + 5 new ones; the other 5 do not fit
-        Assert.Equal(51, Items(merged) - 0 > 0 ? 51 : 0);
+        Assert.Equal(51, Items(merged));                                                             // 45 + 1 more of the overlapping variant + 5 new lines
         Assert.Equal(0, Items(await View(guest: token)));
     }
 
@@ -287,7 +288,7 @@ public sealed class CartReviewTests : IDisposable
     public async Task Cart_and_checkout_answers_are_private_and_never_stored_also_when_refused()
     {
         var token = (await Send(HttpMethod.Post, "/api/v1/cart/lines", new { variantId = Variant("challah-classic") }));
-        Assert.Equal("private, no-store", token.Headers.CacheControl!.ToString());
+        Assert.True(token.Headers.CacheControl is { NoStore: true, Private: true });
         foreach (var r in new[]
         {
             await Send(HttpMethod.Get, "/api/v1/cart"),
@@ -298,6 +299,6 @@ public sealed class CartReviewTests : IDisposable
             await Send(HttpMethod.Post, "/api/v1/checkout", new { }),                                            // 401
             await Send(HttpMethod.Get, "/api/v1/checkout/orders/MP-1"),
         })
-            Assert.Equal("private, no-store", r.Headers.CacheControl?.ToString());
+            Assert.True(r.Headers.CacheControl is { NoStore: true, Private: true }, $"{(int)r.StatusCode} {r.Headers.CacheControl}");
     }
 }

@@ -207,7 +207,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
                           select new
                           {
                               cl.Id, ListingId = v == null ? cl.ListingId : v.ListingId, cl.VariantId, cl.Quantity, cl.SeenUnitPriceCents,
-                              VName = v == null ? null : v.Name, v.PriceCents, v.CompareAtCents, VAvail = v != null && v.Available,
+                              VName = v == null ? null : v.Name, PriceCents = v == null ? 0L : v.PriceCents, CompareAtCents = v == null ? null : v.CompareAtCents, VAvail = v != null && v.Available,
                               LTitle = l == null ? null : l.Title, LSlug = l == null ? null : l.Slug, LVisible = l != null && l.Visible, LType = l == null ? null : l.Type,
                               Currency = l == null ? null : l.Currency, SellerId = l == null ? Guid.Empty : l.SellerId, BrandId = l == null ? Guid.Empty : l.BrandId,
                               SellerActive = s != null && s.Active, SName = s == null ? null : s.DisplayName, BName = b == null ? null : b.Name,
