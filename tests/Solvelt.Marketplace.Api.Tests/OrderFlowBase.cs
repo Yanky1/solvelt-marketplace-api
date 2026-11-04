@@ -132,7 +132,7 @@ public abstract class OrderFlowBase : IDisposable
     }
 
     protected async Task Drain() { while (await _k.Dispatch() > 0) { } }
-    protected Task<MarketplaceOrder> Order(string number) => _k.Db(db => db.Orders.AsNoTracking().Include(o => o.Groups).Include(o => o.Lines).SingleAsync(o => o.Number == number));
+    protected Task<MarketplaceOrder> Order(string number) => _k.Db(db => db.Orders.AsNoTracking().Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().SingleAsync(o => o.Number == number));
     protected IReadOnlyList<ReceivedCall> Portal(string path) => _k.F.Portal.VerifiedCalls.Where(c => c.PathAndQuery == "/api/internal/v1/" + path).ToList();
     protected Task<int> Outbox(string type) => _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == type));
 }

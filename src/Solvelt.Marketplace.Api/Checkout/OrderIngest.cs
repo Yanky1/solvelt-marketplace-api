@@ -25,7 +25,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         try { p = message.Payload is null ? null : JsonSerializer.Deserialize<Payload>(message.Payload, PortalJson.Options); }
         catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
         if (p is null) return OutboxResult.Dead("invalid_payload");
-        var order = await db.Orders.Include(o => o.Groups).Include(o => o.Lines).FirstOrDefaultAsync(o => o.Id == p.OrderId, ct);
+        var order = await db.Orders.Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().FirstOrDefaultAsync(o => o.Id == p.OrderId, ct);
         if (order is null) return OutboxResult.Dead("order_missing");
         if (order.Status != OrderStatus.Paid) return OutboxResult.Delivered();   // already placed, or failed and refunded: nothing left to do
 
