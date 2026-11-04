@@ -25,13 +25,13 @@ public static class NotificationEndpoints
 
     private static IResult Private(IResult r, HttpContext ctx) { ctx.Response.Headers.CacheControl = "private, no-store"; return r; }
 
-    private static async Task<IResult> List(HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, CancellationToken ct)
+    private static async Task<IResult> List(HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, Guid? beforeId, CancellationToken ct)
     {
         var buyer = ctx.Buyer();
         var take = Math.Clamp(limit ?? 20, 1, 50);
         var q = db.Notifications.AsNoTracking().Where(n => n.AccountId == buyer.AccountId);
         var unread = await q.CountAsync(n => n.ReadAt == null, ct);
-        if (before is { } b) q = q.Where(n => n.CreatedAt < b);
+        if (before is { } b) q = beforeId is { } bid ? q.Where(n => n.CreatedAt < b || (n.CreatedAt == b && n.Id.CompareTo(bid) < 0)) : q.Where(n => n.CreatedAt < b);
         var rows = await q.OrderByDescending(n => n.CreatedAt).ThenByDescending(n => n.Id).Take(take + 1).ToListAsync(ct);
         var page = rows.Take(take).ToList();
         return Private(Results.Json(new
@@ -42,7 +42,7 @@ public static class NotificationEndpoints
                 id = n.Id, kind = n.Kind, category = NotificationKinds.CategoryOf(n.Kind), orderNumber = n.OrderNumber, sellerOrderNumber = n.SellerOrderNumber,
                 parameters = n.ParamsJson is null ? (System.Text.Json.JsonElement?)null : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(n.ParamsJson), createdAt = n.CreatedAt, read = n.ReadAt != null,
             }),
-            next = rows.Count > take ? page[^1].CreatedAt : (DateTimeOffset?)null,
+            next = rows.Count > take ? new { before = page[^1].CreatedAt, beforeId = page[^1].Id } : null,
         }), ctx);
     }
 

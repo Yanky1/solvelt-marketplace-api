@@ -14,7 +14,7 @@ namespace Solvelt.Marketplace.Api.Fulfilment;
 /// shipment facts (a parcel exists, was delivered, was voided) and line counters are monotonic and additive, so they apply even when the status step is skipped.
 /// The aggregate key is per SELLER order (<c>MP-…/&lt;sellerOrderId&gt;</c>): cancelling one seller order never blocks another.
 /// </summary>
-public static class FulfilmentProjector
+public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portal, ILogger<FulfilmentProjector> log)
 {
     public const string Accepted = "order.accepted", Held = "order.held", Resumed = "order.resumed", Shipped = "order.shipped", Tracking = "order.tracking_updated",
         Delivered = "order.delivered", Cancelled = "order.cancelled", ShipmentDelivered = "shipment.delivered", ShipmentVoided = "shipment.voided",
@@ -24,11 +24,38 @@ public static class FulfilmentProjector
     /// <summary>The types <see cref="FulfilmentHandler"/> owns. <c>order.cancelled</c> and <c>refund.issued</c> belong to M3's money handler, which calls <see cref="ApplyAsync"/> itself (one handler per type).</summary>
     public static readonly string[] OwnTypes = [Accepted, Held, Resumed, Shipped, Tracking, Delivered, ShipmentDelivered, ShipmentVoided, CancellationDecided, ReturnDecided, ReturnReceived, LabelCreated, AttemptFailed, MethodChanged];
 
+    /// <summary>
+    /// Runs <see cref="ApplyAsync"/> for an event whose MONEY part (M3) is already in this transaction, in a savepoint: if the projection fails for any reason, only the projection is rolled back
+    /// (and its tracked changes dropped), the money part still commits and the event is acked. The failure is logged by type only (payloads can hold personal data).
+    /// </summary>
+    public async Task ApplyIsolatedAsync(ProjectionContext c, bool refundMoneyMoved, CancellationToken ct)
+    {
+        var tx = c.Db.Database.CurrentTransaction;
+        if (tx is null || !tx.SupportsSavepoints) { await ApplyAsync(c, ct, refundMoneyMoved); return; }
+        await c.Db.SaveChangesAsync(ct);   // the money part is flushed first: nothing after this point can undo it
+        const string name = "m5_projection";
+        await tx.CreateSavepointAsync(name, ct);
+        try
+        {
+            await ApplyAsync(c, ct, refundMoneyMoved);
+            await c.Db.SaveChangesAsync(ct);   // errors surface here, inside the savepoint
+            await tx.ReleaseSavepointAsync(name, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await tx.RollbackToSavepointAsync(name, CancellationToken.None);
+            foreach (var e in c.Db.ChangeTracker.Entries().Where(e => e.State != Microsoft.EntityFrameworkCore.EntityState.Unchanged).ToList())
+                e.State = Microsoft.EntityFrameworkCore.EntityState.Detached;
+            log.LogError("The order projection of a {Type} event failed ({ExceptionType}); the money part was kept", c.Event.Type, ex.GetType().FullName);
+        }
+    }
+
     public static string AggregateKey(string marketplaceOrderId, Guid sellerOrderId) => $"{marketplaceOrderId}/{sellerOrderId:D}";
 
     /// <param name="refundMoneyMoved">False when M3's money part refused a <c>refund.issued</c> (over the cap, unpaid): then the buyer is not told about a refund that did not happen.</param>
-    public static async Task<HandlerOutcome> ApplyAsync(ProjectionContext c, CancellationToken ct, bool refundMoneyMoved = true)
+    public async Task<HandlerOutcome> ApplyAsync(ProjectionContext c, CancellationToken ct, bool refundMoneyMoved = true)
     {
+        if (c.Event.Type == RefundIssued && !refundMoneyMoved) return HandlerOutcome.Skipped("no money moved");   // counts and the 'refunded' state follow only a refund we really reserved
         var data = c.Event.Data;
         var oref = EventRefs.Order(data);
         if (oref is null) return HandlerOutcome.Skipped("order reference missing");
@@ -58,6 +85,8 @@ public static class FulfilmentProjector
         }
         HandlerOutcome Done(bool applied, string why) => applied ? HandlerOutcome.Applied() : HandlerOutcome.Skipped(why);
         // The buyer's notification (and its email, queued in the same transaction), once per event and kind.
+        // Side facts (returns, labels, tracking, attempts) have their OWN aggregates: an order's terminal state (delivered) must not freeze them, the portal allows Delivered -> ReturnRequested.
+        Task<bool> Side(string sub, string fieldGroup) => c.AdvanceAsync("order-side", $"{key}/{sub}", fieldGroup, null, ct);
         void Tell(string kind, object? parameters) => Notifier.Add(c.Db, new OutboxWriter(c.Db, c.Time), c.Time, order, group, kind, c.Event.Id, parameters);
 
         switch (c.Event.Type)
@@ -74,18 +103,19 @@ public static class FulfilmentProjector
             {
                 var sh = await ShipmentAsync(c, group, Str(data, "shipmentId"));
                 if (sh is null) return HandlerOutcome.Skipped("shipment id missing");
-                sh.Carrier = Cap(Str(data, "carrier"), 100) ?? sh.Carrier;
-                sh.Service = Cap(Str(data, "service"), 100) ?? sh.Service;
-                sh.TrackingNumber = Cap(Str(data, "trackingNumber"), 100) ?? sh.TrackingNumber;
-                sh.TrackingUrl = SafeUrl(Str(data, "trackingUrl")) ?? sh.TrackingUrl;
-                sh.Method = string.Equals(Str(data, "carrier"), "Local", StringComparison.OrdinalIgnoreCase) || Str(data, "method") == "local" ? "local" : sh.Method;
+                // A shipped event only FILLS what is empty: an older one arriving late must not overwrite newer tracking data.
+                sh.Carrier ??= Cap(Str(data, "carrier"), 100);
+                sh.Service ??= Cap(Str(data, "service"), 100);
+                sh.TrackingNumber ??= Cap(Str(data, "trackingNumber"), 100);
+                sh.TrackingUrl ??= SafeUrl(Str(data, "trackingUrl"));
+                if (string.Equals(Str(data, "carrier"), "Local", StringComparison.OrdinalIgnoreCase) || Str(data, "method") == "local") sh.Method = "local";
                 sh.ShippedAt ??= Time(data, "shippedAt") ?? now;
                 sh.UpdatedAt = now;
                 if (data.TryGetProperty("lines", out var ls) && ls.ValueKind == JsonValueKind.Array)
                     foreach (var l in ls.EnumerateArray())
                     {
                         var mlid = Str(l, "marketplaceLineId");
-                        if (mlid is null || lines.All(x => x.MarketplaceLineId != mlid) || !l.TryGetProperty("quantity", out var q) || !q.TryGetInt32(out var qty) || qty <= 0) continue;
+                        if (mlid is null || lines.All(x => x.MarketplaceLineId != mlid) || Int(l, "quantity") is not { } qty || qty <= 0) continue;
                         var existing = await c.Db.OrderShipmentLines.FindAsync([sh.Id, mlid], ct);
                         if (existing is null) c.Db.OrderShipmentLines.Add(new OrderShipmentLine { ShipmentId = sh.Id, MarketplaceLineId = mlid, Quantity = qty });
                         else existing.Quantity = qty;
@@ -93,14 +123,17 @@ public static class FulfilmentProjector
                 await c.Db.SaveChangesAsync(ct);
                 await RecomputeShippedAsync(c.Db, group.Id, lines, ct);
                 var partial = data.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
-                if (await Step("status", partial ? FulfilmentStatus.PartiallyShipped : FulfilmentStatus.Shipped)) { state.ShippedAt ??= sh.ShippedAt; Tell(NotificationKinds.OrderShipped, new { carrier = sh.Carrier, partial }); }
+                state.ShippedAt ??= sh.ShippedAt;   // a fact, even when the status step is skipped (shipped arriving after delivered)
+                if (await Step("status", partial ? FulfilmentStatus.PartiallyShipped : FulfilmentStatus.Shipped)) { Tell(NotificationKinds.OrderShipped, new { carrier = sh.Carrier, partial }); }
                 return HandlerOutcome.Applied();   // the parcel itself is recorded even when the status step was skipped
             }
             case Tracking:
             {
+                if (Str(data, "kind") == "return") return HandlerOutcome.Skipped("return parcel");   // the return's own tracking is not a forward shipment
                 var sh = await ShipmentAsync(c, group, Str(data, "shipmentId"));
                 if (sh is null) return HandlerOutcome.Skipped("shipment id missing");
-                if (!await c.AdvanceAsync("order", key, "tracking:" + sh.PortalShipmentId, null, ct)) return HandlerOutcome.Skipped("older or terminal");
+                if (sh.DeliveredAt is not null) return HandlerOutcome.Skipped("shipment already delivered");   // a late in-transit scan after delivery
+                if (!await Side("ship:" + sh.PortalShipmentId, "tracking")) return HandlerOutcome.Skipped("older");
                 var wasOut = sh.TrackingStatus == "out_for_delivery";
                 sh.Carrier = Cap(Str(data, "carrier"), 100) ?? sh.Carrier;
                 sh.TrackingNumber = Cap(Str(data, "trackingNumber"), 100) ?? sh.TrackingNumber;
@@ -121,7 +154,7 @@ public static class FulfilmentProjector
                 if (data.TryGetProperty("events", out var evs) && evs.ValueKind == JsonValueKind.Array) sh.TrackingEventsJson = TimelineJson(evs) ?? sh.TrackingEventsJson;
                 // The position exists only while the buyer's stop is next. Anything else (another status, or an event without one) clears it: it is never carried over.
                 if (Str(data, "status") == "out_for_delivery" && data.TryGetProperty("position", out var pos) && pos.ValueKind == JsonValueKind.Object
-                    && pos.TryGetProperty("lat", out var la) && la.TryGetDouble(out var lat) && pos.TryGetProperty("lng", out var ln) && ln.TryGetDouble(out var lng)
+                    && Dbl(pos, "lat") is { } lat && Dbl(pos, "lng") is { } lng
                     && lat is >= -90 and <= 90 && lng is >= -180 and <= 180)
                 { sh.PositionLat = Math.Round(lat, 3); sh.PositionLng = Math.Round(lng, 3); sh.PositionAt = Time(data, "occurredAt") is { } oc && oc <= now ? oc : now; }
                 else { sh.PositionLat = sh.PositionLng = null; sh.PositionAt = null; }
@@ -131,6 +164,7 @@ public static class FulfilmentProjector
             }
             case ShipmentDelivered:
             {
+                if (Str(data, "kind") == "return") return HandlerOutcome.Skipped("return parcel");
                 var sh = await ShipmentAsync(c, group, Str(data, "shipmentId"));
                 if (sh is null) return HandlerOutcome.Skipped("shipment id missing");
                 sh.DeliveredAt ??= Time(data, "deliveredAt") ?? now;
@@ -139,7 +173,7 @@ public static class FulfilmentProjector
                 if (data.TryGetProperty("proof", out var proof) && proof.ValueKind == JsonValueKind.Object && ProofPaths(proof) is { Count: > 0 } paths)
                 {
                     // links are short-lived (the portal says expiresInMinutes, 60 by default): kept no longer than that, counted from now (our clock, never the event's)
-                    var minutes = proof.TryGetProperty("expiresInMinutes", out var em) && em.TryGetInt32(out var m) ? Math.Clamp(m, 1, 120) : 60;
+                    var minutes = Int(proof, "expiresInMinutes") is { } m ? Math.Clamp(m, 1, 120) : 60;
                     sh.ProofJson = JsonSerializer.Serialize(paths);
                     sh.ProofExpiresAt = now.AddMinutes(minutes);
                 }
@@ -167,7 +201,6 @@ public static class FulfilmentProjector
                 var partial = data.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
                 if (partial)
                 {
-                    if (!await c.AdvanceAsync("order", key, "cancel-remainder", null, ct)) return HandlerOutcome.Skipped("older or terminal");
                     await AddCountsAsync(c.Db, data, lines, (f, q) => f.CancelledQty += q, ct);
                     return HandlerOutcome.Applied();
                 }
@@ -185,7 +218,7 @@ public static class FulfilmentProjector
             }
             case CancellationDecided:
             {
-                if (!await c.AdvanceAsync("order", key, "cancellation", null, ct)) return HandlerOutcome.Skipped("older or terminal");
+                if (!await Side("cancellation", "decision")) return HandlerOutcome.Skipped("older");
                 var rid = Str(data, "requestId");
                 var req = rid is null ? null : await c.Db.OrderCancelRequests.FirstOrDefaultAsync(r => r.RequestId == rid && r.GroupId == group.Id, ct);
                 if (req is null) return HandlerOutcome.Skipped("unknown cancel request");
@@ -196,8 +229,8 @@ public static class FulfilmentProjector
                 return await ReturnEventAsync(c, group, key, lines, now, Tell, ct);
             case AttemptFailed:
             {
-                if (!await c.AdvanceAsync("order", key, "attempts", null, ct)) return HandlerOutcome.Skipped("older or terminal");
-                var attempt = data.TryGetProperty("attempt", out var a) && a.TryGetInt32(out var n) ? n : state.DeliveryAttemptsFailed + 1;
+                if (!await Side("attempts", "n")) return HandlerOutcome.Skipped("older");
+                var attempt = Int(data, "attempt") ?? state.DeliveryAttemptsFailed + 1;
                 state.DeliveryAttemptsFailed = Math.Max(state.DeliveryAttemptsFailed, Math.Clamp(attempt, 0, 100));   // a number, not a counter: replays cannot inflate it
                 state.LastAttemptFailedAt = Time(data, "occurredAt") ?? now;
                 Tell(NotificationKinds.DeliveryAttemptFailed, null);
@@ -207,7 +240,7 @@ public static class FulfilmentProjector
             }
             case MethodChanged:
             {
-                if (!await c.AdvanceAsync("order", key, "method", null, ct)) return HandlerOutcome.Skipped("older or terminal");
+                if (!await Side("method", "m")) return HandlerOutcome.Skipped("older");
                 if (Str(data, "method") == "local") state.DeliveryMethodChangedTo = "local";
                 state.UpdatedAt = now;
                 return HandlerOutcome.Applied();
@@ -222,21 +255,21 @@ public static class FulfilmentProjector
                     if (ret is not null && ret.Status == ReturnStatus.Received) { ret.Status = ReturnStatus.Refunded; ret.UpdatedAt = now; }
                 }
                 if (full) await Step("status", FulfilmentStatus.Refunded, TerminalStates.Refunded);
-                if (refundMoneyMoved) Tell(NotificationKinds.RefundIssued, new { amountCents = (data.TryGetProperty("amountCents", out var ac) && ac.TryGetInt64(out var a1) ? a1 : 0) + (data.TryGetProperty("shippingCents", out var sc) && sc.TryGetInt64(out var s1) ? s1 : 0), full });
+                if (refundMoneyMoved) Tell(NotificationKinds.RefundIssued, new { amountCents = (Long(data, "amountCents") ?? 0) + (Long(data, "shippingCents") ?? 0), full });
                 return HandlerOutcome.Applied();
             }
             default: return HandlerOutcome.Skipped("not a fulfilment event");
         }
     }
 
-    private static async Task<HandlerOutcome> ReturnEventAsync(ProjectionContext c, OrderGroup group, string key, List<OrderLine> lines, DateTimeOffset now, Action<string, object?> tell, CancellationToken ct)
+    private async Task<HandlerOutcome> ReturnEventAsync(ProjectionContext c, OrderGroup group, string key, List<OrderLine> lines, DateTimeOffset now, Action<string, object?> tell, CancellationToken ct)
     {
         var data = c.Event.Data;
         var rid = Str(data, "returnId");
         var ret = rid is null ? null : await c.Db.OrderReturns.Include(r => r.Lines).FirstOrDefaultAsync(r => r.ReturnId == rid && r.GroupId == group.Id, ct);
         if (ret is null) return HandlerOutcome.Skipped("unknown return");   // matched on OUR return id AND the seller order, so another seller's event cannot touch it
-        var fieldGroup = (c.Event.Type == LabelCreated ? "label:" : "return:") + ret.ReturnId;
-        if (!await c.AdvanceAsync("order", key, fieldGroup, null, ct)) return HandlerOutcome.Skipped("older or terminal");
+        // the return has its own aggregate: it goes on after the order is delivered (Delivered -> ReturnRequested is legal at the portal)
+        if (!await c.AdvanceAsync("order-side", $"{key}/return:{ret.ReturnId}", c.Event.Type == LabelCreated ? "label" : "return", null, ct)) return HandlerOutcome.Skipped("older");
         switch (c.Event.Type)
         {
             case ReturnDecided when Str(data, "decision") == "approved" && ret.Status is ReturnStatus.Pending or ReturnStatus.Requested:
@@ -252,9 +285,9 @@ public static class FulfilmentProjector
                 tell(NotificationKinds.ReturnReceived, null);
                 break;
             case LabelCreated:
-                var url = SafeUrl(Str(data, "labelUrl"));
+                var url = LabelLinks.Valid(Str(data, "labelUrl"), LabelLinks.Origin(portal.Value), now);
                 var exp = Time(data, "labelUrlExpiresAt");
-                if (url is null || exp is null || exp <= now) break;   // never keep a link that is already dead
+                if (url is null || exp is null || exp <= now) break;   // never keep a link that is dead or not on the portal's origin
                 ret.LabelUrl = url; ret.LabelUrlExpiresAt = exp;
                 ret.LabelCarrier = Cap(Str(data, "carrier"), 100); ret.LabelTrackingNumber = Cap(Str(data, "trackingNumber"), 100); ret.LabelTrackingUrl = SafeUrl(Str(data, "trackingUrl"));
                 tell(NotificationKinds.ReturnLabelReady, null);
@@ -295,7 +328,7 @@ public static class FulfilmentProjector
         foreach (var l in ls.EnumerateArray())
         {
             var line = lines.FirstOrDefault(x => x.MarketplaceLineId == Str(l, "marketplaceLineId"));
-            if (line is null || !l.TryGetProperty("quantity", out var q) || !q.TryGetInt32(out var qty) || qty <= 0) continue;
+            if (line is null || Int(l, "quantity") is not { } qty || qty <= 0) continue;
             var f = await db.OrderLineFulfilments.FindAsync([line.Id], ct);
             if (f is not null) add(f, Math.Min(qty, line.Quantity));
         }
@@ -331,6 +364,11 @@ public static class FulfilmentProjector
         return list.Count == 0 || json.Length > 8000 ? null : json;
     }
 
+    /// <summary>Numbers are read only when the value IS a number: <c>TryGetInt32</c> on a string would throw and fail the whole webhook (M5 review H2).</summary>
+    internal static int? Int(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var x) ? x : null;
+    internal static long? Long(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var x) ? x : null;
+    internal static double? Dbl(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var x) ? x : null;
+
     internal static string? Str(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     internal static string? Cap(string? s, int max) => string.IsNullOrWhiteSpace(s) ? null : s.Length <= max ? s : s[..max];
     internal static DateTimeOffset? Time(JsonElement d, string n) => Str(d, n) is { } s && DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var t) ? t.ToUniversalTime() : null;
@@ -338,11 +376,32 @@ public static class FulfilmentProjector
     internal static string? SafeUrl(string? s) => s is { Length: > 0 and <= 1000 } && Uri.TryCreate(s, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps ? s : null;
 }
 
-/// <summary>The handler for the fulfilment event types nobody else owns.</summary>
-public sealed class FulfilmentHandler : IProjectionHandler
+/// <summary>The handler for the fulfilment event types nobody else owns. A failure of the projection of ONE event is isolated in a savepoint (see <see cref="FulfilmentProjectorGuard"/>) only when it runs inside M3's money handler; here the event is simply retried.</summary>
+public sealed class FulfilmentHandler(FulfilmentProjector projector) : IProjectionHandler
 {
     public IReadOnlyCollection<string> EventTypes { get; } = FulfilmentProjector.OwnTypes;
-    public Task<HandlerOutcome> HandleAsync(ProjectionContext context, CancellationToken ct) => FulfilmentProjector.ApplyAsync(context, ct);
+    public Task<HandlerOutcome> HandleAsync(ProjectionContext context, CancellationToken ct) => projector.ApplyAsync(context, ct);
+}
+
+/// <summary>
+/// Portal-given label links: only the portal's own public origin, only the label path, only while alive (<c>exp</c> in the link and the stated expiry). A link anywhere else is never
+/// stored or shown (it would be a phishing target in the buyer's own account page).
+/// </summary>
+public static class LabelLinks
+{
+    public const string PathPrefix = "/api/v1/shipping/public/labels/";
+
+    public static string? Origin(Infrastructure.PortalOptions o)
+        => Uri.TryCreate(string.IsNullOrWhiteSpace(o.PublicBaseUrl) ? o.BaseUrl : o.PublicBaseUrl, UriKind.Absolute, out var u) ? u.GetLeftPart(UriPartial.Authority) : null;
+
+    public static string? Valid(string? url, string? origin, DateTimeOffset now)
+    {
+        if (url is not { Length: > 0 and <= 1000 } || origin is null || !Uri.TryCreate(url, UriKind.Absolute, out var u)) return null;
+        if (!string.Equals(u.GetLeftPart(UriPartial.Authority), origin, StringComparison.OrdinalIgnoreCase) || u.Scheme != Uri.UriSchemeHttps && !origin.StartsWith("http://localhost", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!u.AbsolutePath.StartsWith(PathPrefix, StringComparison.Ordinal) || u.AbsolutePath.Contains("..") || !string.IsNullOrEmpty(u.Fragment)) return null;
+        var q = System.Web.HttpUtility.ParseQueryString(u.Query);
+        return long.TryParse(q["exp"], out var exp) && DateTimeOffset.FromUnixTimeSeconds(exp) > now ? url : null;
+    }
 }
 
 public static class FulfilmentLines

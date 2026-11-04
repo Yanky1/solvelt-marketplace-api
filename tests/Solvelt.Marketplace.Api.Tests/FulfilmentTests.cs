@@ -25,10 +25,13 @@ public sealed class FulfilmentTests : OrderFlowBase
             if (c.PathAndQuery.EndsWith("/cancel-requests")) return FakePortal.Json(HttpStatusCode.OK, Answer(_cancelAnswer));
             if (c.PathAndQuery.EndsWith("/return-requests")) return FakePortal.Json(HttpStatusCode.OK, Answer(_returnAnswer));
             if (c.PathAndQuery.EndsWith("/delivery-confirmations")) return FakePortal.Json(HttpStatusCode.OK, Answer(_deliveryAnswer));
-            if (c.PathAndQuery.EndsWith("/label-link")) return FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new { labelUrl = "https://portal.test/label/1?sig=x", labelUrlExpiresAt = _k.F.Clock.GetUtcNow().AddHours(24), trackingNumber = "T1", carrier = "USPS" }));
+            if (c.PathAndQuery.EndsWith("/label-link")) return FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new { labelUrl = Label("L1", _k.F.Clock.GetUtcNow().AddHours(24)), labelUrlExpiresAt = _k.F.Clock.GetUtcNow().AddHours(24), trackingNumber = "T1", carrier = "USPS" }));
             return null;
         };
     }
+
+    /// <summary>A return-label link as the portal makes it: its public origin, the label path, an <c>exp</c> and a signature (SHIPPING.md §5).</summary>
+    internal string Label(string id, DateTimeOffset exp) => $"https://portal.test/api/v1/shipping/public/labels/{id}?exp={exp.ToUnixTimeSeconds()}&sig=x";
 
     private async Task<MarketplaceOrder> Placed()
     {
@@ -318,12 +321,12 @@ public sealed class FulfilmentTests : OrderFlowBase
         await Drain();
         Assert.Equal(HttpStatusCode.Conflict, (await Call(HttpMethod.Post, $"/api/v1/orders/{o.Number}/returns/{id}/label-link")).StatusCode);   // not approved yet
         await Evt("return.decided", o, g, new { returnId = id, decision = "approved" });
-        await Evt("return.label_created", o, g, new { returnId = id, labelUrl = "https://portal.test/old", labelUrlExpiresAt = _k.F.Clock.GetUtcNow().AddMinutes(-1), carrier = "USPS" });
+        await Evt("return.label_created", o, g, new { returnId = id, labelUrl = Label("old", _k.F.Clock.GetUtcNow().AddMinutes(-1)), labelUrlExpiresAt = _k.F.Clock.GetUtcNow().AddMinutes(-1), carrier = "USPS" });
         await Evt("return.label_created", o, g, new { returnId = id, labelUrl = "javascript:alert(1)", labelUrlExpiresAt = _k.F.Clock.GetUtcNow().AddHours(1) });
         Assert.Null(await _k.Db(db => db.OrderReturns.Select(r => r.LabelUrl).SingleAsync()));
         var res = await Call(HttpMethod.Post, $"/api/v1/orders/{o.Number}/returns/{id}/label-link");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-        Assert.Equal("https://portal.test/label/1?sig=x", (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("labelUrl").GetString());
+        Assert.StartsWith("https://portal.test/api/v1/shipping/public/labels/L1?exp=", (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("labelUrl").GetString());
         var shown = GroupOf(await Detail(o.Number), g).GetProperty("returns")[0].GetProperty("label");
         Assert.Equal("USPS", shown.GetProperty("carrier").GetString());
         _k.F.Clock.Advance(TimeSpan.FromHours(25));

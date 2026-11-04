@@ -96,6 +96,7 @@ if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedSer
 builder.Services.AddScoped<StripeEventProcessor>();
 builder.Services.AddScoped<IOutboxHandler, OrderIngestHandler>();
 builder.Services.AddSingleton<IProjectionHandler, PortalRefundHandler>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Fulfilment.FulfilmentProjector>();
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Fulfilment.FulfilmentHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeRefundHandler>();
 builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Fulfilment.ProofFetcher>((sp, c) =>
@@ -144,6 +145,14 @@ app.UseMiddleware<ProblemExceptionMiddleware>();
 app.UseMiddleware<StatusProblemMiddleware>();
 app.UseMiddleware<AuthBodyLimitMiddleware>();
 app.UseRateLimiter();
+// Personalised JSON is never cacheable, framework-made 400s (malformed bodies) included: the header is set when the response starts, whatever produced it.
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path;
+    if (path.StartsWithSegments("/api/v1/orders") || path.StartsWithSegments("/api/v1/notifications"))
+        ctx.Response.OnStarting(() => { if (!ctx.Response.Headers.ContainsKey("Cache-Control")) ctx.Response.Headers.CacheControl = "private, no-store"; return Task.CompletedTask; });
+    await next();
+});
 
 if (devLike)
 {
