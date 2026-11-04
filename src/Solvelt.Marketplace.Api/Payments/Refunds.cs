@@ -182,6 +182,22 @@ public sealed class RefundService(MarketplaceDb db, OutboxWriter outbox, TimePro
         return ReserveOutcome.Reserved;
     }
 
+
+    /// <summary>Gives back everything a refund took from the counters (order, seller order, shipping, tax, shipping tax, the units and their tax), exactly as it took them.</summary>
+    public static async Task ReleaseCountersAsync(MarketplaceDb db, OrderRefund refund, CancellationToken ct)
+    {
+        await db.Orders.Where(o => o.Id == refund.OrderId).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - refund.AmountCents), ct);
+        if (refund.GroupId is not { } g) return;
+        await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents)
+            .SetProperty(x => x.RefundedShippingCents, x => x.RefundedShippingCents - refund.ShippingCents).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - refund.TaxCents)
+            .SetProperty(x => x.RefundedShippingTaxCents, x => x.RefundedShippingTaxCents - refund.ShippingTaxCents), ct);
+        foreach (var part in refund.PartsJson is null ? [] : JsonSerializer.Deserialize<List<RefundPart>>(refund.PartsJson) ?? [])
+        {
+            var (id, qty, lt) = (part.LineId, part.Quantity, part.TaxCents);
+            await db.OrderLines.Where(l => l.Id == id).ExecuteUpdateAsync(s => s.SetProperty(l => l.RefundedQuantity, l => l.RefundedQuantity - qty).SetProperty(l => l.RefundedTaxCents, l => l.RefundedTaxCents - lt), ct);
+        }
+    }
+
     public sealed record RefundPart(Guid LineId, int Quantity, long TaxCents);
 
     public sealed record RefundPayload(string Key, int Attempt = 0);
@@ -287,18 +303,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Rejected).SetProperty(r => r.UpdatedAt, now), ct);
         if (changed == 1)
         {
-            await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - refund.AmountCents), ct);
-            if (refund.GroupId is { } g)
-            {
-                await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents)
-                    .SetProperty(x => x.RefundedShippingCents, x => x.RefundedShippingCents - refund.ShippingCents).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - refund.TaxCents)
-                    .SetProperty(x => x.RefundedShippingTaxCents, x => x.RefundedShippingTaxCents - refund.ShippingTaxCents), ct);
-                foreach (var part in refund.PartsJson is null ? [] : JsonSerializer.Deserialize<List<RefundService.RefundPart>>(refund.PartsJson) ?? [])
-                {
-                    var (id, qty, lt) = (part.LineId, part.Quantity, part.TaxCents);
-                    await db.OrderLines.Where(l => l.Id == id).ExecuteUpdateAsync(s => s.SetProperty(l => l.RefundedQuantity, l => l.RefundedQuantity - qty).SetProperty(l => l.RefundedTaxCents, l => l.RefundedTaxCents - lt), ct);
-                }
-            }
+            await RefundService.ReleaseCountersAsync(db, refund, ct);
             if (refund.Reason == "order_failed" && usable == 0) await MailFailedOrderAsync(order, 0, ct);   // the money was already returned another way: say so
             await db.SaveChangesAsync(ct);
         }
