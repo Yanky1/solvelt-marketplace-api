@@ -117,7 +117,7 @@ public class HttpCatalogSourceTests
         Assert.Equal("Hand made", s.Summary);                                                       // no bullets: the first line of the description, markup marks removed
         Assert.Equal((SellerId, BrandId, CategoryId), (s.Seller.Id, s.Brand.Id, s.CategoryId));
         var v = Assert.Single(s.Variants);                                                          // no variants: one buyable line on the listing price
-        Assert.Equal((G(1), 2000L, true), (v.Id, v.PriceCents, v.Available));
+        Assert.Equal((G(1), 2000L, true, true), (v.Id, v.PriceCents, v.Available, v.IsDefault));      // marked synthetic: M3 sends productId with variantId null
     }
 
     [Fact]
@@ -133,6 +133,7 @@ public class HttpCatalogSourceTests
         Assert.Equal(["S / Red", "M", "Standard"], s.Variants.Select(v => v.Name));
         Assert.Equal([true, false, true], s.Variants.Select(v => v.Available));
         Assert.Equal([1850L, 2000L, 2100L], s.Variants.Select(v => v.PriceCents));
+        Assert.All(s.Variants, v => Assert.False(v.IsDefault));                                     // real portal variants are never marked
     }
 
     [Fact]
@@ -314,6 +315,16 @@ public class HttpCatalogSourceTests
         await Run(f, rig.Source);
         Assert.True(CatalogKit.Row(f, G(1)).Visible);
         Assert.Equal("Mug 1 again", CatalogKit.Row(f, G(1)).Title);
+    }
+
+    [Fact]
+    public async Task The_synthetic_default_variant_is_stored_flagged_so_checkout_can_tell_it_from_a_portal_variant()
+    {
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        var rig = PortalFor(f, _ => Page([Doc(1, 10), Doc(2, 10, d => d["variants"] = new object[] { new { variantId = G(50), values = new[] { "S" }, price = new { amountMinor = 2000L, currency = "USD" }, availability = new { state = "in_stock" } } })], "10"));
+        await Run(f, rig.Source);
+        Assert.True(Assert.Single(CatalogKit.Row(f, G(1)).Variants).IsDefault);
+        Assert.False(Assert.Single(CatalogKit.Row(f, G(2)).Variants).IsDefault);
     }
 
     [Fact]

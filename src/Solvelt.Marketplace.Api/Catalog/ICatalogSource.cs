@@ -5,7 +5,8 @@ namespace Solvelt.Marketplace.Api.Catalog;
 
 public sealed record SellerRef(Guid Id, string DisplayName, bool Active);
 public sealed record BrandRef(Guid Id, string Name);
-public sealed record VariantDto(Guid Id, string Name, long PriceCents, long? CompareAtCents, bool Available);
+/// <summary><see cref="IsDefault"/>: a synthetic line for a listing the portal sent with no variants. Its <see cref="Id"/> is the listing id, NOT a portal variant id: an order line for it sends productId with variantId null.</summary>
+public sealed record VariantDto(Guid Id, string Name, long PriceCents, long? CompareAtCents, bool Available, bool IsDefault = false);
 public sealed record ImageDto(Guid Id, int Width, int Height, string Alt);
 public sealed record AttributeDto(string Key, string Value);
 public sealed record FaqDto(string Question, string Answer);

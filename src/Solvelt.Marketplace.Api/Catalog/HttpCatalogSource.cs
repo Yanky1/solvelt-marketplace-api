@@ -126,8 +126,8 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
                         ? string.Join(" / ", vv.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!.Trim()).Where(x => x.Length > 0)) : "";
                     variants.Add(new VariantDto(vid, values.Length > 0 ? values : "Standard", cents, was > cents ? was : null, Available(State(v) ?? listingState)));
                 }
-            if (variants.Count == 0)                                                      // no variants: one buyable line on the listing price (the listing id stands in for the variant)
-                variants.Add(new VariantDto(listingId, "Standard", saleAmount ?? amount, (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) is { } w && w > (saleAmount ?? amount) ? w : null, Available(listingState)));
+            if (variants.Count == 0)                                                      // no variants: one buyable line on the listing price (IsDefault: its id is the listing id, never a portal variant id)
+                variants.Add(new VariantDto(listingId, "Standard", saleAmount ?? amount, (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) is { } w && w > (saleAmount ?? amount) ? w : null, Available(listingState), IsDefault: true));
 
             var images = new List<ImageDto>();
             if (d.TryGetProperty("images", out var ims) && ims.ValueKind == JsonValueKind.Array)

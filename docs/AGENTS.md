@@ -39,6 +39,7 @@ At most 4 workers run at once; the next gate waits for a slot.
 ## Open items for other workstreams (kept here so they are not lost)
 | Item | Owner | Detail |
 |---|---|---|
+| Variant-less listings in orders | M3 | A listing the portal sends with no variants is stored with one synthetic variant (`catalog_variants.IsDefault = true`, id = listing id; M2-18). Order ingest must send `productId` with `variantId: null` for it, never the listing id as a variant id (portal docs/ORDERS.md section 3). The migration must include the `IsDefault` column. |
 | PostgreSQL search schema in the migration | M1 (migration slice) | `InitialCreate` must run `SearchSchema.PostgresDdl` with `migrationBuilder.Sql` (M2-02, M2-13): `pg_trgm`, the function `catalog_tokens_tsvector`, the generated `document` column and both GIN indexes. The database role needs `CREATE EXTENSION`; the database needs a **UTF-8 locale** for typo tolerance in non-Latin text. Launch gate. |
 | Portal C1 additions | orchestrator -> portal | optional `searchTerms` per listing (merged on the portal side, shape to be forwarded); delivery as attribute `delivery` (ships/local/at-home/online) now, explicit `delivery` object with C5 later (reader prefers it, M2-15) |
 | Seller state ordering | portal (C1) | seller state is ordered by listing snapshot time (M2-15); a per-seller version in the feed would be exact |

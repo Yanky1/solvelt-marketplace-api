@@ -114,6 +114,8 @@ public sealed class CatalogVariant
     public long PriceCents { get; set; }
     public long? CompareAtCents { get; set; }
     public bool Available { get; set; }
+    /// <summary>A synthetic line for a listing with no variants at the portal: its id is the listing id and must never be sent to the portal as a variant id.</summary>
+    public bool IsDefault { get; set; }
     public int SortOrder { get; set; }
 }
 
