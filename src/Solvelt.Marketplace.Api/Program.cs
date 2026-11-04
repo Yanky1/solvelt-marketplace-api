@@ -34,6 +34,7 @@ if (!Solvelt.Marketplace.Api.Messaging.AttachmentSanitizer.SelfTest())
     if (!devLike) throw new InvalidOperationException("The image library (SkiaSharp native assets) cannot decode an embedded test image; seller attachments cannot be processed.");
     Console.Error.WriteLine("WARNING: the image library (SkiaSharp native assets) is not working; seller image attachments will be rejected.");
 }
+var startupWarnings = StartupValidator.Warnings(builder.Configuration, builder.Environment);
 builder.Services.Configure<PortalOptions>(o => OptionsSetup.Portal(o, builder.Configuration, devLike));
 builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, builder.Configuration, devLike));
 builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
@@ -172,6 +173,7 @@ builder.Services.AddDbContext<MarketplaceDb>(o =>
 });
 
 var app = builder.Build();
+foreach (var warning in startupWarnings) app.Logger.LogWarning("{Warning}", warning);
 
 // Carts, checkouts, sign-in and the account are personal: never stored by a shared cache or the browser (also on 401 and 429, which is why this runs before the rate limiter).
 app.Use(async (ctx, next) =>

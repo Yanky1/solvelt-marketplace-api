@@ -9,6 +9,14 @@ public sealed class PortalOptions
     public string? InboundSecret { get; set; }
     /// <summary>Verifies portal webhooks (portal: Orders:OutboundSecret).</summary>
     public string? WebhookSecret { get; set; }
+    /// <summary>
+    /// Signs the image downloads (<c>GET /catalog/images/{id}</c>) with a key of their own, distinct from every other key. Until the portal stops accepting the
+    /// inbound key for images (portal <c>Orders:ImageAcceptInboundKey=false</c>) it is optional and image calls fall back to <see cref="InboundSecret"/> with a
+    /// start-up warning; set <see cref="RequireImageKey"/> when the portal has switched.
+    /// </summary>
+    public string? ImageKey { get; set; }
+    /// <summary>Production refuses to start without <see cref="ImageKey"/> (set it when the portal no longer accepts the inbound key for images).</summary>
+    public bool RequireImageKey { get; set; }
     /// <summary>Per-attempt deadline in seconds (contract: at most 30).</summary>
     public int AttemptTimeoutSeconds { get; set; } = 30;
     /// <summary>Days the raw payload of an inbound portal event is kept (parked events: until applied).</summary>

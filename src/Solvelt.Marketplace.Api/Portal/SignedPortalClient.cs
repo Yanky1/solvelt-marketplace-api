@@ -201,7 +201,9 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
     public async Task<PortalImageResult> GetCatalogImageAsync(Guid imageId, CancellationToken ct = default)
     {
         var o = options.Value;
-        if (string.IsNullOrEmpty(o.InboundSecret)) throw new PortalNotConfiguredException("Portal:InboundSecret");
+        // Image downloads have a key of their own once configured; until then (and only then) the inbound key signs them too.
+        var key = string.IsNullOrEmpty(o.ImageKey) ? o.InboundSecret : o.ImageKey;
+        if (string.IsNullOrEmpty(key)) throw new PortalNotConfiguredException("Portal:ImageKey or Portal:InboundSecret");
         if (http.BaseAddress is null) throw new PortalNotConfiguredException("Portal:BaseUrl");
         var path = $"{ApiBase}/catalog/images/{imageId:D}";
         var maxAttempts = Math.Max(1, o.MaxAttempts);
@@ -218,7 +220,7 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
             using var req = new HttpRequestMessage(HttpMethod.Get, path);
             req.Headers.TryAddWithoutValidation(PortalSigning.TimestampHeader, timestamp);
             req.Headers.TryAddWithoutValidation(PortalSigning.NonceHeader, nonce);
-            req.Headers.TryAddWithoutValidation(PortalSigning.SignatureHeader, PortalSigning.Sign(o.InboundSecret, PortalSigning.Canonical(timestamp, nonce, "GET", path, [])));
+            req.Headers.TryAddWithoutValidation(PortalSigning.SignatureHeader, PortalSigning.Sign(key, PortalSigning.Canonical(timestamp, nonce, "GET", path, [])));
             using var deadline = new CancellationTokenSource(attemptTimeout < remaining ? attemptTimeout : remaining, time);
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
             HttpResponseMessage? res = null;
