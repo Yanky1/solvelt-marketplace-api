@@ -365,6 +365,10 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
     }
 
     [Fact]
+    public void G2_The_start_up_self_test_decodes_an_embedded_image_with_the_native_library_that_ships_with_the_app()
+        => Assert.True(AttachmentSanitizer.SelfTest());
+
+    [Fact]
     public void G2_A_huge_picture_is_refused_from_its_header_and_a_big_one_is_scaled_down()
     {
         // a PNG that says it is 20000 x 20000 (400 MP): refused before any pixel is decoded

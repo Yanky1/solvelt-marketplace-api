@@ -27,6 +27,15 @@ public static class AttachmentSanitizer
         return Reject("unsupported_type");
     }
 
+    /// <summary>A 1x1 PNG: the start-up self-test decodes and re-encodes it, so a host without the native image library (SkiaSharp.NativeAssets.Linux.NoDependencies) is found at start, not at the first seller file.</summary>
+    private const string SelfTestPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    public static bool SelfTest()
+    {
+        try { var r = Process(Convert.FromBase64String(SelfTestPng)); return r.ContentType == "image/png" && r.Bytes is { Length: > 0 }; }
+        catch (Exception) { return false; }   // typically DllNotFoundException / TypeInitializationException when the native library is missing
+    }
+
     private static Result Reject(string why) => new(null, null, why);
 
     private static Result Image(byte[] input, string type, SKEncodedImageFormat format)
