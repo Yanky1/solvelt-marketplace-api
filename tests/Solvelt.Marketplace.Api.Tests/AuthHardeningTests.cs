@@ -324,6 +324,19 @@ public class AuthHardeningTests
     }
 
     [Fact]
+    public async Task A_successful_verification_wipes_the_failures_it_collected()
+    {
+        using var k = new AuthKit(NoIpLimit());
+        await k.SignUp(Email);
+        var token = AuthKit.TokenIn((await k.Mail(Email)).Single(), "/verify-email");
+        for (var i = 0; i < 3; i++) Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token, password = Wrong })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token, password = Pw })).StatusCode);
+        // Three failures were carried over, five more would reach the delay if verification had left them behind.
+        for (var i = 0; i < 5; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post(SignIn, new { email = Email, password = Wrong })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await k.Post(SignIn, new { email = Email, password = Pw })).StatusCode);
+    }
+
+    [Fact]
     public async Task Verify_email_answers_a_delayed_valid_token_exactly_like_an_invalid_one()
     {
         using var k = new AuthKit(NoIpLimit());
