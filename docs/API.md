@@ -254,7 +254,7 @@ Portal webhooks (`/api/portal/webhooks`) now also act on `refund.issued` and `or
 
 ## Buyer orders (M5)
 All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Control: private, no-store`, and answer 404 for another buyer's order.
-* `GET /api/v1/orders?limit=1..50&before=<createdAt>` → `{ orders: [{ number, createdAt, totalCents, refundedCents, groups: [{ sellerOrderNumber, sellerName, status, itemCount, firstItem }] }], next }`.
+* `GET /api/v1/orders?limit=1..50&before=<createdAt>&beforeId=<id>` → `{ orders: [{ number, createdAt, totalCents, refundedCents, groups: [{ sellerOrderNumber, sellerName, status, itemCount, firstItem }] }], next }`.
 * `GET /api/v1/orders/{number}` → the order, per seller order: `status` (`processing | new | accepted | on_hold | partially_shipped | shipped | delivered | cancelled | refunded`), lines with `shippedQty/returnableQty/...`, `shipments`, `returns` (with a live `label` only), `cancelRequest`, `refunds` (shown, never moved here), and `canCancel / canReturn / canConfirmDelivery`.
 * `POST /api/v1/orders/{number}/cancel-requests` `{ sellerOrderNumber, reason, note? }` → `202 { requestId, status }`; idempotent (one open request per seller order). `reason`: `changed_mind | ordered_by_mistake | found_better_price | delivery_too_slow | other`.
 * `POST /api/v1/orders/{number}/return-requests` `{ sellerOrderNumber, reason, comment?, lines: [{ lineId, quantity }] }` (+ optional `Idempotency-Key` header) → `202 { returnId, status }` or `422 quantity_exceeded`. `reason`: `damaged | not_as_described | wrong_item | no_longer_needed | other`.
@@ -264,7 +264,7 @@ All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Contr
 
 ## Notifications (M5)
 Buyer routes need the session and answer `private, no-store`.
-* `GET /api/v1/notifications?limit=1..50&before=` → `{ unreadCount, notifications: [{ id, kind, category, orderNumber, sellerOrderNumber, parameters, createdAt, read }], next }`.
+* `GET /api/v1/notifications?limit=1..50&before=&beforeId=` → `{ unreadCount, notifications: [{ id, kind, category, orderNumber, sellerOrderNumber, parameters, createdAt, read }], next }`.
 * `POST /api/v1/notifications/{id}/read`, `POST /api/v1/notifications/read-all` → 204, idempotent; another buyer's id is 404.
 * `GET|PUT /api/v1/notifications/preferences` → `{ email: { order_updates, shipped, out_for_delivery, delivered, refunds, messages, bookings } }`; PUT sends the categories to change; unknown categories are 422.
 * `POST /api/v1/notifications/unsubscribe { token }` (anonymous; the signed token from a mail link) → 204, or 400 `invalid_token`. Switches that category (or all) off, never on.

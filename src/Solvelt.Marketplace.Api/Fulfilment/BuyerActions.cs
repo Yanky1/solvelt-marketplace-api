@@ -20,7 +20,7 @@ public sealed record ReturnLineInput(string? MarketplaceLineId, int Quantity);
 /// What the buyer can DO with an order (M5): ask to cancel, ask for a return, confirm delivery, refresh a return label link. Every action is idempotent and stored BEFORE the portal call:
 /// the row (with OUR id: <c>requestId</c>, <c>returnId</c>) and its outbox message commit in one transaction, the outbox delivers to the portal with retries. Another buyer's order is a 404.
 /// </summary>
-public sealed class BuyerOrderActions(MarketplaceDb db, OutboxWriter outbox, ISignedPortalClient portal, TimeProvider time)
+public sealed class BuyerOrderActions(MarketplaceDb db, OutboxWriter outbox, ISignedPortalClient portal, TimeProvider time, Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions)
 {
     public static readonly string[] CancelReasons = ["changed_mind", "ordered_by_mistake", "found_better_price", "delivery_too_slow", "other"];
     public static readonly string[] ReturnReasons = ["damaged", "not_as_described", "wrong_item", "no_longer_needed", "other"];
@@ -109,7 +109,7 @@ public sealed class BuyerOrderActions(MarketplaceDb db, OutboxWriter outbox, ISi
         };
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         // The cap (shipped - returned - refunded, minus what other open returns hold) is enforced HERE, in one conditional UPDATE per line: parallel requests cannot both take the last unit.
-        foreach (var (line, qty) in chosen)
+        foreach (var (line, qty) in chosen.OrderBy(x => x.Line.Id))   // one fixed order for every request: two multi-line returns never wait on each other in a cycle
         {
             var id = line.Id; var q = qty;
             var taken = await db.OrderLineFulfilments.Where(f => f.LineId == id && f.ShippedQty - f.ReturnedQty - f.RefundedQty - f.ReturnPendingQty >= q)
@@ -176,8 +176,9 @@ public sealed class BuyerOrderActions(MarketplaceDb db, OutboxWriter outbox, ISi
         try { res = await portal.GetReturnLabelLinkAsync(ret.ReturnId, ct); }
         catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException) { return new ActionResult(503, Code: "portal_unavailable", Message: "Try again in a moment."); }
         if (res.Status == 404) return ActionResult.Conflict("no_label", "There is no label for this return yet.");
-        var url = FulfilmentProjector.SafeUrl(res.Value?.LabelUrl);
-        if (!res.IsSuccess || url is null || res.Value?.LabelUrlExpiresAt is not { } exp) return new ActionResult(503, Code: "portal_unavailable", Message: "Try again in a moment.");
+        // only a link on the portal's own origin, on the label path and still alive: anything else is a bad answer, never stored or shown
+        var url = LabelLinks.Valid(res.Value?.LabelUrl, LabelLinks.Origin(portalOptions.Value), time.GetUtcNow());
+        if (!res.IsSuccess || url is null || res.Value?.LabelUrlExpiresAt is not { } exp || exp <= time.GetUtcNow()) return new ActionResult(503, Code: "portal_unavailable", Message: "Try again in a moment.");
         ret.LabelUrl = url; ret.LabelUrlExpiresAt = exp.ToUniversalTime();
         ret.LabelCarrier = FulfilmentProjector.Cap(res.Value.Carrier, 100) ?? ret.LabelCarrier;
         ret.LabelTrackingNumber = FulfilmentProjector.Cap(res.Value.TrackingNumber, 100) ?? ret.LabelTrackingNumber;

@@ -3,6 +3,8 @@ namespace Solvelt.Marketplace.Api.Infrastructure;
 public sealed class PortalOptions
 {
     public string? BaseUrl { get; set; }
+    /// <summary>The portal's PUBLIC API origin (its <c>Shipping:PublicBaseUrl</c>): the only origin a return-label link may have. Defaults to <see cref="BaseUrl"/>.</summary>
+    public string? PublicBaseUrl { get; set; }
     /// <summary>Signs our calls to the portal (portal: Orders:InboundSecret).</summary>
     public string? InboundSecret { get; set; }
     /// <summary>Verifies portal webhooks (portal: Orders:OutboundSecret).</summary>
