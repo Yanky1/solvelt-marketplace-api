@@ -702,4 +702,62 @@ public class AuthTests
         Assert.Equal(HttpStatusCode.TooManyRequests, statuses[2]);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, statuses[1]);
     }
+
+    // ---------- gaps found by mutation checks ----------
+
+    [Fact]
+    public async Task A_links_secret_half_works_only_with_its_own_id()
+    {
+        using var k = new AuthKit();
+        await k.SignUp("a@example.com");
+        await k.SignUp("b@example.com");
+        var a = AuthKit.TokenIn((await k.Mail("a@example.com")).Single(), "/verify-email");
+        var b = AuthKit.TokenIn((await k.Mail("b@example.com")).Single(), "/verify-email");
+        var crossed = b[..32] + "." + a[33..];                       // B's id with A's MAC
+        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = crossed })).StatusCode);
+        Assert.Null((await k.Account("b@example.com")).EmailVerifiedAt);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = b })).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"kind\":\"nope\",\"accountId\":\"00000000-0000-0000-0000-000000000001\"}")]
+    [InlineData("{\"kind\":\"verify\",\"accountId\":\"00000000-0000-0000-0000-000000000001\"}")]   // no token id
+    [InlineData("{\"kind\":\"reset\",\"accountId\":\"00000000-0000-0000-0000-000000000001\"}")]
+    [InlineData("null")]
+    public async Task A_malformed_account_mail_work_item_is_dead_lettered_not_retried(string payload)
+    {
+        using var k = new AuthKit();
+        Guid id;
+        using (var scope = k.F.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+            var m = scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Outbox.OutboxWriter>().Enqueue(AuthMailHandler.Type, new { });
+            m.Payload = payload;
+            id = m.Id;
+            await db.SaveChangesAsync();
+        }
+        // a real account must exist for the "verify/reset without a token id" cases to reach the check
+        await k.Db(async db => { db.BuyerAccounts.Add(new BuyerAccount { Id = Guid.Parse("00000000-0000-0000-0000-000000000001"), Email = "x@example.com", DisplayName = "X", RelayEmail = "relay-x@relay.example", CreatedAt = k.F.Clock.GetUtcNow(), UpdatedAt = k.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
+        await k.Dispatch();
+        var row = await k.Db(db => db.OutboxMessages.AsNoTracking().FirstAsync(m => m.Id == id));
+        Assert.Equal(("dead", "invalid_payload"), (row.Status, row.LastError));
+    }
+
+    [Fact]
+    public async Task Forgot_password_sends_at_most_three_mails_an_hour_per_address()
+    {
+        using var k = new AuthKit();
+        await k.VerifiedSession(Email);
+        var before = (await k.Mail(Email)).Count;
+        for (var i = 0; i < 6; i++)
+        {
+            Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/forgot-password", new { email = Email })).StatusCode);
+            await k.Mail(Email);
+        }
+        Assert.Equal(before + 3, (await k.Mail(Email)).Count);
+        k.F.Clock.Advance(TimeSpan.FromMinutes(61));
+        await k.Post("/api/v1/auth/forgot-password", new { email = Email });
+        Assert.Equal(before + 4, (await k.Mail(Email)).Count);
+    }
 }

@@ -231,15 +231,16 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         return db.EmailTokens.Where(t => t.AccountId == accountId && t.Purpose == purpose && t.UsedAt == null).ExecuteUpdateAsync(s => s.SetProperty(t => t.UsedAt, (DateTimeOffset?)now), ct);
     }
 
-    /// <summary>Marks the token used in one atomic UPDATE (two clicks consume it once) and returns its account, or null.</summary>
+    /// <summary>Marks the link used in one atomic UPDATE (two clicks consume it once) and returns its account, or null.</summary>
     private async Task<Guid?> ConsumeTokenAsync(string purpose, string token, CancellationToken ct)
     {
         if (links.Parse(purpose, token) is not { } tokenId) return null;
         var now = Now;
-        var row = await db.EmailTokens.AsNoTracking().Where(t => t.Id == tokenId && t.Purpose == purpose && t.UsedAt == null && t.ExpiresAt > now).Select(t => new { t.Id, t.AccountId }).FirstOrDefaultAsync(ct);
-        if (row is null) return null;
-        var claimed = await db.EmailTokens.Where(t => t.Id == row.Id && t.UsedAt == null).ExecuteUpdateAsync(s => s.SetProperty(t => t.UsedAt, (DateTimeOffset?)now), ct);
-        return claimed == 1 ? row.AccountId : null;
+        // One atomic UPDATE is the only guard: unused, right purpose, not expired. Two clicks (or two requests) race on it and exactly one gets a row.
+        var claimed = await db.EmailTokens.Where(t => t.Id == tokenId && t.Purpose == purpose && t.UsedAt == null && t.ExpiresAt > now)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.UsedAt, (DateTimeOffset?)now), ct);
+        if (claimed != 1) return null;
+        return await db.EmailTokens.AsNoTracking().Where(t => t.Id == tokenId).Select(t => (Guid?)t.AccountId).FirstOrDefaultAsync(ct);
     }
 
     private static DateTimeOffset Min(DateTimeOffset a, DateTimeOffset b) => a < b ? a : b;
