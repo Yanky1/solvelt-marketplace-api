@@ -192,6 +192,19 @@ public sealed class MessagingTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task N3_Inbound_events_are_deduplicated_on_the_signed_body_id_never_on_the_header()
+    {
+        var (o, g) = await Placed();
+        Assert.Equal("applied", await SellerMessage(o, g, "once", eventId: "dup-1", pid: "pm-dup"));
+        // the same body id again, with another message id: a duplicate, nothing stored
+        Assert.Equal("duplicate", await SellerMessage(o, g, "twice", eventId: "dup-1", pid: "pm-dup-2"));
+        // a header that names another event than the signed body is refused outright
+        var body = Body("dup-2", "message.sent", _k.F.Clock.GetUtcNow().AddSeconds(-5), new Dictionary<string, object?> { ["messageId"] = "pm-dup-3", ["kind"] = "order", ["text"] = "x", ["marketplaceOrderId"] = o.Number, ["sellerOrderNumber"] = g.SellerOrderNumber });
+        Assert.Equal(HttpStatusCode.BadRequest, (await Post(_k.Http, Request(_k.F, body, eventId: "dup-1"))).Item1);
+        Assert.Equal(1, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "seller")));
+    }
+
+    [Fact]
     public async Task G3_An_order_message_without_the_sellers_order_number_is_skipped_even_for_a_single_seller_order()
     {
         var (o, g) = await Placed();
