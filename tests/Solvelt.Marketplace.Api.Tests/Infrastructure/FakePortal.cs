@@ -22,6 +22,10 @@ public sealed class FakePortal(string secret, TimeProvider clock, int windowSeco
     private readonly HashSet<string> _nonces = [];
     private readonly List<ReceivedCall> _calls = [];
     private readonly Queue<Func<ReceivedCall, CancellationToken, Task<HttpResponseMessage>>> _script = new();
+    private Func<ReceivedCall, HttpResponseMessage>? _always;
+
+    /// <summary>Answers every call the script does not cover (the script is one answer per call, then this, then an empty 200). For stateless routes such as shipping settings.</summary>
+    public FakePortal RespondAlways(Func<ReceivedCall, HttpResponseMessage> router) { lock (_lock) _always = router; return this; }
 
     public IReadOnlyList<ReceivedCall> Calls { get { lock (_lock) return _calls.ToList(); } }
     /// <summary>Only requests that passed signature verification.</summary>
@@ -76,8 +80,10 @@ public sealed class FakePortal(string secret, TimeProvider clock, int windowSeco
         }
 
         Func<ReceivedCall, CancellationToken, Task<HttpResponseMessage>>? responder;
-        lock (_lock) { _calls.Add(call); _script.TryDequeue(out responder); }
-        return responder is null ? Json(HttpStatusCode.OK, "{}") : await responder(call, ct);
+        Func<ReceivedCall, HttpResponseMessage>? always;
+        lock (_lock) { _calls.Add(call); _script.TryDequeue(out responder); always = _always; }
+        if (responder is not null) return await responder(call, ct);
+        return always is null ? Json(HttpStatusCode.OK, "{}") : always(call);
     }
 
     private (bool Ok, HttpResponseMessage? Failure) Verify(string method, string target, string ts, string nonce, string sig, byte[] body)

@@ -29,7 +29,7 @@ public static class CartEndpoints
 
     private static IResult Unauthorized() => Problems.Json(401, "unauthorized", "Sign in to continue.");
 
-    private static async Task<CartOwner?> Owner(HttpContext ctx, AuthService auth, CancellationToken ct)
+    internal static async Task<CartOwner?> Owner(HttpContext ctx, AuthService auth, CancellationToken ct)
     {
         var header = ctx.Request.Headers.Authorization.ToString();
         if (header.Length > 0)

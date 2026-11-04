@@ -4,6 +4,7 @@ using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Auth;
 using Solvelt.Marketplace.Api.Carts;
+using Solvelt.Marketplace.Api.Checkout;
 using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
@@ -66,6 +67,11 @@ builder.Services.AddScoped<ProjectionStore>();
 builder.Services.AddScoped<PortalEventProcessor>();
 builder.Services.AddScoped<PortalEventMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<PortalEventWorker>();
+builder.Services.Configure<TaxOptions>(builder.Configuration.GetSection("Tax"));
+builder.Services.Configure<ShippingOptions>(builder.Configuration.GetSection("Shipping"));
+builder.Services.AddSingleton<ITaxCalculator, SimpleTaxCalculator>();
+builder.Services.AddSingleton<ShippingSettingsCache>();
+builder.Services.AddScoped<QuoteService>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();
@@ -111,6 +117,7 @@ app.MapCatalog();
 app.MapOutboxAdmin();
 app.MapAuth();
 app.MapCart();
+app.MapCheckout();
 
 app.Run();
 
