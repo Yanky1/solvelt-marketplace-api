@@ -238,6 +238,7 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         Assert.Equal(0, view.GetProperty("attachments").GetArrayLength());
         Assert.Equal(HttpStatusCode.NotFound, (await Get($"/api/v1/messages/attachments/{att}")).StatusCode);
         Assert.Equal(0, await _k.Db(db => db.MessageAttachmentData.CountAsync()));                       // the bytes are deleted
+        Assert.Equal("", await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.Text).SingleAsync()));   // and so is the text: hidden is gone, not only not shown
         Assert.Equal("Asked for payment off the platform", await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.ModerationNote).SingleAsync()));
     }
 

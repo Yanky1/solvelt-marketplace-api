@@ -122,7 +122,7 @@ public class GuestLinkTests
 
     private static Dictionary<string, string?> GoodProd() => new()
     {
-        ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40), ["Auth:EmailLinkKey"] = new string('e', 40), ["Auth:GuestLinkKey"] = new string('g', 40), ["Checkout:QuoteKey"] = new string('Q', 40), ["Notifications:UnsubscribeKey"] = new string('n', 40),
+        ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40), ["Auth:EmailLinkKey"] = new string('e', 40), ["Auth:GuestLinkKey"] = new string('g', 40), ["Checkout:QuoteKey"] = new string('Q', 40), ["Notifications:UnsubscribeKey"] = new string('n', 40), ["Notifications:PublicApiBaseUrl"] = "https://api.example.test",
         ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example", ["Email:From"] = "no-reply@shop.example",
         ["Portal:BaseUrl"] = "https://portal.example", ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
         ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",

@@ -560,7 +560,7 @@ public class AuthTests
     private static Dictionary<string, string?> GoodProd() => new()
     {
         ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40),
-        ["Auth:EmailLinkKey"] = new string('e', 40), ["Notifications:UnsubscribeKey"] = new string('n', 40), ["Auth:GuestLinkKey"] = new string('G', 40), ["Checkout:QuoteKey"] = new string('Q', 40),
+        ["Auth:EmailLinkKey"] = new string('e', 40), ["Notifications:UnsubscribeKey"] = new string('n', 40), ["Notifications:PublicApiBaseUrl"] = "https://api.example.test", ["Auth:GuestLinkKey"] = new string('G', 40), ["Checkout:QuoteKey"] = new string('Q', 40),
         ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example", ["Email:From"] = "no-reply@shop.example",
         ["Portal:BaseUrl"] = "https://portal.example", ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
         ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",
@@ -588,6 +588,10 @@ public class AuthTests
     {
         var missing = GoodProd(); missing.Remove("Notifications:UnsubscribeKey");
         Assert.Contains(Validate(missing), p => p.Contains("Notifications:UnsubscribeKey") && p.Contains("required"));
+        var noApi = GoodProd(); noApi.Remove("Notifications:PublicApiBaseUrl");
+        Assert.Contains(Validate(noApi), p => p.Contains("Notifications:PublicApiBaseUrl") && p.Contains("required"));
+        var httpApi = GoodProd(); httpApi["Notifications:PublicApiBaseUrl"] = "http://api.example.test";
+        Assert.Contains(Validate(httpApi), p => p.Contains("Notifications:PublicApiBaseUrl") && p.Contains("https"));
         var shortKey = GoodProd(); shortKey["Notifications:UnsubscribeKey"] = "short";
         Assert.Contains(Validate(shortKey), p => p.Contains("Notifications:UnsubscribeKey") && p.Contains("32"));
         var dev = GoodProd(); dev["Notifications:UnsubscribeKey"] = DevDefaults.UnsubscribeKey;

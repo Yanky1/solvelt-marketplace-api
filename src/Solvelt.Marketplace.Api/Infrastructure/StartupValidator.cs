@@ -110,6 +110,9 @@ public static class StartupValidator
         }
         if (string.IsNullOrWhiteSpace(config["Marketplace:RelayDomain"])) problems.Add("Marketplace:RelayDomain (env Marketplace__RelayDomain) is required.");
         if (string.IsNullOrWhiteSpace(config["Marketplace:PublicBaseUrl"])) problems.Add("Marketplace:PublicBaseUrl (env Marketplace__PublicBaseUrl) is required.");
+        // the origin of the one-click List-Unsubscribe URL in every notification mail: a wrong default would put dead links into mail clients' unsubscribe buttons (M5 review, info)
+        if (!Uri.TryCreate(config["Notifications:PublicApiBaseUrl"], UriKind.Absolute, out var apiBase) || apiBase.Scheme != Uri.UriSchemeHttps)
+            problems.Add("Notifications:PublicApiBaseUrl (env Notifications__PublicApiBaseUrl) is required and must be an absolute https URL.");
         if (!string.Equals(config["Database:Provider"], "Postgres", StringComparison.OrdinalIgnoreCase))
             problems.Add("Database:Provider must be Postgres outside Development/Testing.");
         if (string.IsNullOrWhiteSpace(config.GetConnectionString("Default")))
