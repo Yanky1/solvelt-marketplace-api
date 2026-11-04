@@ -100,6 +100,8 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintena
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.CancelRequestOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.ReturnRequestOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.DeliveryConfirmationOutboxHandler>();
+builder.Services.Configure<Solvelt.Marketplace.Api.Services.ServicesOptions>(builder.Configuration.GetSection("Services"));
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Services.AvailabilityCache>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();
@@ -159,6 +161,7 @@ app.MapCatalog();
 app.MapOutboxAdmin();
 app.MapAuth();
 app.MapCart();
+Solvelt.Marketplace.Api.Services.ServiceEndpoints.MapServices(app);
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
 app.MapStripeWebhooks();
