@@ -36,6 +36,14 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
         }
 
         var outcome = await ApplyAsync(row, evt, ct);
+        // C14: an earlier event of this seller order went Dead at the portal, so our view of it may have a gap. Booking events reconcile by themselves (BookingEventHandler); for orders the portal offers no
+        // read we can use, so the event is applied as usual and the stored row says "reconcile" where staff look (and the log carries an error): never silent.
+        if (evt.PredecessorDead && !evt.Type.StartsWith("booking.", StringComparison.Ordinal))
+        {
+            const string mark = "predecessor_dead: an earlier event of this seller order never arrived; reconcile it";
+            row.Note = row.Note is { Length: > 0 } n ? (n + "; " + mark)[..Math.Min(500, n.Length + 2 + mark.Length)] : mark;
+            log.LogError("Portal event of type {Type} says an earlier event of its seller order went dead; the order view may have a gap and needs a person to reconcile", evt.Type);
+        }
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(CancellationToken.None);   // a client disconnect must not leave the commit ambiguous
         log.LogInformation("Portal event of type {Type} {Outcome}", evt.Type, outcome);

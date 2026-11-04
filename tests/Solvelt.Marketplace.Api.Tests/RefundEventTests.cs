@@ -1103,4 +1103,56 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal("reserved", (await Refund("portal:rf-idem")).Status);                  // nothing was given back: money may have moved
         Assert.Equal(4587L, (await Order(o.Number)).RefundedCents);
     }
+
+    // ---- portal C14: order.cancelled names the refunds it nets out; predecessorDead ----
+
+    [Fact]
+    public async Task C14_a_cancel_waits_for_every_refund_it_names_and_then_runs_with_both_applied_exactly_once()
+    {
+        var (o, g, line) = await Three();
+        // the cancel names rf-1 (4587 returned before it) but arrives first: parked, nothing moves
+        Assert.Equal("parked", await Portal("order.cancelled", o, g, new { RefundDueCents = 9675, Partial = false, RefundIdsAccounted = new[] { "rf-1" }, PreviouslyRefundedCents = 4587 }, id: "pe-c14"));
+        await Drain();
+        Assert.Empty(Stripe.Refunds);
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
+        using (var scope = _k.F.Services.CreateScope())
+            Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor>().ReplayAllParkedAsync());
+        await Drain();
+        Assert.Equal([4587L, 9675L], Stripe.Refunds.Select(r => r.AmountCents).Order().ToList());
+        Assert.Equal(14262L, (await Order(o.Number)).Groups.Single().RefundedCents);
+    }
+
+    [Fact]
+    public async Task C14_a_cancel_whose_named_refunds_are_all_applied_runs_at_once_whatever_the_figures_say_and_empty_ids_mean_nothing_before()
+    {
+        var (o, g, line) = await Three();
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
+        // the ids decide: rf-1 is applied, so the cancel runs; a wrong previouslyRefundedCents is an alarm in the log, not a stop
+        Assert.Equal("applied", await Portal("order.cancelled", o, g, new { RefundDueCents = 9675, Partial = false, RefundIdsAccounted = new[] { "rf-1" }, PreviouslyRefundedCents = 1 }, id: "pe-ok"));
+        var (o2, g2, _) = await SecondThree();
+        Assert.Equal("applied", await Portal("order.cancelled", o2, g2, new { RefundDueCents = 14262, Partial = false, RefundIdsAccounted = Array.Empty<string>(), PreviouslyRefundedCents = 0 }, id: "pe-empty"));
+        await Drain();
+        Assert.Equal([4587L, 9675L, 14262L], Stripe.Refunds.Select(r => r.AmountCents).Order().ToList());
+        // a named refund we do not hold keeps the cancel waiting even when the figure says nothing was returned: the ids are what the portal accounted for
+        var (o3, g3, _) = await SecondThree();
+        Assert.Equal("parked", await Portal("order.cancelled", o3, g3, new { RefundDueCents = 14262, Partial = false, RefundIdsAccounted = new[] { "rf-unknown" }, PreviouslyRefundedCents = 0 }, id: "pe-ghost"));
+    }
+
+    [Fact]
+    public async Task C14_predecessorDead_on_an_order_event_is_applied_and_leaves_a_reconcile_mark_on_the_stored_event()
+    {
+        var (o, g, line) = await Three();
+        var data = new Dictionary<string, object?> { ["order"] = new { sellerOrderId = g.SellerOrderId, sellerOrderNumber = g.SellerOrderNumber, marketplaceOrderId = o.Number },
+            ["refundId"] = "rf-dead", ["amountCents"] = 4587, ["shippingCents"] = 0, ["lines"] = new[] { new { marketplaceLineId = line, quantity = 1, amountCents = 4587 } } };
+        var body = Body("pe-dead", "refund.issued", _k.F.Clock.GetUtcNow(), data).Insert(1, "\"predecessorDead\":true,");
+        var (status, json) = await Post(_k.Http, Request(_k.F, body));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("applied", JsonDocument.Parse(json).RootElement.GetProperty("status").GetString());
+        var row = await _k.Db(db => db.PortalInboundEvents.AsNoTracking().SingleAsync(e => e.Id == "pe-dead"));
+        Assert.Contains("predecessor_dead", row.Note);
+        // and it stays deduped on its signed id
+        var (_, again) = await Post(_k.Http, Request(_k.F, body));
+        Assert.Equal("duplicate", JsonDocument.Parse(again).RootElement.GetProperty("status").GetString());
+        Assert.Single(await _k.Db(db => db.OrderRefunds.Where(r => r.Key == "portal:rf-dead").ToListAsync()));
+    }
 }

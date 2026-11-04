@@ -77,7 +77,27 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
             // R3: events can arrive out of order. A full cancel's due amount is TotalCents minus what the portal has already returned (its own figure, `previouslyRefundedCents`, once it sends it): if
             // that is more than we have applied for this seller order, an earlier refund.issued is still on its way and the cancel must NOT run first (it would refund everything left and the
             // earlier refund would then be refused: the buyer short, the units wrong). It is parked and replayed by the maintenance loop; a log error says so once it has waited too long.
-            if (!partial)
+            // C14: the portal names the refunds the cancel already nets out (`refundIdsAccounted`) and their sum (`previouslyRefundedCents`, tax and shipping included). When the ids are there they decide:
+            // every one of them must already be applied on our side (a refund we hold under "portal:<id>", not rejected or failed), else the cancel waits for the missing ones (parked, with the same 30-minute
+            // alarm). A sum that is not the sum of what we hold is an alarm, not a reason to stop: the portal's own `refundDueCents` is what moves and the paid cap guards it. Without the field (an older
+            // event) the figure-based check below is the fallback.
+            var accounted = AccountedRefundIds(data);
+            if (accounted is not null)
+            {
+                var keys = accounted.Select(id => "portal:" + id).ToList();
+                var held = await c.Db.OrderRefunds.AsNoTracking()
+                    .Where(r => r.OrderId == order.Id && r.GroupId == group.Id && keys.Contains(r.Key) && r.Status != RefundStatus.Rejected && r.Status != RefundStatus.Failed).ToListAsync(ct);
+                var missing = keys.Except(held.Select(r => r.Key)).ToList();
+                if (missing.Count > 0)
+                {
+                    if (c.Time.GetUtcNow() - c.Event.CreatedAt > TimeSpan.FromMinutes(30))
+                        log.LogError("Portal order.cancelled for order {Number} has waited more than 30 minutes for {Count} earlier refund(s) it accounts for; a person should look", order.Number, missing.Count);
+                    return HandlerOutcome.Parked("order", order.Number, "earlier refunds not applied yet");
+                }
+                if (Num(data, "previouslyRefundedCents") is { } stated && stated != held.Sum(r => r.AmountCents))
+                    log.LogError("Portal order.cancelled for order {Number}: previouslyRefundedCents {Stated} is not the {Held} cents we hold for the refunds it names; a person should check", order.Number, stated, held.Sum(r => r.AmountCents));
+            }
+            if (!partial && accounted is null)
             {
                 var portalReturned = Num(data, "previouslyRefundedCents") ?? group.TotalCents - due;
                 var applied = await c.Db.OrderGroups.AsNoTracking().Where(x => x.Id == group.Id).Select(x => x.RefundedCents).FirstAsync(ct);
@@ -111,6 +131,19 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
     {
         try { return checked(a + b + c); }
         catch (OverflowException) { return -1; }   // never equal to a positive amount
+    }
+
+    /// <summary>The refund ids an <c>order.cancelled</c> says it already nets out: null when the field is absent (an older event) or malformed (then the figure-based check decides), otherwise the distinct ids.</summary>
+    private static List<string>? AccountedRefundIds(JsonElement data)
+    {
+        if (!data.TryGetProperty("refundIdsAccounted", out var arr) || arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() > 200) return null;
+        var ids = new List<string>();
+        foreach (var e in arr.EnumerateArray())
+        {
+            if (e.ValueKind != JsonValueKind.String || e.GetString() is not { Length: > 0 and <= 100 } id) return null;
+            if (!ids.Contains(id)) ids.Add(id);
+        }
+        return ids;
     }
 
     private static List<(string Id, int Quantity)>? ParseLines(JsonElement data, out long amountSum)
