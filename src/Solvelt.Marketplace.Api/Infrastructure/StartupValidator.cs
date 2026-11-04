@@ -49,6 +49,7 @@ public static class StartupValidator
         if (lease < portalDeadline + LeaseMarginSeconds) problems.Add($"Outbox:LeaseSeconds ({lease}) must be at least Portal:TotalDeadlineSeconds ({portalDeadline}) + {LeaseMarginSeconds}.");
         if (lease < emailTimeout + LeaseMarginSeconds) problems.Add($"Outbox:LeaseSeconds ({lease}) must be at least Email:SendTimeoutSeconds ({emailTimeout}) + {LeaseMarginSeconds}.");
         if (emailTimeout < 1) problems.Add("Email:SendTimeoutSeconds must be at least 1.");
+        problems.AddRange(Solvelt.Marketplace.Api.Services.ServicesModule.ConfigProblems(config));   // M4: availability window and limits (every environment)
         if (IsDevLike(env)) return problems;
 
         var keys = new (string Name, string Env, string? Value)[]

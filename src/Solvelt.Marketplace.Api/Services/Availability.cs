@@ -16,6 +16,12 @@ public sealed class ServicesOptions
     public int DefaultWindowDays { get; set; } = 14;
     /// <summary>Upper bound on cached answers; expired entries are dropped first, then the oldest.</summary>
     public int MaxCacheEntries { get; set; } = 2000;
+    /// <summary>
+    /// Portal availability calls the marketplace itself allows per service per minute, counted over cache MISSES only (a single-flight burst is one call). The portal's own limit is 600 per service for
+    /// ALL shoppers (SERVICES.md §6); this stays well below it so that no mix of queries, from any number of addresses, can push a service into 429s for everyone (decision M4-14). When it is spent the buyer
+    /// gets <c>503 availability_unavailable</c> and the next minute works again.
+    /// </summary>
+    public int AvailabilityPortalCallsPerMinute { get; set; } = 300;
 }
 
 /// <summary>The buyer-facing availability request after normalisation. Everything that changes the portal's answer is in the key; nothing else is.</summary>
@@ -23,7 +29,7 @@ public sealed record AvailabilityRequest(Guid ServiceId, DateTimeOffset From, Da
     double? Lat, double? Lng, int? Minutes, IReadOnlyList<string> AddOns)
 {
     public string Key => string.Join("|", ServiceId.ToString("N"), From.UtcTicks, To.UtcTicks, Location, PostalCode ?? "", ProviderId?.ToString("N") ?? "",
-        Lat?.ToString("F4", CultureInfo.InvariantCulture) ?? "", Lng?.ToString("F4", CultureInfo.InvariantCulture) ?? "", Minutes?.ToString(CultureInfo.InvariantCulture) ?? "", string.Join(",", AddOns));
+        Lat?.ToString("F2", CultureInfo.InvariantCulture) ?? "", Lng?.ToString("F2", CultureInfo.InvariantCulture) ?? "", Minutes?.ToString(CultureInfo.InvariantCulture) ?? "", string.Join(",", AddOns));
 }
 
 /// <summary>Result of an availability read: either the (cached) portal answer or a buyer-safe error.</summary>
@@ -45,6 +51,26 @@ public sealed class AvailabilityCache(IServiceScopeFactory scopes, TimeProvider 
     private readonly ConcurrentDictionary<string, Lazy<Task<AvailabilityOutcome>>> _inflight = new();
     public int PortalCalls;
 
+    // One token bucket per service, filled to AvailabilityPortalCallsPerMinute and refilled continuously over a minute (decision M4-14).
+    private sealed class Bucket { public double Tokens; public DateTimeOffset At; }
+    private readonly ConcurrentDictionary<Guid, Bucket> _buckets = new();
+
+    private bool TryTakeToken(Guid serviceId)
+    {
+        var cap = Math.Clamp(options.Value.AvailabilityPortalCallsPerMinute, 1, 600);
+        var now = time.GetUtcNow();
+        var b = _buckets.GetOrAdd(serviceId, _ => new Bucket { Tokens = cap, At = now });
+        lock (b)
+        {
+            var elapsed = Math.Max(0, (now - b.At).TotalSeconds);
+            b.Tokens = Math.Min(cap, b.Tokens + elapsed * cap / 60.0);
+            b.At = now;
+            if (b.Tokens < 1) return false;
+            b.Tokens -= 1;
+            return true;
+        }
+    }
+
     public async Task<AvailabilityOutcome> GetAsync(AvailabilityRequest r, CancellationToken ct)
     {
         var ttl = TimeSpan.FromSeconds(Math.Clamp(options.Value.AvailabilityCacheSeconds, 0, 30));
@@ -61,6 +87,9 @@ public sealed class AvailabilityCache(IServiceScopeFactory scopes, TimeProvider 
         {
             // A re-check after joining: a flight that just finished may have filled the cache between our first look and GetOrAdd.
             if (_cache.TryGetValue(key, out var hit) && time.GetUtcNow() - hit.At < ttl) return hit.Outcome;
+            // Only a real portal call costs a token: cache hits and joined in-flight calls are free, so ordinary shopping never meets this limit, while a stream of ever-new queries cannot spend the
+            // portal's 600 per minute for everyone (it was possible to mint a new cache key per request by varying the postal code, coordinates, window or minutes).
+            if (!TryTakeToken(r.ServiceId)) return Fail(503, "availability_unavailable", "Availability can't be loaded right now. Try again in a moment.");
             Interlocked.Increment(ref PortalCalls);
             var outcome = await CallPortalAsync(r);
             if (outcome.IsSuccess && ttl > TimeSpan.Zero) { Trim(); _cache[key] = new Entry(outcome, time.GetUtcNow()); }
@@ -109,7 +138,10 @@ public sealed class AvailabilityCache(IServiceScopeFactory scopes, TimeProvider 
     /// <summary>Ordered, de-duplicated and trimmed to what the buyer needs; the portal's slot list is the only source of truth for start times.</summary>
     private static ServiceAvailability Normalise(ServiceAvailability v) => v with
     {
-        Slots = v.Slots.Where(s => s.EndAt > s.StartAt).GroupBy(s => s.StartAt).Select(g => g.First()).OrderBy(s => s.StartAt).ToList(),
+        // One slot per (start, end); a start listed twice (one entry per provider, say) keeps every provider.
+        Slots = v.Slots.Where(s => s.EndAt > s.StartAt).GroupBy(s => (s.StartAt, s.EndAt))
+            .Select(g => new AvailabilitySlot(g.Key.StartAt, g.Key.EndAt, g.SelectMany(x => x.ProviderIds ?? []).Distinct().Order().ToList()))
+            .OrderBy(s => s.StartAt).ThenBy(s => s.EndAt).ToList(),
     };
 
     private void Trim()
@@ -122,6 +154,12 @@ public sealed class AvailabilityCache(IServiceScopeFactory scopes, TimeProvider 
         if (_cache.Count < max) return;
         foreach (var kv in _cache.OrderBy(k => k.Value.At).Take(Math.Max(1, max / 10)).ToList()) _cache.TryRemove(kv.Key, out _);
     }
+}
+
+/// <summary>The catalog's own visibility rule (listing Active, not unlisted, SELLER active: CONTRACT.md §2) narrowed to services. Every public service endpoint uses it.</summary>
+public static class ServiceListings
+{
+    public static IQueryable<CatalogListing> Visible(MarketplaceDb db) => Catalog.CatalogEndpoints.Visible(db).Where(l => l.Type == ListingTypes.Service);
 }
 
 public static class ServiceEndpoints
@@ -144,6 +182,7 @@ public static class ServiceEndpoints
     /// </summary>
     private static async Task<IResult> Availability(Guid id, HttpContext http, MarketplaceDb db, AvailabilityCache cache, TimeProvider time, IOptions<ServicesOptions> options, CancellationToken ct)
     {
+        http.Response.Headers.CacheControl = "no-store";   // every answer but a 200 (a 404, 422 or 503 must never be cached for the next shopper)
         var q = http.Request.Query;
         var errors = new Dictionary<string, string>();
         var o = options.Value;
@@ -156,7 +195,11 @@ public static class ServiceEndpoints
         DateTimeOffset from = Day(now), to = from.AddDays(o.DefaultWindowDays);
         if (q.ContainsKey("from") && !TryInstant(q["from"].ToString(), out from)) errors["from"] = "Use a date like 2026-12-09.";
         if (q.ContainsKey("to") && !TryInstant(q["to"].ToString(), out to)) errors["to"] = "Use a date like 2026-12-10.";
-        if (!q.ContainsKey("to") && q.ContainsKey("from")) to = Day(from).AddDays(o.DefaultWindowDays);
+        // Far-future dates are refused BEFORE any date arithmetic (adding a window to 9999-12-30 overflows).
+        var horizon = now.AddDays(400);
+        if (errors.Count == 0 && from > horizon) errors["from"] = "Choose a date within the next year.";
+        if (errors.Count == 0 && !q.ContainsKey("to") && q.ContainsKey("from")) to = Day(from).AddDays(o.DefaultWindowDays);
+        if (errors.Count == 0 && to > horizon) errors["to"] = "Choose a date within the next year.";
         if (errors.Count == 0)
         {
             from = Day(from); if (to != Day(to)) to = Day(to).AddDays(1); else to = Day(to);
@@ -177,7 +220,7 @@ public static class ServiceEndpoints
         {
             if (!double.TryParse(q["lat"], NumberStyles.Float, CultureInfo.InvariantCulture, out var la) || la is < -90 or > 90 || double.IsNaN(la)) errors["lat"] = "Invalid latitude.";
             else if (!double.TryParse(q["lng"], NumberStyles.Float, CultureInfo.InvariantCulture, out var lo) || lo is < -180 or > 180 || double.IsNaN(lo)) errors["lng"] = "Invalid longitude.";
-            else { lat = Math.Round(la, 4); lng = Math.Round(lo, 4); }
+            else { lat = Math.Round(la, 2); lng = Math.Round(lo, 2); }   // about 1.1 km: the postal code decides the service area, and probing coordinates can only mint a handful of cache keys; the booking itself re-validates the exact address
         }
         Guid? provider = null;
         if (q.ContainsKey("providerId")) { if (Guid.TryParse(q["providerId"], out var p)) provider = p; else errors["providerId"] = "Invalid provider."; }
@@ -191,7 +234,7 @@ public static class ServiceEndpoints
         }
         if (errors.Count > 0) return Problems.Validation(errors);
 
-        var isService = await db.CatalogListings.AsNoTracking().AnyAsync(l => l.Id == id && l.Type == ListingTypes.Service && l.Visible, ct);
+        var isService = await ServiceListings.Visible(db).AnyAsync(l => l.Id == id, ct);
         if (!isService) return Problems.NotFound("This service is not available.");
 
         var outcome = await cache.GetAsync(new AvailabilityRequest(id, from, to, location, postal, provider, lat, lng, minutes, addOns), ct);

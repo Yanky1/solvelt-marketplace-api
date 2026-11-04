@@ -10,7 +10,7 @@ public sealed class AvailabilityTests : IDisposable
 {
     private readonly AuthKit _k = new();
     private static readonly Guid Service = CatalogKit.ListingId("deep-house-cleaning");
-    private static readonly Guid Product = CatalogKit.ListingId("challah-6-braided");
+    private static readonly Guid Product = CatalogKit.ListingId("challah-classic");
     private static readonly Guid Provider = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     public void Dispose() => _k.Dispose();
