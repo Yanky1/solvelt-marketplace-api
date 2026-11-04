@@ -560,7 +560,7 @@ public class AuthTests
     private static Dictionary<string, string?> GoodProd() => new()
     {
         ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40),
-        ["Auth:EmailLinkKey"] = new string('e', 40), ["Auth:GuestLinkKey"] = new string('G', 40),
+        ["Auth:EmailLinkKey"] = new string('e', 40), ["Notifications:UnsubscribeKey"] = new string(\'n\', 40), ["Auth:GuestLinkKey"] = new string('G', 40),
         ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example", ["Email:From"] = "no-reply@shop.example",
         ["Portal:BaseUrl"] = "https://portal.example", ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
         ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",
@@ -581,6 +581,22 @@ public class AuthTests
         Assert.Contains(Validate(dev), p => p.Contains("Auth:EmailLinkKey") && p.Contains("Development default"));
         var reused = GoodProd(); reused["Auth:EmailLinkKey"] = reused["Web:ForwardingKey"];
         Assert.Contains(Validate(reused), p => p.Contains("must differ"));
+    }
+
+    [Fact]
+    public void The_unsubscribe_key_is_required_long_distinct_and_never_a_dev_default_in_production()
+    {
+        var missing = GoodProd(); missing.Remove("Notifications:UnsubscribeKey");
+        Assert.Contains(Validate(missing), p => p.Contains("Notifications:UnsubscribeKey") && p.Contains("required"));
+        var shortKey = GoodProd(); shortKey["Notifications:UnsubscribeKey"] = "short";
+        Assert.Contains(Validate(shortKey), p => p.Contains("Notifications:UnsubscribeKey") && p.Contains("32"));
+        var dev = GoodProd(); dev["Notifications:UnsubscribeKey"] = DevDefaults.UnsubscribeKey;
+        Assert.Contains(Validate(dev), p => p.Contains("Notifications:UnsubscribeKey") && p.Contains("Development default"));
+        foreach (var other in new[] { "Auth:EmailLinkKey", "Web:ForwardingKey", "Portal:InboundSecret", "Portal:WebhookSecret" })
+        {
+            var reused = GoodProd(); reused["Notifications:UnsubscribeKey"] = reused[other];
+            Assert.Contains(Validate(reused), p => p.Contains("Notifications:UnsubscribeKey") && p.Contains("must differ"));
+        }
     }
 
     [Fact]

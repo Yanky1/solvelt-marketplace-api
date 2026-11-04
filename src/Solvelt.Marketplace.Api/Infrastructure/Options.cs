@@ -74,6 +74,12 @@ public static class OptionsSetup
         if (devLike) { o.EmailLinkKey ??= DevDefaults.EmailLinkKey; o.GuestLinkKey ??= DevDefaults.GuestLinkKey; }
     }
 
+    public static void Notifications(NotificationOptions o, IConfiguration config, bool devLike)
+    {
+        config.GetSection("Notifications").Bind(o);
+        if (devLike) o.UnsubscribeKey ??= DevDefaults.UnsubscribeKey;
+    }
+
     public static void Admin(AdminOptions o, IConfiguration config, bool devLike)
     {
         config.GetSection("Admin").Bind(o);
@@ -143,6 +149,14 @@ public sealed class EmailOptions
     public bool SmtpUseTls { get; set; } = true;
     /// <summary>A send is cut off after this long, always well inside the outbox lease.</summary>
     public int SendTimeoutSeconds { get; set; } = 20;
+}
+
+public sealed class NotificationOptions
+{
+    /// <summary>Key of the unsubscribe links in notification mail (HMAC). Its own key: never a portal, webhook, web, admin or auth link key (decision M5-08).</summary>
+    public string? UnsubscribeKey { get; set; }
+    /// <summary>In-app notifications are deleted after this many days.</summary>
+    public int RetentionDays { get; set; } = 180;
 }
 
 public sealed class AuthOptions
