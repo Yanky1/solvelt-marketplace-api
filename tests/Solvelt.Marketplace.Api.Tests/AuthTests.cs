@@ -572,23 +572,21 @@ public class AuthTests
     }
 
     [Fact]
-    public async Task Mail_without_a_provider_waits_and_keeps_no_secret_while_it_waits()
+    public async Task Mail_that_cannot_be_sent_waits_in_the_outbox_and_keeps_no_secret_while_it_waits()
     {
-        using var k = new AuthKit();
-        await k.SignUp(Email);
-        // no sender: the unconfigured sender throws, so the message stays pending, still with ids only
         using var broken = new TestFactory(new() { ["Auth:PasswordIterations"] = "1000", ["RateLimits:AuthPerMinute"] = "1000" },
-            s => s.AddSingleton<Solvelt.Marketplace.Api.Outbox.IEmailSender, Solvelt.Marketplace.Api.Outbox.UnconfiguredEmailSender>());
+            s => s.AddSingleton<Solvelt.Marketplace.Api.Outbox.IEmailSender, FailingEmailSender>());
         var c = broken.CreateClient();
         await c.PostAsJsonAsync("/api/v1/auth/sign-up", new { email = Email, password = Pw, displayName = "Jane Brown" });
         using (var scope = broken.Services.CreateScope())
             await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Outbox.OutboxDispatcher>().DispatchDueAsync();
         using var check = broken.Services.CreateScope();
         var m = await check.ServiceProvider.GetRequiredService<MarketplaceDb>().OutboxMessages.AsNoTracking().SingleAsync();
-        Assert.Equal(("pending", "email_not_configured"), (m.Status, m.LastError));
+        Assert.Equal(("pending", "InvalidOperationException"), (m.Status, m.LastError));   // the type only: the exception text names the recipient
         Assert.DoesNotContain("@", m.Payload);
         using var payload = JsonDocument.Parse(m.Payload!);
         Assert.Equal(new[] { "accountId", "kind", "tokenId" }, payload.RootElement.EnumerateObject().Select(p => p.Name).Order().ToArray());   // ids only
+        Assert.DoesNotContain(broken.Logs.Lines, l => l.Contains(Email));
     }
 
     [Fact]
@@ -618,6 +616,7 @@ public class AuthTests
     {
         ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40),
         ["Auth:EmailLinkKey"] = new string('e', 40),
+        ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example", ["Email:From"] = "no-reply@shop.example",
         ["Portal:BaseUrl"] = "https://portal.example", ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
         ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",
     };

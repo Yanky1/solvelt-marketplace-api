@@ -128,7 +128,10 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
             await tx.CommitAsync(CancellationToken.None);
             return outcome != ProcessOutcome.Parked;
         }
-        catch (DbUpdateException ex)   // includes DbUpdateConcurrencyException
+        // Any failure of ONE event (a database conflict, or a handler that throws) rolls its transaction back, leaves it parked and lets the rest of the
+        // list go on, so one poisoned event cannot stop the others or the LastReplayAt stamp that keeps the sweep fair. Only a cancelled caller stops the replay.
+        // Only the exception type is logged: its message may carry data from the event.
+        catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
         {
             await tx.RollbackAsync(CancellationToken.None);
             db.ChangeTracker.Clear();

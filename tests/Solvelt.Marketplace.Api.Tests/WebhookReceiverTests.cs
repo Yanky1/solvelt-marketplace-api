@@ -751,7 +751,7 @@ public class WebhookReceiverTests
         var over = Body("chunkB", "big.type", T0, new { pad = new string('x', cap - baseLen + 1) });
         Assert.Equal(cap + 1, Encoding.UTF8.GetByteCount(over));
         var res = await Post(c, Request(f, over, chunked: true));
-        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, res.Status);                                // only the in-read cap can catch this
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, res.Status);                                // NB: the in-process test server declares a length, so this alone does not prove the in-read cap; the real-socket test does (ReplayFollowUpTests)
         Assert.Equal("too_large", CodeOf(res.Json));
         var huge = Body("chunkC", "big.type", T0, new { pad = new string('x', 10 * 1024 * 1024) });
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await Post(c, Request(f, huge, chunked: true))).Status);
