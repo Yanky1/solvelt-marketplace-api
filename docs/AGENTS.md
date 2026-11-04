@@ -4,7 +4,7 @@
 |---|---|---|---|---|---|---|---|
 | Orchestrator | both | n/a | Plans and supervises M1–M7 | agent-briefs/ORCHESTRATOR.md | session_018hZb8pE5JAKd7eu3Enzfnr | Running | 2026-11-04 |
 | M1 Foundation | api | feat/m1-* | Buyer auth/accounts, signed portal client, webhook receiver, outbox, catalog read model | agent-briefs/M1-foundation.md | M1 worker (see session link in orchestrator) | In progress: slice 1 skeleton+CI on feat/m1-foundation | 2026-11-04 |
-| W1 Web foundation | web | feat/w1-* | RR7 framework-mode SSR skeleton, Solvelt design tokens, auth pages via BFF, CI + Playwright/axe | (after M1 skeleton) | - | Planned | 2026-11-04 |
+| W1 Web foundation | web | feat/w1-* | RR7 framework-mode SSR skeleton, Solvelt design tokens, BFF auth pages, basic catalog pages, image resize, CI + Playwright/axe | agent-briefs/W1-web-foundation.md | (starting) | Starting | 2026-11-04 |
 | M2 Catalog & search | api+web | - | Categories, brands, filters, full-text search, PDP/service pages, SEO | - | - | Planned | - |
 | M3 Cart & checkout | api+web | - | Multi-seller cart, shipping rates, local delivery, tax, Stripe test mode, order ingest | - | - | Planned | - |
 | M4 Services | api+web | - | Availability, holds, bookings, quotes | - | - | Planned | - |
