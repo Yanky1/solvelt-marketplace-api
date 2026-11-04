@@ -40,5 +40,6 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Portal__AttemptTimeoutSeconds`, `Portal__TotalDeadlineSeconds`, `Portal__MaxAttempts`, `Portal__RetryBaseDelayMs` | no | Portal client deadlines: defaults 30, 30, 5, 500 (see decisions M1-09, M1-19) |
 | `RateLimits__AuthPerMinute`, `RateLimits__PublicPerMinute` | no | Defaults 10 and 240 per client IP |
 
+Logging never contains URLs, query strings or paths (filters are enforced in code, see decision M1-29).
 Outside Development/Testing (any other environment name, Staging included) the app refuses to start when a required value is missing, a key is short, any two keys are equal, or a dev default is used in any slot.
 No secrets are stored in the repository.

@@ -221,7 +221,7 @@ public class ReviewHardeningTests
     private static (ClientIpResolver Resolver, FakeTimeProvider Clock) Resolver(string? key = "k-forwarding-key-for-unit-tests-0123456789")
     {
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 11, 4, 12, 0, 0, TimeSpan.Zero));
-        return (new ClientIpResolver(Options.Create(new WebOptions { ForwardingKey = key }), clock), clock);
+        return (new ClientIpResolver(Options.Create(new WebOptions { ForwardingKey = key }), clock, Microsoft.Extensions.Logging.Abstractions.NullLogger<ClientIpResolver>.Instance), clock);
     }
 
     private static DefaultHttpContext Ctx(ClientIpResolver r, string? peer, params (string, string)[] headers)
@@ -242,7 +242,7 @@ public class ReviewHardeningTests
         Assert.Equal("v1=eaf9dade01862226a6cb91574596e068996969fe53eb32f05d4ec102df81a4e8", Sig(key, "1700000000", "203.0.113.9"));   // independent test-side HMAC
         // ... and the production resolver accepts exactly that signature at that timestamp, and rejects it for another ip
         var clock = new FakeTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1700000000));
-        var r = new ClientIpResolver(Options.Create(new WebOptions { ForwardingKey = key }), clock);
+        var r = new ClientIpResolver(Options.Create(new WebOptions { ForwardingKey = key }), clock, Microsoft.Extensions.Logging.Abstractions.NullLogger<ClientIpResolver>.Instance);
         const string sig = "v1=eaf9dade01862226a6cb91574596e068996969fe53eb32f05d4ec102df81a4e8";
         Assert.Equal("fwd:203.0.113.9", r.Resolve(Ctx(r, "10.0.0.1", (ClientIpResolver.IpHeader, "203.0.113.9"), (ClientIpResolver.TimestampHeader, "1700000000"), (ClientIpResolver.SignatureHeader, sig))));
         Assert.Equal("peer:10.0.0.1", r.Resolve(Ctx(r, "10.0.0.1", (ClientIpResolver.IpHeader, "203.0.113.10"), (ClientIpResolver.TimestampHeader, "1700000000"), (ClientIpResolver.SignatureHeader, sig))));
