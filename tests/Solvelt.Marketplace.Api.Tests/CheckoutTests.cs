@@ -1,3 +1,4 @@
+using Solvelt.Marketplace.Api.Carts;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -59,11 +60,11 @@ public sealed class CheckoutTests : IDisposable
 
     private static object Address(string region = "NY") => new { name = "Jane Brown", line1 = "1 Main St", city = "Brooklyn", region, postalCode = "11201", country = "US", phone = "+1 718 555 0100" };
 
-    private Task<HttpResponseMessage> Checkout(string? session, object body)
+    private async Task<HttpResponseMessage> Checkout(string? session, object body)
     {
-        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(body) };
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = await QuoteHashes.WithHashAsync(_k.Http, session, body) };
         if (session != null) r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session);
-        return _k.Http.SendAsync(r);
+        return await _k.Http.SendAsync(r);
     }
 
     private static async Task<JsonElement> Ok(HttpResponseMessage r, HttpStatusCode expected = HttpStatusCode.OK)
@@ -204,28 +205,50 @@ public sealed class CheckoutTests : IDisposable
     }
 
     [Fact]
-    public async Task A_total_the_buyer_did_not_see_is_refused_with_the_new_quote_and_nothing_is_created_or_charged()
+    public async Task A_quote_the_buyer_did_not_see_is_refused_with_the_new_quote_and_nothing_is_created_or_charged()
     {
         var s = await Buyer();
         await AddToCart(s, "kiddush-cup-pewter");
-        var seen = (await Ok(await Checkout(s, new { address = Address() }))).GetProperty("quote").GetProperty("totalCents").GetInt64();
+        var seen = (await Ok(await Checkout(s, new { address = Address() }))).GetProperty("quote");
+        var seenHash = seen.GetProperty("quoteHash").GetString();
         Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));
-        // the price moves after the buyer looked: they confirm the old total, so nothing is created and the new quote comes back to be shown
+        // the price moves after the buyer looked: they confirm the old quote, so nothing is created and the new quote comes back to be shown
         CatalogKit.Fixture(_k.F).Upsert(CatalogKit.ListingId("kiddush-cup-pewter"), l => l with { Variants = l.Variants.Select(v => v with { PriceCents = 4300 }).ToList() });
         await CatalogKit.Sync(_k.F);
-        var refused = await Ok(await Checkout(s, new { address = Address(), expectedTotalCents = seen }), HttpStatusCode.Conflict);
+        var refused = await Ok(await Checkout(s, new { address = Address(), quoteHash = seenHash }), HttpStatusCode.Conflict);
         Assert.Equal("price_changed", refused.GetProperty("code").GetString());
-        var fresh = refused.GetProperty("quote").GetProperty("totalCents").GetInt64();
-        Assert.NotEqual(seen, fresh);
-        Assert.Equal(4300, refused.GetProperty("quote").GetProperty("itemsCents").GetInt64());
+        var fresh = refused.GetProperty("quote");
+        Assert.NotEqual(seen.GetProperty("totalCents").GetInt64(), fresh.GetProperty("totalCents").GetInt64());
+        Assert.Equal(4300, fresh.GetProperty("itemsCents").GetInt64());
         Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));                       // still only the first order
         Assert.Single(Stripe.Intents);
-        // confirming the NEW total goes through, and it is the server's total that is charged, not the number sent
-        var ok = await Ok(await Checkout(s, new { address = Address(), expectedTotalCents = fresh }));
-        Assert.Equal(fresh, Stripe.Intents.Single(i => i.Metadata["marketplace_order_id"] == ok.GetProperty("orderNumber").GetString()).AmountCents);
-        // a wrong total with no price change is refused too; leaving it out keeps the old behaviour (the web always sends it)
-        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address(), expectedTotalCents = fresh + 1 })).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await Checkout(s, new { address = Address() })).StatusCode);
+        // confirming the NEW quote goes through, and it is the server's total that is charged
+        var ok = await Ok(await Checkout(s, new { address = Address(), quoteHash = fresh.GetProperty("quoteHash").GetString() }));
+        Assert.Equal(fresh.GetProperty("totalCents").GetInt64(), Stripe.Intents.Single(i => i.Metadata["marketplace_order_id"] == ok.GetProperty("orderNumber").GetString()).AmountCents);
+    }
+
+    [Fact]
+    public async Task The_quote_hash_is_required_and_bound_to_what_was_priced_and_to_the_destination_and_it_expires()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        string Quote(JsonElement e) => e.GetProperty("quoteHash").GetString()!;
+        // none, garbage, and a hash of another destination are all refused before anything is created
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address(), quoteHash = "" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address(), quoteHash = "x.y" })).StatusCode);
+        var ny = Quote((await Ok(await Checkout(s, new { address = Address("CA") }))).GetProperty("quote"));      // a hash for CA (this also creates a CA order)
+        var orders = await _k.Db(db => db.Orders.CountAsync());
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address("NY"), quoteHash = ny })).StatusCode);   // same hash, other state: refused
+        Assert.Equal(orders, await _k.Db(db => db.Orders.CountAsync()));
+        // changing the stored expiry (the part before the dot) invalidates the hash
+        var parts = ny.Split('.');
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address("CA"), quoteHash = (long.Parse(parts[0]) + 1) + "." + parts[1] })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Checkout(s, new { address = Address("CA"), quoteHash = ny })).StatusCode);
+        // past its expiry a correct hash is refused with a fresh quote
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(16));
+        var expired = await Ok(await Checkout(s, new { address = Address("CA"), quoteHash = ny }), HttpStatusCode.Conflict);
+        Assert.Equal("price_changed", expired.GetProperty("code").GetString());
+        Assert.NotEqual(ny, Quote(expired.GetProperty("quote")));
     }
 
     [Fact]
@@ -381,6 +404,47 @@ public sealed class CheckoutTests : IDisposable
             Assert.Contains(Validate(env == "Production" ? Production(("Stripe:SecretKey", live), ("Stripe:WebhookSecret", new string('w', 40))) : new() { ["Stripe:SecretKey"] = live }, env), p => p.Contains("LIVE key") || p.Contains("test key"));
         Assert.Contains(Validate(new() { ["Stripe:PublishableKey"] = "pk_live_abc" }, env), p => p.Contains("LIVE key"));
         Assert.Contains(Validate(new() { ["Stripe:SecretKey"] = "whatever" }, env), p => p.Contains("test key"));
+    }
+
+    [Fact]
+    public void A_stripe_key_must_not_double_as_one_of_our_own_keys()
+    {
+        var shared = "sk_test_" + new string('k', 40);
+        var cfg = Production(("Stripe:SecretKey", shared), ("Stripe:WebhookSecret", "whsec_" + new string('w', 40)));
+        cfg["Portal:InboundSecret"] = shared;
+        Assert.Contains(Validate(cfg, "Production"), p => p.Contains("Stripe:SecretKey") && p.Contains("must differ"));
+        var pub = "pk_test_" + new string('p', 40);
+        var cfg2 = Production(("Stripe:SecretKey", "sk_test_abc"), ("Stripe:PublishableKey", pub), ("Stripe:WebhookSecret", "whsec_" + new string('w', 40)));
+        cfg2["Web:ForwardingKey"] = pub;
+        Assert.Contains(Validate(cfg2, "Production"), p => p.Contains("Stripe:PublishableKey") && p.Contains("must differ"));
+    }
+
+    [Fact]
+    public async Task A_us_destination_needs_a_real_state_a_price_above_the_cap_is_unavailable_and_a_total_above_the_cap_is_refused()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        foreach (var region in new object?[] { null, "", "ZZ", "N1" })
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Checkout(s, new { address = new { name = "A", line1 = "x", city = "c", region, postalCode = "20001", country = "US" } })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Checkout(s, new { address = Address("dc") })).StatusCode);          // lower case is accepted and normalised
+        Assert.Equal("DC", await _k.Db(db => db.Orders.Select(o => o.ShipRegion).SingleAsync()));
+        // a price above the cap makes the line unavailable (it blocks checkout until removed)
+        CatalogKit.Fixture(_k.F).Upsert(CatalogKit.ListingId("kiddush-cup-pewter"), l => l with { Variants = l.Variants.Select(v => v with { PriceCents = CartLimits.MaxUnitPriceCents + 1 }).ToList() });
+        await CatalogKit.Sync(_k.F);
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address() })).StatusCode);
+        // at the cap one unit is fine, but 20 of them exceed the total cap: refused, not charged, not overflowed
+        CatalogKit.Fixture(_k.F).Upsert(CatalogKit.ListingId("kiddush-cup-pewter"), l => l with { Variants = l.Variants.Select(v => v with { PriceCents = CartLimits.MaxUnitPriceCents }).ToList() });
+        await CatalogKit.Sync(_k.F);
+        var variant = await _k.Db(db => db.CatalogVariants.Where(v => v.PriceCents == CartLimits.MaxUnitPriceCents).Select(v => v.Id).FirstAsync());
+        var set = new HttpRequestMessage(HttpMethod.Get, "/api/v1/cart"); set.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s);
+        var cart = JsonDocument.Parse(await (await _k.Http.SendAsync(set)).Content.ReadAsStringAsync()).RootElement;
+        var line = cart.GetProperty("groups")[0].GetProperty("lines")[0].GetProperty("id").GetGuid();
+        var put = new HttpRequestMessage(HttpMethod.Put, "/api/v1/cart/lines/" + line) { Content = JsonContent.Create(new { quantity = 20 }) }; put.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s);
+        await _k.Http.SendAsync(put);
+        var intents = Stripe.Intents.Count;
+        var r = await Ok(await Checkout(s, new { address = Address() }), HttpStatusCode.UnprocessableEntity);
+        Assert.Equal("amount_too_large", r.GetProperty("code").GetString());
+        Assert.Equal(intents, Stripe.Intents.Count);
     }
 
     [Fact]
