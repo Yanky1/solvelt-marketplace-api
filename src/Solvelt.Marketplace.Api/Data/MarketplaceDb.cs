@@ -29,6 +29,8 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<OrderLine> OrderLines => Set<OrderLine>();
     public DbSet<OrderRefund> OrderRefunds => Set<OrderRefund>();
     public DbSet<StripeEvent> StripeEvents => Set<StripeEvent>();
+    public DbSet<Notification> Notifications => Set<Notification>();
+    public DbSet<NotificationPreference> NotificationPreferences => Set<NotificationPreference>();
     public DbSet<SellerOrderState> SellerOrderStates => Set<SellerOrderState>();
     public DbSet<OrderShipment> OrderShipments => Set<OrderShipment>();
     public DbSet<OrderShipmentLine> OrderShipmentLines => Set<OrderShipmentLine>();

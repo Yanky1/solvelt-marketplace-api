@@ -8,12 +8,12 @@ namespace Solvelt.Marketplace.Api.Fulfilment;
 /// (delivered, cancelled or refunded) the delivery address, phone, gift message, buyer name, relay address and the buyer's free-text notes are replaced, like the portal does
 /// for its own copy (ORDERS.md §7). Money, lines and ids stay (accounting).
 /// </summary>
-public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time)
+public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, Microsoft.Extensions.Options.IOptions<Infrastructure.NotificationOptions> notifications)
 {
     public const int RedactAfterDays = 90;
     public const string Redacted = "Redacted";
     public const int PositionRetentionHours = 24;
-    public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0);
+    public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0, int NotificationsDeleted = 0);
 
     public async Task<Result> RunAsync(CancellationToken ct = default)
     {
@@ -27,6 +27,9 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.PositionLat, (double?)null).SetProperty(x => x.PositionLng, (double?)null).SetProperty(x => x.PositionAt, (DateTimeOffset?)null), ct);
         var proofs = await db.OrderShipments.Where(x => x.ProofJson != null && x.ProofExpiresAt != null && x.ProofExpiresAt <= now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.ProofJson, (string?)null), ct);
+
+        var notifCut = now.AddDays(-Math.Max(1, notifications.Value.RetentionDays));
+        var deleted = await db.Notifications.Where(n => n.CreatedAt < notifCut).ExecuteDeleteAsync(ct);
 
         var cutoff = now.AddDays(-RedactAfterDays);
         var candidates = await db.Orders.AsNoTracking().Where(o => o.Status == OrderStatus.Placed && o.ShipName != Redacted).Select(o => o.Id).Take(500).ToListAsync(ct);
@@ -46,6 +49,6 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time)
                 .SetProperty(r => r.LabelUrl, (string?)null).SetProperty(r => r.LabelTrackingUrl, (string?)null), ct);
             redacted++;
         }
-        return new Result(labels, redacted, positions, proofs);
+        return new Result(labels, redacted, positions, proofs, deleted);
     }
 }
