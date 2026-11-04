@@ -12,7 +12,7 @@ public static class NotificationCategories
     /// off, "all" does not touch it, and it is not in <see cref="Switchable"/>; the in-app entry exists as always.</summary>
     public const string Transactional = "transactional";
     public static readonly string[] Switchable = [OrderUpdates, Shipped, OutForDelivery, Delivered, Messages, Bookings];
-    public static readonly string[] AlwaysOn = ["refunds", "cancellations", "failed_delivery_attempts"];
+    public static readonly string[] AlwaysOn = ["refunds", "cancellations", "delivery_problems", "returns", "booking_changes"];
 }
 
 public static class NotificationKinds
@@ -29,7 +29,9 @@ public static class NotificationKinds
         OrderShipped => NotificationCategories.Shipped,
         OutForDelivery => NotificationCategories.OutForDelivery,
         OrderDelivered => NotificationCategories.Delivered,
-        RefundIssued or OrderCancelled or DeliveryAttemptFailed => NotificationCategories.Transactional,
+        // transactional (O-21 / M5-20): money, cancellations, a delivery that failed, every change to a return, and every change to a booking except its reminder and its completion
+        RefundIssued or OrderCancelled or CancellationRejected or DeliveryAttemptFailed or ReturnApproved or ReturnRejected or ReturnReceived or ReturnLabelReady
+            or BookingConfirmed or BookingDeclined or BookingTimeProposed or BookingRescheduled or BookingCancelled or BookingExtraChargeRequested or BookingNoShow => NotificationCategories.Transactional,
         MessageReceived => NotificationCategories.Messages,
         var k when k.StartsWith("booking_") => NotificationCategories.Bookings,
         _ => NotificationCategories.OrderUpdates,

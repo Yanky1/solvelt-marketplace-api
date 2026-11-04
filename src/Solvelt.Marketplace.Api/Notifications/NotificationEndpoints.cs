@@ -70,8 +70,13 @@ public static class NotificationEndpoints
 
     private static async Task<IResult> PutPrefs(PreferencesBody? body, HttpContext ctx, MarketplaceDb db, TimeProvider time, CancellationToken ct)
     {
-        if (body?.Email is not { Count: > 0 } wanted || wanted.Keys.Any(k => !NotificationCategories.Switchable.Contains(k)))
+        if (body?.Email is not { Count: > 0 } wanted || wanted.Keys.Any(k => !NotificationCategories.Switchable.Contains(k) && !NotificationCategories.AlwaysOn.Contains(k)))
             return Private(Problems.Validation(new Dictionary<string, string> { ["email"] = "Send a value for each category you want to change." }), ctx);
+        // the mandatory (transactional) kinds can be named, but never switched off (O-21)
+        if (wanted.Any(kv => !kv.Value && NotificationCategories.AlwaysOn.Contains(kv.Key)))
+            return Private(Problems.Validation(new Dictionary<string, string> { ["email"] = "Required for your orders and account: these emails cannot be switched off." }), ctx);
+        wanted = wanted.Where(kv => NotificationCategories.Switchable.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+        if (wanted.Count == 0) return Private(Results.Json(View(await db.NotificationPreferences.AsNoTracking().FirstOrDefaultAsync(p => p.AccountId == ctx.Buyer().AccountId, ct))), ctx);
         var id = ctx.Buyer().AccountId;
         for (var attempt = 0; ; attempt++)
         {

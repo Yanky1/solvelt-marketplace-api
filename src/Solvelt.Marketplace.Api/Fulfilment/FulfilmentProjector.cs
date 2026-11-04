@@ -268,7 +268,7 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
                     if (ret is not null && ret.Status == ReturnStatus.Received) { ret.Status = ReturnStatus.Refunded; ret.UpdatedAt = now; }
                 }
                 if (full && await Step("status", FulfilmentStatus.Refunded, TerminalStates.Refunded)) await ClearPositionsAsync(c.Db, group.Id, ct);
-                if (refundMoneyMoved) Tell(NotificationKinds.RefundIssued, new { amountCents = (Long(data, "amountCents") ?? 0) + (Long(data, "shippingCents") ?? 0), full });
+                if (refundMoneyMoved) Tell(NotificationKinds.RefundIssued, new { amountCents = (Long(data, "amountCents") ?? 0) + (Long(data, "shippingCents") ?? 0), full, currency = order.Currency });
                 return HandlerOutcome.Applied();
             }
             default: return HandlerOutcome.Skipped("not a fulfilment event");

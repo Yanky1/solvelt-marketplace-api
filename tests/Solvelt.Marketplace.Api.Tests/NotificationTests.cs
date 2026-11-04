@@ -102,15 +102,31 @@ public sealed class NotificationTests : OrderFlowBase
         Assert.DoesNotContain(_k.Sink.Sent, m => m.Subject.Contains("accepted order"));
     }
 
+    [Theory]
+    [InlineData("refund_issued", true)] [InlineData("order_cancelled", true)] [InlineData("cancellation_rejected", true)] [InlineData("delivery_attempt_failed", true)]
+    [InlineData("return_approved", true)] [InlineData("return_rejected", true)] [InlineData("return_received", true)] [InlineData("return_label_ready", true)]
+    [InlineData("booking_confirmed", true)] [InlineData("booking_declined", true)] [InlineData("booking_time_proposed", true)] [InlineData("booking_rescheduled", true)]
+    [InlineData("booking_cancelled", true)] [InlineData("booking_extra_charge_requested", true)] [InlineData("booking_no_show", true)]
+    [InlineData("order_accepted", false)] [InlineData("order_shipped", false)] [InlineData("out_for_delivery", false)] [InlineData("order_delivered", false)]
+    [InlineData("message_received", false)] [InlineData("booking_reminder", false)] [InlineData("booking_completed", false)]
+    public void Which_mail_is_mandatory_follows_decision_O21(string kind, bool transactional)
+        => Assert.Equal(transactional, NotificationKinds.CategoryOf(kind) == NotificationCategories.Transactional);
+
     [Fact]
     public async Task Refund_cancellation_and_failed_delivery_mail_is_transactional_it_cannot_be_switched_off_and_all_leaves_it_on()
     {
         var (o, g) = await Placed();
         var id = (await _k.Account(Email)).Id;
         var prefs = await Prefs();
-        Assert.Equal(new[] { "refunds", "cancellations", "failed_delivery_attempts" }, prefs.GetProperty("alwaysOn").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.Equal(new[] { "refunds", "cancellations", "delivery_problems", "returns", "booking_changes" }, prefs.GetProperty("alwaysOn").EnumerateArray().Select(x => x.GetString()).ToArray());
         Assert.False(prefs.GetProperty("email").TryGetProperty("refunds", out _));                          // no switch for it
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { refunds = false } })).StatusCode);
+        foreach (var k in new[] { "refunds", "cancellations", "delivery_problems", "returns", "booking_changes" })
+        {
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new Dictionary<string, object> { ["email"] = new Dictionary<string, bool> { [k] = false } })).StatusCode);   // never off
+            Assert.Equal(HttpStatusCode.OK, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new Dictionary<string, object> { ["email"] = new Dictionary<string, bool> { [k] = true } })).StatusCode);          // "on" is a no-op
+        }
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { shipped = false, refunds = false } })).StatusCode);
+        Assert.True((await Prefs()).GetProperty("email").GetProperty("shipped").GetBoolean());                  // a refused request changes nothing
         // "stop all notification emails" through a signed link, then the events happen
         var all = _k.F.Services.GetRequiredService<Solvelt.Marketplace.Api.Notifications.UnsubscribeTokens>().Make(id, "all");
         Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, "/api/v1/notifications/unsubscribe", new { token = all }, "none")).StatusCode);
