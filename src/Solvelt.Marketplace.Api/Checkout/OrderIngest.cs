@@ -120,10 +120,12 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
                 return OutboxResult.Dead("refund_not_reserved");
             }
         }
-        var refundText = owed == paidNow.PaidCents ? $"{Money(owed, order.Currency)} is being refunded to your card in full" : owed > 0 ? $"the remaining {Money(owed, order.Currency)} is being refunded to your card (the rest was already returned)" : "everything has already been returned to your card";
-        await EnqueueBuyerMailAsync(order, "We couldn't place your order " + order.Number,
-            (windowGone ? "The delivery time you chose is no longer available, so the seller couldn't accept your order. " : "One of the items could no longer be ordered, so the sellers couldn't accept your order. ")
-            + $"You have not been charged: {refundText} (it can take a few days to show). Please place the order again and choose again.\n", $"failed:{order.Number}", ct);
+        // The buyer is mailed that money is coming back only once Stripe has really returned it (StripeRefundHandler sends that mail; never on reservation, review R1c). When nothing is owed because
+        // everything was already returned another way, there is no refund to wait for: say so now.
+        if (owed <= 0)
+            await EnqueueBuyerMailAsync(order, "We couldn't place your order " + order.Number,
+                (windowGone ? "The delivery time you chose is no longer available, so the seller couldn't accept your order. " : "One of the items could no longer be ordered, so the sellers couldn't accept your order. ")
+                + "You have not been charged: everything has already been returned to your card (it can take a few days to show). Please place the order again and choose again.\n", $"failed:{order.Number}", ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return OutboxResult.Delivered();
