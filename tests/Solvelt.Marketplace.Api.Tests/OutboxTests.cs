@@ -234,14 +234,15 @@ public class OutboxTests
     public async Task A_result_that_arrives_after_the_lease_was_lost_is_ignored()
     {
         TestFactory? factory = null;
+        int early = -1, takeover = -1;   // asserted after the dispatch: an assertion inside a handler would be swallowed as a handler failure
         var h = new ScriptedOutboxHandler();
         // First call: stalls past its lease, lets a second dispatcher take over and deliver, then reports a failure.
         h.Then(async _ =>
         {
             factory!.Clock.Advance(TimeSpan.FromSeconds(119));
-            Assert.Equal(0, await Dispatch(factory));   // the 120 s lease still protects the message
+            early = await Dispatch(factory);          // the 120 s lease still protects the message
             factory.Clock.Advance(TimeSpan.FromSeconds(2));
-            Assert.Equal(1, await Dispatch(factory));
+            takeover = await Dispatch(factory);
             return OutboxResult.Retry("late");
         }).Then(OutboxResult.Delivered());
         using var f = With(h);
@@ -249,10 +250,31 @@ public class OutboxTests
         var id = await Enqueue(f);
         await Dispatch(f);
         var m = await Load(f, id);
+        Assert.Equal((0, 1), (early, takeover));
         Assert.Equal(2, h.Calls);
         Assert.Equal("delivered", m.Status);
         Assert.Equal(1, m.Attempts);
         Assert.Null(m.LastError);
+    }
+
+    [Fact]
+    public async Task A_late_delivered_result_cannot_overwrite_a_newer_claims_outcome()
+    {
+        TestFactory? factory = null;
+        var h = new ScriptedOutboxHandler();
+        h.Then(async _ =>
+        {
+            factory!.Clock.Advance(TimeSpan.FromSeconds(121));
+            await Dispatch(factory);                   // the newer claim fails and schedules a retry
+            return OutboxResult.Delivered();           // the stale claim says delivered
+        }).Then(OutboxResult.Retry("newer"));
+        using var f = With(h);
+        factory = f;
+        var id = await Enqueue(f);
+        await Dispatch(f);
+        var m = await Load(f, id);
+        Assert.Equal(("pending", 1, "newer"), (m.Status, m.Attempts, m.LastError));
+        Assert.Null(m.DeliveredAt);
     }
 
     [Fact]
