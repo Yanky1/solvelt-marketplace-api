@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Fulfilment;
+using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
 using static Solvelt.Marketplace.Api.Tests.Infrastructure.WebhookTestKit;
 
@@ -175,6 +176,99 @@ public sealed class M5ReviewTests : OrderFlowBase
         Assert.Equal("refunded", await Status(g));
         Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == "refund_issued")));
         Assert.Single(Stripe.Refunds);                                                                // and the money was not moved twice
+    }
+
+    // ---------------------------------------------------------------- X (review of the replay)
+
+    private static async Task Rename(AuthKit k, string from, string to) => await k.Db(async db => await db.Database.ExecuteSqlRawAsync($"ALTER TABLE {from} RENAME TO {to}"));
+
+    private async Task<OutboxMessage> QueuedReplay() => await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "m5.reproject"));
+
+    private static ReprojectHandler Replay(IServiceScope scope) => scope.ServiceProvider.GetServices<IOutboxHandler>().OfType<ReprojectHandler>().Single();
+
+    [Fact]
+    public async Task X1_A_failed_replay_leaves_nothing_in_the_change_tracker_for_the_next_handler_of_the_same_scope()
+    {
+        var (o, g) = await Placed();
+        await Ship(o, g, 2);
+        await Rename(_k, "notifications", "notifications_x");
+        try
+        {
+            await Evt("refund.issued", o, g, new { refundId = "rf-x1", amountCents = o.TotalCents, shippingCents = 0, full = true, lines = new[] { new { marketplaceLineId = o.Lines.Single().MarketplaceLineId, quantity = 2, amountCents = o.TotalCents } } });
+            var msg = await QueuedReplay();
+            using var scope = _k.F.Services.CreateScope();
+            await Assert.ThrowsAnyAsync<Exception>(() => Replay(scope).HandleAsync(msg, default));         // the notifications table is still gone: the replay fails
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+            Assert.Empty(db.ChangeTracker.Entries().Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted));   // nothing half-applied is left to be saved by the next handler
+        }
+        finally { await Rename(_k, "notifications_x", "notifications"); }
+    }
+
+    [Fact]
+    public async Task X2_Replaying_the_same_event_twice_changes_nothing_the_second_time()
+    {
+        var (o, g) = await Placed();
+        await Ship(o, g, 2);
+        var lid = o.Lines.Single().MarketplaceLineId;
+        await Rename(_k, "order_line_fulfilment", "order_line_fulfilment_x");
+        try { Assert.Equal("applied", await Evt("order.cancelled", o, g, new { partial = true, refundDueCents = 0, lines = new[] { new { marketplaceLineId = lid, quantity = 1 } } })); }   // the projection fails inside its savepoint
+        finally { await Rename(_k, "order_line_fulfilment_x", "order_line_fulfilment"); }
+        var msg = await QueuedReplay();
+        for (var i = 0; i < 2; i++) { using var scope = _k.F.Services.CreateScope(); Assert.Equal(OutboxOutcome.Delivered, (await Replay(scope).HandleAsync(msg, default)).Outcome); }
+        Assert.Equal(1, (await Counters(o)).CancelledQty);                                                 // once, not twice (an additive count has no ordering guard of its own)
+    }
+
+    [Fact]
+    public async Task X5_A_tracked_entity_the_projection_changed_before_it_failed_is_re_read_not_left_modified()
+    {
+        var (o, g) = await Placed();
+        await Ship(o, g, 2);
+        await Rename(_k, "notifications", "notifications_x");
+        try
+        {
+            using var scope = _k.F.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+            var state = await db.SellerOrderStates.FindAsync(g.Id);                                         // tracked BEFORE the projection, like the money part's entities
+            Assert.Equal("shipped", state!.Status);
+            await using var tx = await db.Database.BeginTransactionAsync();
+            var data = JsonSerializer.SerializeToElement(new { order = new { sellerOrderId = g.SellerOrderId, sellerOrderNumber = g.SellerOrderNumber, marketplaceOrderId = o.Number }, refundId = "rf-x5", amountCents = o.TotalCents, shippingCents = 0, full = true,
+                lines = new[] { new { marketplaceLineId = o.Lines.Single().MarketplaceLineId, quantity = 2, amountCents = o.TotalCents } } });
+            var ctx = new Solvelt.Marketplace.Api.Portal.Webhooks.ProjectionContext(db, new Solvelt.Marketplace.Api.Portal.Webhooks.PortalEvent("e-x5", "refund.issued", _k.F.Clock.GetUtcNow().AddMinutes(-1), data),
+                scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Portal.Webhooks.ProjectionStore>(), _k.F.Clock);
+            await scope.ServiceProvider.GetRequiredService<FulfilmentProjector>().ApplyIsolatedAsync(ctx, true, default);
+            Assert.Equal(("shipped", EntityState.Unchanged), (state.Status, db.Entry(state).State));          // the in-memory "refunded" is gone
+            await tx.RollbackAsync();
+        }
+        finally { await Rename(_k, "notifications_x", "notifications"); }
+    }
+
+    [Fact]
+    public async Task X5_A_replay_is_ordered_by_the_ordering_time_a_cancel_that_arrives_late_does_not_undo_a_delivery_and_a_future_dated_event_is_clamped()
+    {
+        var (o, g) = await Placed();
+        var t = _k.F.Clock.GetUtcNow();
+        await Rename(_k, "notifications", "notifications_x");
+        try { Assert.Equal("applied", await Evt("order.cancelled", o, g, new { refundDueCents = 0 }, id: "re-late", at: t.AddMinutes(-100))); }   // projection fails; the replay is queued
+        finally { await Rename(_k, "notifications_x", "notifications"); }
+        Assert.Equal("applied", await Evt("order.delivered", o, g, new { by = "seller" }, id: "re-deliv", at: t.AddMinutes(-50)));
+        Assert.Equal("delivered", await Status(g));
+        using (var scope = _k.F.Services.CreateScope()) await Replay(scope).HandleAsync(await QueuedReplay(), default);
+        Assert.Equal("delivered", await Status(g));                                                          // the stale cancel is skipped, not forced
+    }
+
+    [Fact]
+    public async Task X5_A_future_dated_event_is_replayed_with_the_clamped_ordering_time_never_its_own_claim()
+    {
+        var (o2, g2) = await Placed();
+        var t = _k.F.Clock.GetUtcNow();
+        await Rename(_k, "notifications", "notifications_x");
+        try { Assert.Equal("applied", await Evt("refund.issued", o2, g2, new { refundId = "rf-fut", amountCents = o2.TotalCents, shippingCents = 0, full = true, lines = new[] { new { marketplaceLineId = o2.Lines.Single().MarketplaceLineId, quantity = 2, amountCents = o2.TotalCents } } }, id: "re-future", at: t.AddDays(30))); }
+        finally { await Rename(_k, "notifications_x", "notifications"); }
+        var fut = (await _k.Db(db => db.OutboxMessages.AsNoTracking().Where(m => m.Type == "m5.reproject").ToListAsync())).Single(m => m.Payload!.Contains("re-future"));
+        using (var scope = _k.F.Services.CreateScope()) await Replay(scope).HandleAsync(fut, default);
+        var at = await _k.Db(db => db.ProjectionStates.AsNoTracking().Where(x => x.LastEventId == "re-future").Select(x => x.LastAppliedAt).ToListAsync());
+        Assert.NotEmpty(at);
+        Assert.All(at, x => Assert.True(x <= _k.F.Clock.GetUtcNow().AddMinutes(6)));
     }
 
     // ---------------------------------------------------------------- M1

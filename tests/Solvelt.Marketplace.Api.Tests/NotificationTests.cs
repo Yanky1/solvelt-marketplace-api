@@ -134,6 +134,10 @@ public sealed class NotificationTests : OrderFlowBase
         await Evt("delivery.attempt_failed", o, g, new { shipmentId = "sh-1", attempt = 1, reason = "no one home" }, id: "ne-fail");
         await Evt("refund.issued", o, g, new { refundId = "rf-t", amountCents = 500, shippingCents = 0 }, id: "ne-rf2");
         await Drain();
+        var refundMail = _k.Sink.Sent.First(m => m.To == Email && m.Subject.StartsWith("A refund"));
+        Assert.Null(refundMail.Headers);                                                                   // nothing to unsubscribe from: no List-Unsubscribe header ...
+        Assert.DoesNotContain("unsubscribe", refundMail.TextBody, StringComparison.OrdinalIgnoreCase);     // ... and no dead "stop these emails" link (review X3)
+        Assert.Contains("required for your orders and account", refundMail.TextBody, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(_k.Sink.Sent, m => m.To == Email && m.Subject.StartsWith("A refund"));
         Assert.Contains(_k.Sink.Sent, m => m.To == Email && m.Subject.StartsWith("A delivery attempt"));
         // and the switchable ones stay off
@@ -272,6 +276,17 @@ public sealed class NotificationTests : OrderFlowBase
         Assert.Equal(HttpStatusCode.NoContent, ok.StatusCode);
         Assert.False((await Prefs()).GetProperty("email").GetProperty("shipped").GetBoolean());
         Assert.True((await Prefs()).GetProperty("email").GetProperty("delivered").GetBoolean());
+    }
+
+    [Fact]
+    public void X7_The_subject_cut_never_splits_a_surrogate_pair()
+    {
+        // 199 letters then an emoji (two UTF-16 units) make the cut fall between them
+        var n = new Notification { Kind = NotificationKinds.OrderAccepted, OrderNumber = "O-1", ParamsJson = JsonSerializer.Serialize(new { sellerName = new string('a', 190) + "\U0001F600\U0001F600\U0001F600" }) };
+        var subject = Solvelt.Marketplace.Api.Notifications.NotificationEmails.Build("a@example.com", "A", n, "https://shop.test", "https://shop.test/u", "https://shop.test/u2").Subject;
+        Assert.True(subject.Length <= 200);
+        Assert.All(subject.Select((c, i) => (c, i)), x => { if (char.IsHighSurrogate(x.c)) Assert.True(x.i + 1 < subject.Length && char.IsLowSurrogate(subject[x.i + 1])); if (char.IsLowSurrogate(x.c)) Assert.True(x.i > 0 && char.IsHighSurrogate(subject[x.i - 1])); });
+        Assert.DoesNotContain('\uFFFD', subject);
     }
 
     [Fact]

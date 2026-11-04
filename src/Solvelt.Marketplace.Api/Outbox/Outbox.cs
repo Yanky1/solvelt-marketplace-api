@@ -119,12 +119,14 @@ public sealed class OutboxDispatcher(MarketplaceDb db, OutboxHandlerRegistry reg
         OutboxResult result;
         try
         {
+            db.ChangeTracker.Clear();   // every message starts with a clean tracker: nothing a previous handler left half-done can be saved by this one (review X1)
             var handler = registry.Find(message.Type);
             result = handler is null ? OutboxResult.Retry("no_handler") : await handler.HandleAsync(message, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
+            db.ChangeTracker.Clear();   // a failed handler's tracked changes are never saved by whoever runs next in this scope
             result = OutboxResult.Retry(ex.GetType().Name);   // the type only: a message may carry PII or portal payload
             log.LogWarning("Outbox message of type {Type} failed with {ExceptionType} (attempt {Attempt})", message.Type, ex.GetType().FullName, message.Attempts + 1);
         }

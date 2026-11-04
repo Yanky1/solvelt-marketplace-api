@@ -243,6 +243,25 @@ public sealed class TrackingTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task X5_The_worker_clears_old_positions_first_so_a_failing_maintenance_step_cannot_leave_them_behind()
+    {
+        var (o, g) = await Shipped();
+        await Evt("order.tracking_updated", o, g, new { shipmentId = "sh-1", method = "local", status = "out_for_delivery", position = new { lat = 40.693, lng = -73.99 } });
+        _k.F.Clock.Advance(TimeSpan.FromHours(25));
+        // the first maintenance step (expiring unpaid orders) now fails: the worker must already have cleared the positions
+        await _k.Db(async db => await db.Database.ExecuteSqlRawAsync("ALTER TABLE marketplace_orders RENAME TO marketplace_orders_x"));
+        var worker = new Solvelt.Marketplace.Api.Checkout.OrderWorker(_k.F.Services.GetRequiredService<IServiceScopeFactory>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<Solvelt.Marketplace.Api.Checkout.OrderWorker>.Instance);
+        try
+        {
+            await worker.StartAsync(default);
+            for (var i = 0; i < 100 && await _k.Db(db => db.OrderShipments.CountAsync(x => x.PositionLat != null)) > 0; i++) await Task.Delay(50);
+            await worker.StopAsync(default);
+        }
+        finally { await _k.Db(async db => await db.Database.ExecuteSqlRawAsync("ALTER TABLE marketplace_orders_x RENAME TO marketplace_orders")); }
+        Assert.Null(await _k.Db(db => db.OrderShipments.Select(x => x.PositionLat).SingleAsync()));
+    }
+
+    [Fact]
     public async Task Position_retention_runs_on_its_own()
     {
         var (o, g) = await Shipped();
