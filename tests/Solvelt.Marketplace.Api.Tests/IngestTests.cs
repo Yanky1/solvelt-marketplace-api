@@ -392,7 +392,12 @@ public sealed class IngestTests : OrderFlowBase
         await Drain();
         var rejected = await _k.Db(db => db.OrderRefunds.SingleAsync(r => r.Key == "k-no"));
         Assert.Equal("rejected", rejected.Status);
-        Assert.Equal(before, (await Order(order.Number)).RefundedCents);                   // the money is already gone (refunded in the dashboard): the reservation STAYS, so the cap cannot allow it twice
+        // the money is already gone (refunded in the dashboard): the 700 is given back and the CONFIRMED dashboard refund takes its place in the counter (decision M3-28), so the cap is still
+        // used up exactly by money that really left, never by a reservation Stripe did not execute
+        var afterRefusal = await Order(order.Number);
+        Assert.Equal(afterRefusal.PaidCents, afterRefusal.RefundedCents);
+        Assert.Equal(afterRefusal.PaidCents - 500, await _k.Db(db => db.OrderRefunds.Where(r => r.Reason == "external").SumAsync(r => r.AmountCents)));
+        Assert.True(before > 0);
         Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == "stripe.refund" && m.Status == "dead" && m.LastError == "stripe_charge_exceeds_amount")));
     }
 
@@ -574,6 +579,53 @@ public sealed class IngestTests : OrderFlowBase
     }
 
     // ---- the 422 refund (review F3) and parallel dashboard refunds (F4) ----
+
+    [Fact]
+    public async Task A_rejected_order_whose_dashboard_refund_was_not_processed_yet_is_still_refunded_what_is_really_left_and_mailed_only_after_stripe_returned_it()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        _onOrder = _ => FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"invalid_order\",\"errors\":[{\"index\":0,\"code\":\"product_inactive\",\"message\":\"x\"}]}");
+        await Pay(number, intent, total);
+        // 300 cents were refunded in Stripe's dashboard; our webhook for it has NOT been processed (review R1: the reservation of the full amount then used to be refused for good)
+        await Stripe.RefundAsync(intent, 300, "dashboard", new Dictionary<string, string>(), default);
+        await Drain();
+        var order = await Order(number);
+        Assert.Equal("failed", order.Status);
+        Assert.Equal(total, Stripe.Intents.Single().RefundedCents);                      // the buyer has everything back: 300 from the dashboard + the true remainder from us
+        Assert.Equal(total, order.RefundedCents);                                        // and our counter says exactly that, no more
+        Assert.Contains(Stripe.Refunds, r => r.AmountCents == total - 300);
+        Assert.Equal(1, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external" && r.AmountCents == 300)));
+        var mail = Assert.Single(_k.Sink.Sent, m => m.Subject.Contains("couldn't place"));   // sent once, after Stripe returned the money
+        Assert.Contains("remaining", mail.TextBody);
+        Assert.Contains((total - 300).ToString("D4").Insert((total - 300).ToString().Length - 2, "."), mail.TextBody);
+        // the dashboard refund's own webhook arrives late: it is already accounted for, nothing changes
+        await PostStripe(Event("charge.refunded", "ch_late", null, 0, extra: new { payment_intent = intent, amount_refunded = 300L }));
+        await Drain();
+        Assert.Equal(total, (await Order(number)).RefundedCents);
+        Assert.Equal(1, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external")));
+    }
+
+    [Fact]
+    public async Task The_buyer_is_not_mailed_that_a_refund_is_coming_while_it_is_only_reserved()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        _onOrder = _ => FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"invalid_order\",\"errors\":[{\"index\":0,\"code\":\"product_inactive\",\"message\":\"x\"}]}");
+        Stripe.Capture(intent);
+        await PostStripe(Event("payment_intent.succeeded", intent, number, total));
+        // run only the ingest, not the refund: Stripe is unreachable, so the reservation exists but no money moved
+        Stripe.FailNext = 50;
+        await Drain();
+        Assert.Equal("reserved", (await _k.Db(db => db.OrderRefunds.SingleAsync())).Status);
+        Assert.DoesNotContain(_k.Sink.Sent, m => m.Subject.Contains("couldn't place"));      // not announced while it is only a reservation
+        Stripe.FailNext = 0;
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(5));
+        await Drain();
+        Assert.Single(_k.Sink.Sent, m => m.Subject.Contains("couldn't place"));              // announced once it really went
+    }
 
     [Fact]
     public async Task A_rejected_order_after_an_earlier_refund_refunds_what_is_left_and_says_so_and_a_refund_that_cannot_be_reserved_is_not_mailed()
