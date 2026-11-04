@@ -164,7 +164,7 @@ public sealed class NotificationTests : OrderFlowBase
     {
         await Login(Email);
         var id = (await _k.Account(Email)).Id;
-        string Sign(string key, Guid acc, string cat) => $"{acc:N}.{cat}." + Convert.ToBase64String(HMACSHA256.HashData(Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes($"unsub|{acc:N}|{cat}"))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        string Sign(string key, Guid acc, string cat, long? exp = null) { var e = exp ?? _k.F.Clock.GetUtcNow().AddDays(30).ToUnixTimeSeconds(); return $"{acc:N}.{cat}.{e}." + Convert.ToBase64String(HMACSHA256.HashData(Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes($"unsub|{acc:N}|{cat}|{e}"))).TrimEnd('=').Replace('+', '-').Replace('/', '_'); }
         Task<HttpResponseMessage> Unsub(string? t) => Call(HttpMethod.Post, "/api/v1/notifications/unsubscribe", new { token = t }, "none");
         // the right key (the dev default of the Testing app) works for one category
         Assert.Equal(HttpStatusCode.NoContent, (await Unsub(Sign(DevDefaults.UnsubscribeKey, id, "refunds"))).StatusCode);
@@ -179,11 +179,59 @@ public sealed class NotificationTests : OrderFlowBase
         Assert.Equal(HttpStatusCode.BadRequest, (await Unsub(Sign(DevDefaults.UnsubscribeKey, id, "marketing"))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await Unsub(null)).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await Unsub("x.y.z")).StatusCode);
+        // the canonical id only: the same MAC-valid token with an upper-case id is refused (review P4)
+        var up = Sign(DevDefaults.UnsubscribeKey, id, "shipped"); up = up.Replace(id.ToString("N"), id.ToString("N").ToUpperInvariant());
+        Assert.Equal(HttpStatusCode.BadRequest, (await Unsub(up)).StatusCode);
+        // the expiry is part of the signature: moving it later does not extend a link
+        var t = Sign(DevDefaults.UnsubscribeKey, id, "shipped", 100).Split('.');
+        Assert.Equal(HttpStatusCode.BadRequest, (await Unsub($"{t[0]}.{t[1]}.{_k.F.Clock.GetUtcNow().AddYears(5).ToUnixTimeSeconds()}.{t[3]}")).StatusCode);
         Assert.True((await Prefs()).GetProperty("email").GetProperty("shipped").GetBoolean());
         // "all" switches every category off; an unknown (deleted) account is a quiet no-op, not an error that reveals anything
         Assert.Equal(HttpStatusCode.NoContent, (await Unsub(Sign(DevDefaults.UnsubscribeKey, id, "all"))).StatusCode);
         Assert.All(new[] { "order_updates", "shipped", "out_for_delivery", "delivered", "refunds", "messages", "bookings" }, c => Assert.False((Prefs().Result).GetProperty("email").GetProperty(c).GetBoolean()));
         Assert.Equal(HttpStatusCode.NoContent, (await Unsub(Sign(DevDefaults.UnsubscribeKey, Guid.NewGuid(), "all"))).StatusCode);
+    }
+
+    [Fact]
+    public async Task An_unsubscribe_link_expires_after_90_days_with_its_own_error_and_changes_nothing()
+    {
+        var (o, g) = await Placed();
+        await Ship(o, g, "ne-exp");
+        var mail = Assert.Single(await Mails("Your order"));
+        var token = Regex.Match(mail.TextBody, @"Stop these emails: \S+/unsubscribe\?token=([A-Za-z0-9_.-]+)").Groups[1].Value;
+        var exp = long.Parse(token.Split('.')[2]);
+        Assert.Equal(_k.F.Clock.GetUtcNow().AddDays(90).ToUnixTimeSeconds(), exp);
+        _k.F.Clock.Advance(TimeSpan.FromDays(91));
+        var res = await Call(HttpMethod.Post, "/api/v1/notifications/unsubscribe", new { token }, "none");
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        Assert.Equal("expired_token", (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        Assert.Equal(0, await _k.Db(db => db.NotificationPreferences.CountAsync(x => !x.EmailShipped)));     // nothing was switched off (the session itself is long gone)
+    }
+
+    [Fact]
+    public async Task A_notification_mail_carries_RFC_8058_one_click_headers_and_that_url_works_with_the_mail_clients_form_post_only()
+    {
+        var (o, g) = await Placed();
+        await Ship(o, g, "ne-8058");
+        var mail = Assert.Single(await Mails("Your order"));
+        var url = mail.Headers!["List-Unsubscribe"];
+        Assert.Equal("List-Unsubscribe=One-Click", mail.Headers["List-Unsubscribe-Post"]);
+        Assert.StartsWith("<", url); Assert.EndsWith(">", url);
+        var uri = new Uri(url.Trim('<', '>'));
+        Assert.Equal("/api/v1/notifications/unsubscribe", uri.AbsolutePath);
+        var pathAndQuery = uri.PathAndQuery;
+        // a GET (a link scanner) changes nothing and is not even routed
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, (await _k.Http.GetAsync(pathAndQuery)).StatusCode);
+        Assert.True((await Prefs()).GetProperty("email").GetProperty("shipped").GetBoolean());
+        // a POST without the one-click marker is refused
+        var bare = await _k.Http.PostAsync(pathAndQuery, new FormUrlEncodedContent(new Dictionary<string, string> { ["x"] = "y" }));
+        Assert.Equal(HttpStatusCode.BadRequest, bare.StatusCode);
+        Assert.True((await Prefs()).GetProperty("email").GetProperty("shipped").GetBoolean());
+        // the mail client's POST: form body, token in the URL, no cookie and no Authorization header
+        var ok = await _k.Http.PostAsync(pathAndQuery, new FormUrlEncodedContent(new Dictionary<string, string> { ["List-Unsubscribe"] = "One-Click" }));
+        Assert.Equal(HttpStatusCode.NoContent, ok.StatusCode);
+        Assert.False((await Prefs()).GetProperty("email").GetProperty("shipped").GetBoolean());
+        Assert.True((await Prefs()).GetProperty("email").GetProperty("delivered").GetBoolean());
     }
 
     [Fact]

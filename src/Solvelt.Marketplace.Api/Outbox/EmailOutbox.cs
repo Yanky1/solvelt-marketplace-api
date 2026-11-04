@@ -7,7 +7,7 @@ using Solvelt.Marketplace.Api.Portal;
 
 namespace Solvelt.Marketplace.Api.Outbox;
 
-public sealed record EmailMessage(string To, string Subject, string TextBody, string? HtmlBody = null);
+public sealed record EmailMessage(string To, string Subject, string TextBody, string? HtmlBody = null, IReadOnlyDictionary<string, string>? Headers = null);
 
 public interface IEmailSender
 {
@@ -43,6 +43,7 @@ public sealed class SmtpEmailSender(IOptions<EmailOptions> options) : IEmailSend
         if (!string.IsNullOrEmpty(o.SmtpUserName)) client.Credentials = new System.Net.NetworkCredential(o.SmtpUserName, o.SmtpPassword);
         using var mail = new System.Net.Mail.MailMessage(o.From!, message.To, message.Subject, message.TextBody);
         if (message.HtmlBody is { } html) mail.AlternateViews.Add(System.Net.Mail.AlternateView.CreateAlternateViewFromString(html, null, "text/html"));
+        if (message.Headers is not null) foreach (var (k, v) in message.Headers) mail.Headers.Add(k, v.Replace("\r", "").Replace("\n", ""));
         await client.SendMailAsync(mail, ct);
     }
 }

@@ -84,10 +84,28 @@ public static class NotificationEndpoints
         }
     }
 
-    /// <summary>One-click unsubscribe (RFC 8058 style). The token names an account and a category (or all) and is signed with its own key; it can only switch mail OFF.</summary>
-    private static async Task<IResult> Unsubscribe(UnsubscribeBody? body, UnsubscribeTokens tokens, MarketplaceDb db, TimeProvider time, CancellationToken ct)
+    /// <summary>
+    /// One-click unsubscribe. The token (query, form field or JSON body) names an account and a category (or all), is signed with its own key and expires; it can only switch mail OFF. Accepts the
+    /// RFC 8058 mail-client POST (<c>application/x-www-form-urlencoded</c> body <c>List-Unsubscribe=One-Click</c>, token in the URL) as well as the website's JSON POST. An expired token is a distinct
+    /// 400 <c>expired_token</c> (the website then sends the person to the signed-in preferences page).
+    /// </summary>
+    private static async Task<IResult> Unsubscribe(HttpContext ctx, UnsubscribeTokens tokens, MarketplaceDb db, TimeProvider time, CancellationToken ct)
     {
-        if (tokens.Parse(body?.Token) is not var (accountId, category) ) return Problems.Json(400, "invalid_token", "This link is not valid.");
+        string? token = ctx.Request.Query["token"].FirstOrDefault();
+        if (ctx.Request.HasFormContentType)
+        {
+            IFormCollection form;
+            try { form = await ctx.Request.ReadFormAsync(ct); } catch (InvalidDataException) { return Problems.Json(400, "invalid_token", "This link is not valid."); }
+            if (form["List-Unsubscribe"].FirstOrDefault() != "One-Click") return Problems.Json(400, "invalid_request", "Not a one-click unsubscribe.");
+            token ??= form["token"].FirstOrDefault();
+        }
+        else if (token is null)
+        {
+            try { token = (await ctx.Request.ReadFromJsonAsync<UnsubscribeBody>(ct))?.Token; } catch (Exception e) when (e is System.Text.Json.JsonException or BadHttpRequestException or InvalidOperationException) { token = null; }
+        }
+        var (state, accountId, category) = tokens.Parse(token);
+        if (state == UnsubscribeTokens.State.Expired) return Problems.Json(400, "expired_token", "This link has expired. Sign in to change your email settings.");
+        if (state != UnsubscribeTokens.State.Ok) return Problems.Json(400, "invalid_token", "This link is not valid.");
         if (!await db.BuyerAccounts.AnyAsync(a => a.Id == accountId && a.DeletedAt == null, ct)) return Results.NoContent();
         for (var attempt = 0; ; attempt++)
         {
