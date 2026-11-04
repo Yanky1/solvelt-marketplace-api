@@ -105,7 +105,6 @@ public class SignedPortalClientTests
     [InlineData(HttpStatusCode.ServiceUnavailable, "")]
     [InlineData(HttpStatusCode.Conflict, "concurrent_update")]
     [InlineData(HttpStatusCode.Conflict, "version_conflict")]
-    [InlineData(HttpStatusCode.TooManyRequests, "")]
     public async Task Retryable_answers_are_retried_for_ordinary_calls(HttpStatusCode status, string code)
     {
         var rig = new Rig();
@@ -122,6 +121,8 @@ public class SignedPortalClientTests
     [InlineData(HttpStatusCode.BadRequest, "bad_request")]
     [InlineData(HttpStatusCode.Conflict, "something_else")]
     [InlineData(HttpStatusCode.NotFound, "order_not_found")]   // retryable only for payment events
+    [InlineData(HttpStatusCode.NotFound, "booking_not_found")]
+    [InlineData(HttpStatusCode.Conflict, "sale_not_recorded")] // retryable only for payment events
     public async Task Other_answers_are_never_retried_for_ordinary_calls(HttpStatusCode status, string code)
     {
         var rig = new Rig();
@@ -192,17 +193,6 @@ public class SignedPortalClientTests
         await Assert.ThrowsAsync<PortalUnavailableException>(() => rig.Client.CreateOrderAsync(Order()));
     }
 
-    [Fact]
-    public async Task A_hung_portal_hits_the_per_attempt_deadline_and_is_retried()
-    {
-        var rig = new Rig(o => { o.AttemptTimeoutSeconds = 1; o.MaxAttempts = 2; });
-        rig.Portal.Respond(async_ => { Thread.Sleep(10); throw new TaskCanceledException("deadline"); })
-                  .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
-        var res = await rig.Client.CreateOrderAsync(Order());
-        Assert.Equal(2, res.Attempts);
-    }
-
-    
     // ---------- the fake portal enforces the portal's rules (so every test exercises real verification) ----------
     [Fact]
     public async Task Client_clock_skew_beyond_300s_is_a_401_stale_and_is_not_retried()
@@ -427,6 +417,192 @@ public class SignedPortalClientTests
         var rig = new Rig();
         await Assert.ThrowsAsync<ArgumentException>(() => rig.Client.SendPaymentEventAsync(Capture(new string('e', 101))));
         Assert.Empty(rig.Portal.Calls);
+    }
+
+    // ---------- deadlines (review 2): run on the injected clock, against a portal that never answers ----------
+    private static async Task WaitForCalls(FakePortal portal, int n)
+    {
+        var until = DateTime.UtcNow.AddSeconds(5);
+        while (portal.Calls.Count < n)
+        {
+            if (DateTime.UtcNow > until) throw new TimeoutException($"Expected {n} call(s), saw {portal.Calls.Count}.");
+            await Task.Delay(2);
+        }
+    }
+
+    private static async Task Advance(Rig rig, int seconds)
+    {
+        await Task.Delay(20);   // let the client reach its await before the timer fires
+        rig.Clock.Advance(TimeSpan.FromSeconds(seconds));
+    }
+
+    private static async Task<T> Within<T>(Task<T> task) => await task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    [Fact]
+    public void Defaults_are_30s_per_attempt_30s_in_total_and_5_attempts()
+    {
+        var o = new PortalOptions();
+        Assert.Equal(30, o.AttemptTimeoutSeconds);
+        Assert.Equal(30, o.TotalDeadlineSeconds);
+        Assert.Equal(5, o.MaxAttempts);
+    }
+
+    [Fact]
+    public async Task A_portal_that_never_answers_is_cut_off_at_the_total_deadline_on_the_injected_clock()
+    {
+        var rig = new Rig(o => { o.AttemptTimeoutSeconds = 30; o.TotalDeadlineSeconds = 30; o.MaxAttempts = 5; });   // the defaults, spelled out
+        rig.Portal.RespondHang(5);
+        var task = rig.Client.CreateOrderAsync(Order());
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 29);
+        await Task.Delay(30);
+        Assert.False(task.IsCompleted, "the call ended before the deadline");
+        rig.Clock.Advance(TimeSpan.FromSeconds(1));
+        await Assert.ThrowsAsync<PortalUnavailableException>(() => Within(task));
+        Assert.Single(rig.Portal.Calls);   // 30 s were spent, nothing left for a second attempt
+    }
+
+    [Fact]
+    public async Task A_configured_attempt_timeout_above_30s_is_clamped_to_30s()
+    {
+        var rig = new Rig(o => { o.AttemptTimeoutSeconds = 120; o.TotalDeadlineSeconds = 60; o.MaxAttempts = 5; });
+        rig.Portal.RespondHang(5);
+        var task = rig.Client.CreateOrderAsync(Order());
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 29);
+        await Task.Delay(30);
+        Assert.Single(rig.Portal.Calls);   // still waiting on attempt 1
+        rig.Clock.Advance(TimeSpan.FromSeconds(1));   // 30 s: attempt 1 is cancelled (120 would have run on) and attempt 2 starts
+        await WaitForCalls(rig.Portal, 2);
+        await Advance(rig, 30);
+        await Assert.ThrowsAsync<PortalUnavailableException>(() => Within(task));
+        Assert.Equal(2, rig.Portal.Calls.Count);
+    }
+
+    [Fact]
+    public async Task A_configured_total_deadline_above_60s_is_clamped_to_60s()
+    {
+        var rig = new Rig(o => { o.AttemptTimeoutSeconds = 30; o.TotalDeadlineSeconds = 3600; o.MaxAttempts = 10; });
+        rig.Portal.RespondHang(10);
+        var task = rig.Client.CreateOrderAsync(Order());
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 30);
+        await WaitForCalls(rig.Portal, 2);
+        await Advance(rig, 30);
+        await Assert.ThrowsAsync<PortalUnavailableException>(() => Within(task));
+        Assert.Equal(2, rig.Portal.Calls.Count);   // 60 s in total, not 10 attempts
+    }
+
+    [Fact]
+    public async Task The_last_attempt_is_bounded_by_what_is_left_of_the_total_deadline()
+    {
+        var rig = new Rig(o => { o.AttemptTimeoutSeconds = 30; o.TotalDeadlineSeconds = 45; o.MaxAttempts = 5; });
+        rig.Portal.RespondHang(5);
+        var task = rig.Client.CreateOrderAsync(Order());
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 30);                   // attempt 1 times out at 30 s; 15 s of budget remain
+        await WaitForCalls(rig.Portal, 2);
+        await Advance(rig, 15);                   // attempt 2 must end at 45 s, not run on to 60 s
+        await Assert.ThrowsAsync<PortalUnavailableException>(() => Within(task));
+        Assert.Equal(2, rig.Portal.Calls.Count);
+    }
+
+    [Fact]
+    public async Task Retrying_stops_when_the_next_backoff_would_exceed_the_total_deadline()
+    {
+        var rig = new Rig(o => { o.TotalDeadlineSeconds = 15; o.MaxAttempts = 5; });
+        rig.Portal.Respond(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(TimeSpan.FromSeconds(10)))
+                  .Respond(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(TimeSpan.FromSeconds(10)))
+                  .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
+        var task = rig.Client.CreateOrderAsync(Order());
+        while (!task.IsCompleted) { rig.Clock.Advance(TimeSpan.FromSeconds(1)); await Task.Delay(5); }
+        var res = await task;
+        Assert.Equal(503, res.Status);
+        Assert.Equal(2, res.Attempts);      // 0 s + 10 s wait fits in 15 s; a second 10 s wait (20 s) would not
+        Assert.True(res.Retryable);
+    }
+
+    [Fact]
+    public async Task A_503_without_retry_after_is_retried_within_the_deadline()
+    {
+        var rig = new Rig(o => { o.RetryBaseDelayMs = 0; });
+        rig.Portal.Respond(HttpStatusCode.ServiceUnavailable, "{}").Respond(HttpStatusCode.ServiceUnavailable, "{}").Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
+        var res = await rig.Client.CreateOrderAsync(Order());
+        Assert.True(res.IsSuccess);
+        Assert.Equal(3, res.Attempts);
+    }
+
+    [Fact]
+    public async Task A_429_is_surfaced_for_the_outbox_and_never_retried_by_the_client()
+    {
+        var rig = new Rig();
+        rig.Portal.Respond(HttpStatusCode.TooManyRequests, "{\"code\":\"rate_limited\"}").Respond(HttpStatusCode.OK, "{}");
+        var res = await rig.Client.CreateOrderAsync(Order());
+        Assert.Equal(429, res.Status);
+        Assert.Equal(1, res.Attempts);
+        Assert.True(res.Retryable);
+        Assert.Single(rig.Portal.Calls);
+    }
+
+    [Fact]
+    public async Task Retry_after_may_be_an_http_date()
+    {
+        var rig = new Rig();
+        rig.Portal.Respond(_ => FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(rig.Clock.GetUtcNow().AddSeconds(7))))
+                  .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
+        var task = rig.Client.CreateOrderAsync(Order());
+        while (!task.IsCompleted) { rig.Clock.Advance(TimeSpan.FromSeconds(1)); await Task.Delay(5); }
+        Assert.True((await task).IsSuccess);
+        var ts = rig.Portal.Calls.Select(c => long.Parse(c.Timestamp)).ToList();
+        Assert.InRange(ts[1] - ts[0], 6, 9);
+    }
+
+    [Fact]
+    public async Task A_retry_after_date_in_the_past_means_retry_now()
+    {
+        var rig = new Rig();
+        rig.Portal.Respond(_ => FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(rig.Clock.GetUtcNow().AddSeconds(-100))))
+                  .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
+        var res = await Within(rig.Client.CreateOrderAsync(Order()));   // would hang on an unadvanced clock if it waited
+        Assert.Equal(2, res.Attempts);
+    }
+
+    [Fact]
+    public async Task Retry_after_is_capped_at_30s()
+    {
+        var rig = new Rig(o => o.TotalDeadlineSeconds = 60);
+        rig.Portal.Respond(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(TimeSpan.FromSeconds(600)))
+                  .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
+        var task = rig.Client.CreateOrderAsync(Order());
+        while (!task.IsCompleted) { rig.Clock.Advance(TimeSpan.FromSeconds(1)); await Task.Delay(5); }
+        var res = await task;
+        Assert.Equal(2, res.Attempts);
+        var ts = rig.Portal.Calls.Select(c => long.Parse(c.Timestamp)).ToList();
+        Assert.InRange(ts[1] - ts[0], 30, 32);
+    }
+
+    [Fact]
+    public async Task An_oversized_response_is_not_a_network_error_and_the_write_is_not_resent()
+    {
+        var rig = new Rig();
+        rig.Portal.Respond(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[3 * 1024 * 1024]) })
+                  .Respond(HttpStatusCode.OK, "{}");
+        await Assert.ThrowsAsync<PortalResponseTooLargeException>(() => rig.Client.CreateOrderAsync(Order()));
+        Assert.Single(rig.Portal.Calls);
+    }
+
+    [Fact]
+    public async Task The_body_cap_is_exactly_262144_bytes()
+    {
+        var rig = new Rig();
+        var baseLen = JsonSerializer.SerializeToUtf8Bytes(Order() with { GiftMessage = "" }, PortalJson.Options).Length;
+        var atCap = Order() with { GiftMessage = new string('x', PortalSigning.MaxBodyBytes - baseLen) };
+        var res = await rig.Client.CreateOrderAsync(atCap);
+        Assert.True(res.IsSuccess);
+        Assert.Equal(PortalSigning.MaxBodyBytes, rig.Portal.Calls[0].Body.Length);
+        var over = Order() with { GiftMessage = new string('x', PortalSigning.MaxBodyBytes - baseLen + 1) };
+        await Assert.ThrowsAsync<PortalRequestTooLargeException>(() => rig.Client.CreateOrderAsync(over));
+        Assert.Single(rig.Portal.Calls);
     }
 
     // ---------- DI wiring through the real app ----------

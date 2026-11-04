@@ -21,7 +21,7 @@ public sealed class FakePortal(string secret, TimeProvider clock, int windowSeco
     private readonly object _lock = new();
     private readonly HashSet<string> _nonces = [];
     private readonly List<ReceivedCall> _calls = [];
-    private readonly Queue<Func<ReceivedCall, HttpResponseMessage>> _script = new();
+    private readonly Queue<Func<ReceivedCall, CancellationToken, Task<HttpResponseMessage>>> _script = new();
 
     public IReadOnlyList<ReceivedCall> Calls { get { lock (_lock) return _calls.ToList(); } }
     /// <summary>Only requests that passed signature verification.</summary>
@@ -30,9 +30,19 @@ public sealed class FakePortal(string secret, TimeProvider clock, int windowSeco
     public FakePortal Respond(HttpStatusCode status, string json, Action<HttpResponseMessage>? configure = null)
         => Respond(_ => Json(status, json, configure));
 
-    public FakePortal Respond(Func<ReceivedCall, HttpResponseMessage> responder)
+    public FakePortal Respond(Func<ReceivedCall, HttpResponseMessage> responder) => RespondAsync((c, _) => Task.FromResult(responder(c)));
+
+    public FakePortal RespondAsync(Func<ReceivedCall, CancellationToken, Task<HttpResponseMessage>> responder)
     {
         lock (_lock) _script.Enqueue(responder);
+        return this;
+    }
+
+    /// <summary>The portal never answers: the call ends only when the request token is cancelled (the client's deadline).</summary>
+    public FakePortal RespondHang(int times = 1)
+    {
+        for (var i = 0; i < times; i++)
+            RespondAsync(async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return Json(HttpStatusCode.OK, "{}"); });
         return this;
     }
 
@@ -65,9 +75,9 @@ public sealed class FakePortal(string secret, TimeProvider clock, int windowSeco
             return failure!;
         }
 
-        Func<ReceivedCall, HttpResponseMessage>? responder;
+        Func<ReceivedCall, CancellationToken, Task<HttpResponseMessage>>? responder;
         lock (_lock) { _calls.Add(call); _script.TryDequeue(out responder); }
-        return responder is null ? Json(HttpStatusCode.OK, "{}") : responder(call);
+        return responder is null ? Json(HttpStatusCode.OK, "{}") : await responder(call, ct);
     }
 
     private (bool Ok, HttpResponseMessage? Failure) Verify(string method, string target, string ts, string nonce, string sig, byte[] body)

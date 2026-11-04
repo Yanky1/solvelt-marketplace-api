@@ -37,6 +37,7 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Marketplace__PublicBaseUrl` | yes | Public website URL (links in emails) |
 | `Database__Provider` | yes, `Postgres` | `Sqlite` is for dev/tests only |
 | `ConnectionStrings__Default` | yes | |
+| `Portal__AttemptTimeoutSeconds`, `Portal__TotalDeadlineSeconds`, `Portal__MaxAttempts`, `Portal__RetryBaseDelayMs` | no | Portal client deadlines: defaults 30, 30, 5, 500 (see decisions M1-09, M1-19) |
 | `RateLimits__AuthPerMinute`, `RateLimits__PublicPerMinute` | no | Defaults 10 and 240 per client IP |
 
 Outside Development/Testing (any other environment name, Staging included) the app refuses to start when a required value is missing, a key is short, any two keys are equal, or a dev default is used in any slot.

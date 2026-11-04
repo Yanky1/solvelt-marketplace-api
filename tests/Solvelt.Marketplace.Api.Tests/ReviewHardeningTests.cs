@@ -343,3 +343,69 @@ public class ReviewHardeningTests
         Assert.Equal(f.Provider == "postgres" ? "Npgsql.EntityFrameworkCore.PostgreSQL" : "Microsoft.EntityFrameworkCore.Sqlite", name);
     }
 }
+
+/// <summary>Orchestrator review of slice 2a, item 7: Portal:BaseUrl is validated at start-up.</summary>
+public class PortalBaseUrlValidationTests
+{
+    private sealed class Env(string name) : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = name;
+        public string ApplicationName { get; set; } = "t";
+        public string ContentRootPath { get; set; } = "/";
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
+    }
+
+    private static IReadOnlyList<string> Validate(string baseUrl, string env = "Production")
+    {
+        var d = new Dictionary<string, string?>
+        {
+            ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40),
+            ["Portal:BaseUrl"] = baseUrl, ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
+            ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",
+        };
+        return StartupValidator.Validate(new ConfigurationBuilder().AddInMemoryCollection(d).Build(), new Env(env));
+    }
+
+    [Theory]
+    [InlineData("https://portal.example")]
+    [InlineData("https://portal.example/")]
+    [InlineData("https://portal.example:8443")]
+    public void Plain_https_origins_are_accepted(string url) => Assert.Empty(Validate(url));
+
+    [Theory]
+    [InlineData("http://portal.example", "https")]
+    [InlineData("portal.example", "absolute")]
+    [InlineData("/relative", "Portal:BaseUrl")]   // a file: URI on Linux, "not absolute" elsewhere: rejected either way
+    [InlineData("ftp://portal.example", "https")]
+    [InlineData("https://portal.example/api", "path")]
+    [InlineData("https://portal.example/api/internal/v1", "path")]
+    [InlineData("https://portal.example/?x=1", "query")]
+    [InlineData("https://portal.example/#frag", "query or fragment")]
+    [InlineData("https://user:pw@portal.example", "credentials")]
+    public void Anything_but_an_https_origin_is_rejected_in_production(string url, string fragmentOfProblem)
+        => Assert.Contains(Validate(url), p => p.Contains("Portal:BaseUrl") && p.Contains(fragmentOfProblem));
+
+    [Theory]
+    [InlineData("http://localhost:5000", true)]
+    [InlineData("https://portal.test", true)]
+    [InlineData("http://localhost/api", false)]
+    [InlineData("ftp://portal.test", false)]
+    [InlineData("https://portal.test/?a=b", false)]
+    public void Development_clients_may_use_http_but_never_a_path_or_query(string url, bool ok)
+        => Assert.Equal(ok, StartupValidator.BaseUrlProblem(url, requireHttps: false) is null);
+
+    [Fact]
+    public void Dev_and_testing_do_not_require_a_base_url() => Assert.Empty(Validate("", "Development"));
+
+    [Theory]
+    [InlineData("https://portal.test/api")]
+    [InlineData("https://portal.test/?x=1")]
+    public void The_client_registration_refuses_a_base_url_with_a_path_or_query_even_in_development(string url)
+    {
+        using var f = new TestFactory(new() { ["Portal:BaseUrl"] = url });
+        using var scope = f.Services.CreateScope();
+        var ex = Assert.ThrowsAny<Exception>(() => scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Portal.ISignedPortalClient>());
+        Assert.Contains("Portal:BaseUrl", ex.ToString());
+    }
+}
+

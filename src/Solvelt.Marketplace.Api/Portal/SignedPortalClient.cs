@@ -8,6 +8,8 @@ using Solvelt.Marketplace.Api.Infrastructure;
 namespace Solvelt.Marketplace.Api.Portal;
 
 public class PortalUnavailableException(string message, Exception? inner = null) : Exception(message, inner);
+/// <summary>The portal answered with something we refuse to read (oversized). Not retried: the write may already have been applied.</summary>
+public class PortalResponseTooLargeException() : Exception("Portal response exceeds the allowed size.");
 public class PortalRequestTooLargeException() : Exception($"Portal request body exceeds {PortalSigning.MaxBodyBytes} bytes.");
 public class PortalNotConfiguredException(string what) : InvalidOperationException($"Portal is not configured: {what}.");
 
@@ -92,10 +94,15 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
         if (bytes.Length > PortalSigning.MaxBodyBytes) throw new PortalRequestTooLargeException();
 
         var maxAttempts = Math.Max(1, o.MaxAttempts);
-        var timeout = TimeSpan.FromSeconds(Math.Clamp(o.AttemptTimeoutSeconds, 1, 30));
+        var attemptTimeout = TimeSpan.FromSeconds(Math.Clamp(o.AttemptTimeoutSeconds, 1, 30));
+        // One deadline for the whole call (all attempts and backoffs). Longer persistence is the outbox's job.
+        var total = TimeSpan.FromSeconds(Math.Clamp(o.TotalDeadlineSeconds, 1, 60));
+        var started = time.GetTimestamp();
+
         for (var attempt = 1; ; attempt++)
         {
             var last = attempt >= maxAttempts;
+            var remaining = total - time.GetElapsedTime(started);
             var timestamp = time.GetUtcNow().ToUnixTimeSeconds().ToString();
             var nonce = PortalSigning.NewNonce();   // new per attempt, including retries
             var signature = PortalSigning.Sign(o.InboundSecret, PortalSigning.Canonical(timestamp, nonce, method.Method, pathAndQuery, bytes));
@@ -110,8 +117,9 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
                 req.Content.Headers.ContentType = new("application/json");
             }
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(timeout);
+            // The deadline timer runs on the injected TimeProvider so tests control it; an attempt never outlives the total budget.
+            using var deadline = new CancellationTokenSource(attemptTimeout < remaining ? attemptTimeout : remaining, time);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
             HttpResponseMessage res;
             string text;
             try
@@ -121,8 +129,10 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
             }
             catch (Exception ex) when (ex is HttpRequestException or IOException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
             {
-                if (last) throw new PortalUnavailableException($"Portal unreachable after {attempt} attempt(s).", ex);
-                await Task.Delay(Backoff(o, attempt, null), time, ct);
+                var delay = Backoff(o, attempt, null);
+                if (last || !HasBudgetFor(delay, started, total))
+                    throw new PortalUnavailableException($"Portal unreachable after {attempt} attempt(s).", ex);
+                await Task.Delay(delay, time, ct);
                 continue;
             }
 
@@ -130,24 +140,45 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
             {
                 var status = (int)res.StatusCode;
                 var error = status is >= 200 and < 300 ? null : ParseError(text);
-                var retryable = ShouldRetry(profile, status, error?.Code);
-                if (retryable && !last)
+                var transient = IsTransient(profile, status, error?.Code);
+                // 429 is transient but never retried here: the portal's limiter is a fixed one-minute window without
+                // Retry-After, so short backoffs only add load. It is surfaced (Retryable) for the outbox to retry later.
+                if (transient && status != 429 && !last)
                 {
-                    await Task.Delay(Backoff(o, attempt, res.Headers.RetryAfter?.Delta), time, ct);
-                    continue;
+                    var delay = Backoff(o, attempt, RetryAfterDelay(res));
+                    if (HasBudgetFor(delay, started, total))
+                    {
+                        await Task.Delay(delay, time, ct);
+                        continue;
+                    }
                 }
                 T? value = default;
                 if (error is null && text.Length > 0)
                 {
                     try { value = JsonSerializer.Deserialize<T>(text, PortalJson.Options); } catch (JsonException) { }
                 }
-                return new PortalResult<T>(status, value, error, attempt) { Retryable = retryable };
+                return new PortalResult<T>(status, value, error, attempt) { Retryable = transient };
             }
         }
     }
 
-    /// <summary>CONTRACT.md §1.1. Never retry 401, 413, 422 (or any other 4xx not listed).</summary>
-    private static bool ShouldRetry(Retry profile, int status, string? code) => status switch
+    /// <summary>The next attempt may only start if the wait still leaves part of the total deadline.</summary>
+    private bool HasBudgetFor(TimeSpan delay, long started, TimeSpan total) => time.GetElapsedTime(started) + delay < total;
+
+    /// <summary>Retry-After as delta seconds or as an HTTP date (date minus now, never negative).</summary>
+    private TimeSpan? RetryAfterDelay(HttpResponseMessage res)
+    {
+        var ra = res.Headers.RetryAfter;
+        if (ra?.Delta is { } delta) return delta < TimeSpan.Zero ? TimeSpan.Zero : delta;
+        if (ra?.Date is { } date) { var d = date - time.GetUtcNow(); return d < TimeSpan.Zero ? TimeSpan.Zero : d; }
+        return null;
+    }
+
+    /// <summary>
+    /// CONTRACT.md §1.1: answers the portal says to re-send. 503 is transient with or without Retry-After (without it we back off
+    /// ourselves, inside the total deadline). Never retry 401, 413, 422 or any other 4xx.
+    /// </summary>
+    private static bool IsTransient(Retry profile, int status, string? code) => status switch
     {
         503 => true,
         429 => true,
@@ -176,7 +207,7 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
         while ((n = await s.ReadAsync(buf, ct)) > 0)
         {
             ms.Write(buf, 0, n);
-            if (ms.Length > MaxResponseBytes) throw new HttpRequestException("Portal response too large.");
+            if (ms.Length > MaxResponseBytes) throw new PortalResponseTooLargeException();
         }
         return Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
     }
@@ -198,10 +229,9 @@ public static class PortalClientRegistration
             var o = sp.GetRequiredService<IOptions<PortalOptions>>().Value;
             if (!string.IsNullOrWhiteSpace(o.BaseUrl))
             {
-                var uri = new Uri(o.BaseUrl, UriKind.Absolute);
                 // The signed path is the absolute path we send, so the base must not carry a path prefix.
-                if (uri.AbsolutePath != "/") throw new InvalidOperationException("Portal:BaseUrl must not contain a path.");
-                c.BaseAddress = uri;
+                if (StartupValidator.BaseUrlProblem(o.BaseUrl, requireHttps: false) is { } problem) throw new InvalidOperationException(problem);
+                c.BaseAddress = new Uri(o.BaseUrl, UriKind.Absolute);
             }
             c.Timeout = Timeout.InfiniteTimeSpan;   // per-attempt deadlines are enforced by the client
         });

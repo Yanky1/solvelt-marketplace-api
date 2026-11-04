@@ -43,6 +43,7 @@ public static class StartupValidator
                 if (present[i].Value == present[j].Value)
                     problems.Add($"{present[i].Name} and {present[j].Name} must differ; one key per purpose.");
         if (string.IsNullOrWhiteSpace(config["Portal:BaseUrl"])) problems.Add("Portal:BaseUrl (env Portal__BaseUrl) is required.");
+        else if (BaseUrlProblem(config["Portal:BaseUrl"]!, requireHttps: true) is { } baseUrlProblem) problems.Add(baseUrlProblem);
         if (string.IsNullOrWhiteSpace(config["Marketplace:RelayDomain"])) problems.Add("Marketplace:RelayDomain (env Marketplace__RelayDomain) is required.");
         if (string.IsNullOrWhiteSpace(config["Marketplace:PublicBaseUrl"])) problems.Add("Marketplace:PublicBaseUrl (env Marketplace__PublicBaseUrl) is required.");
         if (!string.Equals(config["Database:Provider"], "Postgres", StringComparison.OrdinalIgnoreCase))
@@ -50,5 +51,19 @@ public static class StartupValidator
         if (string.IsNullOrWhiteSpace(config.GetConnectionString("Default")))
             problems.Add("ConnectionStrings:Default (env ConnectionStrings__Default) is required.");
         return problems;
+    }
+
+    /// <summary>
+    /// The portal base URL is an origin: absolute, https outside development, no credentials, no path (the signed path is the
+    /// absolute path we send), no query, no fragment. Returns the problem, or null when acceptable.
+    /// </summary>
+    public static string? BaseUrlProblem(string value, bool requireHttps)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return "Portal:BaseUrl must be an absolute URL.";
+        if (uri.Scheme != Uri.UriSchemeHttps && (requireHttps || uri.Scheme != Uri.UriSchemeHttp)) return requireHttps ? "Portal:BaseUrl must be https." : "Portal:BaseUrl must be http(s).";
+        if (uri.UserInfo.Length > 0) return "Portal:BaseUrl must not contain credentials.";
+        if (uri.AbsolutePath != "/") return "Portal:BaseUrl must not contain a path.";
+        if (uri.Query.Length > 0 || uri.Fragment.Length > 0) return "Portal:BaseUrl must not contain a query or fragment.";
+        return null;
     }
 }

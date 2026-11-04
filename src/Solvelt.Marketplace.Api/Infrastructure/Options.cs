@@ -9,6 +9,8 @@ public sealed class PortalOptions
     public string? WebhookSecret { get; set; }
     /// <summary>Per-attempt deadline in seconds (contract: at most 30).</summary>
     public int AttemptTimeoutSeconds { get; set; } = 30;
+    /// <summary>Deadline for the whole call across all attempts and backoffs (decision O-08). Longer persistence is the outbox's job.</summary>
+    public int TotalDeadlineSeconds { get; set; } = 30;
     /// <summary>Total attempts per call including the first.</summary>
     public int MaxAttempts { get; set; } = 5;
     /// <summary>Backoff base in milliseconds: base x 2^(attempt-1), jittered, capped at 30 s.</summary>
