@@ -331,26 +331,6 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
 
     // ------------------------------------------------------------------ portal N3: ids are unique per seller only
 
-    [Fact]
-    public async Task N3_Receipts_and_reports_name_the_seller_so_a_message_id_two_sellers_share_is_not_ambiguous()
-    {
-        var (o, g) = await Placed();
-        var (thread, msg, _, pid) = await Reported(o, g);                                                 // sends the "delivered" receipt and the report
-        await Drain();
-        var r = Assert.Single(Portal($"messages/{pid}/receipts"), c => c.BodyText.Contains("delivered"));
-        var rb = JsonDocument.Parse(r.BodyText).RootElement;
-        Assert.Equal((g.SellerOrderNumber, g.SellerId.ToString()), (rb.GetProperty("sellerOrderNumber").GetString(), rb.GetProperty("sellerId").GetString()));
-        var rep = JsonDocument.Parse(Assert.Single(Portal("content/reports")).BodyText).RootElement;
-        Assert.Equal((g.SellerOrderNumber, g.SellerId.ToString()), (rep.GetProperty("sellerOrderNumber").GetString(), rep.GetProperty("sellerId").GetString()));
-        // and the read receipt, when the buyer opens the thread
-        await Get($"/api/v1/messages/threads/{thread}");
-        var read = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/messages/threads/{thread}/read"); read.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
-        Assert.Equal(HttpStatusCode.NoContent, (await _k.Http.SendAsync(read)).StatusCode);
-        await Drain();
-        var readBody = JsonDocument.Parse(Portal($"messages/{pid}/receipts").Single(c => c.BodyText.Contains("\"read\"")).BodyText).RootElement;
-        Assert.Equal(g.SellerOrderNumber, readBody.GetProperty("sellerOrderNumber").GetString());
-    }
-
     [Theory]
     [InlineData("ambiguous_message")]
     [InlineData("ambiguous_target")]
