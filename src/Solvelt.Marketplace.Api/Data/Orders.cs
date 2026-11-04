@@ -9,6 +9,8 @@ public static class OrderStatus
     public const string PendingPayment = "pending_payment";
     /// <summary>The buyer changed something and a newer pending order replaced this one (its intent is cancelled; a payment that still lands is honoured).</summary>
     public const string Superseded = "superseded";
+    /// <summary>A delayed payment method is in flight at Stripe (<c>payment_intent.processing</c>): the money may still arrive, so neither a newer checkout nor the expiry may close this order.</summary>
+    public const string PaymentProcessing = "payment_processing";
     public const string Paid = "paid", Placed = "placed", Failed = "failed", Expired = "expired";
 }
 

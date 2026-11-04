@@ -38,6 +38,8 @@ public interface IPaymentProvider
 {
     Task<PaymentIntentResult> CreateIntentAsync(long amountCents, string currency, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct);
     Task CancelIntentAsync(string intentId, string idempotencyKey, CancellationToken ct);
+    /// <summary>Stripe's current status of an intent (<c>requires_payment_method</c>, <c>processing</c>, <c>requires_capture</c>, <c>succeeded</c>, <c>canceled</c> ...). Read-only.</summary>
+    Task<string> GetIntentStatusAsync(string intentId, CancellationToken ct);
     Task<RefundResult> RefundAsync(string intentId, long amountCents, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct);
 }
 
@@ -49,12 +51,15 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
         var form = new List<KeyValuePair<string, string>>
         {
             new("amount", amountCents.ToString(CultureInfo.InvariantCulture)), new("currency", currency.ToLowerInvariant()),
-            new("automatic_payment_methods[enabled]", "true"),
+            new("payment_method_types[]", "card"),   // cards and wallets only at launch (decision O-19): no delayed methods (ACH, SEPA) that could sit in "processing" for days
         };
         foreach (var (k, v) in metadata) form.Add(new($"metadata[{k}]", v));
         var json = await PostAsync("/v1/payment_intents", form, idempotencyKey, ct);
         return new PaymentIntentResult(Str(json, "id"), Str(json, "client_secret"), Str(json, "status"));
     }
+
+    public async Task<string> GetIntentStatusAsync(string intentId, CancellationToken ct)
+        => Str(await PostAsync($"/v1/payment_intents/{Uri.EscapeDataString(intentId)}", null, null, ct), "status");
 
     public async Task CancelIntentAsync(string intentId, string idempotencyKey, CancellationToken ct)
         => await PostAsync($"/v1/payment_intents/{Uri.EscapeDataString(intentId)}/cancel", [], idempotencyKey, ct);
@@ -67,16 +72,18 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
         return new RefundResult(Str(json, "id"), Str(json, "status"), json.TryGetProperty("amount", out var a) && a.TryGetInt64(out var n) ? n : amountCents);
     }
 
-    private async Task<JsonElement> PostAsync(string path, List<KeyValuePair<string, string>> form, string idempotencyKey, CancellationToken ct)
+    /// <summary>A POST with a form body and an idempotency key; with no form and no key it is a GET (read-only).</summary>
+    private async Task<JsonElement> PostAsync(string path, List<KeyValuePair<string, string>>? form, string? idempotencyKey, CancellationToken ct)
     {
         var key = options.Value.SecretKey;
         if (string.IsNullOrWhiteSpace(key)) throw new PaymentsUnavailableException("not_configured");
-        if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 255) throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
+        var read = form is null && idempotencyKey is null;
+        if (!read && (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 255)) throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
         for (var attempt = 0; ; attempt++)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Post, options.Value.BaseUrl.TrimEnd('/') + path) { Content = new FormUrlEncodedContent(form) };
+            using var req = new HttpRequestMessage(read ? HttpMethod.Get : HttpMethod.Post, options.Value.BaseUrl.TrimEnd('/') + path);
+            if (!read) { req.Content = new FormUrlEncodedContent(form!); req.Headers.Add("Idempotency-Key", idempotencyKey); }
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-            req.Headers.Add("Idempotency-Key", idempotencyKey);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.Value.TimeoutSeconds, 1, 60)));
             HttpResponseMessage res;
@@ -110,6 +117,7 @@ public sealed class UnconfiguredPaymentProvider : IPaymentProvider
 {
     public Task<PaymentIntentResult> CreateIntentAsync(long a, string c, string k, IReadOnlyDictionary<string, string> m, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task CancelIntentAsync(string i, string k, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
+    public Task<string> GetIntentStatusAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<RefundResult> RefundAsync(string i, long a, string k, IReadOnlyDictionary<string, string> m, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
 }
 
@@ -124,6 +132,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
         public long CapturedCents { get; internal set; }
         public long RefundedCents { get; internal set; }
         public bool Cancelled { get; internal set; }
+        /// <summary>Test hook: a delayed payment method is in flight (Stripe status <c>processing</c>); cannot be cancelled.</summary>
+        public bool Processing { get; internal set; }
     }
 
     private readonly object _lock = new();
@@ -138,6 +148,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
     private readonly List<RefundResult> _refunds = [];
     /// <summary>Test hook: fail the next N calls as an unreachable processor.</summary>
     public int FailNext { get; set; }
+    /// <summary>Test hook: the next cancel is refused by the processor with this error code (for example <c>api_key_expired</c>).</summary>
+    public string? RejectCancelWith { get; set; }
 
     public Task<PaymentIntentResult> CreateIntentAsync(long amountCents, string currency, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct)
     {
@@ -162,12 +174,26 @@ public sealed class FakePaymentProvider : IPaymentProvider
         lock (_lock)
         {
             MaybeFail();
+            if (RejectCancelWith is { } code) { RejectCancelWith = null; throw new PaymentRejectedException(code); }
             if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
-            if (i.CapturedCents > 0) throw new PaymentRejectedException("payment_intent_unexpected_state");
+            if (i.CapturedCents > 0 || i.Processing) throw new PaymentRejectedException("payment_intent_unexpected_state");
             i.Cancelled = true;
             return Task.CompletedTask;
         }
     }
+
+    public Task<string> GetIntentStatusAsync(string intentId, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            MaybeFail();
+            if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
+            return Task.FromResult(i.Cancelled ? "canceled" : i.CapturedCents > 0 ? "succeeded" : i.Processing ? "processing" : "requires_payment_method");
+        }
+    }
+
+    /// <summary>Test hook: the buyer chose a delayed method; the money is in flight.</summary>
+    public void SetProcessing(string intentId) { lock (_lock) _intents[intentId].Processing = true; }
 
     public Task<RefundResult> RefundAsync(string intentId, long amountCents, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct)
     {
