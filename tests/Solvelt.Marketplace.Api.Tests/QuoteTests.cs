@@ -334,17 +334,18 @@ public sealed class QuoteTests : IDisposable
     }
 
     [Fact]
-    public async Task An_unknown_weight_makes_weight_based_speeds_unavailable_but_flat_speeds_still_work_decision_O_15()
+    public async Task An_unknown_weight_makes_weight_based_speeds_unavailable_unless_the_group_ships_free_decision_O_15_and_review_C4()
     {
         PortalAnswers();
-        // the pewter cup has no weight attribute: standard (flat) is offered, overnight (weight based) is not, and the quote says why
+        // the pewter cup has no weight attribute and its group is over the free-shipping threshold: free shipping does not need a weight, so BOTH speeds are offered, free (review C4;
+        // before it the weight-based one was refused for the missing weight although nothing is charged)
         await Cart(("kiddush-cup-pewter", 1, 0));
         var g = Group(await Ok(await Quote(new { address = Addr() })), ShabbatTable);
-        Assert.Equal("standard", Assert.Single(g.GetProperty("shippingOptions").EnumerateArray()).GetProperty("speed").GetString());
-        var gone = Assert.Single(g.GetProperty("unavailableSpeeds").EnumerateArray());
-        Assert.Equal(("overnight", "weight_unknown"), (gone.GetProperty("speed").GetString(), gone.GetProperty("reason").GetString()));
-        var refused = await Ok(await Quote(new { address = Addr(), selections = new[] { new { sellerId = Judaica, brandId = ShabbatTable, speed = "overnight" } } }), HttpStatusCode.UnprocessableEntity);
-        Assert.Equal("invalid_selection", refused.GetProperty("code").GetString());
+        var options = g.GetProperty("shippingOptions").EnumerateArray().ToList();
+        Assert.Equal(["overnight", "standard"], options.Select(o => o.GetProperty("speed").GetString()).Order().ToList());
+        Assert.All(options, o => Assert.True(o.GetProperty("free").GetBoolean()));
+        Assert.Empty(g.GetProperty("unavailableSpeeds").EnumerateArray());
+        // below the threshold (see the next test and ShippingTaxUnitTests) the unknown weight still makes the weight-based speed unavailable
     }
 
     [Fact]

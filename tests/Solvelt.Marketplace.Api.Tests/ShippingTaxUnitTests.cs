@@ -20,6 +20,23 @@ public sealed class ShippingTaxUnitTests
         Assert.Equal((price, free), (o.PriceCents, o.Free));
     }
 
+    private static ShippingSettings WeightSettings(long? freeAt) => new(Guid.NewGuid(), Guid.NewGuid(), 1, null,
+        [new ShippingProfile(Guid.NewGuid(), "d", true, "USD", freeAt, [new ShippingZone("US", "domestic", ["US"], [new ShippingSpeedSetting("standard", true, "weight", null, 400, 300)])])]);
+
+    [Fact]
+    public void A_free_group_ships_free_even_when_a_weight_is_unknown_and_a_paid_one_still_needs_it()
+    {
+        var today = new DateOnly(2026, 11, 4);
+        var free = ShippingRates.Options(WeightSettings(2000), "US", 2500, null, today, new ShippingOptions());
+        var o = Assert.Single(free.Options);
+        Assert.Equal((0L, true), (o.PriceCents, o.Free));
+        Assert.Empty(free.Unavailable);
+        var paid = ShippingRates.Options(WeightSettings(2000), "US", 1999, null, today, new ShippingOptions());   // below the threshold: unknown weight cannot be priced
+        Assert.Empty(paid.Options);
+        Assert.Equal("weight_unknown", Assert.Single(paid.Unavailable).Reason);
+        Assert.Equal(400 + 2 * 300, Assert.Single(ShippingRates.Options(WeightSettings(2000), "US", 1999, 1500, today, new ShippingOptions()).Options).PriceCents);   // known weight: base + ceil(1.5 kg) x per kg
+    }
+
     [Fact]
     public void No_threshold_never_means_free()
         => Assert.Equal(500, ShippingRates.Options(Settings(null), "US", 1_000_000, null, new DateOnly(2026, 11, 4), new ShippingOptions()).Options.Single().PriceCents);
