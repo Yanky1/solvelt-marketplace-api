@@ -1,7 +1,10 @@
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Solvelt.Marketplace.Api.Data;
+using Solvelt.Marketplace.Api.Infrastructure;
+using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
 
 namespace Solvelt.Marketplace.Api.Services;
@@ -14,15 +17,15 @@ namespace Solvelt.Marketplace.Api.Services;
 /// group, so a late one is not lost behind a newer status event, yet none of them can reopen a finished booking.
 /// What this handler does NOT do: money (refunds and fees are decided by the payment slice from the values stored here) and messages (<c>message.sent</c> is M5's).
 /// </summary>
-public sealed class BookingEventHandler : IProjectionHandler
+public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace) : IProjectionHandler
 {
     public const string Requested = "booking.requested", Confirmed = "booking.confirmed", Declined = "booking.declined", TimeProposed = "booking.time_proposed",
         Rescheduled = "booking.rescheduled", RescheduleRequested = "booking.reschedule_requested", RescheduleDecided = "booking.reschedule_decided", Cancelled = "booking.cancelled",
         Started = "booking.started", Completed = "booking.completed", ExtraCharge = "booking.additional_charge_requested", NoShow = "booking.no_show",
-        ProviderChanged = "booking.provider_changed", HoldExpired = "booking.hold_expired";
+        ProviderChanged = "booking.provider_changed", HoldExpired = "booking.hold_expired", Reminder = "booking.reminder";
 
     public IReadOnlyCollection<string> EventTypes { get; } =
-        [Requested, Confirmed, Declined, TimeProposed, Rescheduled, RescheduleRequested, RescheduleDecided, Cancelled, Started, Completed, ExtraCharge, NoShow, ProviderChanged, HoldExpired];
+        [Requested, Confirmed, Declined, TimeProposed, Rescheduled, RescheduleRequested, RescheduleDecided, Cancelled, Started, Completed, ExtraCharge, NoShow, ProviderChanged, HoldExpired, Reminder];
 
     public const string Aggregate = "booking";
 
@@ -70,6 +73,7 @@ public sealed class BookingEventHandler : IProjectionHandler
             case Declined:
                 if (!await Step("status", BookingStatus.Declined, "declined")) return Done(false);
                 b.ProposedStartAt = null; b.HoldExpiresAt = null; b.ApprovalDeadline = null; ClearPending(b);
+                await RefundAsync(c, b, long.MaxValue, "declined", ct);       // the buyer paid up front: a declined request returns everything that is left
                 break;
             case HoldExpired:
                 if (!await Step("status", BookingStatus.Expired, "expired")) return Done(false);
@@ -102,6 +106,9 @@ public sealed class BookingEventHandler : IProjectionHandler
                 b.CancellationFeeCents = byBuyer ? Money(data, "cancellationFeeCents") ?? 0 : 0;
                 b.RefundDueCents = Math.Clamp(Money(data, "refundDueCents") ?? 0, 0, Math.Max(b.TotalCents, 0));
                 b.HoldExpiresAt = null; ClearPending(b);
+                // Money back: a seller cancellation returns everything; a buyer's returns what the portal says is due (total minus its policy fee). The fee stays inside the
+                // original payment, so no second charge exists (decision M4-09).
+                await RefundAsync(c, b, byBuyer ? Money(data, "refundDueCents") ?? Math.Max(0, b.TotalCents - b.CancellationFeeCents) : b.TotalCents, "cancelled", ct);
                 break;
             }
             case Started:
@@ -117,14 +124,32 @@ public sealed class BookingEventHandler : IProjectionHandler
                 b.NoShowFeeCents = Math.Max(0, Money(data, "noShowFeeCents") ?? 0);
                 b.RefundDueCents = Math.Clamp(Money(data, "refundDueCents") ?? 0, 0, Math.Max(b.TotalCents, 0));
                 ClearPending(b);
+                await RefundAsync(c, b, Money(data, "refundDueCents") ?? Math.Max(0, b.TotalCents - b.NoShowFeeCents), "no_show", ct);
                 break;
             case ExtraCharge:
                 // A REQUEST: nothing is charged here. The buyer consents (or declines) on the booking page; only then does the payment slice take the money.
-                if (!await Step("charge")) return Done(false);
-                if (b.ExtraChargeState is "paid") break;      // an amount already paid is never replaced by a later request
+                // The portal raises this when hourly work is completed, so it is a completion fact: it may follow booking.completed (same state again is allowed by the terminal rules) and
+                // is refused after a cancellation, a decline, an expiry or a no-show (a different terminal state).
+                if (!await Step("charge", terminal: "completed")) return Done(false);
+                if (b.ExtraChargeState is ExtraChargeStates.Paid) break;      // an amount already paid is never replaced by a later request
                 b.AdditionalChargeCents = Math.Max(0, Money(data, "amountCents") ?? 0);
-                b.ExtraChargeState = b.AdditionalChargeCents > 0 ? "requested" : null;
+                b.ExtraChargeState = b.AdditionalChargeCents > 0 ? ExtraChargeStates.Requested : null;   // a changed amount needs a new consent
                 break;
+            case Reminder:
+            {
+                // The buyer's reminder is OUR job (SERVICES.md §11). Only for a live booking whose time still is the one the reminder was scheduled for (a moved or cancelled booking
+                // must not remind about the old time); one mail per event id (the receiver already refuses a repeated event).
+                if (b.Status is not (BookingStatus.Confirmed or BookingStatus.Rescheduled) || Time(data, "startAt") is not { } at || b.StartAt is not { } now0 || Math.Abs((at - now0).TotalMinutes) > 1)
+                    return HandlerOutcome.Skipped("stale or not confirmed");
+                var email = await c.Db.BuyerAccounts.AsNoTracking().Where(a => a.Id == b.AccountId && a.DeletedAt == null).Select(a => a.Email).FirstOrDefaultAsync(ct);
+                if (email is null) return HandlerOutcome.Skipped("no recipient");
+                var title = await c.Db.CatalogListings.AsNoTracking().Where(l => l.Id == b.ListingId).Select(l => l.Title).FirstOrDefaultAsync(ct) ?? "your booking";
+                var baseUrl = (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
+                var when = Str(data, "kind") == "hour_before" ? "in about an hour" : "tomorrow";
+                new OutboxWriter(c.Db, c.Time).EnqueueEmail(new EmailMessage(email, "Reminder: your booking starts " + when,
+                    $"Hello,\n\nA reminder that \"{title}\" starts {when}: {at.UtcDateTime:yyyy-MM-dd HH:mm} UTC.\n\nSee the details, reschedule or cancel: {baseUrl}/account/bookings/{b.Id}\n"), "mail:reminder:" + c.Event.Id);
+                break;
+            }
             case ProviderChanged:
                 if (!await Step("provider")) return Done(false);
                 if (Guid.TryParse(Str(data, "providerId"), out var pid)) b.ProviderId = pid;
@@ -135,7 +160,17 @@ public sealed class BookingEventHandler : IProjectionHandler
         return HandlerOutcome.Applied();
     }
 
-    private static void ClearPending(Booking b) { b.RequiresBuyerConsent = false; b.RescheduleRequestedStartAt = null; if (b.ExtraChargeState == "requested") b.ExtraChargeState = null; }
+    /// <summary>Reserves a refund of at most what is left of the booking's captured payment, reported to the portal as <c>refund.processed</c> (it recorded the sale). Idempotent per booking and reason.</summary>
+    private static async Task RefundAsync(ProjectionContext c, Booking b, long wanted, string reason, CancellationToken ct)
+    {
+        var pay = await c.Db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.BookingId == b.Id && p.Kind == "booking" && p.Status == BookingPaymentStatus.Captured, ct);
+        if (pay is null) return;
+        var amount = Math.Min(wanted, pay.CapturedCents - pay.RefundedCents);
+        if (amount <= 0) return;
+        await new BookingRefundService(c.Db, new OutboxWriter(c.Db, c.Time), c.Time).ReserveAsync(pay.Id, amount, $"{reason}:{b.MarketplaceBookingId}", reason, true, ct);
+    }
+
+    private static void ClearPending(Booking b) { b.RequiresBuyerConsent = false; b.RescheduleRequestedStartAt = null; if (b.ExtraChargeState is ExtraChargeStates.Requested or ExtraChargeStates.Consented) b.ExtraChargeState = null; }
 
     private static string? Str(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     private static string? Cap(string? s, int max) => string.IsNullOrWhiteSpace(s) ? null : s.Length <= max ? s : s[..max];

@@ -72,8 +72,14 @@ public sealed record BookingConfirmBody(PortalBuyer Buyer, PortalAddress? Addres
 /// <summary>The portal's booking summary. Every amount is the portal's (long cents); <c>OnlineInstructions</c> (the meeting link) is only present for a confirmed online booking.</summary>
 public sealed record PortalBookingSummary(Guid BookingId, string? Number, string MarketplaceBookingId, string Status, Guid? ServiceId, Guid? ProviderId, string? Location,
     DateTimeOffset? StartAt, DateTimeOffset? EndAt, int DurationMinutes, DateTimeOffset? HoldExpiresAt, DateTimeOffset? ApprovalDeadline, long PriceCents, long AddOnsCents,
-    long TravelFeeCents, long TotalCents, long CancellationFeeCents, long AdditionalChargeCents, DateTimeOffset? ProposedStartAt, int RescheduleCount, string? OnlineInstructions);
+    long TravelFeeCents, long TotalCents, long CancellationFeeCents, long AdditionalChargeCents, DateTimeOffset? ProposedStartAt, int RescheduleCount, string? OnlineInstructions,
+    PortalBookingPolicy? Policy = null);
+/// <summary>The policy snapshot the portal froze at booking time (SERVICES.md §4). Optional in the summary until the portal sends it (contract request); null means "unknown", never a guess.</summary>
+public sealed record PortalBookingPolicy(int? CancelFreeHours, int? CancelFeePercent, int? NoShowFeePercent, int? MaxReschedules, int? ApprovalHours);
 public sealed record BookingResponse(bool Created, PortalBookingSummary Booking);
+public sealed record BookingCancelBody(string RequestId, string? Reason);
+public sealed record BookingRescheduleBody(string RequestId, DateTimeOffset NewStart);
+public sealed record BookingProposalBody(bool Accept);
 
 // ---- POST /payment-events (PAYMENTS.md §6) ----
 public static class PaymentEventTypes

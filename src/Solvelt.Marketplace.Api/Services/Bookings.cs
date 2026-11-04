@@ -18,7 +18,7 @@ public sealed record HoldRequest(Guid? ListingId, Guid? ProviderId, DateTimeOffs
 public sealed record BookingView(Guid Id, string? Number, Guid ListingId, string Status, string Location, DateTimeOffset? StartAt, DateTimeOffset? EndAt, int DurationMinutes,
     string Currency, long PriceCents, long AddOnsCents, long TravelFeeCents, long TotalCents, DateTimeOffset? HoldExpiresAt, bool HoldExpired, DateTimeOffset? ApprovalDeadline,
     DateTimeOffset? ProposedStartAt, long CancellationFeeCents, long RefundDueCents, long NoShowFeeCents, long AdditionalChargeCents, int RescheduleCount, IReadOnlyList<string> AddOnIds,
-    string? OnlineInstructions, string? FailureCode, DateTimeOffset CreatedAt);
+    string? OnlineInstructions, string? FailureCode, DateTimeOffset CreatedAt, bool RequiresBuyerConsent = false, DateTimeOffset? RescheduleRequestedStartAt = null, string? ExtraChargeState = null);
 
 public enum HoldStatus { Ok, NotFound, Invalid, IdempotencyConflict, TooManyHolds, SlotUnavailable, PortalRefused, Unavailable }
 public sealed record HoldResult(HoldStatus Status, BookingView? Booking = null, bool Created = false, string? Code = null, IReadOnlyDictionary<string, string>? Errors = null);
@@ -202,6 +202,7 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         row.PriceCents = s.PriceCents; row.AddOnsCents = s.AddOnsCents; row.TravelFeeCents = s.TravelFeeCents; row.TotalCents = s.TotalCents;
         row.HoldExpiresAt = s.HoldExpiresAt; row.ApprovalDeadline = s.ApprovalDeadline; row.ProposedStartAt = s.ProposedStartAt; row.RescheduleCount = s.RescheduleCount;
         row.CancellationFeeCents = s.CancellationFeeCents; row.AdditionalChargeCents = s.AdditionalChargeCents;
+        if (s.Policy is { } pol) { row.PolicyCancelFreeHours = pol.CancelFreeHours; row.PolicyCancelFeePercent = pol.CancelFeePercent; row.PolicyNoShowFeePercent = pol.NoShowFeePercent; row.PolicyMaxReschedules = pol.MaxReschedules; }
         row.OnlineInstructions = BookingStatuses.RevealsMeetingLink(status) ? Cap(s.OnlineInstructions, 2000) : null;
         row.UpdatedAt = now; row.Version++;
         try { await db.SaveChangesAsync(ct); }
@@ -218,7 +219,8 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         b.Id, b.Number, b.ListingId, b.Status == BookingStatus.HoldPending ? BookingStatus.Hold : b.Status, b.Location, b.StartAt, b.EndAt, b.DurationMinutes, b.Currency, b.PriceCents, b.AddOnsCents,
         b.TravelFeeCents, b.TotalCents, b.HoldExpiresAt, b.Status == BookingStatus.Expired || (b.Status == BookingStatus.Hold && b.HoldExpiresAt is { } h && h <= now), b.ApprovalDeadline, b.ProposedStartAt,
         b.CancellationFeeCents, b.RefundDueCents, b.NoShowFeeCents, b.AdditionalChargeCents, b.RescheduleCount, b.AddOnIds.Length == 0 ? [] : b.AddOnIds.Split(','),
-        BookingStatuses.RevealsMeetingLink(b.Status) ? b.OnlineInstructions : null, b.Status == BookingStatus.Failed ? b.FailureCode : null, b.CreatedAt);
+        BookingStatuses.RevealsMeetingLink(b.Status) ? b.OnlineInstructions : null, b.Status == BookingStatus.Failed ? b.FailureCode : null, b.CreatedAt,
+        b.RequiresBuyerConsent, b.RescheduleRequestedStartAt, b.ExtraChargeState);
 
     /// <summary>The buyer's own booking, or null (another buyer's booking is a 404, never a 403).</summary>
     public async Task<BookingView?> GetAsync(Guid accountId, Guid id, CancellationToken ct)
@@ -242,6 +244,9 @@ public static class BookingEndpoints
     {
         var g = app.MapGroup("/api/v1/bookings").RequireRateLimiting(RateLimitPolicies.Public).AddEndpointFilter<RequireBuyerFilter>();
         g.MapPost("/holds", Hold);
+        g.MapBookingActions();
+        g.MapPost("/{id:guid}/extra-charge/accept", ExtraAccept);
+        g.MapPost("/{id:guid}/extra-charge/decline", ExtraDecline);
         g.MapPost("/{id:guid}/checkout", Checkout);
         g.MapGet("", async (HttpContext ctx, BookingService svc, CancellationToken ct) => Private(ctx, Results.Json(new { bookings = await svc.ListAsync(ctx.Buyer().AccountId, ct) })));
         g.MapGet("/{id:guid}", async (Guid id, HttpContext ctx, BookingService svc, CancellationToken ct)
@@ -296,6 +301,31 @@ public static class BookingEndpoints
             _ => Problems.Json(409, "not_payable", "This booking can't be paid for right now."),
         };
     }
+
+    /// <summary>The buyer's consent to an additional charge the provider asked for: creates the intent for the amount the portal sent (the body has none). Nothing is charged before this.</summary>
+    private static async Task<IResult> ExtraAccept(Guid id, HttpContext ctx, ExtraChargeService extra, CancellationToken ct)
+    {
+        var (status, payment, amount) = await extra.AcceptAsync(ctx.Buyer().AccountId, id, ct);
+        ctx.Response.Headers.CacheControl = "private, no-store";
+        return status switch
+        {
+            ExtraChargeStatus.Ok => Results.Json(new { amountCents = amount, payment }),
+            ExtraChargeStatus.NotFound => Problems.NotFound(),
+            ExtraChargeStatus.AlreadyPaid => Problems.Json(409, "already_paid", "This charge is already paid."),
+            ExtraChargeStatus.AmountTooSmall => Problems.Unprocessable("amount_too_small", "The amount is below the minimum we can charge."),
+            ExtraChargeStatus.PaymentRejected => Problems.Unprocessable("payment_rejected", "The payment provider could not start this payment."),
+            ExtraChargeStatus.PaymentsUnavailable => Problems.Json(503, "payments_unavailable", "Payments are unavailable right now. Please try again in a moment."),
+            _ => Problems.Json(409, "nothing_requested", "There is no additional charge to pay."),
+        };
+    }
+
+    private static async Task<IResult> ExtraDecline(Guid id, HttpContext ctx, ExtraChargeService extra, CancellationToken ct)
+        => await extra.DeclineAsync(ctx.Buyer().AccountId, id, ct) switch
+        {
+            ExtraChargeStatus.Ok => Results.NoContent(),
+            ExtraChargeStatus.NotFound => Problems.NotFound(),
+            _ => Problems.Json(409, "nothing_requested", "There is no additional charge to answer."),
+        };
 
     private static readonly string[] KnownCodes = ["outside_service_area", "location_not_offered", "duration", "add_on", "intake_required", "intake_invalid", "provider_required", "quote_required"];
     private static string Known(string? c) => c is not null && KnownCodes.Contains(c) ? c : "invalid_request";

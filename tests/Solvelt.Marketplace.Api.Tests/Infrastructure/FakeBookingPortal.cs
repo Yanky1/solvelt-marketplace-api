@@ -14,7 +14,7 @@ public sealed class FakeBookingPortal
         public Guid BookingId { get; init; } = Guid.NewGuid();
         public string Mid { get; init; } = "";
         public Guid ServiceId { get; init; }
-        public DateTimeOffset Start { get; init; }
+        public DateTimeOffset Start { get; set; }
         public string Status { get; set; } = "Hold";
         public string Location { get; init; } = "online";
         public int Minutes { get; init; }
@@ -22,6 +22,10 @@ public sealed class FakeBookingPortal
         public DateTimeOffset ExpiresAt { get; init; }
         public string? OnlineInstructions { get; set; }
         public string BodyText { get; init; } = "";
+        public long Fee { get; set; }
+        public DateTimeOffset? ProposedStart { get; set; }
+        public List<string> RequestIds { get; } = [];
+        public object? Policy { get; set; }
     }
 
     private readonly object _lock = new();
@@ -45,6 +49,12 @@ public sealed class FakeBookingPortal
     public bool ConfirmDown { get; set; }
     public List<string> ConfirmBodies { get; } = [];
     public List<string> PaymentEvents { get; } = [];
+    /// <summary>The fee the portal charges when the buyer cancels (cents); the portal's policy is its own business.</summary>
+    public long CancelFeeCents { get; set; }
+    public bool RescheduleLimitReached { get; set; }
+    public int ActionCalls;
+    /// <summary>The policy the NEXT hold is created with (the portal freezes it on the booking); null = the portal does not send one.</summary>
+    public object? PolicyForNext { get; set; }
 
     public FakeBookingPortal(TimeProvider clock) => _clock = clock;
 
@@ -60,6 +70,9 @@ public sealed class FakeBookingPortal
             return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\"}");
         }
         if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/confirm")) return ConfirmCall(c);
+        if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/cancellations")) return Action(c, "/cancellations", CancelCall);
+        if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/reschedule-requests")) return Action(c, "/reschedule-requests", RescheduleCall);
+        if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/proposal-responses")) return Action(c, "/proposal-responses", ProposalCall);
         if (c.Method == "GET" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/"))
         {
             if (Down) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
@@ -67,6 +80,50 @@ public sealed class FakeBookingPortal
             lock (_lock) return _byMid.TryGetValue(mid, out var h) ? FakePortal.Json(HttpStatusCode.OK, Summary(h)) : FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
         }
         return null;
+    }
+
+    private HttpResponseMessage Action(ReceivedCall c, string suffix, Func<Hold, JsonElement, HttpResponseMessage> run)
+    {
+        Interlocked.Increment(ref ActionCalls);
+        var mid = c.PathAndQuery["/api/internal/v1/bookings/".Length..^suffix.Length];
+        if (Down) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+        lock (_lock)
+        {
+            if (!_byMid.TryGetValue(mid, out var h)) return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
+            return run(h, JsonDocument.Parse(c.Body).RootElement.Clone());
+        }
+    }
+
+    private static HttpResponseMessage Err(HttpStatusCode s, string code) => FakePortal.Json(s, JsonSerializer.Serialize(new { code }));
+
+    private HttpResponseMessage CancelCall(Hold h, JsonElement body)
+    {
+        var rid = body.GetProperty("requestId").GetString()!;
+        if (h.Status == "CancelledByBuyer") return FakePortal.Json(HttpStatusCode.OK, Summary(h));           // idempotent
+        if (h.Status is not ("Hold" or "Requested" or "Confirmed" or "Rescheduled")) return Err(HttpStatusCode.Conflict, "invalid_state");
+        h.RequestIds.Add(rid);
+        h.Fee = h.Status is "Confirmed" or "Rescheduled" ? CancelFeeCents : 0;
+        h.Status = "CancelledByBuyer";
+        return FakePortal.Json(HttpStatusCode.OK, Summary(h));
+    }
+
+    private HttpResponseMessage RescheduleCall(Hold h, JsonElement body)
+    {
+        if (h.Status is not ("Confirmed" or "Rescheduled")) return Err(HttpStatusCode.Conflict, "invalid_state");
+        if (RescheduleLimitReached) return Err(HttpStatusCode.Conflict, "reschedule_limit");
+        var ns = body.GetProperty("newStart").GetDateTimeOffset();
+        if (_byMid.Values.Any(o => o != h && o.ServiceId == h.ServiceId && o.Start == ns && o.Status is "Hold" or "Requested" or "Confirmed")) return Err(HttpStatusCode.Conflict, "slot_unavailable");
+        h.RequestIds.Add(body.GetProperty("requestId").GetString()!);
+        h.Start = ns; h.Status = "Rescheduled";
+        return FakePortal.Json(HttpStatusCode.OK, Summary(h));
+    }
+
+    private HttpResponseMessage ProposalCall(Hold h, JsonElement body)
+    {
+        if (h.Status != "Requested" || h.ProposedStart is null) return Err(HttpStatusCode.Conflict, "invalid_state");
+        if (body.GetProperty("accept").GetBoolean()) { h.Start = h.ProposedStart.Value; h.ProposedStart = null; h.Status = "Confirmed"; }
+        else { h.ProposedStart = null; h.Status = "CancelledByBuyer"; }
+        return FakePortal.Json(HttpStatusCode.OK, Summary(h));
     }
 
     private HttpResponseMessage ConfirmCall(ReceivedCall c)
@@ -102,7 +159,7 @@ public sealed class FakeBookingPortal
             var hold = new Hold
             {
                 Mid = mid, ServiceId = serviceId, Start = start, Location = j.GetProperty("location").GetString()!, Minutes = DurationMinutes, Price = PriceCents,
-                ExpiresAt = now.AddMinutes(10), OnlineInstructions = OnlineInstructions, BodyText = c.BodyText,
+                ExpiresAt = now.AddMinutes(10), OnlineInstructions = OnlineInstructions, BodyText = c.BodyText, Policy = PolicyForNext,
             };
             _byMid[mid] = hold;
             if (LoseAnswer) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
@@ -116,6 +173,6 @@ public sealed class FakeBookingPortal
     {
         bookingId = h.BookingId, number = "BK-2026-0001", marketplaceBookingId = h.Mid, status = h.Status, serviceId = h.ServiceId, providerId = Guid.Parse("11111111-1111-1111-1111-111111111111"),
         location = h.Location, startAt = h.Start, endAt = h.Start.AddMinutes(h.Minutes), durationMinutes = h.Minutes, holdExpiresAt = h.Status == "Hold" ? h.ExpiresAt : (DateTimeOffset?)null,
-        priceCents = h.Price, addOnsCents = 0, travelFeeCents = 0, totalCents = h.Price, cancellationFeeCents = 0, additionalChargeCents = 0, rescheduleCount = 0, onlineInstructions = h.OnlineInstructions,
+        priceCents = h.Price, addOnsCents = 0, travelFeeCents = 0, totalCents = h.Price, cancellationFeeCents = h.Fee, additionalChargeCents = 0, rescheduleCount = 0, onlineInstructions = h.OnlineInstructions, proposedStartAt = h.ProposedStart, policy = h.Policy,
     });
 }
