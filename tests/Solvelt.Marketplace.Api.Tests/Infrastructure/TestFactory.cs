@@ -23,6 +23,9 @@ public sealed class TestFactory : WebApplicationFactory<Program>
     public FakePortal Portal { get; }
     /// <summary>Captures every log line (message, state values, scopes) written while the app runs.</summary>
     public CaptureLoggerProvider Logs { get; } = new();
+    /// <summary>Answers the unsigned public GETs the app makes to the portal (proof-of-delivery images). Calls are recorded in <see cref="PublicCalls"/>.</summary>
+    public Func<HttpRequestMessage, HttpResponseMessage>? PublicResponder { get; set; }
+    public System.Collections.Concurrent.ConcurrentQueue<Uri> PublicCalls { get; } = new();
     private readonly string _provider = ResolveProvider(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER"));
 
     /// <summary>"sqlite" (default when unset) or "postgres". Anything else throws: a typo must not silently run on SQLite.</summary>
@@ -78,6 +81,7 @@ public sealed class TestFactory : WebApplicationFactory<Program>
             s.RemoveAll<TimeProvider>();
             s.AddSingleton<TimeProvider>(Clock);
             s.AddHttpClient<ISignedPortalClient, SignedPortalClient>().ConfigurePrimaryHttpMessageHandler(() => Portal);
+            s.AddHttpClient<Solvelt.Marketplace.Api.Fulfilment.ProofFetcher>().ConfigurePrimaryHttpMessageHandler(() => new DelegateHandler(r => { PublicCalls.Enqueue(r.RequestUri!); return PublicResponder?.Invoke(r) ?? new HttpResponseMessage(System.Net.HttpStatusCode.NotFound); }));
         });
     }
 
@@ -129,4 +133,9 @@ public sealed class CaptureLoggerProvider : ILoggerProvider, ISupportExternalSco
             owner._lines.Enqueue(sb.ToString());
         }
     }
+}
+
+public sealed class DelegateHandler(Func<HttpRequestMessage, HttpResponseMessage> f) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => Task.FromResult(f(request));
 }

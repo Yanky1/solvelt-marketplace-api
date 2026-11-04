@@ -90,6 +90,12 @@ builder.Services.AddScoped<IOutboxHandler, OrderIngestHandler>();
 builder.Services.AddSingleton<IProjectionHandler, PortalRefundHandler>();
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Fulfilment.FulfilmentHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeRefundHandler>();
+builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Fulfilment.ProofFetcher>((sp, c) =>
+{
+    var o = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<PortalOptions>>().Value;
+    if (!string.IsNullOrWhiteSpace(o.BaseUrl)) c.BaseAddress = new Uri(o.BaseUrl, UriKind.Absolute);
+    c.Timeout = TimeSpan.FromSeconds(20);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });   // a redirect would leave the portal origin
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.CancelRequestOutboxHandler>();
@@ -144,6 +150,7 @@ app.MapAuth();
 app.MapCart();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
+Solvelt.Marketplace.Api.Fulfilment.ProofEndpoints.MapProofs(app);
 app.MapStripeWebhooks();
 
 app.Run();
