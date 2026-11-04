@@ -24,6 +24,8 @@ public sealed class StripeOptions
 
 public sealed record PaymentIntentResult(string Id, string ClientSecret, string Status);
 public sealed record RefundResult(string Id, string Status, long AmountCents);
+/// <summary>A refund as Stripe lists it for an intent: <see cref="RefundKey"/> is OUR <c>refund_key</c> metadata (null for a refund made in the dashboard). Status: pending, requires_action, succeeded, failed, canceled.</summary>
+public sealed record ProviderRefund(string Id, long AmountCents, string Status, string? RefundKey);
 
 /// <summary>Raised when payments are not configured or the provider cannot be reached or refuses: nothing was charged.</summary>
 public sealed class PaymentsUnavailableException(string message, Exception? inner = null) : Exception(message, inner);
@@ -44,6 +46,8 @@ public interface IPaymentProvider
     Task<long> GetAmountRefundedAsync(string intentId, CancellationToken ct);
     /// <summary>Reads an intent we created (status and client secret). Stripe forgets idempotency keys after 24 hours, so a second create for an old key would open a SECOND intent: callers reuse the stored one through this instead (M4-15).</summary>
     Task<PaymentIntentResult> GetIntentAsync(string intentId, CancellationToken ct);
+    /// <summary>Every refund Stripe has for the intent (up to 100), with our <c>refund_key</c> metadata: the only way to tell a refund of OURS that Stripe executed (our call timed out) from one made in the dashboard (decision M3-34).</summary>
+    Task<IReadOnlyList<ProviderRefund>> ListRefundsAsync(string intentId, CancellationToken ct);
     Task<RefundResult> RefundAsync(string intentId, long amountCents, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct);
 }
 
@@ -60,6 +64,23 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
         foreach (var (k, v) in metadata) form.Add(new($"metadata[{k}]", v));
         var json = await PostAsync("/v1/payment_intents", form, idempotencyKey, ct);
         return new PaymentIntentResult(Str(json, "id"), Str(json, "client_secret"), Str(json, "status"));
+    }
+
+    public async Task<IReadOnlyList<ProviderRefund>> ListRefundsAsync(string intentId, CancellationToken ct)
+    {
+        var json = await PostAsync($"/v1/refunds?payment_intent={Uri.EscapeDataString(intentId)}&limit=100", null, null, ct);
+        var list = new List<ProviderRefund>();
+        if (json.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+            foreach (var r in data.EnumerateArray())
+            {
+                if (r.ValueKind != JsonValueKind.Object || !r.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String) continue;
+                var amount = r.TryGetProperty("amount", out var a) && a.TryGetInt64(out var n) ? n : 0;
+                var status = r.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString()! : "succeeded";
+                string? key = null;
+                if (r.TryGetProperty("metadata", out var md) && md.ValueKind == JsonValueKind.Object && md.TryGetProperty("refund_key", out var k) && k.ValueKind == JsonValueKind.String) key = k.GetString();
+                list.Add(new ProviderRefund(id.GetString()!, amount, status, key));
+            }
+        return list;
     }
 
     public async Task<PaymentIntentResult> GetIntentAsync(string intentId, CancellationToken ct)
@@ -137,6 +158,7 @@ public sealed class UnconfiguredPaymentProvider : IPaymentProvider
     public Task<string> GetIntentStatusAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<long> GetAmountRefundedAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<PaymentIntentResult> GetIntentAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
+    public Task<IReadOnlyList<ProviderRefund>> ListRefundsAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<RefundResult> RefundAsync(string i, long a, string k, IReadOnlyDictionary<string, string> m, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
 }
 
@@ -165,6 +187,9 @@ public sealed class FakePaymentProvider : IPaymentProvider
     public IReadOnlyCollection<Intent> Intents => _intents.Values.ToList();
     public IReadOnlyList<RefundResult> Refunds { get { lock (_lock) return _refunds.ToList(); } }
     private readonly List<RefundResult> _refunds = [];
+    private readonly List<(string IntentId, ProviderRefund Refund)> _listed = [];
+    /// <summary>Test hook: the next refund IS executed at the processor but the answer is lost (a timeout): the caller sees "unreachable" and will retry with the same key.</summary>
+    public bool TimeoutAfterExecuteNext { get; set; }
     /// <summary>Test hook: fail the next N calls as an unreachable processor.</summary>
     public int FailNext { get; set; }
     /// <summary>Test hook: the next cancel is refused by the processor with this error code (for example <c>api_key_expired</c>).</summary>
@@ -238,6 +263,16 @@ public sealed class FakePaymentProvider : IPaymentProvider
         }
     }
 
+    public Task<IReadOnlyList<ProviderRefund>> ListRefundsAsync(string intentId, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            MaybeFail();
+            if (!_intents.ContainsKey(intentId)) throw new PaymentRejectedException("resource_missing");
+            return Task.FromResult<IReadOnlyList<ProviderRefund>>(_listed.Where(x => x.IntentId == intentId).Select(x => x.Refund).ToList());
+        }
+    }
+
     /// <summary>Test hook: the buyer chose a delayed method; the money is in flight.</summary>
     public void SetProcessing(string intentId) { lock (_lock) _intents[intentId].Processing = true; }
 
@@ -256,6 +291,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
             var r = new RefundResult($"re_fake_{_refunds.Count + 1:D6}", "succeeded", amountCents);
             _refunds.Add(r);
             _byKey[idempotencyKey] = (fp, r);
+            _listed.Add((intentId, new ProviderRefund(r.Id, amountCents, "succeeded", metadata.TryGetValue("refund_key", out var rk) ? rk : null)));
+            if (TimeoutAfterExecuteNext) { TimeoutAfterExecuteNext = false; throw new PaymentsUnavailableException("unreachable"); }
             return Task.FromResult(r);
         }
     }
