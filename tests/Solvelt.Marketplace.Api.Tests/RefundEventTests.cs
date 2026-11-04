@@ -380,6 +380,8 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal(2, datas.Count);
         Assert.Equal(3000, datas.Sum(d => d.GetProperty("amountCents").GetInt64()));                       // proportional to the charged totals, adds up exactly
         Assert.Equal(1500, datas.Sum(d => d.GetProperty("feeCents").GetInt64()));                          // the fee split the same way
+        await PostStripe(Dispute("charge.dispute.updated", o, "under_review", amount: o.TotalCents, id: "evt_p2", dp: "dp_1"));   // a full dispute: the tax cannot be placed, so an info line says so (no personal data)
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("unallocated-dispute flag") && l.Contains(o.Number) && !l.Contains("@"));
         var sold = o.Groups.ToDictionary(g => g.SellerOrderNumber!, g => g.ItemsCents + g.ShippingCents);
         Assert.All(datas, d => Assert.InRange(d.GetProperty("amountCents").GetInt64(), 0, sold[d.GetProperty("sellerOrderNumber").GetString()!]));
         // the refused share is dead (a person sees it); the other was delivered on its own
