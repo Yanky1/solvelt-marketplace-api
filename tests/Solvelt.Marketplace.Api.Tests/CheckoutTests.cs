@@ -228,6 +228,24 @@ public sealed class CheckoutTests : IDisposable
     }
 
     [Fact]
+    public async Task A_checkout_without_any_quote_hash_is_refused_with_the_fresh_quote_and_creates_nothing()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        // sent exactly as a client would that never asked for a quote: no quoteHash field at all (review C5: the hash is required on EVERY checkout)
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address(), quoteHash = (string?)null }) };
+        r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s);
+        var res = await Ok(await _k.Http.SendAsync(r), HttpStatusCode.Conflict);
+        Assert.Equal("price_changed", res.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrEmpty(res.GetProperty("quote").GetProperty("quoteHash").GetString()));   // the fresh quote carries the hash to confirm
+        var r2 = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address() }) };
+        r2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s);
+        Assert.Equal(HttpStatusCode.Conflict, (await _k.Http.SendAsync(r2)).StatusCode);
+        Assert.Equal(0, await _k.Db(db => db.Orders.CountAsync()));
+        Assert.Empty(Stripe.Intents);
+    }
+
+    [Fact]
     public async Task The_quote_hash_is_required_and_bound_to_what_was_priced_and_to_the_destination_and_it_expires()
     {
         var s = await Buyer();

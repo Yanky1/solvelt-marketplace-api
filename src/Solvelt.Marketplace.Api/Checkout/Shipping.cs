@@ -38,12 +38,12 @@ public static class ShippingRates
         foreach (var sp in zone.Speeds.Where(x => x.Enabled))
         {
             // Decision O-15: a weight-based price needs a KNOWN weight for every line of the group. Counting an unknown weight as 0 would under-charge,
-            // so the speed is unavailable (flat speeds and local delivery are unaffected).
-            if (sp.Method == "weight" && weightGrams is not > 0) { unavailable.Add(new UnavailableSpeed(sp.Speed, "weight_unknown")); continue; }
+            // so the speed is unavailable (flat speeds and local delivery are unaffected), unless the group ships free: then the weight does not matter.
+            if (sp.Method == "weight" && weightGrams is not > 0 && !free) { unavailable.Add(new UnavailableSpeed(sp.Speed, "weight_unknown")); continue; }
             long? price = sp.Method switch
             {
                 "flat" => sp.FlatCents,
-                "weight" => sp.BaseCents is { } b && sp.PerKgCents is { } k ? b + (weightGrams!.Value + 999) / 1000 * k : null,
+                "weight" => free ? 0 : sp.BaseCents is { } b && sp.PerKgCents is { } k ? b + (weightGrams!.Value + 999) / 1000 * k : null,   // a free group needs no weight (review C4)
                 _ => null,
             };
             if (price is not { } p || p < 0) continue;   // a speed we cannot price is not offered

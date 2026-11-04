@@ -60,9 +60,10 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
             if (Str(data, "refundId") is not { Length: > 0 and <= 100 } rid || Num(data, "amountCents") is not { } total || total <= 0 || (Num(data, "shippingCents") ?? 0) is var shipping && (shipping < 0 || shipping > total))
                 return HandlerOutcome.Skipped("invalid refund payload");
             var lines = ParseLines(data, out var lineSum);
-            // amountCents is the sum of the lines (tax included) plus shipping (portal answer to C9). A payload that does not add up is not acted on: money moves only on consistent data.
-            if (lines is null || (lines.Count > 0 && lineSum + shipping != total)) { log.LogError("Portal refund.issued for order {Number} is inconsistent (lines do not add up to the amount); nothing was reserved", order.Number); return HandlerOutcome.Skipped("inconsistent refund amounts"); }
-            request = new PortalRefund(order.Id, group.Id, total, shipping, lines.Select(l => new PortalRefundLine(l.Id, l.Quantity)).ToList(), Num(data, "taxCents"), false, false, "portal:" + rid, Str(data, "reason") ?? "portal_refund", rid);
+            // amountCents is the sum of the lines (tax included) plus shipping (portal answer to C9) plus the shipping tax when the portal sends it (C8). A payload that does not add up is not acted on: money moves only on consistent data.
+            var shippingTax = Num(data, "shippingTaxCents") ?? 0;   // C8 (brief N8): the amount is lines (with their tax) + shipping + shipping tax
+            if (shippingTax < 0 || lines is null || (lines.Count > 0 && lineSum + shipping + shippingTax != total)) { log.LogError("Portal refund.issued for order {Number} is inconsistent (lines do not add up to the amount); nothing was reserved", order.Number); return HandlerOutcome.Skipped("inconsistent refund amounts"); }
+            request = new PortalRefund(order.Id, group.Id, total, shipping, lines.Select(l => new PortalRefundLine(l.Id, l.Quantity)).ToList(), Num(data, "taxCents"), false, false, "portal:" + rid, Str(data, "reason") ?? "portal_refund", rid, Num(data, "shippingTaxCents"));
         }
         else
         {
@@ -71,7 +72,7 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
             var partial = data.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
             var lines = ParseLines(data, out _);
             if (lines is null) return HandlerOutcome.Skipped("invalid cancellation lines");
-            request = new PortalRefund(order.Id, group.Id, due, 0, lines.Select(l => new PortalRefundLine(l.Id, l.Quantity)).ToList(), Num(data, "taxCents"), !partial, true, "cancelled:" + c.Event.Id, "order_cancelled", null);
+            request = new PortalRefund(order.Id, group.Id, due, 0, lines.Select(l => new PortalRefundLine(l.Id, l.Quantity)).ToList(), Num(data, "taxCents"), !partial, true, "cancelled:" + c.Event.Id, "order_cancelled", null, Num(data, "shippingTaxCents"));
         }
         switch (await refunds.ReservePortalAsync(request, perGroupShipping: portalOptions.Value.PerGroupShipping, ct))
         {

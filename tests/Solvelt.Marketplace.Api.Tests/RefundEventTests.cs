@@ -544,4 +544,97 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(o2, g2, 200, 200, [], null, false, false, "off", "t", "off"), perGroupShipping: false, default));
         Assert.Equal(0, (await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Key == "off"))).ShippingTaxCents);
     }
+
+    // ---- review C2 / C3 / survivors M19, M21-M23 (C8 refund semantics, brief N8) ----
+
+    private async Task<OrderRefund> Refund(string key) => await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Key == key));
+    private async Task<OrderGroup> GroupOf(Guid id) => await _k.Db(db => db.OrderGroups.AsNoTracking().SingleAsync(x => x.Id == id));
+
+    [Fact]
+    public async Task The_shipping_tax_is_never_counted_when_it_does_not_fit_inside_the_amount_and_never_more_than_is_left()
+    {
+        await Login();
+        var (orderId, groupId) = await HandmadeOrder(paid: 3845, groupTotal: 3845, groupTax: 345, qty: 3, shipping: 500, shippingTax: 45);
+        using var scope = _k.F.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        // C2: 200 of shipping and an amount of 200: an older portal that does not send the shipping tax; the inferred 18 does not fit, so it is NOT refunded and NOT counted
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 200, 200, [], null, false, false, "c2", "t", "c2"), true, default));
+        var c2 = await Refund("c2");
+        Assert.Equal((0L, 0L), (c2.TaxCents, c2.ShippingTaxCents));
+        var g = await GroupOf(groupId);
+        Assert.Equal((0L, 0L), (g.RefundedTaxCents, g.RefundedShippingTaxCents));                     // before the fix: tax 0 but 18 counted, and never returned later
+        // the portal's explicit figure is used as sent; more than what is left is cut to what is left (45 - 0)
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 218, 200, [], null, false, false, "x1", "t", "x1", ShippingTaxCents: 18), true, default));
+        Assert.Equal((18L, 18L), ((await Refund("x1")).TaxCents, (await Refund("x1")).ShippingTaxCents));
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 127, 100, [], null, false, false, "x2", "t", "x2", ShippingTaxCents: 99), true, default));   // 99 claimed, 27 left
+        Assert.Equal((27L, 27L), ((await Refund("x2")).TaxCents, (await Refund("x2")).ShippingTaxCents));
+        Assert.Equal(45, (await GroupOf(groupId)).RefundedShippingTaxCents);
+    }
+
+    [Fact]
+    public async Task A_refund_of_an_amount_without_lines_takes_the_shipping_tax_out_before_prorating_the_line_tax()
+    {
+        await Login();
+        var (orderId, groupId) = await HandmadeOrder(paid: 3845, groupTotal: 3845, groupTax: 345, qty: 3, shipping: 500, shippingTax: 45);
+        using var scope = _k.F.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        // C3: 1318 = items 1000 + line tax 100 + shipping 200 + shipping tax 18 (the lines hold 3000 + 300): the line tax is 100 and the total tax 118 (before: 133, 15 cents too much)
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 1318, 200, [], null, false, false, "c3", "t", "c3", ShippingTaxCents: 18), true, default));
+        var c3 = await Refund("c3");
+        Assert.Equal((118L, 18L), (c3.TaxCents, c3.ShippingTaxCents));
+        Assert.Equal(1318 - 200 - 118, c3.AmountCents - c3.ShippingCents - c3.TaxCents);               // refund.processed's items part: 1000
+        // the same refund inferred (an older portal that sends no shipping tax) comes out the same
+        var (o2, g2) = await HandmadeOrder(paid: 3845, groupTotal: 3845, groupTax: 345, qty: 3, shipping: 500, shippingTax: 45);
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(o2, g2, 1318, 200, [], null, false, false, "c3b", "t", "c3b"), true, default));
+        Assert.Equal((118L, 18L), ((await Refund("c3b")).TaxCents, (await Refund("c3b")).ShippingTaxCents));
+    }
+
+    [Fact]
+    public async Task When_the_shipping_tax_is_inferred_the_last_shipping_refund_takes_the_remainder_of_an_uneven_split()
+    {
+        await Login();
+        var (orderId, groupId) = await HandmadeOrder(paid: 3845, groupTotal: 3845, groupTax: 345, qty: 3, shipping: 500, shippingTax: 45);
+        using var scope = _k.F.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        // 45 on a 333 / 167 split of the shipping: floor(45 x 333 / 500) = 29, then the last takes 16 (a plain proration would give floor(45 x 167 / 500) = 15 and lose a cent)
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 362, 333, [], null, false, false, "u1", "t", "u1"), true, default));
+        Assert.Equal(29, (await Refund("u1")).ShippingTaxCents);
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 183, 167, [], null, false, false, "u2", "t", "u2"), true, default));
+        Assert.Equal(16, (await Refund("u2")).ShippingTaxCents);
+        Assert.Equal(45, (await GroupOf(groupId)).RefundedShippingTaxCents);
+    }
+
+    [Fact]
+    public async Task A_stripe_refusal_that_moved_no_money_gives_the_shipping_tax_counter_back_too()
+    {
+        await Login();
+        var (orderId, groupId) = await HandmadeOrder(paid: 3845, groupTotal: 3845, groupTax: 345, qty: 3, shipping: 500, shippingTax: 45);
+        using (var scope = _k.F.Services.CreateScope())
+            Assert.Equal(ReserveOutcome.Reserved, await scope.ServiceProvider.GetRequiredService<RefundService>().ReservePortalAsync(new PortalRefund(orderId, groupId, 218, 200, [], null, false, false, "m22", "t", "m22", ShippingTaxCents: 18), true, default));
+        var before = await GroupOf(groupId);
+        Assert.Equal((218L, 200L, 18L, 18L), (before.RefundedCents, before.RefundedShippingCents, before.RefundedTaxCents, before.RefundedShippingTaxCents));
+        Stripe.RejectRefundWith = "api_key_expired";                       // nothing moved at Stripe
+        await Drain();
+        var after = await GroupOf(groupId);
+        Assert.Equal((0L, 0L, 0L, 0L), (after.RefundedCents, after.RefundedShippingCents, after.RefundedTaxCents, after.RefundedShippingTaxCents));   // every counter is back, the shipping tax one included
+        Assert.Equal("rejected", (await Refund("m22")).Status);
+    }
+
+    [Fact]
+    public async Task A_portal_refund_event_with_the_c8_switch_on_uses_its_explicit_shipping_tax_end_to_end()
+    {
+        var (o, g, _) = await Three();                                     // the order was priced and ingested with the switch OFF; the refund arrives with it ON
+        _k.F.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Infrastructure.PortalOptions>>().Value.PerGroupShipping = true;
+        await _k.Db(db => db.OrderGroups.Where(x => x.Id == g.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.ShippingTaxCents, 44)));
+        // amount = shipping 200 + shipping tax 18 (no lines); the portal states both
+        Assert.Equal("applied", await Portal("refund.issued", o, g, new { RefundId = "n8-1", AmountCents = 218, ShippingCents = 200, ShippingTaxCents = 18, TaxCents = 18 }));
+        await Drain();
+        Assert.Equal(218, Assert.Single(Stripe.Refunds).AmountCents);       // the buyer gets exactly the portal's amount
+        var d = Assert.Single(await Sent("refund.processed")).GetProperty("data");
+        Assert.Equal((0L, 200L), (d.GetProperty("amountCents").GetInt64(), d.GetProperty("shippingCents").GetInt64()));   // tax-exclusive, as before
+        var ag = await GroupOf(g.Id);
+        Assert.Equal((200L, 18L, 18L), (ag.RefundedShippingCents, ag.RefundedShippingTaxCents, ag.RefundedTaxCents));
+        // an amount that does not add up with the stated shipping tax is not acted on
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "n8-bad", AmountCents = 400, ShippingCents = 100, ShippingTaxCents = 9, Lines = new[] { new { marketplaceLineId = o.Lines.Single().MarketplaceLineId, quantity = 1, amountCents = 100 } } }));
+    }
 }
