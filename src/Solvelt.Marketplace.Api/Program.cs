@@ -34,6 +34,7 @@ builder.Services.Configure<AdminOptions>(o => OptionsSetup.Admin(o, builder.Conf
 builder.Services.Configure<AuthOptions>(o => OptionsSetup.Auth(o, builder.Configuration, devLike));
 builder.Services.Configure<NotificationOptions>(o => OptionsSetup.Notifications(o, builder.Configuration, devLike));
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Notifications.UnsubscribeTokens>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Infrastructure.MessageRateLimiter>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Notifications.NotificationMailHandler>();
 builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();

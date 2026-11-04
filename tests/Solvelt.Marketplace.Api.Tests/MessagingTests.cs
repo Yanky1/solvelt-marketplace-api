@@ -294,12 +294,19 @@ public sealed class MessagingTests : OrderFlowBase
     }
 
     [Fact]
-    public async Task Sending_and_reporting_messages_has_its_own_tighter_per_user_limit()
+    public async Task G4_Sending_and_reporting_messages_is_limited_per_signed_in_account_and_requests_before_sign_in_do_not_count()
     {
         using var k = new AuthKit(new Dictionary<string, string?> { ["RateLimits:MessagesPerMinute"] = "3" });
+        // requests without a session are refused and never use up anything: not for the address, not for anyone
+        for (var i = 0; i < 6; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/messages", new { text = "x" })).StatusCode);
+        var a = await k.VerifiedSession("a@example.com");
+        var b = await k.VerifiedSession("b@example.com");     // same address, another buyer
         var codes = new List<HttpStatusCode>();
-        for (var i = 0; i < 5; i++) codes.Add((await k.Post("/api/v1/messages", new { text = "x" })).StatusCode);
-        Assert.Equal(new[] { HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized, HttpStatusCode.TooManyRequests, HttpStatusCode.TooManyRequests }, codes);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/messages/threads", null)).StatusCode);   // reading is on the generous bucket
+        for (var i = 0; i < 5; i++) codes.Add((await k.Post("/api/v1/messages", new { text = "x" }, a)).StatusCode);
+        Assert.Equal(new[] { HttpStatusCode.UnprocessableEntity, HttpStatusCode.UnprocessableEntity, HttpStatusCode.UnprocessableEntity, HttpStatusCode.TooManyRequests, HttpStatusCode.TooManyRequests }, codes);   // 3 reach the handler (422: no order or product), then 429
+        var limited = await k.Post("/api/v1/messages", new { text = "x" }, a);
+        Assert.Equal("60", limited.Headers.RetryAfter!.ToString());
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await k.Post("/api/v1/messages", new { text = "x" }, b)).StatusCode);   // b has its own bucket
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/messages/threads", a)).StatusCode);                                    // reading is on the generous bucket
     }
 }

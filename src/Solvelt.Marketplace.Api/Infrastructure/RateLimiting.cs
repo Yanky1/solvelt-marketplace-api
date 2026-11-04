@@ -1,5 +1,6 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Solvelt.Marketplace.Api.Auth;
 
 namespace Solvelt.Marketplace.Api.Infrastructure;
 
@@ -9,8 +10,6 @@ public static class RateLimitPolicies
     public const string Auth = "auth";
     /// <summary>Anonymous catalog/public reads: generous, per client IP.</summary>
     public const string Public = "public";
-    /// <summary>Sending and reporting messages: tighter, per end user (the signed forwarded client identity, not the web server).</summary>
-    public const string Messages = "messages";
     /// <summary>Operations endpoints: its own bucket, per client IP, so buyer traffic and operator traffic never share a limit.</summary>
     public const string Admin = "admin";
 
@@ -26,8 +25,6 @@ public static class RateLimitPolicies
             o.AddPolicy(Auth, ctx => Fixed(ctx, "auth", authPerMinute));
             var adminPerMinute = config.GetValue("RateLimits:AdminPerMinute", 30);
             o.AddPolicy(Public, ctx => Fixed(ctx, "public", publicPerMinute));
-            var messagesPerMinute = config.GetValue("RateLimits:MessagesPerMinute", 20);
-            o.AddPolicy(Messages, ctx => Fixed(ctx, "messages", messagesPerMinute));
             o.AddPolicy(Admin, ctx => Fixed(ctx, "admin", adminPerMinute));
             o.OnRejected = async (c, _) => await ProblemExceptionMiddleware.Write(c.HttpContext, 429, "rate_limited", "Too many requests. Try again shortly.",
                 headers: r => { r.Headers.RetryAfter = "60"; r.Headers.CacheControl = "no-store"; });     // set after Write's Clear(), which would otherwise drop them
@@ -42,4 +39,31 @@ public static class RateLimitPolicies
     private static RateLimitPartition<string> Fixed(HttpContext ctx, string bucket, int permits) =>
         RateLimitPartition.GetFixedWindowLimiter(PartitionKey(ctx, bucket),
             _ => new FixedWindowRateLimiterOptions { PermitLimit = permits, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 });
+}
+
+/// <summary>
+/// Sending and reporting messages: <c>RateLimits:MessagesPerMinute</c> (20) per SIGNED-IN ACCOUNT, counted only after the sign-in check (M5 review G4). It runs as an endpoint filter after
+/// <see cref="Solvelt.Marketplace.Api.Auth.RequireBuyerFilter"/>: requests without a valid session never count, and two buyers behind one address do not share a bucket. The general per-address
+/// limit (<c>Public</c>) still applies in front of it.
+/// </summary>
+public sealed class MessageRateLimiter(IConfiguration config) : IDisposable
+{
+    private readonly PartitionedRateLimiter<Guid> _limiter = PartitionedRateLimiter.Create<Guid, Guid>(account =>
+        RateLimitPartition.GetFixedWindowLimiter(account, _ => new FixedWindowRateLimiterOptions { PermitLimit = Math.Max(1, config.GetValue("RateLimits:MessagesPerMinute", 20)), Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+    public bool TryAcquire(Guid accountId) { using var lease = _limiter.AttemptAcquire(accountId); return lease.IsAcquired; }
+    public void Dispose() => _limiter.Dispose();
+}
+
+public sealed class MessageRateLimitFilter(MessageRateLimiter limiter) : IEndpointFilter
+{
+    public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        if (!limiter.TryAcquire(context.HttpContext.Buyer().AccountId))
+        {
+            context.HttpContext.Response.Headers.RetryAfter = "60";
+            context.HttpContext.Response.Headers.CacheControl = "no-store";
+            return Problems.Json(429, "rate_limited", "Too many requests. Try again shortly.");
+        }
+        return await next(context);
+    }
 }
