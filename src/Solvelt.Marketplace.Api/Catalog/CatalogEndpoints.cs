@@ -42,7 +42,7 @@ public static class CatalogEndpoints
             ctx.HttpContext.Response.OnStarting(static state =>
             {
                 var res = (HttpResponse)state;
-                if (!res.Headers.ContainsKey("Cache-Control")) res.Headers.CacheControl = res.StatusCode == 200 ? "public, max-age=5" : "no-store";
+                if (!res.Headers.ContainsKey("Cache-Control")) res.Headers.CacheControl = res.StatusCode is 200 or 304 ? "public, max-age=5" : "no-store";
                 return Task.CompletedTask;
             }, ctx.HttpContext.Response);
             return await next(ctx);
@@ -123,7 +123,7 @@ public static class CatalogEndpoints
         var rows = await q.Skip(skip).Take(o.PageSize + 1).ToListAsync(ct);
         var more = rows.Count > o.PageSize;
         if (more) rows.RemoveAt(rows.Count - 1);
-        return (rows, more ? new ListingCursor(o.Sort, ListingCursor.KeyOf(sort, rows[^1]), rows[^1].Id).Encode() : null);
+        return (rows, more ? new ListingCursor(o.EffectiveSort, ListingCursor.KeyOf(sort, rows[^1]), rows[^1].Id, o.Fingerprint).Encode() : null);
     }
 
     private static IQueryable<CatalogListing> After(IQueryable<CatalogListing> q, string sort, ListingCursor c)
@@ -153,22 +153,23 @@ public static class CatalogEndpoints
         var more = window.Count > o.PageSize;
         var pageIds = window.Take(o.PageSize).ToList();
         var rows = (await filtered.Where(l => pageIds.Contains(l.Id)).ToListAsync(ct)).OrderBy(l => pageIds.IndexOf(l.Id)).ToList();
-        return (rows, more && rows.Count > 0 ? new ListingCursor("relevance", ListingCursor.KeyOf("relevance", rows[^1], score[rows[^1].Id]), rows[^1].Id).Encode() : null);
+        return (rows, more && rows.Count > 0 ? new ListingCursor("relevance", ListingCursor.KeyOf("relevance", rows[^1], score[rows[^1].Id]), rows[^1].Id, o.Fingerprint).Encode() : null);
     }
 
     /// <summary>
-    /// A listing that was shown and has been unlisted, archived or removed is 410 (permanent), so search engines drop it. A listing whose seller is
+    /// A listing that WAS shown (WasPublic) and has been unlisted, archived or removed is 410 (permanent), so search engines drop it. A listing whose seller is
     /// suspended, a draft, a stub we only heard an event about, and anything unknown are all 404 with no hint they exist.
     /// </summary>
     private static async Task<bool> IsGone(MarketplaceDb db, string slugOrId, CancellationToken ct)
     {
-        var q = db.CatalogListings.AsNoTracking().Where(l => !l.IsStub && !l.Visible && db.CatalogSellers.Any(s => s.Id == l.SellerId && s.Active));
+        var q = db.CatalogListings.AsNoTracking().Where(l => l.WasPublic && !l.IsStub && !l.Visible && db.CatalogSellers.Any(s => s.Id == l.SellerId && s.Active));
         q = Guid.TryParse(slugOrId, out var id) ? q.Where(l => l.Id == id) : q.Where(l => l.Slug == slugOrId);
         return await q.AnyAsync(l => (l.UnlistedVersion != null && l.UnlistedVersion >= l.Version) || l.Status == "Archived" || l.Status == "Removed", ct);
     }
 
     private static async Task<IResult> Listing(MarketplaceDb db, CategoryMap map, string slugOrId, CancellationToken ct)
     {
+        if (ListingQuery.HasControl(slugOrId)) return Problems.NotFound("Listing not found.");     // no such slug can exist (and PostgreSQL cannot compare a NUL)
         var q = Visible(db).Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).AsSplitQuery();
         var l = Guid.TryParse(slugOrId, out var id) ? await q.FirstOrDefaultAsync(x => x.Id == id, ct) : await q.FirstOrDefaultAsync(x => x.Slug == slugOrId, ct);
         if (l is null) return await IsGone(db, slugOrId, ct) ? Problems.Gone("This listing is no longer available.") : Problems.NotFound("Listing not found.");

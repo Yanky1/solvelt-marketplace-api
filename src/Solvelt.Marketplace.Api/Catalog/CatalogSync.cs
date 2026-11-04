@@ -141,12 +141,14 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     {
         var existing = await db.CatalogCategories.ToDictionaryAsync(c => c.Id, ct);
         var slugs = existing.Values.ToDictionary(c => c.Slug, c => c.Id, StringComparer.Ordinal);
+        var now = time.GetUtcNow().ToUniversalTime();
         foreach (var c in feed)
         {
             var row = existing.GetValueOrDefault(c.Id);
             var slug = SlugRules.Choose(c.Slug, c.Id, row?.Slug, slugs);
             if (row is null) { row = new CatalogCategory { Id = c.Id }; db.CatalogCategories.Add(row); existing[c.Id] = row; }
             else if (row.Slug != slug) slugs.Remove(row.Slug);
+            if (row.UpdatedAt == default || row.ParentId != c.ParentId || row.Slug != slug || row.Name != c.Name || row.SortOrder != c.SortOrder) row.UpdatedAt = now;
             row.ParentId = c.ParentId; row.Slug = slug; row.Name = c.Name; row.SortOrder = c.SortOrder;
             slugs[slug] = c.Id;
             if (perRecord && !await TrySaveRecordAsync(c.Id, "category", ct))
@@ -164,6 +166,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     {
         var existing = await db.CatalogBrands.ToDictionaryAsync(b => b.Id, ct);
         var slugs = existing.Values.ToDictionary(b => b.Slug, b => b.Id, StringComparer.Ordinal);
+        var now = time.GetUtcNow().ToUniversalTime();
         foreach (var b in feed)
         {
             var row = existing.GetValueOrDefault(b.Id);
@@ -171,6 +174,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             if (row is null) { row = new CatalogBrand { Id = b.Id }; db.CatalogBrands.Add(row); existing[b.Id] = row; }
             else if (row.Slug != slug) slugs.Remove(row.Slug);
             var renamed = row.Name != b.Name && !string.IsNullOrEmpty(row.Name);
+            if (row.UpdatedAt == default || row.SellerId != b.SellerId || row.Slug != slug || row.Name != b.Name || row.LogoImageId != b.LogoImageId) row.UpdatedAt = now;
             row.SellerId = b.SellerId; row.Slug = slug; row.Name = b.Name; row.LogoImageId = b.LogoImageId;
             slugs[slug] = b.Id;
             if (renamed) await SearchIndexer.RenameBrandAsync(db, b.Id, b.Name, ct);
@@ -428,7 +432,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         {
             var slug = Slug.From(s.Brand.Name);
             if (await db.CatalogBrands.AnyAsync(b => b.Slug == slug, ct) || db.CatalogBrands.Local.Any(b => b.Slug == slug)) slug += "-" + s.Brand.Id.ToString("N")[..6];
-            db.CatalogBrands.Add(new CatalogBrand { Id = s.Brand.Id, SellerId = s.Seller.Id, Name = SnapshotLimits.Clip(s.Brand.Name, SnapshotLimits.DisplayName), Slug = SnapshotLimits.Clip(slug, SnapshotLimits.Slug) });
+            db.CatalogBrands.Add(new CatalogBrand { Id = s.Brand.Id, SellerId = s.Seller.Id, Name = SnapshotLimits.Clip(s.Brand.Name, SnapshotLimits.DisplayName), Slug = SnapshotLimits.Clip(slug, SnapshotLimits.Slug), UpdatedAt = now });
         }
     }
 

@@ -228,8 +228,19 @@ public class CatalogEndpointTests : IAsyncLifetime
     [Fact]
     public async Task A_listing_whose_status_left_Active_is_410_gone_by_slug_and_by_id()      // was a 404 in M1; the SEO brief asks for 410 (M2-07)
     {
-        Assert.Equal("gone", Code(await Get($"{Base}/listings/retired-spice-gift-set", HttpStatusCode.Gone)));
-        Assert.Equal("gone", Code(await Get($"{Base}/listings/{ListingId("retired-spice-set")}", HttpStatusCode.Gone)));
+        var id = ListingId("babka-chocolate");
+        await Get($"{Base}/listings/chocolate-babka");
+        Fixture(_f).Upsert(id, l => l with { Status = "Archived" });
+        await Sync(_f);
+        Assert.Equal("gone", Code(await Get($"{Base}/listings/chocolate-babka", HttpStatusCode.Gone)));
+        Assert.Equal("gone", Code(await Get($"{Base}/listings/{id}", HttpStatusCode.Gone)));
+    }
+
+    [Fact]
+    public async Task A_listing_that_was_archived_before_it_was_ever_public_is_404_not_410()      // M2-16: 410 would reveal a listing that never existed publicly
+    {
+        Assert.Equal("not_found", Code(await Get($"{Base}/listings/retired-spice-gift-set", HttpStatusCode.NotFound)));         // archived in the seed, never Active
+        Assert.Equal("not_found", Code(await Get($"{Base}/listings/{ListingId("retired-spice-set")}", HttpStatusCode.NotFound)));
     }
 
     [Fact]

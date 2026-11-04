@@ -36,6 +36,12 @@ public sealed class ListingQuery
     public Dictionary<string, List<string>> Attrs = new();
     public bool Searching; public IReadOnlyList<SearchMatch> Matches = [];
     public string Sort = "newest";
+    /// <summary>The order that actually runs: relevance without a query is the newest order (a cursor is checked against this, not against what was typed).</summary>
+    public string EffectiveSort => Sort == "relevance" && !Searching ? "newest" : Sort;
+    public string? BrandRaw, CategoryRaw;
+    public IReadOnlyList<string> Terms = [];
+    /// <summary>Short fingerprint of everything that decides WHICH listings come back and in what order (not the page size): a cursor only continues the request it came from.</summary>
+    public string Fingerprint { get; private set; } = "";
     public int Page = 1, PageSize = CatalogEndpoints.DefaultPageSize;
     public ListingCursor? Cursor;
     public bool WantFacets;
@@ -49,6 +55,11 @@ public sealed class ListingQuery
         string? One(string key) => q.TryGetValue(key, out var v) && v.Count > 0 ? v[0] : null;
         foreach (var key in q.Keys)
             if (q[key].Count > 1 && key is not "attr") return (null, Bad($"{key} may be given once."));
+
+        // a NUL (or any control character) in a value PostgreSQL cannot store is a 500 waiting to happen (22021); no legitimate parameter has one. q is exempt: its
+        // text is normalised to letters and digits before it goes anywhere.
+        foreach (var key in q.Keys)
+            if (HasControl(key) || (key != "q" && q[key].Any(HasControl))) return (null, Bad("parameters must not contain control characters."));
 
         r.Type = One("type");
         if (r.Type is not null && !ListingTypes.IsValid(r.Type)) return (null, Bad("type must be 'product' or 'service'."));
@@ -106,26 +117,40 @@ public sealed class ListingQuery
 
         if (One("brand") is { } brand && !string.IsNullOrWhiteSpace(brand))
         {
-            r.BrandGiven = true;
+            r.BrandGiven = true; r.BrandRaw = brand;
             r.BrandId = Guid.TryParse(brand, out var bg) ? bg : await db.CatalogBrands.Where(b => b.Slug == brand).Select(b => (Guid?)b.Id).FirstOrDefaultAsync(ct);
         }
         if (One("category") is { } category && !string.IsNullOrWhiteSpace(category))
         {
-            r.CategoryGiven = true;
+            r.CategoryGiven = true; r.CategoryRaw = category;
             var root = await map.FindAsync(category, ct);
             r.CategoryIds = root is null ? [] : await map.DescendantsAsync(root.Id, ct);
         }
 
         if (r.Searching)
-            r.Matches = SearchTerms.From(search) is { Count: > 0 } terms ? await index.SearchAsync(db, terms, SearchTerms.MaxMatches, ct) : [];
+        {
+            r.Terms = SearchTerms.From(search);
+            r.Matches = r.Terms.Count > 0 ? await index.SearchAsync(db, r.Terms, SearchTerms.MaxMatches, ct) : [];
+        }
+        r.Fingerprint = r.ComputeFingerprint();
 
         if (One("cursor") is { } cursor)
         {
             if (q.ContainsKey("page")) return (null, Bad("use either page or cursor, not both."));
             r.Cursor = ListingCursor.Decode(cursor);
-            if (r.Cursor is null || r.Cursor.Sort != r.Sort || !r.Cursor.KeyIsValid()) return (null, Bad("cursor is not valid for this request."));
+            if (r.Cursor is null || r.Cursor.Sort != r.EffectiveSort || !r.Cursor.KeyIsValid() || r.Cursor.Fingerprint != r.Fingerprint)
+                return (null, Bad("cursor is not valid for this request."));       // other sort, other filters or query, or a forged key
         }
         return (r, null);
+    }
+
+    public static bool HasControl(string? s) => s is not null && s.Any(char.IsControl);
+
+    private string ComputeFingerprint()
+    {
+        var attrs = string.Join(";", Attrs.OrderBy(a => a.Key, StringComparer.Ordinal).Select(a => a.Key + "=" + string.Join(",", a.Value.Order(StringComparer.Ordinal))));
+        var text = string.Join("|", EffectiveSort, Type, SellerId, BrandRaw, CategoryRaw, PriceMin, PriceMax, AvailableOnly, attrs, string.Join(" ", Terms), Searching);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..8].ToLowerInvariant();
     }
 
     private static bool TryCents(string? raw, out long? value)
@@ -172,7 +197,7 @@ public sealed class ListingQuery
 
         var sellerCounts = await Apply(db, visible, Dim.Seller).GroupBy(l => l.SellerId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
         var sellers = (await db.CatalogSellers.AsNoTracking().Where(s => sellerCounts.Keys.Contains(s.Id)).ToListAsync(ct)).OrderBy(s => s.DisplayName, StringComparer.Ordinal)
-            .Select(s => new SellerCount(s.Id, s.DisplayName, sellerCounts[s.Id])).ToList();
+            .Take(CatalogEndpoints.MaxBrands).Select(s => new SellerCount(s.Id, s.DisplayName, sellerCounts[s.Id])).ToList();       // capped like brands
 
         var types = (await Apply(db, visible, Dim.Type).GroupBy(l => l.Type).Select(g => new { V = g.Key, N = g.Count() }).ToListAsync(ct))
             .OrderBy(x => x.V, StringComparer.Ordinal).Select(x => new CountItem(x.V, x.N)).ToList();
@@ -196,9 +221,9 @@ public sealed class ListingQuery
 }
 
 /// <summary>An opaque keyset position: the sort it belongs to plus the sort value and id of the last item of the previous page.</summary>
-public sealed record ListingCursor(string Sort, string Key, Guid Id)
+public sealed record ListingCursor(string Sort, string Key, Guid Id, string Fingerprint)
 {
-    public string Encode() => Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(new[] { Sort, Key, Id.ToString("D") })).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    public string Encode() => Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(new[] { Sort, Key, Id.ToString("D"), Fingerprint })).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     public static ListingCursor? Decode(string text)
     {
@@ -207,19 +232,19 @@ public sealed record ListingCursor(string Sort, string Key, Guid Id)
             if (text.Length is 0 or > 400) return null;
             var padded = text.Replace('-', '+').Replace('_', '/');
             padded = padded.PadRight(padded.Length + (4 - padded.Length % 4) % 4, '=');
-            var parts = JsonSerializer.Deserialize<string[]>(Convert.FromBase64String(padded));
-            if (parts is not { Length: 3 } || !Guid.TryParse(parts[2], out var id) || !ListingQuery.Sorts.Contains(parts[0])) return null;
-            return new ListingCursor(parts[0], parts[1], id);
+            var parts = JsonSerializer.Deserialize<string?[]>(Convert.FromBase64String(padded));
+            if (parts is not { Length: 4 } || parts.Any(p => p is null) || !Guid.TryParse(parts[2], out var id) || !ListingQuery.Sorts.Contains(parts[0]!)) return null;
+            return new ListingCursor(parts[0]!, parts[1]!, id, parts[3]!);
         }
         catch (Exception ex) when (ex is FormatException or JsonException) { return null; }
     }
 
-    /// <summary>A cursor is client input: its key must be a value of the right type for its sort, or the keyset query could not be built.</summary>
-    public bool KeyIsValid() => Sort switch
+    /// <summary>A cursor is client input: its key must be a value of the right type for its sort (and of the shape we ever write), or the keyset query could not be built.</summary>
+    public bool KeyIsValid() => Fingerprint.Length == 8 && Fingerprint.All(Uri.IsHexDigit) && Sort switch
     {
         "price_asc" or "price_desc" => long.TryParse(Key, NumberStyles.None, CultureInfo.InvariantCulture, out var p) && p <= ListingQuery.MaxCents,
-        "title" => Key.Length <= 300,
-        "relevance" => double.TryParse(Key, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && double.IsFinite(d),
+        "title" => Key.Length <= 300 && Key.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-'),      // TitleSort is a slug: nothing else was ever written, so nothing else is read
+        "relevance" => Key.Length <= 40 && Key.All(c => c is >= '0' and <= '9' or '.' or '-' or '+' or 'E') && double.TryParse(Key, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && double.IsFinite(d),
         _ => long.TryParse(Key, NumberStyles.None, CultureInfo.InvariantCulture, out var t) && t <= DateTimeOffset.MaxValue.UtcTicks,
     };
 
