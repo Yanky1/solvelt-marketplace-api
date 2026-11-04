@@ -47,6 +47,7 @@ builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Da
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();
+Solvelt.Marketplace.Api.Services.ServicesModule.AddMarketplaceServices(builder.Services, builder.Configuration, builder.Environment);   // M4: services and bookings (Services/ServicesModule.cs)
 builder.Services.Configure<CatalogOptions>(builder.Configuration.GetSection("Catalog"));
 builder.Services.AddSingleton<FixtureCatalogSource>();
 // Resolved lazily from the final configuration. Fixture data is for Development/Testing only (the validator rejects it elsewhere); "None" is an empty catalog.
@@ -156,6 +157,7 @@ app.MapGet("/health", (ClientIpResolver forwarding, OpsCounters ops) => Results.
 }));
 app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateLimiting(RateLimitPolicies.Public);
 
+Solvelt.Marketplace.Api.Services.ServicesModule.MapMarketplaceServices(app);   // M4
 app.MapPortalWebhooks();
 app.MapCatalog();
 app.MapOutboxAdmin();
