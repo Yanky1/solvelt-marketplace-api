@@ -18,7 +18,11 @@ public static class Notifier
 
     /// <summary>Adds the entry and its mail message to the caller's unit of work (nothing is saved here). <paramref name="eventId"/> + kind make it once-only.</summary>
     public static Notification Add(MarketplaceDb db, OutboxWriter outbox, TimeProvider time, MarketplaceOrder order, OrderGroup? group, string kind, string eventId, object? parameters = null)
-        => AddForAccount(db, outbox, time, order.AccountId, kind, eventId, order.Number, group?.SellerOrderNumber, new Dictionary<string, object?> { ["sellerName"] = group?.SellerName }.Concat(Flatten(parameters)));
+    {
+        // A guest order has no account to notify (its mails go to the checkout address, M3); the claim attaches it later and nothing is backfilled.
+        if (order.AccountId is not { } accountId) return new Notification { Id = Guid.NewGuid(), Kind = kind, OrderNumber = order.Number, DedupeKey = $"{eventId}:{kind}" };
+        return AddForAccount(db, outbox, time, accountId, kind, eventId, order.Number, group?.SellerOrderNumber, new Dictionary<string, object?> { ["sellerName"] = group?.SellerName }.Concat(Flatten(parameters)));
+    }
 
     /// <summary>
     /// The same for a booking (called by M4's projection, in its own transaction, after the state change). <paramref name="marketplaceBookingId"/> is our <c>BK-…</c> id; the entry is in the

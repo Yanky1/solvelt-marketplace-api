@@ -468,7 +468,7 @@ public sealed class IngestTests : OrderFlowBase
                 r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
                 return await _k.Http.SendAsync(r);
             }));
-            Assert.All(results, r => Assert.True(r.StatusCode is HttpStatusCode.OK or HttpStatusCode.Conflict, $"{(int)r.StatusCode}"));   // a loser is a 200 that was superseded later, or a clean 409
+            foreach (var r in results) Assert.True(r.StatusCode is HttpStatusCode.OK or HttpStatusCode.Conflict, $"{(int)r.StatusCode}: {await r.Content.ReadAsStringAsync()}");   // a loser is a 200 that was superseded later, or a clean 409
             Assert.Contains(results, r => r.StatusCode == HttpStatusCode.OK);
             await Drain();                                                                                                                  // the outbox cancels what was superseded
             var pending = await _k.Db(db => db.Orders.AsNoTracking().Where(o => o.Status == "pending_payment").ToListAsync());
