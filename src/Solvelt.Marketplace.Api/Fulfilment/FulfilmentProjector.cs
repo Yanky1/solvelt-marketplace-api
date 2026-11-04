@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
+using Solvelt.Marketplace.Api.Notifications;
+using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
 
 namespace Solvelt.Marketplace.Api.Fulfilment;
@@ -24,7 +26,8 @@ public static class FulfilmentProjector
 
     public static string AggregateKey(string marketplaceOrderId, Guid sellerOrderId) => $"{marketplaceOrderId}/{sellerOrderId:D}";
 
-    public static async Task<HandlerOutcome> ApplyAsync(ProjectionContext c, CancellationToken ct)
+    /// <param name="refundMoneyMoved">False when M3's money part refused a <c>refund.issued</c> (over the cap, unpaid): then the buyer is not told about a refund that did not happen.</param>
+    public static async Task<HandlerOutcome> ApplyAsync(ProjectionContext c, CancellationToken ct, bool refundMoneyMoved = true)
     {
         var data = c.Event.Data;
         var oref = EventRefs.Order(data);
@@ -54,13 +57,15 @@ public static class FulfilmentProjector
             return true;
         }
         HandlerOutcome Done(bool applied, string why) => applied ? HandlerOutcome.Applied() : HandlerOutcome.Skipped(why);
+        // The buyer's notification (and its email, queued in the same transaction), once per event and kind.
+        void Tell(string kind, object? parameters) => Notifier.Add(c.Db, new OutboxWriter(c.Db, c.Time), c.Time, order, group, kind, c.Event.Id, parameters);
 
         switch (c.Event.Type)
         {
             case Accepted:
             {
                 var ok = await Step("status", FulfilmentStatus.Accepted);
-                if (ok) state.AcceptedAt = Time(data, "acceptedAt") ?? now;
+                if (ok) { state.AcceptedAt = Time(data, "acceptedAt") ?? now; Tell(NotificationKinds.OrderAccepted, null); }
                 return Done(ok, "older or terminal");
             }
             case Held: return Done(await Step("status", FulfilmentStatus.OnHold), "older or terminal");
@@ -88,7 +93,7 @@ public static class FulfilmentProjector
                 await c.Db.SaveChangesAsync(ct);
                 await RecomputeShippedAsync(c.Db, group.Id, lines, ct);
                 var partial = data.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
-                if (await Step("status", partial ? FulfilmentStatus.PartiallyShipped : FulfilmentStatus.Shipped)) state.ShippedAt ??= sh.ShippedAt;
+                if (await Step("status", partial ? FulfilmentStatus.PartiallyShipped : FulfilmentStatus.Shipped)) { state.ShippedAt ??= sh.ShippedAt; Tell(NotificationKinds.OrderShipped, new { carrier = sh.Carrier, partial }); }
                 return HandlerOutcome.Applied();   // the parcel itself is recorded even when the status step was skipped
             }
             case Tracking:
@@ -96,6 +101,7 @@ public static class FulfilmentProjector
                 var sh = await ShipmentAsync(c, group, Str(data, "shipmentId"));
                 if (sh is null) return HandlerOutcome.Skipped("shipment id missing");
                 if (!await c.AdvanceAsync("order", key, "tracking:" + sh.PortalShipmentId, null, ct)) return HandlerOutcome.Skipped("older or terminal");
+                var wasOut = sh.TrackingStatus == "out_for_delivery";
                 sh.Carrier = Cap(Str(data, "carrier"), 100) ?? sh.Carrier;
                 sh.TrackingNumber = Cap(Str(data, "trackingNumber"), 100) ?? sh.TrackingNumber;
                 sh.TrackingUrl = SafeUrl(Str(data, "trackingUrl")) ?? sh.TrackingUrl;
@@ -120,6 +126,7 @@ public static class FulfilmentProjector
                 { sh.PositionLat = Math.Round(lat, 3); sh.PositionLng = Math.Round(lng, 3); sh.PositionAt = Time(data, "occurredAt") is { } oc && oc <= now ? oc : now; }
                 else { sh.PositionLat = sh.PositionLng = null; sh.PositionAt = null; }
                 sh.UpdatedAt = now;
+                if (!wasOut && sh.TrackingStatus == "out_for_delivery") Tell(NotificationKinds.OutForDelivery, null);   // once, not on every position update
                 return HandlerOutcome.Applied();
             }
             case ShipmentDelivered:
@@ -152,7 +159,7 @@ public static class FulfilmentProjector
             case Delivered:
             {
                 var ok = await Step("status", FulfilmentStatus.Delivered, TerminalStates.Delivered);
-                if (ok) { state.DeliveredAt = Time(data, "deliveredAt") ?? now; state.DeliveredBy = Str(data, "by") is "seller" or "buyer" ? Str(data, "by") : null; }
+                if (ok) { state.DeliveredAt = Time(data, "deliveredAt") ?? now; state.DeliveredBy = Str(data, "by") is "seller" or "buyer" ? Str(data, "by") : null; Tell(NotificationKinds.OrderDelivered, null); }
                 return Done(ok, "older or terminal");
             }
             case Cancelled:
@@ -172,6 +179,7 @@ public static class FulfilmentProjector
                     state.CancelReason = Cap(Str(data, "reason"), 100);
                     var open = await c.Db.OrderCancelRequests.Where(r => r.GroupId == group.Id && r.OpenKey != null).ToListAsync(ct);
                     foreach (var r in open) { r.Status = CancelRequestStatus.Approved; r.OpenKey = null; r.UpdatedAt = now; }
+                    Tell(NotificationKinds.OrderCancelled, null);
                 }
                 return Done(ok, "older or terminal");
             }
@@ -181,17 +189,18 @@ public static class FulfilmentProjector
                 var rid = Str(data, "requestId");
                 var req = rid is null ? null : await c.Db.OrderCancelRequests.FirstOrDefaultAsync(r => r.RequestId == rid && r.GroupId == group.Id, ct);
                 if (req is null) return HandlerOutcome.Skipped("unknown cancel request");
-                if (Str(data, "decision") == "rejected") { req.Status = CancelRequestStatus.Rejected; req.OpenKey = null; req.DecisionNote = Cap(Str(data, "note"), 500); req.UpdatedAt = now; }
+                if (Str(data, "decision") == "rejected") { req.Status = CancelRequestStatus.Rejected; req.OpenKey = null; req.DecisionNote = Cap(Str(data, "note"), 500); req.UpdatedAt = now; Tell(NotificationKinds.CancellationRejected, null); }
                 return HandlerOutcome.Applied();
             }
             case ReturnDecided or ReturnReceived or LabelCreated:
-                return await ReturnEventAsync(c, group, key, lines, now, ct);
+                return await ReturnEventAsync(c, group, key, lines, now, Tell, ct);
             case AttemptFailed:
             {
                 if (!await c.AdvanceAsync("order", key, "attempts", null, ct)) return HandlerOutcome.Skipped("older or terminal");
                 var attempt = data.TryGetProperty("attempt", out var a) && a.TryGetInt32(out var n) ? n : state.DeliveryAttemptsFailed + 1;
                 state.DeliveryAttemptsFailed = Math.Max(state.DeliveryAttemptsFailed, Math.Clamp(attempt, 0, 100));   // a number, not a counter: replays cannot inflate it
                 state.LastAttemptFailedAt = Time(data, "occurredAt") ?? now;
+                Tell(NotificationKinds.DeliveryAttemptFailed, null);
                 state.LastAttemptFailedReason = Str(data, "reason") is "no_one_home" or "address_issue" or "refused" or "unsafe" ? Str(data, "reason") : null;
                 state.UpdatedAt = now;
                 return HandlerOutcome.Applied();
@@ -213,13 +222,14 @@ public static class FulfilmentProjector
                     if (ret is not null && ret.Status == ReturnStatus.Received) { ret.Status = ReturnStatus.Refunded; ret.UpdatedAt = now; }
                 }
                 if (full) await Step("status", FulfilmentStatus.Refunded, TerminalStates.Refunded);
+                if (refundMoneyMoved) Tell(NotificationKinds.RefundIssued, new { amountCents = (data.TryGetProperty("amountCents", out var ac) && ac.TryGetInt64(out var a1) ? a1 : 0) + (data.TryGetProperty("shippingCents", out var sc) && sc.TryGetInt64(out var s1) ? s1 : 0), full });
                 return HandlerOutcome.Applied();
             }
             default: return HandlerOutcome.Skipped("not a fulfilment event");
         }
     }
 
-    private static async Task<HandlerOutcome> ReturnEventAsync(ProjectionContext c, OrderGroup group, string key, List<OrderLine> lines, DateTimeOffset now, CancellationToken ct)
+    private static async Task<HandlerOutcome> ReturnEventAsync(ProjectionContext c, OrderGroup group, string key, List<OrderLine> lines, DateTimeOffset now, Action<string, object?> tell, CancellationToken ct)
     {
         var data = c.Event.Data;
         var rid = Str(data, "returnId");
@@ -230,14 +240,16 @@ public static class FulfilmentProjector
         switch (c.Event.Type)
         {
             case ReturnDecided when Str(data, "decision") == "approved" && ret.Status is ReturnStatus.Pending or ReturnStatus.Requested:
-                ret.Status = ReturnStatus.Approved; ret.DecisionNote = Cap(Str(data, "note"), 500); break;
+                ret.Status = ReturnStatus.Approved; ret.DecisionNote = Cap(Str(data, "note"), 500); tell(NotificationKinds.ReturnApproved, null); break;
             case ReturnDecided when Str(data, "decision") == "rejected" && ret.Status is ReturnStatus.Pending or ReturnStatus.Requested or ReturnStatus.Approved:
                 ret.Status = ReturnStatus.Rejected; ret.DecisionNote = Cap(Str(data, "note"), 500);
                 await FulfilmentLines.ReleaseAsync(c.Db, ret, received: false, ct);
+                tell(NotificationKinds.ReturnRejected, null);
                 break;
             case ReturnReceived when ret.Status is not ReturnStatus.Received and not ReturnStatus.Refunded and not ReturnStatus.Rejected:
                 ret.Status = ReturnStatus.Received;
                 await FulfilmentLines.ReleaseAsync(c.Db, ret, received: true, ct);
+                tell(NotificationKinds.ReturnReceived, null);
                 break;
             case LabelCreated:
                 var url = SafeUrl(Str(data, "labelUrl"));
@@ -245,6 +257,7 @@ public static class FulfilmentProjector
                 if (url is null || exp is null || exp <= now) break;   // never keep a link that is already dead
                 ret.LabelUrl = url; ret.LabelUrlExpiresAt = exp;
                 ret.LabelCarrier = Cap(Str(data, "carrier"), 100); ret.LabelTrackingNumber = Cap(Str(data, "trackingNumber"), 100); ret.LabelTrackingUrl = SafeUrl(Str(data, "trackingUrl"));
+                tell(NotificationKinds.ReturnLabelReady, null);
                 break;
         }
         ret.UpdatedAt = now;

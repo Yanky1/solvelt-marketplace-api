@@ -262,6 +262,12 @@ All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Contr
 * `POST /api/v1/orders/{number}/returns/{returnId}/label-link` → `{ labelUrl, labelUrlExpiresAt }` for an approved return.
 * Shipments in the order detail now carry `id`, `timeline` (carrier events), `eta`, `etaWindowStart/End`, `driverFirstName`, `placement`, `position` (only while the stop is next and fresh) and `proofCount`. `GET /api/v1/orders/{number}/shipments/{id}/proof/{index}` returns the image (sniffed type, `nosniff`, `private, no-store`); 404 once the short-lived link has expired.
 
+## Notifications (M5)
+Buyer routes need the session and answer `private, no-store`.
+* `GET /api/v1/notifications?limit=1..50&before=` → `{ unreadCount, notifications: [{ id, kind, category, orderNumber, sellerOrderNumber, parameters, createdAt, read }], next }`.
+* `POST /api/v1/notifications/{id}/read`, `POST /api/v1/notifications/read-all` → 204, idempotent; another buyer's id is 404.
+* `GET|PUT /api/v1/notifications/preferences` → `{ email: { order_updates, shipped, out_for_delivery, delivered, refunds, messages, bookings } }`; PUT sends the categories to change; unknown categories are 422.
+* `POST /api/v1/notifications/unsubscribe { token }` (anonymous; the signed token from a mail link) → 204, or 400 `invalid_token`. Switches that category (or all) off, never on.
 ## Guest order links (for M3 and M5)
 Not endpoints of their own: services other modules call (decision M1-70).
 

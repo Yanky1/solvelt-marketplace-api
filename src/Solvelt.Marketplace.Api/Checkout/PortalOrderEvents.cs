@@ -25,7 +25,7 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
     public async Task<HandlerOutcome> HandleAsync(ProjectionContext c, CancellationToken ct)
     {
         var money = await MoneyAsync(c, ct);
-        if (money.Status != Data.InboundStatus.Parked) await Fulfilment.FulfilmentProjector.ApplyAsync(c, ct);
+        if (money.Status != Data.InboundStatus.Parked) await Fulfilment.FulfilmentProjector.ApplyAsync(c, ct, refundMoneyMoved: money.Status == Data.InboundStatus.Applied);
         return money;
     }
 
