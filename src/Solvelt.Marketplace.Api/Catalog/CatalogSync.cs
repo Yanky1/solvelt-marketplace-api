@@ -487,7 +487,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         {
             var row = listing.Variants.FirstOrDefault(e => e.Id == v.Id);
             if (row is null) { row = new CatalogVariant { Id = v.Id, ListingId = s.Id }; listing.Variants.Add(row); }
-            row.Name = SnapshotLimits.Clip(v.Name, SnapshotLimits.Name); row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available; row.SortOrder = i;
+            row.Name = SnapshotLimits.Clip(v.Name, SnapshotLimits.Name); row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available; row.IsDefault = v.IsDefault; row.SortOrder = i;
         }
     }
 
