@@ -1,0 +1,86 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Solvelt.Marketplace.Api.Portal;
+
+// ---- shared ----
+public sealed record PortalError(string? Code, string? Message, IReadOnlyList<InvalidOrderError>? Errors = null);
+public sealed record InvalidOrderError(int Index, string Code, string Message);
+
+public sealed record PortalResult<T>(int Status, T? Value, PortalError? Error, int Attempts)
+{
+    public bool IsSuccess => Status is >= 200 and < 300;
+    /// <summary>True when the final answer was one the contract says to re-send later (retries were exhausted).</summary>
+    public bool Retryable { get; init; }
+}
+
+// ---- POST /orders (ORDERS.md §3.2, LOCAL-DELIVERY.md §4) ----
+public sealed record PortalBuyer(string DisplayName, string RelayEmail, string? Phone = null);
+public sealed record PortalAddress(string Name, string Line1, string? Line2, string City, string? Region, string PostalCode, string Country, double? Lat = null, double? Lng = null);
+/// <summary>A line names its product by ids, never by SKU (CONTRACT.md §3).</summary>
+public sealed record OrderLineRequest(string MarketplaceLineId, Guid SellerId, Guid BrandId, Guid ProductId, Guid? VariantId,
+    int Quantity, long UnitPriceCents, long DiscountCents = 0, long TaxCents = 0);
+public sealed record ShippingChargeRequest(Guid SellerId, Guid BrandId, long AmountCents);
+public sealed record LocalDeliveryRequest(Guid SellerId, Guid BrandId, string Method, Guid WindowId, string Date);
+public sealed record CreateOrderRequest(string MarketplaceOrderId, DateTimeOffset PlacedAt, string Currency, PortalBuyer Buyer, PortalAddress ShippingAddress,
+    string ShippingMethod, string ShippingSpeed, string? GiftMessage, IReadOnlyList<OrderLineRequest> Lines, IReadOnlyList<ShippingChargeRequest> Shipping,
+    IReadOnlyList<LocalDeliveryRequest>? Deliveries = null);
+public sealed record SellerOrderRef(Guid SellerOrderId, string Number, Guid SellerId, Guid BrandId, string Status, bool Oversold, long TotalCents, long FeeCents, long NetCents);
+public sealed record CreateOrderResponse(bool Created, IReadOnlyList<SellerOrderRef> Orders);
+
+// ---- buyer events (ORDERS.md §3.3). Response shapes are per-order result lists the portal docs do not pin as a schema: returned raw. ----
+public sealed record CancelRequestBody(string RequestId, string Reason, string? Note = null, string? SellerOrderNumber = null);
+public sealed record ReturnLineRequest(string MarketplaceLineId, int Quantity);
+public sealed record ReturnRequestBody(string ReturnId, string Reason, string? Comment, string? SellerOrderNumber, IReadOnlyList<ReturnLineRequest> Lines);
+/// <summary>Deliberately has no <c>deliveredAt</c>: the portal stamps its own server time (never a client value).</summary>
+public sealed record DeliveryConfirmationBody(string? SellerOrderNumber = null, string? TrackingNumber = null);
+
+// ---- GET /shipping/settings (SHIPPING.md §4) ----
+public sealed record ShipsFrom(string? Country, string? Region);
+public sealed record ShippingSpeedSetting(string Speed, bool Enabled, string Method, long? FlatCents, long? BaseCents, long? PerKgCents);
+public sealed record ShippingZone(string Name, string Kind, IReadOnlyList<string> Countries, IReadOnlyList<ShippingSpeedSetting> Speeds);
+public sealed record ShippingProfile(Guid Id, string Name, bool IsDefault, string Currency, long? FreeShippingThresholdCents, IReadOnlyList<ShippingZone> Zones);
+public sealed record ShippingSettings(Guid SellerId, Guid BrandId, int HandlingDays, ShipsFrom? ShipsFrom, IReadOnlyList<ShippingProfile> Profiles);
+
+// ---- POST /local-delivery/eligibility (LOCAL-DELIVERY.md §4) ----
+public sealed record EligibilityAddress(string PostalCode, string Country, double? Lat = null, double? Lng = null);
+public sealed record LocalDeliveryEligibilityRequest(Guid SellerId, Guid BrandId, long SubtotalCents, EligibilityAddress Address);
+public sealed record DeliveryZoneRef(Guid Id, string Name);
+public sealed record DeliveryWindow(Guid WindowId, string Date, DateTimeOffset Start, DateTimeOffset End, int Remaining);
+public sealed record LocalDeliveryEligibility(bool Eligible, string? Reason, string? Method, long? FeeCents, DeliveryZoneRef? Zone, string? TimeZone, IReadOnlyList<DeliveryWindow>? Windows);
+
+// ---- GET /services/{id}/availability (SERVICES.md §6) ----
+public sealed record ServiceAvailabilityQuery(Guid ServiceId, DateTimeOffset From, DateTimeOffset To, string Location, string? PostalCode = null,
+    Guid? ProviderId = null, double? Lat = null, double? Lng = null, int? Minutes = null, IReadOnlyList<string>? AddOns = null);
+public sealed record AvailabilityProvider(Guid ProviderId, string TimeZone);
+public sealed record AvailabilitySlot(DateTimeOffset StartAt, DateTimeOffset EndAt, IReadOnlyList<Guid> ProviderIds);
+public sealed record ServiceAvailability(int DurationMinutes, long PriceCents, IReadOnlyList<AvailabilityProvider> Providers, IReadOnlyList<AvailabilitySlot> Slots);
+
+// ---- POST /payment-events (PAYMENTS.md §6) ----
+public static class PaymentEventTypes
+{
+    public const string Captured = "payment.captured", RefundProcessed = "refund.processed";
+    public const string DisputeCreated = "dispute.created", DisputeUpdated = "dispute.updated", DisputeClosed = "dispute.closed";
+}
+public static class PaymentKinds
+{
+    public const string Order = "order", Booking = "booking", CancellationFee = "booking_cancellation_fee",
+        NoShowFee = "booking_no_show_fee", ExtraCharge = "booking_extra_charge";
+}
+public sealed record PaymentCapturedData(string Kind, string? MarketplaceOrderId, string? MarketplaceBookingId, string? SellerOrderNumber,
+    string PaymentRef, string Currency, long? AmountCents = null, DateTimeOffset? CapturedAt = null);
+public sealed record RefundProcessedData(string RefundId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
+    long AmountCents, long? ShippingCents = null, string? Currency = null, string? Reason = null);
+public sealed record DisputeData(string DisputeId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
+    long AmountCents, string Status, long? FeeCents = null, string? Currency = null, string? Reason = null, DateTimeOffset? EvidenceDueBy = null);
+/// <summary><see cref="EventId"/> is ours, stored in our outbox before sending (the portal dedupes on it).</summary>
+public sealed record PaymentEventRequest(string EventId, string Type, object Data);
+public sealed record PaymentEventResponse(string Status, JsonElement? Result);
+
+public static class PortalJson
+{
+    public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+}

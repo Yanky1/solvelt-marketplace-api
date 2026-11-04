@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Infrastructure;
+using Solvelt.Marketplace.Api.Portal;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +27,7 @@ builder.Services.Configure<MarketplaceOptions>(o =>
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddPortalClient();
 builder.Services.AddMarketplaceRateLimiting();
 builder.Services.AddDbContext<MarketplaceDb>(o =>
 {
