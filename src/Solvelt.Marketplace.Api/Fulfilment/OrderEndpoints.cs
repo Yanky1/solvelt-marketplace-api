@@ -42,7 +42,7 @@ public static class OrderEndpoints
         var take = Math.Clamp(limit ?? 20, 1, 50);
         var q = db.Orders.AsNoTracking().Where(o => o.AccountId == buyer.AccountId && (o.Status == OrderStatus.Placed || o.Status == OrderStatus.Paid));
         if (before is { } b) q = q.Where(o => o.CreatedAt < b);
-        var orders = await q.OrderByDescending(o => o.CreatedAt).Take(take + 1).Include(o => o.Groups).Include(o => o.Lines).ToListAsync(ct);
+        var orders = await q.OrderByDescending(o => o.CreatedAt).Take(take + 1).Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().ToListAsync(ct);
         var page = orders.Take(take).ToList();
         var groupIds = page.SelectMany(o => o.Groups.Select(g => g.Id)).ToList();
         var states = await db.SellerOrderStates.AsNoTracking().Where(s => groupIds.Contains(s.GroupId)).ToDictionaryAsync(s => s.GroupId, s => s.Status, ct);
@@ -65,7 +65,7 @@ public static class OrderEndpoints
     private static async Task<IResult> Detail(string number, HttpContext ctx, MarketplaceDb db, TimeProvider time, CancellationToken ct)
     {
         var buyer = ctx.Buyer();
-        var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);
+        var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).AsSplitQuery().FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);
         if (o is null || o.Status is not (OrderStatus.Placed or OrderStatus.Paid)) return Private(Problems.NotFound(), ctx);
         var gids = o.Groups.Select(g => g.Id).ToList();
         var lineIds = o.Lines.Select(l => l.Id).ToList();

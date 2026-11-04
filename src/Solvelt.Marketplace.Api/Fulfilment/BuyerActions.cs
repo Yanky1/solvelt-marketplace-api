@@ -33,7 +33,7 @@ public sealed class BuyerOrderActions(MarketplaceDb db, OutboxWriter outbox, ISi
     /// <summary>The buyer's own order and the seller order they mean. With several seller orders the caller must name one (<c>sellerOrderNumber</c>).</summary>
     private async Task<(MarketplaceOrder? Order, OrderGroup? Group, string State, ActionResult? Error)> LoadAsync(BuyerPrincipal buyer, string number, string? sellerOrderNumber, CancellationToken ct)
     {
-        var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);
+        var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).AsSplitQuery().FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);
         if (o is null) return (null, null, "", ActionResult.NotFound());
         var groups = o.Groups.Where(g => g.SellerOrderId is not null).ToList();
         var g = sellerOrderNumber is null ? (groups.Count == 1 ? groups[0] : null) : groups.FirstOrDefault(x => x.SellerOrderNumber == sellerOrderNumber);

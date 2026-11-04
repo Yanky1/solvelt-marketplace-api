@@ -29,7 +29,7 @@ public static class FulfilmentProjector
         var data = c.Event.Data;
         var oref = EventRefs.Order(data);
         if (oref is null) return HandlerOutcome.Skipped("order reference missing");
-        var order = await c.Db.Orders.AsNoTracking().Include(o => o.Groups).Include(o => o.Lines).FirstOrDefaultAsync(o => o.Number == oref.MarketplaceOrderId, ct);
+        var order = await c.Db.Orders.AsNoTracking().Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().FirstOrDefaultAsync(o => o.Number == oref.MarketplaceOrderId, ct);
         if (order is null) return HandlerOutcome.Skipped("unknown marketplace order");
         var group = order.Groups.FirstOrDefault(g => g.SellerOrderId is not null && EventRefs.Matches(oref, order.Number, g.SellerOrderId.Value));
         if (group is null)
