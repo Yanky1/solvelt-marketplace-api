@@ -9,6 +9,10 @@ public sealed class CatalogSeller
     public Guid Id { get; set; }
     public string DisplayName { get; set; } = "";
     public bool Active { get; set; } = true;
+    /// <summary>Portal time of the snapshot that set <see cref="DisplayName"/> and <see cref="Active"/>: an older snapshot never overwrites them (a stale page must not reactivate a suspended seller).</summary>
+    public DateTimeOffset StateAt { get; set; }
+    /// <summary>Last time the seller had a visible listing (or was first seen): the display name is deleted 90 days after it (PII table).</summary>
+    public DateTimeOffset LastVisibleAt { get; set; }
 }
 
 public sealed class CatalogBrand
@@ -75,6 +79,10 @@ public sealed class CatalogListing
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset FirstSeenAt { get; set; }
+    /// <summary>Failed attempts to fetch the pending version (a snapshot that never applies); drives the backoff so bad rows cannot starve good ones.</summary>
+    public int FetchAttempts { get; set; }
+    /// <summary>Earliest time the pending version is fetched again; null = now.</summary>
+    public DateTimeOffset? NextFetchAt { get; set; }
     /// <summary>Concurrency token: an event and a sync run cannot silently overwrite each other.</summary>
     public int Row { get; set; }
 
@@ -134,6 +142,8 @@ public sealed class CatalogSyncState
     public string Key { get; set; } = "";
     public string? Cursor { get; set; }
     public DateTimeOffset? LeaseUntil { get; set; }
+    /// <summary>Random token of the instance holding the lease: only the owner may renew or release it.</summary>
+    public string? LeaseOwner { get; set; }
     public DateTimeOffset? LastRunAt { get; set; }
     public DateTimeOffset? LastSuccessAt { get; set; }
     public string? LastError { get; set; }
@@ -150,6 +160,7 @@ internal sealed class CatalogConfiguration :
         b.HasKey(x => x.Id);
         b.Property(x => x.Id).ValueGeneratedNever();   // ids come from the portal: an entity with a key set is new, not "existing"
         b.Property(x => x.DisplayName).HasMaxLength(200).IsRequired();
+        b.HasIndex(x => x.LastVisibleAt);
     }
 
     public void Configure(EntityTypeBuilder<CatalogBrand> b)
@@ -193,6 +204,7 @@ internal sealed class CatalogConfiguration :
         b.HasIndex(x => new { x.Visible, x.BrandId });
         b.HasIndex(x => new { x.Visible, x.SellerId });
         b.HasIndex(x => x.KnownVersion);
+        b.HasIndex(x => x.NextFetchAt);
         b.HasMany(x => x.Variants).WithOne().HasForeignKey(v => v.ListingId).OnDelete(DeleteBehavior.Cascade);
         b.HasMany(x => x.Images).WithOne().HasForeignKey(v => v.ListingId).OnDelete(DeleteBehavior.Cascade);
         b.HasMany(x => x.Attributes).WithOne().HasForeignKey(v => v.ListingId).OnDelete(DeleteBehavior.Cascade);
@@ -236,6 +248,7 @@ internal sealed class CatalogConfiguration :
         b.ToTable("catalog_sync_state");
         b.HasKey(x => x.Key);
         b.Property(x => x.Key).HasMaxLength(50);
+        b.Property(x => x.LeaseOwner).HasMaxLength(50);
         b.Property(x => x.Cursor).HasMaxLength(200);
         b.Property(x => x.LastError).HasMaxLength(500);
     }

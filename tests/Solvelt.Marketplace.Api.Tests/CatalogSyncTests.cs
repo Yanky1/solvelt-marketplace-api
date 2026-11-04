@@ -137,15 +137,35 @@ public class CatalogSyncTests
     }
 
     [Fact]
-    public async Task A_failure_in_reference_data_is_recorded_and_changes_no_listing()
+    public async Task A_failure_in_reference_data_is_recorded_but_does_not_stop_the_listings()      // replaces A_failure_in_reference_data_is_recorded_and_changes_no_listing (M2-11)
     {
         using var f = new TestFactory();
         var probe = new ProbeSource(Fixture(f)) { FailReferenceData = true };
         using var scope = f.Services.CreateScope();
         var r = await Service(scope, probe, f.Clock).RunAsync();
-        Assert.Equal("InvalidOperationException", r.Error);
-        Assert.Equal(0, WithDb(f, db => db.CatalogListings.Count()));
-        Assert.DoesNotContain("simulated", State(f).LastError);   // the portal's message is never stored
+        Assert.Equal("InvalidOperationException", r.Error);                                          // recorded, with the exception type only
+        Assert.DoesNotContain("simulated", State(f).LastError);                                       // the portal's message is never stored
+        Assert.Equal(43, WithDb(f, db => db.CatalogListings.Count()));                                // the poll went on: every listing is known ...
+        Assert.Equal(0, WithDb(f, db => db.CatalogListings.Count(l => l.Visible)));                   // ... but none shows without its category: held, hidden
+        Assert.Equal(43, WithDb(f, db => db.CatalogListings.Count(l => l.IsStub && l.KnownVersion > l.Version)));
+        Assert.Null(State(f).LeaseUntil);
+        var last = Fixture(f).All()[^1];
+        Assert.Equal($"{last.Version}:{last.Id}", State(f).Cursor);                                   // and the cursor moved on
+    }
+
+    [Fact]
+    public async Task Listings_held_for_a_missing_category_appear_once_the_reference_data_works_again()
+    {
+        using var f = new TestFactory();
+        var probe = new ProbeSource(Fixture(f)) { FailReferenceData = true };
+        using (var scope = f.Services.CreateScope()) await Service(scope, probe, f.Clock).RunAsync();
+        probe.FailReferenceData = false;
+        using (var scope = f.Services.CreateScope()) await Service(scope, probe, f.Clock).RunAsync();
+        Assert.Equal(0, WithDb(f, db => db.CatalogListings.Count(l => l.Visible)));                   // all of them are backing off for a minute
+        f.Clock.Advance(TimeSpan.FromMinutes(1));
+        using (var scope = f.Services.CreateScope()) { var r = await Service(scope, probe, f.Clock).RunAsync(); Assert.Null(r.Error); Assert.Equal(43, r.Fetched); }
+        Assert.Equal(42, WithDb(f, db => db.CatalogListings.Count(l => l.Visible)));
+        Assert.Equal(0, WithDb(f, db => db.CatalogListings.Count(l => l.IsStub)));
     }
 
     [Fact]
@@ -187,9 +207,13 @@ public class CatalogSyncTests
         Assert.Null(r.Error);
         Assert.Equal((44, 5), (r.Applied, r.Skipped));
         Assert.DoesNotContain(f.Logs.Lines, l => l.Contains("as a whole"));                        // rejected up front: the page was applied in one go, not record by record
-        Assert.Equal(44, WithDb(f, db => db.CatalogListings.Count()));
-        foreach (var bad in new[] { noVariants, badType, negative, noTitle, noCategory })
+        Assert.Equal(45, WithDb(f, db => db.CatalogListings.Count()));                             // 44 + the one held for its category (below)
+        foreach (var bad in new[] { noVariants, badType, negative, noTitle })
             Assert.DoesNotContain(WithDb(f, db => db.CatalogListings.Select(l => l.Id).ToList()), id => id == bad.Id);
+        var held = Row(f, noCategory.Id);                                                           // an unknown category is not a bad record: it is held, hidden, until the category exists (M2-11)
+        Assert.True(held.IsStub);
+        Assert.False(held.Visible);
+        Assert.Equal(noCategory.Version, held.KnownVersion);
         Assert.Contains(WithDb(f, db => db.CatalogListings.Select(l => l.Id).ToList()), id => id == good.Id);
         Assert.Equal($"{good.Version}:{good.Id}", State(f).Cursor);                               // the cursor moved past the bad records
     }

@@ -34,7 +34,10 @@ public sealed class FixtureCatalogSource : ICatalogSource
     {
         lock (_lock)
         {
-            var updated = change(_listings[id]) with { Id = id, Version = _nextVersion++ };
+            var before = _listings[id];
+            var updated = change(before) with { Id = id, Version = _nextVersion++ };
+            // a portal edit stamps a newer update time (seller state is ordered by it); a change that sets its own time keeps it
+            if (updated.UpdatedAt <= before.UpdatedAt) updated = updated with { UpdatedAt = _listings.Values.Max(l => l.UpdatedAt).AddMinutes(1) };
             _listings[id] = updated;
             return updated;
         }
@@ -52,6 +55,10 @@ public sealed class FixtureCatalogSource : ICatalogSource
 
     /// <summary>The portal no longer has it: <see cref="GetListingAsync"/> answers null and it leaves the feed.</summary>
     public void Remove(Guid id) { lock (_lock) _listings.Remove(id); }
+
+    /// <summary>Reference data the portal adds or changes (tests: clashing slugs, deep or cyclic trees, oversized names).</summary>
+    public void SetCategory(CategoryDto c) { lock (_lock) { var i = _categories.FindIndex(x => x.Id == c.Id); if (i < 0) _categories.Add(c); else _categories[i] = c; } }
+    public void AddBrand(BrandDto b) { lock (_lock) _brands.Add(b); }
 
     /// <summary>A reference-data change (the brand feed): the next sync sees the new name.</summary>
     public void RenameBrand(Guid id, string name) { lock (_lock) { var i = _brands.FindIndex(b => b.Id == id); _brands[i] = _brands[i] with { Name = name }; } }

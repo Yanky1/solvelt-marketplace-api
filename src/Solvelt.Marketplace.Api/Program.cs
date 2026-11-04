@@ -82,6 +82,8 @@ builder.Services.AddDbContext<MarketplaceDb>(o =>
     var cs = builder.Configuration.GetConnectionString("Default");
     if (provider.Equals("Postgres", StringComparison.OrdinalIgnoreCase)) o.UseNpgsql(cs);
     else o.UseSqlite(cs ?? DevDefaults.SqliteConnection);
+    // A query that Includes several collections without AsSplitQuery multiplies rows (variants x images x attributes x FAQs); in tests that is an error, not a log line.
+    if (builder.Environment.IsEnvironment("Testing")) o.ConfigureWarnings(w => w.Throw(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.MultipleCollectionIncludeWarning));
 });
 
 var app = builder.Build();
