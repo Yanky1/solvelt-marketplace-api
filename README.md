@@ -37,7 +37,7 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Auth__EmailLinkKey` | yes, >= 32 chars, must differ from every other key | Signs the verify and reset links in account mail (decision M1-56) |
 | `Auth__GuestLinkKey` | yes, >= 32 chars, must differ from every other key | Signs guest order-access links (decision M1-70); `Auth__GuestLinkDays` (30) is their lifetime |
 | `Notifications__UnsubscribeKey` | yes, >= 32 chars, must differ from every other key | Signs the unsubscribe links in notification mail (decision M5-08) |
-| `Notifications__PublicApiBaseUrl` | no, default `Marketplace__PublicBaseUrl` | The origin of the one-click `List-Unsubscribe` URL in notification mail: the public origin that reaches this API (decision M5-17) |
+| `Notifications__PublicApiBaseUrl` | yes in production, an https URL (dev: defaults to `Marketplace__PublicBaseUrl`) | The origin of the one-click `List-Unsubscribe` URL in notification mail: the public origin that reaches this API (decision M5-17) |
 | `Admin__ApiKey` | no (unset or blank disables `/api/admin/*`); when set >= 32 chars, must differ from every other key | Key for the operations endpoints (outbox list/retry) |
 | `Admin__Host` | yes when `Admin__ApiKey` is set; must not be the public host | The host (and port) the operations endpoints answer on; everything else gets 404 (decision O-12). Never proxy `/api/admin` from the web server |
 | `Email__Provider` | yes, `Smtp` (Development/Testing use an in-memory sink) | Without it the application does not start (decision M1-50) |
