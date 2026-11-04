@@ -10,6 +10,7 @@ public static class DevDefaults
     public const string PortalWebhookSecret = "dev-only-portal-webhook-secret-not-for-production";
     public const string WebForwardingKey = "dev-only-web-forwarding-key-not-for-production";
     public const string AdminApiKey = "dev-only-admin-api-key-not-for-production";
+    public const string PublicBaseUrl = "http://localhost:3000";
     public const string RelayDomain = "relay.solvelt.test";
     public const string SqliteConnection = "Data Source=marketplace-dev.db";
 }

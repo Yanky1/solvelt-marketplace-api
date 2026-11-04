@@ -65,7 +65,7 @@ public static class OptionsSetup
     public static void Marketplace(MarketplaceOptions o, IConfiguration config, bool devLike)
     {
         config.GetSection("Marketplace").Bind(o);
-        if (devLike) o.RelayDomain ??= DevDefaults.RelayDomain;
+        if (devLike) { o.RelayDomain ??= DevDefaults.RelayDomain; o.PublicBaseUrl ??= DevDefaults.PublicBaseUrl; }
     }
 
     public static void Admin(AdminOptions o, IConfiguration config, bool devLike)
@@ -113,4 +113,18 @@ public sealed class AdminOptions
 {
     /// <summary>Key for the operations endpoints (<c>/api/admin/*</c>). Its own key. Unset means the endpoints answer 404 (disabled).</summary>
     public string? ApiKey { get; set; }
+}
+
+public sealed class AuthOptions
+{
+    /// <summary>PBKDF2 iterations of the password hasher (ASP.NET Core Identity V3, HMAC-SHA512). Tests lower it; a stored hash keeps its own count and is upgraded at the next sign-in.</summary>
+    public int PasswordIterations { get; set; } = 210_000;
+    public int PasswordMinLength { get; set; } = 10;
+    public int SessionIdleDays { get; set; } = 7;
+    public int SessionAbsoluteDays { get; set; } = 30;
+    public int VerificationTokenHours { get; set; } = 24;
+    public int ResetTokenMinutes { get; set; } = 60;
+    /// <summary>Wrong passwords in a row before the account is locked for <see cref="LockoutMinutes"/>.</summary>
+    public int LockoutThreshold { get; set; } = 5;
+    public int LockoutMinutes { get; set; } = 15;
 }

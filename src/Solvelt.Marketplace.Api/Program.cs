@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Infrastructure;
+using Solvelt.Marketplace.Api.Auth;
 using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
@@ -27,6 +28,9 @@ builder.Services.Configure<PortalOptions>(o => OptionsSetup.Portal(o, builder.Co
 builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, builder.Configuration, devLike));
 builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
 builder.Services.Configure<AdminOptions>(o => OptionsSetup.Admin(o, builder.Configuration, devLike));
+builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection("Auth"));
+builder.Services.AddSingleton<PasswordService>();
+builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
@@ -99,6 +103,7 @@ app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateL
 app.MapPortalWebhooks();
 app.MapCatalog();
 app.MapOutboxAdmin();
+app.MapAuth();
 
 app.Run();
 
