@@ -12,8 +12,8 @@ public static class CheckoutEndpoints
     {
         var g = app.MapGroup("/api/v1/checkout").RequireRateLimiting(RateLimitPolicies.Public);
         g.MapPost("/quote", Quote);
-        g.MapPost("", Place).AddEndpointFilter<RequireBuyerFilter>();
-        g.MapGet("/orders/{number}", GetOrder).AddEndpointFilter<RequireBuyerFilter>();
+        g.MapPost("", Place);
+        g.MapGet("/orders/{number}", GetOrder);
         return app;
     }
 
@@ -37,22 +37,44 @@ public static class CheckoutEndpoints
         };
     }
 
+    /// <summary>The header that carries a guest's order-access link (decision M3-24): it names ONE order and is mailed to the checkout address only.</summary>
+    public const string GuestOrderHeader = "X-Guest-Order";
+
     /// <summary>
     /// Creates our order as PendingPayment and the ONE PaymentIntent for it. Safe to repeat and to send twice in parallel: an identical checkout is the same order and the same
     /// intent (unique key in the database + the order number as Stripe's idempotency key). Amounts come from <see cref="QuoteService"/> only; the body has no money field.
-    /// The buyer is signed in (guest checkout plugs in later through M1's order access links).
+    /// The buyer is signed in (Bearer) or a guest: the cart token (<c>X-Cart-Token</c>) and an <c>email</c> in the body. A guest's order carries that address, gets a relay address of its own, and the answer
+    /// includes <c>guestOrderToken</c> (the order-access link's token, also mailed to the address once the payment is confirmed).
     /// </summary>
-    private static async Task<IResult> Place(CheckoutRequest? body, HttpContext ctx, CheckoutService checkout, MarketplaceDb db, CancellationToken ct)
+    private static async Task<IResult> Place(CheckoutRequest? body, HttpContext ctx, AuthService auth, CheckoutService checkout, MarketplaceDb db, GuestLinks links,
+        Microsoft.Extensions.Options.IOptions<MarketplaceOptions> marketplace, CancellationToken ct)
     {
-        var errors = CheckoutService.Validate(body?.Address, body?.GiftMessage);
+        var errors = new Dictionary<string, string>(CheckoutService.Validate(body?.Address, body?.GiftMessage));
+        CheckoutActor actor;
+        var header = ctx.Request.Headers.Authorization.ToString();
+        if (header.Length > 0)
+        {
+            var principal = await auth.AuthenticateAsync(header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? header[7..].Trim() : null, ct);
+            if (principal is null) return Problems.Json(401, "unauthorized", "Sign in to continue.");
+            var relay = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == principal.AccountId && a.DeletedAt == null).Select(a => a.RelayEmail).FirstOrDefaultAsync(ct);
+            if (relay is null) return Problems.Json(401, "unauthorized", "Sign in to continue.");
+            actor = new CheckoutActor(principal.AccountId, null, null, principal.DisplayName, relay);
+        }
+        else
+        {
+            var token = ctx.Request.Headers[CartEndpoints.GuestHeader].ToString();
+            if (token.Length == 0) return Problems.Json(401, "unauthorized", "Sign in or check out as a guest to continue.");
+            var email = body?.Email?.Trim().ToLowerInvariant();
+            if (AuthValidation.EmailProblem(email) is { } problem) errors["email"] = problem;
+            if (errors.Count == 0)
+                actor = new CheckoutActor(null, token, email, body!.Address!.Name!.Trim(), RelayIdentity.NewRelayEmail(marketplace.Value.RelayDomain ?? throw new InvalidOperationException("Marketplace:RelayDomain is not configured.")));
+            else actor = null!;
+        }
         if (errors.Count > 0) return Problems.Validation(errors);
-        var buyer = ctx.Buyer();
-        var relay = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == buyer.AccountId && a.DeletedAt == null).Select(a => a.RelayEmail).FirstOrDefaultAsync(ct);
-        if (relay is null) return Problems.Json(401, "unauthorized", "Sign in to continue.");
-        var (status, result, detail) = await checkout.PlaceAsync(buyer, relay, body!, ct);
+        var (status, result, detail) = await checkout.PlaceAsync(actor, body!, ct);
         return status switch
         {
-            CheckoutStatus.Ok => Results.Json(result),
+            CheckoutStatus.Ok => Results.Json(await WithGuestTokenAsync(result!, actor, db, links, ct)),
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("InvalidAddress") => Problems.Validation(new Dictionary<string, string> { ["address"] = "Enter a delivery country, postal code and, for the US, a state." }),
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("InvalidSelection") => Problems.Unprocessable("invalid_selection", "That delivery choice is not available."),
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("ShippingUnavailable") => Problems.Json(503, "shipping_unavailable", "Delivery options are unavailable right now. Please try again in a moment."),
@@ -70,11 +92,38 @@ public static class CheckoutEndpoints
     }
 
     /// <summary>The buyer's own order (the confirmation page polls this). Another buyer's order is a 404.</summary>
-    private static async Task<IResult> GetOrder(string number, HttpContext ctx, MarketplaceDb db, CancellationToken ct)
+    private static async Task<object> WithGuestTokenAsync(CheckoutResult result, CheckoutActor actor, MarketplaceDb db, GuestLinks links, CancellationToken ct)
     {
-        var buyer = ctx.Buyer();
-        var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).AsSplitQuery().FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);
+        if (actor.AccountId is not null) return result;
+        var id = await db.Orders.AsNoTracking().Where(o => o.Number == result.OrderNumber).Select(o => o.Id).FirstAsync(ct);
+        var (token, expires) = links.Make(id);
+        return new { orderNumber = result.OrderNumber, status = result.Status, quote = result.Quote, payment = result.Payment, guestOrderToken = token, guestOrderTokenExpiresAt = expires };
+    }
+
+    /// <summary>
+    /// The order for the confirmation page, which polls it: the signed-in buyer's own order, or a guest's through its order-access link (<c>X-Guest-Order</c>; a link of another order is a 404, a bad or expired
+    /// one a 401). Once a guest order has been CLAIMED by an account, the link shows only the number, status and date (decision M3-24): nothing of the owner's can be read through it.
+    /// Another buyer's order is a 404.
+    /// </summary>
+    private static async Task<IResult> GetOrder(string number, HttpContext ctx, AuthService auth, MarketplaceDb db, GuestLinks links, CancellationToken ct)
+    {
+        IQueryable<MarketplaceOrder> q = db.Orders.AsNoTracking().Where(x => x.Number == number);
+        var header = ctx.Request.Headers.Authorization.ToString();
+        var asGuest = header.Length == 0;
+        if (!asGuest)
+        {
+            var principal = await auth.AuthenticateAsync(header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? header[7..].Trim() : null, ct);
+            if (principal is null) return Problems.Json(401, "unauthorized", "Sign in to continue.");
+            q = q.Where(x => x.AccountId == principal.AccountId);
+        }
+        else
+        {
+            if (links.Parse(ctx.Request.Headers[GuestOrderHeader].ToString()) is not { } orderId) return Problems.Json(401, "unauthorized", "Open the link from your order email to continue.");
+            q = q.Where(x => x.Id == orderId);
+        }
+        var o = await q.Include(x => x.Groups).Include(x => x.Lines).AsSplitQuery().FirstOrDefaultAsync(ct);
         if (o is null) return Problems.NotFound();
+        if (asGuest && (o.ClaimedAt is not null || o.AccountId is not null)) return Results.Json(new { number = o.Number, status = o.Status, createdAt = o.CreatedAt, claimed = true });   // frozen: no address, no lines, no money
         return Results.Json(new
         {
             number = o.Number, status = o.Status, currency = o.Currency, itemsCents = o.ItemsCents, shippingCents = o.ShippingCents, taxCents = o.TaxCents, totalCents = o.TotalCents, createdAt = o.CreatedAt, paidAt = o.PaidAt,

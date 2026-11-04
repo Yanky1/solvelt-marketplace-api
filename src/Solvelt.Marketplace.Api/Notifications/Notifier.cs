@@ -19,9 +19,11 @@ public static class Notifier
     /// <summary>Adds the entry and its mail message to the caller's unit of work (nothing is saved here). <paramref name="eventId"/> + kind make it once-only.</summary>
     public static Notification Add(MarketplaceDb db, OutboxWriter outbox, TimeProvider time, MarketplaceOrder order, OrderGroup? group, string kind, string eventId, object? parameters = null)
     {
+        // A guest order has no account to notify (its mails go to the checkout address, M3); the claim attaches it later.
+        if (order.AccountId is not { } accountId) return new Notification { Id = Guid.NewGuid(), Kind = kind, OrderNumber = order.Number, DedupeKey = $"{eventId}:{kind}" };
         var n = new Notification
         {
-            Id = Guid.NewGuid(), AccountId = order.AccountId, Kind = kind, OrderNumber = order.Number, SellerOrderNumber = group?.SellerOrderNumber,
+            Id = Guid.NewGuid(), AccountId = accountId, Kind = kind, OrderNumber = order.Number, SellerOrderNumber = group?.SellerOrderNumber,
             ParamsJson = JsonSerializer.Serialize(new Dictionary<string, object?> { ["sellerName"] = group?.SellerName }.Concat(Flatten(parameters)).ToDictionary(kv => kv.Key, kv => kv.Value), PortalJson.Options),
             DedupeKey = $"{eventId}:{kind}", CreatedAt = time.GetUtcNow().ToUniversalTime(),
         };

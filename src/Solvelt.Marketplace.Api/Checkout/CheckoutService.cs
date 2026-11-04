@@ -15,7 +15,10 @@ public sealed record CheckoutAddress(string? Name, string? Line1, string? Line2,
 /// <paramref name="QuoteHash"/> is the token of the quote the buyer SAW and agreed to (<see cref="QuoteSigner"/>), required. It is never charged and never prices anything: it only guards consent. When it does not match
 /// the server's fresh quote (a price, tax, shipping, delivery choice or destination changed) or has expired, nothing is created and the answer is <c>409 price_changed</c> with the new quote to show and confirm.
 /// </summary>
-public sealed record CheckoutRequest(CheckoutAddress? Address, IReadOnlyList<GroupSelection>? Selections, string? GiftMessage, string? QuoteHash = null);
+public sealed record CheckoutRequest(CheckoutAddress? Address, IReadOnlyList<GroupSelection>? Selections, string? GiftMessage, string? QuoteHash = null, string? Email = null);
+
+/// <summary>Who is checking out: a signed-in buyer (<see cref="AccountId"/>), or a guest (<see cref="GuestToken"/>, the cart token, and <see cref="GuestEmail"/>, trimmed and lower-cased) whose order gets a relay address of its own.</summary>
+public sealed record CheckoutActor(Guid? AccountId, string? GuestToken, string? GuestEmail, string DisplayName, string RelayEmail);
 public sealed record CheckoutPayment(string Provider, string ClientSecret, string? PublishableKey);
 public sealed record CheckoutResult(string OrderNumber, string Status, QuoteView Quote, CheckoutPayment? Payment);
 
@@ -51,10 +54,10 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
         return e;
     }
 
-    public async Task<(CheckoutStatus Status, CheckoutResult? Result, string? Detail)> PlaceAsync(BuyerPrincipal buyer, string relayEmail, CheckoutRequest req, CancellationToken ct)
+    public async Task<(CheckoutStatus Status, CheckoutResult? Result, string? Detail)> PlaceAsync(CheckoutActor buyer, CheckoutRequest req, CancellationToken ct)
     {
         var a = req.Address!;
-        var owner = new CartOwner(buyer.AccountId, null);
+        var owner = new CartOwner(buyer.AccountId, buyer.GuestToken);
         var country = Clean(a.Country).ToUpperInvariant();
         string? region = Clean(a.Region) is { Length: > 0 } rg ? rg.ToUpperInvariant() : null;
         var postal = Clean(a.PostalCode);
@@ -66,7 +69,7 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
         if (quote.TotalCents < 50) return (CheckoutStatus.AmountTooSmall, null, null);   // Stripe's minimum charge
         var cartId = await carts.CartIdAsync(owner, ct);
 
-        var order = Build(buyer, relayEmail, cartId, a, req.GiftMessage, quote);
+        var order = Build(buyer, cartId, a, req.GiftMessage, quote);
         if (cartId is { } cid)
         {
             // Never replace an order whose money may still be on its way (decision M3-25): a delayed payment (status processing, or captured later) would arrive on a closed order and have to be refunded.
@@ -107,7 +110,7 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
         catch (PaymentRejectedException ex) { log.LogWarning("Payment provider refused order {Number}: {Code}", existing.Number, ex.Code); return (CheckoutStatus.PaymentRejected, null, ex.Code); }
     }
 
-    private MarketplaceOrder Build(BuyerPrincipal buyer, string relayEmail, Guid? cartId, CheckoutAddress a, string? gift, QuoteView quote)
+    private MarketplaceOrder Build(CheckoutActor buyer, Guid? cartId, CheckoutAddress a, string? gift, QuoteView quote)
     {
         var now = Now;
         var number = NewNumber(now);
@@ -116,7 +119,7 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
         {
             Id = id, Number = number, AccountId = buyer.AccountId, CartId = cartId, Status = OrderStatus.PendingPayment, Currency = quote.Currency,
             ItemsCents = quote.ItemsCents, ShippingCents = quote.ShippingCents, TaxCents = quote.TaxCents, TotalCents = quote.TotalCents,
-            BuyerName = RelayIdentity.PublicName(buyer.DisplayName), RelayEmail = relayEmail, Phone = Clean(a.Phone) is { Length: > 0 } ph ? ph : null,
+            BuyerName = RelayIdentity.PublicName(buyer.DisplayName), RelayEmail = buyer.RelayEmail, GuestEmail = buyer.GuestEmail, Phone = Clean(a.Phone) is { Length: > 0 } ph ? ph : null,
             ShipName = Clean(a.Name), ShipLine1 = Clean(a.Line1), ShipLine2 = Clean(a.Line2) is { Length: > 0 } l2 ? l2 : null, ShipCity = Clean(a.City),
             ShipRegion = Clean(a.Region) is { Length: > 0 } rg ? (Clean(a.Country).Equals("US", StringComparison.OrdinalIgnoreCase) ? rg.ToUpperInvariant() : rg) : null, ShipPostalCode = Clean(a.PostalCode), ShipCountry = Clean(a.Country).ToUpperInvariant(),
             ShipLat = a.Lat, ShipLng = a.Lng, GiftMessage = Clean(gift) is { Length: > 0 } gm ? gm : null, CreatedAt = now, UpdatedAt = now,
@@ -146,7 +149,7 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
     public static string Fingerprint(MarketplaceOrder o)
     {
         // every field length-prefixed (Canon): a `|` or `;` typed into the name or the address can never make two different checkouts the same value (review K3)
-        var sb = new StringBuilder().Field(o.AccountId).Field(o.CartId).Field(o.Currency).Field(o.TotalCents)
+        var sb = new StringBuilder().Field(o.AccountId).Field(o.GuestEmail).Field(o.CartId).Field(o.Currency).Field(o.TotalCents)
           .Field(o.ShipName).Field(o.ShipLine1).Field(o.ShipLine2).Field(o.ShipCity).Field(o.ShipRegion).Field(o.ShipPostalCode).Field(o.ShipCountry).Field(o.Phone).Field(o.GiftMessage).Field(o.ShipLat).Field(o.ShipLng);
         foreach (var g in o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId))
             sb.Field("G").Field(g.SellerId).Field(g.BrandId).Field(g.DeliveryKind).Field(g.ShippingSpeed).Field(g.LocalWindowId).Field(g.LocalDate).Field(g.ShippingCents).Field(g.TaxCents);

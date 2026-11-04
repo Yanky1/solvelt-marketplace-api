@@ -51,7 +51,7 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
                 await db.Orders.Where(o => o.Id == id).ExecuteUpdateAsync(s => s
                     .SetProperty(o => o.ShipName, Redacted).SetProperty(o => o.ShipLine1, Redacted).SetProperty(o => o.ShipLine2, (string?)null).SetProperty(o => o.ShipCity, Redacted)
                     .SetProperty(o => o.ShipRegion, (string?)null).SetProperty(o => o.ShipPostalCode, "").SetProperty(o => o.ShipLat, (double?)null).SetProperty(o => o.ShipLng, (double?)null)
-                    .SetProperty(o => o.Phone, (string?)null).SetProperty(o => o.GiftMessage, (string?)null).SetProperty(o => o.BuyerName, Redacted).SetProperty(o => o.RelayEmail, Redacted), ct);
+                    .SetProperty(o => o.Phone, (string?)null).SetProperty(o => o.GiftMessage, (string?)null).SetProperty(o => o.BuyerName, Redacted).SetProperty(o => o.RelayEmail, Redacted).SetProperty(o => o.GuestEmail, (string?)null), ct);
                 await db.OrderCancelRequests.Where(r => r.OrderId == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Note, (string?)null).SetProperty(r => r.DecisionNote, (string?)null), ct);
                 await db.OrderReturns.Where(r => r.OrderId == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Comment, (string?)null).SetProperty(r => r.DecisionNote, (string?)null)
                     .SetProperty(r => r.LabelUrl, (string?)null).SetProperty(r => r.LabelTrackingUrl, (string?)null), ct);

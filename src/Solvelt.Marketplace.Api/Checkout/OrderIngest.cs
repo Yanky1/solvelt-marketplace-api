@@ -133,7 +133,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
 
     private async Task EnqueueBuyerMailAsync(MarketplaceOrder order, string subject, string body, string dedupe, CancellationToken ct)
     {
-        var email = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == order.AccountId && a.DeletedAt == null).Select(a => a.Email).FirstOrDefaultAsync(ct);
+        var email = await OrderMail.AddressAsync(db, order, ct);
         if (email is null) return;   // an account deleted meanwhile has no address to write to
         outbox.EnqueueEmail(new EmailMessage(email, subject, body), "mail:" + dedupe);
         await db.SaveChangesAsync(ct);

@@ -23,7 +23,12 @@ public sealed class MarketplaceOrder
     public Guid Id { get; set; }
     /// <summary><c>MP-yyyyMMdd-XXXXXXXX</c>: our idempotency id towards the portal (<c>marketplaceOrderId</c>) and Stripe.</summary>
     public string Number { get; set; } = "";
-    public Guid AccountId { get; set; }
+    /// <summary>The buyer's account; NULL for a guest order until its address is proven and it is claimed (decision M3-24).</summary>
+    public Guid? AccountId { get; set; }
+    /// <summary>The address a guest typed at checkout (trimmed, lower-cased): where the order link is mailed, and what a verified account claims the order by. NULL for an account order. Personal data (PII table).</summary>
+    public string? GuestEmail { get; set; }
+    /// <summary>When a guest order was attached to an account. From then on the guest link shows only the order's number, status and date (an attacker who typed someone else's address keeps a link that reveals nothing of the owner).</summary>
+    public DateTimeOffset? ClaimedAt { get; set; }
     public Guid? CartId { get; set; }
     public string Status { get; set; } = OrderStatus.PendingPayment;
     /// <summary>
@@ -245,6 +250,8 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceO
         b.Property(o => o.ShipPostalCode).HasMaxLength(20);
         b.Property(o => o.ShipCountry).HasMaxLength(2);
         b.Property(o => o.GiftMessage).HasMaxLength(500);
+        b.Property(o => o.GuestEmail).HasMaxLength(254);
+        b.HasIndex(o => o.GuestEmail);
         b.Property(o => o.FailureCode).HasMaxLength(60);
         b.HasIndex(o => o.Number).IsUnique();
         b.HasIndex(o => o.ActiveKey).IsUnique();             // at most one pending order per identical checkout (NULLs allowed)

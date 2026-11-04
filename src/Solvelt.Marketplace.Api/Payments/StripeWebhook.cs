@@ -71,7 +71,7 @@ public sealed record StripeEnvelope(string Id, string Type, long Created, JsonEl
 public enum StripeOutcome { Applied, Ignored, Unmatched, Duplicate }
 
 /// <summary>The event-id insert and the handler's changes commit in ONE transaction: a failure rolls both back and answers 5xx, so Stripe's retry sees a clean slate.</summary>
-public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, RefundService refunds, Solvelt.Marketplace.Api.Services.BookingPaymentEvents bookingEvents, Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions, TimeProvider time, ILogger<StripeEventProcessor> log)
+public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, RefundService refunds, Auth.GuestLinks guestLinks, Microsoft.Extensions.Options.IOptions<Infrastructure.MarketplaceOptions> marketplace, Solvelt.Marketplace.Api.Services.BookingPaymentEvents bookingEvents, Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions, TimeProvider time, ILogger<StripeEventProcessor> log)
 {
     public async Task<StripeOutcome> ProcessAsync(StripeEnvelope evt, CancellationToken ct)
     {
@@ -124,9 +124,9 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
 
     public static readonly TimeSpan NotYetKnownGrace = TimeSpan.FromMinutes(10);
 
-    private async Task MailBuyerAsync(Guid accountId, string subject, string body, string dedupe, CancellationToken ct)
+    private async Task MailBuyerAsync(MarketplaceOrder order, string subject, string body, string dedupe, CancellationToken ct)
     {
-        var email = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId && a.DeletedAt == null).Select(a => a.Email).FirstOrDefaultAsync(ct);
+        var email = await OrderMail.AddressAsync(db, order, ct);
         if (email is not null) outbox.EnqueueEmail(new EmailMessage(email, subject, body), "mail:" + dedupe);
     }
 
@@ -165,7 +165,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
             if (amount is > 0)
             {
                 await refunds.ReserveAsync(order.Id, null, amount.Value, 0, $"fail:{order.Number}", code, false, null, ct);
-                await MailBuyerAsync(order.AccountId, "Your payment for order " + order.Number + " is being refunded",
+                await MailBuyerAsync(order, "Your payment for order " + order.Number + " is being refunded",
                     "You completed a payment for an older version of your checkout (your cart or choices changed afterwards), so we did not place that order. The full amount is being refunded to your card (it can take a few days to show). Your latest checkout is unaffected.\n", $"late:{order.Number}", ct);
             }
             return StripeOutcome.Applied;
@@ -178,11 +178,19 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
             if (amount is > 0)
             {
                 await refunds.ReserveAsync(order.Id, null, amount.Value, 0, $"fail:{order.Number}", "amount_mismatch", false, null, ct);
-                await MailBuyerAsync(order.AccountId, "We couldn't place your order " + order.Number, "The amount charged did not match your order, so we did not place it. The full amount is being refunded to your card (it can take a few days to show). Please try again.\n", $"mismatch:{order.Number}", ct);
+                await MailBuyerAsync(order, "We couldn't place your order " + order.Number, "The amount charged did not match your order, so we did not place it. The full amount is being refunded to your card (it can take a few days to show). Please try again.\n", $"mismatch:{order.Number}", ct);
             }
             return StripeOutcome.Applied;
         }
         outbox.Enqueue(OrderIngestHandler.Type, new OrderIngestHandler.Payload(order.Id), $"ingest:{order.Number}");
+        // A guest has no account to look the order up in: the confirmation carries the order-access link, mailed to the checkout address ONLY (decision M3-24; it names this one order and expires).
+        if (order.AccountId is null && order.GuestEmail is { } guestEmail)
+        {
+            var (token, expires) = guestLinks.Make(order.Id);
+            var baseUrl = (marketplace.Value.PublicBaseUrl ?? "").TrimEnd('/');
+            outbox.EnqueueEmail(new EmailMessage(guestEmail, "Your order " + order.Number,
+                $"Thank you. We received your payment for order {order.Number}.\n\nFollow your order here (the link works until {expires:yyyy-MM-dd}; keep it private, anyone who has it can open this order):\n{baseUrl}/orders/{order.Number}?guest={token}\n\nCreate an account with this email address to keep all your orders in one place.\n"), $"mail:guest-link:{order.Number}");
+        }
         // The cart has been bought: remove exactly the lines this order took (anything added since stays).
         if (order.CartId is { } cart)
         {
