@@ -113,6 +113,7 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
                 && (Time(sale, "startsAt") is not { } starts || starts <= now) && (Time(sale, "endsAt") is not { } ends || now < ends))
                 saleAmount = sa;
             var listingState = State(d);
+            var weight = Int(d, "weightGrams") is > 0 and var wg ? wg : (int?)null;      // C7: null or a non-positive weight is "unknown", never 0 (O-15)
             var variants = new List<VariantDto>();
             if (d.TryGetProperty("variants", out var vs) && vs.ValueKind == JsonValueKind.Array)
                 foreach (var v in vs.EnumerateArray())
@@ -124,10 +125,10 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
                     long? was = onListingPrice ? (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) : null;
                     var values = v.TryGetProperty("values", out var vv) && vv.ValueKind == JsonValueKind.Array
                         ? string.Join(" / ", vv.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!.Trim()).Where(x => x.Length > 0)) : "";
-                    variants.Add(new VariantDto(vid, values.Length > 0 ? values : "Standard", cents, was > cents ? was : null, Available(State(v) ?? listingState)));
+                    variants.Add(new VariantDto(vid, values.Length > 0 ? values : "Standard", cents, was > cents ? was : null, Available(State(v) ?? listingState), WeightGrams: Int(v, "weightGrams") is > 0 and var vw ? vw : weight));   // a variant without its own weight carries the product's
                 }
             if (variants.Count == 0)                                                      // no variants: one buyable line on the listing price (IsDefault: its id is the listing id, never a portal variant id)
-                variants.Add(new VariantDto(listingId, "Standard", saleAmount ?? amount, (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) is { } w && w > (saleAmount ?? amount) ? w : null, Available(listingState), IsDefault: true));
+                variants.Add(new VariantDto(listingId, "Standard", saleAmount ?? amount, (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) is { } w && w > (saleAmount ?? amount) ? w : null, Available(listingState), IsDefault: true, WeightGrams: weight));
 
             var images = new List<ImageDto>();
             if (d.TryGetProperty("images", out var ims) && ims.ValueKind == JsonValueKind.Array)
@@ -170,7 +171,7 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
             var updated = Time(d, "updatedAt") ?? now;
             return new ListingSnapshot(listingId, version, type, "Active", title, summary, description,
                 new SellerRef(sellerId, Str(seller, "displayName") ?? "", true), new BrandRef(brandId, Str(brand, "name") ?? ""), categoryId, currency.ToUpperInvariant(),
-                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d));
+                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d), Dimensions(d));
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
         {
@@ -235,6 +236,9 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
     private static IEnumerable<string> Strings(JsonElement e, string name)
         => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array ? v.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!.Trim()).Where(x => x.Length > 0) : [];
     private static long? Long(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n) ? n : null;
+    /// <summary>C7: all three sides, each a positive whole number of millimetres, or null.</summary>
+    private static DimensionsMm? Dimensions(JsonElement d)
+        => d.TryGetProperty("dimensionsMm", out var m) && m.ValueKind == JsonValueKind.Object && Int(m, "l") is > 0 and var l && Int(m, "w") is > 0 and var w && Int(m, "h") is > 0 and var h ? new DimensionsMm(l, w, h) : null;
     private static int? Int(JsonElement e, string name) => Long(e, name) is { } n && n is >= int.MinValue and <= int.MaxValue ? (int)n : null;
     private static Guid? Guid_(JsonElement e, string name) => Str(e, name) is { } s && Guid.TryParse(s, out var g) ? g : null;
     private static DateTimeOffset? Time(JsonElement e, string name) => Str(e, name) is { } s && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var t) ? t.ToUniversalTime() : null;

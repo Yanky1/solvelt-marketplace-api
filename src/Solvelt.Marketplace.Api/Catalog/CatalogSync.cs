@@ -415,6 +415,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.Version = s.Version;
         listing.KnownVersion = Math.Max(listing.KnownVersion, s.Version);
         listing.IsStub = false;
+        listing.LengthMm = s.Dimensions?.L; listing.WidthMm = s.Dimensions?.W; listing.HeightMm = s.Dimensions?.H;
         listing.FetchAttempts = 0; listing.NextFetchAt = null;
         listing.Row++;
 
@@ -491,7 +492,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         {
             var row = listing.Variants.FirstOrDefault(e => e.Id == v.Id);
             if (row is null) { row = new CatalogVariant { Id = v.Id, ListingId = s.Id }; listing.Variants.Add(row); }
-            row.Name = SnapshotLimits.Clip(v.Name, SnapshotLimits.Name); row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available && v.PriceCents <= SnapshotLimits.MaxUnitPriceCents; row.IsDefault = v.IsDefault; row.SortOrder = i;
+            row.Name = SnapshotLimits.Clip(v.Name, SnapshotLimits.Name); row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available && v.PriceCents <= SnapshotLimits.MaxUnitPriceCents; row.IsDefault = v.IsDefault; row.WeightGrams = v.WeightGrams is > 0 ? v.WeightGrams : null; row.SortOrder = i;
         }
     }
 
