@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
+using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
@@ -29,6 +30,24 @@ builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Da
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();
+builder.Services.Configure<CatalogOptions>(builder.Configuration.GetSection("Catalog"));
+builder.Services.AddSingleton<FixtureCatalogSource>();
+// Resolved lazily from the final configuration. Fixture data is for Development/Testing only (the validator rejects it elsewhere); "None" is an empty catalog.
+builder.Services.AddSingleton<ICatalogSource>(sp =>
+{
+    var source = CatalogSourceSelection.Resolve(sp.GetRequiredService<IConfiguration>()["Catalog:Source"], devLike);
+    return source.ToLowerInvariant() switch
+    {
+        "fixture" => sp.GetRequiredService<FixtureCatalogSource>(),
+        "none" => new EmptyCatalogSource(),
+        "http" => throw new NotSupportedException("Catalog:Source=Http is not available yet (portal contract change C1)."),
+        _ => throw new InvalidOperationException($"Unknown Catalog:Source '{source}'."),
+    };
+});
+builder.Services.AddSingleton<IProjectionHandler, CatalogEventHandler>();
+builder.Services.AddScoped<CatalogSyncService>();
+if (!builder.Environment.IsEnvironment("Testing") && !string.Equals(builder.Configuration["Catalog:Source"], "None", StringComparison.OrdinalIgnoreCase) && (devLike || !string.IsNullOrWhiteSpace(builder.Configuration["Catalog:Source"])))
+    builder.Services.AddHostedService<CatalogSyncWorker>();
 builder.Services.AddSingleton<ProjectionRegistry>();
 builder.Services.AddSingleton<TerminalStateRules>();
 builder.Services.AddScoped<ProjectionStore>();
@@ -62,6 +81,7 @@ app.MapGet("/health", (ClientIpResolver forwarding) => Results.Json(new { status
 app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateLimiting(RateLimitPolicies.Public);
 
 app.MapPortalWebhooks();
+app.MapCatalog();
 
 app.Run();
 

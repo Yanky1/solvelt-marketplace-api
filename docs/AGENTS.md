@@ -3,7 +3,7 @@
 | Workstream | Repo | Branch | Scope | Brief | Session | Status | Updated |
 |---|---|---|---|---|---|---|---|
 | Orchestrator | both | n/a | Plans and supervises M1–M7 | agent-briefs/ORCHESTRATOR.md | session_018hZb8pE5JAKd7eu3Enzfnr | Running | 2026-11-04 |
-| M1 Foundation | api | feat/m1-* | Buyer auth/accounts, signed portal client, webhook receiver, outbox, catalog read model | agent-briefs/M1-foundation.md | session_018hZb8rdQJTwYBEtUV4GvDf | In progress: slice 1, 2a, 2b-i and reviews 1-3 merged (207fabf); review 4 (client crash, webhook framework fixes) on feat/m1-review-4; catalog on feat/m1-catalog (pushed, CI); outbox, auth next | 2026-11-04 |
+| M1 Foundation | api | feat/m1-* | Buyer auth/accounts, signed portal client, webhook receiver, outbox, catalog read model | agent-briefs/M1-foundation.md | session_018hZb8rdQJTwYBEtUV4GvDf | In progress: slices 1, 2a, 2b-i and reviews 1-4 merged (02c0e6a); catalog on feat/m1-catalog-r2 (CI); review 5 (log guard, limiter eviction), outbox, auth next | 2026-11-04 |
 | W1 Web foundation | web | feat/w1-* | RR7 framework-mode SSR skeleton, Solvelt design tokens, BFF auth pages, basic catalog pages, image resize, CI + Playwright/axe | agent-briefs/W1-web-foundation.md | session_018hZb8rg4HdxcFLSY4vTN1q | Running | 2026-11-04 |
 | M2 Catalog & search | api+web | feat/m2-* | Facets, full-text search, autocomplete, PDP/service pages, SEO | agent-briefs/M2-catalog-search.md | - | Queued (gate G2) | 2026-11-04 |
 | M3 Cart & checkout | api+web | feat/m3-* | Multi-seller cart, shipping, local delivery, tax, Stripe test mode, ingest, refunds/disputes | agent-briefs/M3-cart-checkout.md | - | Queued (gate G3) | 2026-11-04 |

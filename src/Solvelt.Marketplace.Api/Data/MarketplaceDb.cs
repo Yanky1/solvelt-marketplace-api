@@ -8,10 +8,22 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
 {
     public DbSet<PortalInboundEvent> PortalInboundEvents => Set<PortalInboundEvent>();
     public DbSet<ProjectionState> ProjectionStates => Set<ProjectionState>();
+    public DbSet<CatalogSeller> CatalogSellers => Set<CatalogSeller>();
+    public DbSet<CatalogBrand> CatalogBrands => Set<CatalogBrand>();
+    public DbSet<CatalogCategory> CatalogCategories => Set<CatalogCategory>();
+    public DbSet<CatalogListing> CatalogListings => Set<CatalogListing>();
+    public DbSet<CatalogVariant> CatalogVariants => Set<CatalogVariant>();
+    public DbSet<CatalogImage> CatalogImages => Set<CatalogImage>();
+    public DbSet<CatalogAttribute> CatalogAttributes => Set<CatalogAttribute>();
+    public DbSet<CatalogFaq> CatalogFaqs => Set<CatalogFaq>();
+    public DbSet<CatalogSyncState> CatalogSyncStates => Set<CatalogSyncState>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(MarketplaceDb).Assembly);
+
+        // Listing titles sort by an ASCII key with a binary collation, so the order is the same on SQLite and PostgreSQL (whose default collation is locale based).
+        modelBuilder.Entity<CatalogListing>().Property(l => l.TitleSort).UseCollation(Database.IsSqlite() ? "BINARY" : "C");
 
         // SQLite cannot order or compare DateTimeOffset natively. All stored times are UTC (offset 0), so the binary
         // representation orders correctly. PostgreSQL keeps native timestamptz (Npgsql requires UTC offsets).
