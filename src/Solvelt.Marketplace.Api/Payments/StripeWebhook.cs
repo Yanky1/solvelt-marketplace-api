@@ -240,12 +240,11 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         if (order.Status == OrderStatus.Failed) return StripeOutcome.Ignored;   // never placed and already refunded: nothing at the portal to tell
         if (order.Groups.Any(g => g.SellerOrderNumber is null)) throw new StripeOrderNotYetKnownException();   // not ingested yet: Stripe retries
         var type = evt.Type == "charge.dispute.created" ? PaymentEventTypes.DisputeCreated : portalStatus is "won" or "lost" or "warning_closed" ? PaymentEventTypes.DisputeClosed : PaymentEventTypes.DisputeUpdated;
-        // Our own order guard (webhooks arrive in any order): an event older than the last one sent for this dispute is dropped, and nothing follows a closed dispute.
-        var state = await db.DisputeStates.FirstOrDefaultAsync(d => d.DisputeId == disputeId, ct);
-        if (state is not null && (state.Closed || evt.Created < state.LastCreated)) return StripeOutcome.Ignored;
+        // Our own order guard (webhooks arrive in any order; decision M3-29, review R4/R5): ONE conditional write claims the dispute's state, so parallel events cannot overwrite each other. Nothing follows a
+        // closed dispute; an update older than the last one applied (same second: the larger event id wins) is dropped; a `created` is NEVER dropped for arriving late (the portal books the debit on the
+        // first event it sees for a seller order, and updated/closed for an unseen one is an upsert, so the first event we send always carries the amount and the fee).
         var closed = portalStatus is "won" or "lost" or "warning_closed";
-        if (state is null) db.DisputeStates.Add(new DisputeState { DisputeId = disputeId, LastCreated = evt.Created, Closed = closed });
-        else { state.LastCreated = evt.Created; state.Closed = closed; }
+        if (!await ClaimDisputeAsync(disputeId, evt, closed, type == PaymentEventTypes.DisputeCreated, ct)) return StripeOutcome.Ignored;
 
         var groups = order.Groups.OrderByDescending(g => g.TotalCents).ThenBy(g => g.Id).ToList();
         var sales = groups.Select(g => g.ItemsCents + g.ShippingCents).ToList();   // what each seller order SOLD: the portal's cap per share (items + shipping, no tax)
@@ -266,6 +265,24 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
             outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{groups[i].SellerOrderNumber}", type,
                 new DisputeData(disputeId, order.Number, groups[i].SellerOrderNumber, null, share[i], portalStatus, feeShare is not null ? feeShare[i] : i == 0 ? null : 0, order.Currency, evt.Str("reason"), due, createdAt), hold);
         return StripeOutcome.Applied;
+    }
+
+    private async Task<bool> ClaimDisputeAsync(string disputeId, StripeEnvelope evt, bool closed, bool isCreated, CancellationToken ct)
+    {
+        var now = time.GetUtcNow().ToUniversalTime();
+        var created = evt.Created;
+        var eventId = evt.Id;
+        // the first event of a dispute: insert, and let the unique key decide a parallel one
+        var inserted = await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO dispute_states ("DisputeId", "LastCreated", "LastEventId", "Closed", "UpdatedAt") VALUES ({disputeId}, {created}, {eventId}, {closed}, {now})
+            ON CONFLICT ("DisputeId") DO NOTHING
+            """, ct);
+        if (inserted == 1) return true;
+        var moved = await db.DisputeStates.Where(d => d.DisputeId == disputeId && !d.Closed && (d.LastCreated < created || (d.LastCreated == created && string.Compare(d.LastEventId, eventId) < 0)))
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.LastCreated, created).SetProperty(d => d.LastEventId, eventId).SetProperty(d => d.Closed, closed).SetProperty(d => d.UpdatedAt, now), ct);
+        if (moved == 1) return true;
+        // an older event: dropped, except a `created` of a dispute that is not closed (sent, the state stays as it is)
+        return isCreated && !await db.DisputeStates.AsNoTracking().AnyAsync(d => d.DisputeId == disputeId && d.Closed, ct);
     }
 
     /// <summary>
