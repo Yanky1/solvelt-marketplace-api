@@ -125,7 +125,7 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         _files[ids[0]] = () => File(Encoding.UTF8.GetBytes("<html><script>alert(1)</script></html>"), "image/png");   // html with an image header
         _files[ids[1]] = () => File(Pdf("/OpenAction<</S/JavaScript/JS(app.alert(1))>>"), "application/pdf");
         _files[ids[2]] = () => File(Pdf("/Java#53cript/JS(x)"), "application/pdf");                                // hidden by a name escape
-        _files[ids[3]] = () => File([.. Jpeg(false), .. new byte[5 * 1024 * 1024]], "image/jpeg");                  // over 5 MB
+        _files[ids[3]] = () => { var j = Jpeg(false); return File([.. j[..^2], .. new byte[5 * 1024 * 1024], .. j[^2..]], "image/jpeg"); };   // a VALID jpeg, over 5 MB: only the cap refuses it
         _files[ids[4]] = () => File(Jpeg(false).Take(12).ToArray(), "image/jpeg");                                  // truncated
         await SellerMessage(o, g, "files", ids.Select((id, i) => (id, $"f{i}.bin", "image/png", 1L)).ToArray());
         await Drain();
@@ -205,15 +205,19 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         var (o, g) = await Placed();
         var (thread, msg, att, pid) = await Reported(o, g);
         Assert.Equal("skipped", await Decided("message", "MR-someone-else", pid, "hidden"));            // not the report id we made
-        Assert.Equal("skipped", await Decided("message", "MR-pm-ghost", "pm-ghost", "hidden"));          // a message we never reported
+        Assert.Equal("skipped", await Decided("message", "MR-pm-ghost", "pm-ghost", "hidden"));          // a message we do not have
+        Assert.Equal("applied", await SellerMessage(o, g, "an ordinary message"));
+        var plain = await _k.Db(db => db.ThreadMessages.AsNoTracking().Where(m => m.Direction == "seller" && m.ReportedAt == null).Select(m => m.PortalMessageId!).SingleAsync());
+        Assert.Equal("skipped", await Decided("message", "MR-" + plain, plain, "hidden"));              // a real message that nobody reported on our side: never hidden by an event alone
+        Assert.Null(await _k.Db(db => db.ThreadMessages.Where(m => m.PortalMessageId == plain).Select(m => m.HiddenAt).SingleAsync()));
         Assert.Equal("skipped", await Decided("review", "R-1", "review-1", "hidden"));                   // reviews are the reviews workstream's
         Assert.Equal("skipped", await Decided("listing", "L-1", "x", "hidden"));
         Assert.Equal("applied", await Decided("message", "MR-" + pid, pid, "dismissed"));
-        Assert.Null(await _k.Db(db => db.ThreadMessages.Where(m => m.Direction == "seller").Select(m => m.HiddenAt).SingleAsync()));   // dismissed: not hidden
+        Assert.Null(await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.HiddenAt).SingleAsync()));   // dismissed: not hidden
         Assert.Equal(HttpStatusCode.OK, (await Get($"/api/v1/messages/attachments/{att}")).StatusCode);   // still there
         Assert.Equal("applied", await Decided("message", "MR-" + pid, pid, "removed", "Asked for payment off the platform"));
         Assert.Equal("applied", await Decided("message", "MR-" + pid, pid, "removed"));                  // again: nothing changes
-        var view = JsonDocument.Parse(await (await Get($"/api/v1/messages/threads/{thread}")).Content.ReadAsStringAsync()).RootElement.GetProperty("messages").EnumerateArray().Single(m => m.GetProperty("direction").GetString() == "seller");
+        var view = JsonDocument.Parse(await (await Get($"/api/v1/messages/threads/{thread}")).Content.ReadAsStringAsync()).RootElement.GetProperty("messages").EnumerateArray().Single(m => m.GetProperty("id").GetGuid() == msg);
         Assert.True(view.GetProperty("hidden").GetBoolean());
         Assert.Equal(JsonValueKind.Null, view.GetProperty("text").ValueKind);
         Assert.Equal(0, view.GetProperty("attachments").GetArrayLength());
