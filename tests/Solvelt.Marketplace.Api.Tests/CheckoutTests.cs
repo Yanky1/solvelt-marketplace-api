@@ -115,7 +115,7 @@ public sealed class CheckoutTests : IDisposable
         var body = new { address = Address(), giftMessage = "hello" };
         var results = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => Checkout(s, body)));
         var views = new List<JsonElement>();
-        foreach (var r in results) views.Add(await Ok(r));
+        foreach (var r in results) { if (!r.IsSuccessStatusCode) throw new Exception(string.Join("\n", _k.F.Logs.Lines.Where(l => l.Contains("Unhandled")).Take(3))); views.Add(await Ok(r)); }
         Assert.Single(views.Select(v => v.GetProperty("orderNumber").GetString()).Distinct());
         Assert.Single(views.Select(v => v.GetProperty("payment").GetProperty("clientSecret").GetString()).Distinct());
         Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));
@@ -200,6 +200,31 @@ public sealed class CheckoutTests : IDisposable
         Assert.Equal("delivery_unavailable", unserviceable.GetProperty("code").GetString());
         Assert.Equal(0, await _k.Db(db => db.Orders.CountAsync()));
         Assert.Empty(Stripe.Intents);
+    }
+
+    [Fact]
+    public async Task A_total_the_buyer_did_not_see_is_refused_with_the_new_quote_and_nothing_is_created_or_charged()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        var seen = (await Ok(await Checkout(s, new { address = Address() }))).GetProperty("quote").GetProperty("totalCents").GetInt64();
+        Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));
+        // the price moves after the buyer looked: they confirm the old total, so nothing is created and the new quote comes back to be shown
+        CatalogKit.Fixture(_k.F).Upsert(CatalogKit.ListingId("kiddush-cup-pewter"), l => l with { Variants = l.Variants.Select(v => v with { PriceCents = 4300 }).ToList() });
+        await CatalogKit.Sync(_k.F);
+        var refused = await Ok(await Checkout(s, new { address = Address(), expectedTotalCents = seen }), HttpStatusCode.Conflict);
+        Assert.Equal("price_changed", refused.GetProperty("code").GetString());
+        var fresh = refused.GetProperty("quote").GetProperty("totalCents").GetInt64();
+        Assert.NotEqual(seen, fresh);
+        Assert.Equal(4300, refused.GetProperty("quote").GetProperty("itemsCents").GetInt64());
+        Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));                       // still only the first order
+        Assert.Single(Stripe.Intents);
+        // confirming the NEW total goes through, and it is the server's total that is charged, not the number sent
+        var ok = await Ok(await Checkout(s, new { address = Address(), expectedTotalCents = fresh }));
+        Assert.Equal(fresh, Stripe.Intents.Single(i => i.Metadata["marketplace_order_id"] == ok.GetProperty("orderNumber").GetString()).AmountCents);
+        // a wrong total with no price change is refused too; leaving it out keeps the old behaviour (the web always sends it)
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address(), expectedTotalCents = fresh + 1 })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Checkout(s, new { address = Address() })).StatusCode);
     }
 
     [Fact]
