@@ -68,19 +68,28 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
 
     public async Task<IReadOnlyList<ProviderRefund>> ListRefundsAsync(string intentId, CancellationToken ct)
     {
-        var json = await PostAsync($"/v1/refunds?payment_intent={Uri.EscapeDataString(intentId)}&limit=100", null, null, ct);
+        // Follows starting_after while has_more (review L3): a charge with more than one page of refunds must not hide ours. A runaway list is cut at 50 pages (5000 refunds) and reported as unavailable.
         var list = new List<ProviderRefund>();
-        if (json.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
-            foreach (var r in data.EnumerateArray())
-            {
-                if (r.ValueKind != JsonValueKind.Object || !r.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String) continue;
-                var amount = r.TryGetProperty("amount", out var a) && a.TryGetInt64(out var n) ? n : 0;
-                var status = r.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString()! : "succeeded";
-                string? key = null;
-                if (r.TryGetProperty("metadata", out var md) && md.ValueKind == JsonValueKind.Object && md.TryGetProperty("refund_key", out var k) && k.ValueKind == JsonValueKind.String) key = k.GetString();
-                list.Add(new ProviderRefund(id.GetString()!, amount, status, key));
-            }
-        return list;
+        string? after = null;
+        for (var page = 0; page < 50; page++)
+        {
+            var json = await PostAsync($"/v1/refunds?payment_intent={Uri.EscapeDataString(intentId)}&limit=100" + (after is null ? "" : $"&starting_after={Uri.EscapeDataString(after)}"), null, null, ct);
+            string? last = null;
+            if (json.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+                foreach (var r in data.EnumerateArray())
+                {
+                    if (r.ValueKind != JsonValueKind.Object || !r.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String) continue;
+                    last = id.GetString();
+                    var amount = r.TryGetProperty("amount", out var a) && a.TryGetInt64(out var n) ? n : 0;
+                    var status = r.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString()! : "succeeded";
+                    string? key = null;
+                    if (r.TryGetProperty("metadata", out var md) && md.ValueKind == JsonValueKind.Object && md.TryGetProperty("refund_key", out var k) && k.ValueKind == JsonValueKind.String) key = k.GetString();
+                    list.Add(new ProviderRefund(id.GetString()!, amount, status, key));
+                }
+            if (!(json.TryGetProperty("has_more", out var more) && more.ValueKind == JsonValueKind.True) || last is null) return list;
+            after = last;
+        }
+        throw new PaymentsUnavailableException("too_many_refunds");
     }
 
     public async Task<PaymentIntentResult> GetIntentAsync(string intentId, CancellationToken ct)
@@ -196,6 +205,21 @@ public sealed class FakePaymentProvider : IPaymentProvider
     public string? RejectCancelWith { get; set; }
     /// <summary>Test hook: the next refund is refused by the processor with this error code (one that moved no money, for example <c>api_key_expired</c>).</summary>
     public string? RejectRefundWith { get; set; }
+    /// <summary>Test hook: runs once, just before a refund is refused for exceeding what is left (a slow worker is overtaken here by a parallel one).</summary>
+    public Action? OnRefusal { get; set; }
+
+    /// <summary>Test hook: Stripe now lists the refund with this metadata key under another status. failed and canceled refunds return the money (amount_refunded drops); pending ones stay counted.</summary>
+    public void SetListedStatus(string refundKey, string status)
+    {
+        lock (_lock)
+            for (var n = 0; n < _listed.Count; n++)
+                if (_listed[n].Refund.RefundKey == refundKey)
+                {
+                    var was = _listed[n].Refund;
+                    if (was.Status == "succeeded" && status is "failed" or "canceled") _intents[_listed[n].IntentId].RefundedCents -= was.AmountCents;
+                    _listed[n] = (_listed[n].IntentId, was with { Status = status });
+                }
+    }
 
     public Task<PaymentIntentResult> CreateIntentAsync(long amountCents, string currency, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct)
     {
@@ -289,7 +313,11 @@ public sealed class FakePaymentProvider : IPaymentProvider
             if (_byKey.TryGetValue(idempotencyKey, out var prior))
                 return prior.Fingerprint == fp ? Task.FromResult((RefundResult)prior.Result) : throw new PaymentRejectedException("idempotency_key_in_use");
             if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
-            if (amountCents <= 0 || i.RefundedCents + amountCents > i.CapturedCents) throw new PaymentRejectedException("charge_exceeds_amount");   // never more than was paid
+            if (amountCents <= 0 || i.RefundedCents + amountCents > i.CapturedCents)
+            {
+                var hook = OnRefusal; OnRefusal = null; hook?.Invoke();
+                throw new PaymentRejectedException("charge_exceeds_amount");   // never more than was paid
+            }
             i.RefundedCents += amountCents;
             var r = new RefundResult($"re_fake_{_refunds.Count + 1:D6}", "succeeded", amountCents);
             _refunds.Add(r);

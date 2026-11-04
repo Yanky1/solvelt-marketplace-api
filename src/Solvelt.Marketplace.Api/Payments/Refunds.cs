@@ -263,7 +263,9 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
     private async Task<OutboxResult> RefusedAsync(OrderRefund refund, MarketplaceOrder order, RefundService.RefundPayload p, string code, CancellationToken ct)
     {
         // An idempotency error means the SAME key reached Stripe with another amount, or while the first request was still running: never a reason to give anything back. Look again later with a fresh read (review Q2).
-        if (code.StartsWith("idempotency", StringComparison.Ordinal)) return OutboxResult.Retry("stripe_" + code);
+        // Only "the first request is still running" is a reason to wait; any other idempotency error is a bug alarm: dead-lettered where a person sees it, never retried and never a release (review L4).
+        if (code == "idempotency_key_in_use") return OutboxResult.Retry("stripe_" + code);
+        if (code.StartsWith("idempotency", StringComparison.Ordinal)) { log?.LogError("Refund {Key} of order {Number}: Stripe answered {Code}; the same key reached it with another request. A person must look", refund.Key, order.Number, code); return OutboxResult.Dead("stripe_" + code); }
 
         long? read = null;   // null: Stripe does not know the intent (or the charge), so no money can have left through it
         IReadOnlyList<ProviderRefund> listed = [];
@@ -283,10 +285,16 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         var all = await db.OrderRefunds.AsNoTracking().Where(r => r.OrderId == order.Id).ToListAsync(ct);
         var current = all.FirstOrDefault(r => r.Id == refund.Id);
         if (current is null || current.Status != RefundStatus.Reserved) { await tx.RollbackAsync(CancellationToken.None); return OutboxResult.Delivered(); }   // settled meanwhile
+        // Under the lock the row is read again: a worker that was slow past its outbox lease finds the refund already cut and re-sent under a newer attempt, and must not touch it (review M1: a double release).
+        if (current.Attempt != p.Attempt) { await tx.RollbackAsync(CancellationToken.None); return OutboxResult.Delivered(); }
+        refund = current;
 
         // A reserved refund of OURS that Stripe has already executed (our call timed out and waits for its retry) is MONEY THAT LEFT: it is matched by our refund_key metadata and finished, never counted as a
         // dashboard refund and never released (review Q1). A refund Stripe lists as failed or canceled is not money.
-        var executed = listed.Where(l => l.RefundKey is not null && l.Status is not ("failed" or "canceled")).GroupBy(l => l.RefundKey!).ToDictionary(g => g.Key, g => g.First());
+        // Only a refund Stripe lists as SUCCEEDED is finished (review M2): pending or requires_action is not money yet (look again later), failed or canceled is not money at all.
+        var executed = listed.Where(l => l.RefundKey is not null && l.Status == "succeeded").GroupBy(l => l.RefundKey!).ToDictionary(g => g.Key, g => g.First());
+        if (!executed.ContainsKey(refund.Key) && listed.Any(l => l.RefundKey == refund.Key && l.Status is "pending" or "requires_action"))
+        { await tx.RollbackAsync(CancellationToken.None); return OutboxResult.Retry("stripe_refund_pending"); }
         var finished = false;
         foreach (var row in all.Where(r => r.Status == RefundStatus.Reserved && r.Reason != "external" && executed.ContainsKey(r.Key)).ToList())
             if (await FinalizeSucceededAsync(row, order, executed[row.Key].Id, ct))
@@ -314,9 +322,12 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
             // The money is partly gone: send what is left, under a new idempotency attempt (the old key belongs to the old amount). The refund becomes a plain AMOUNT (decision M3-34): everything the
             // original reservation took from the counters (units, tax, shipping) is given back, and the cut amount is booked on its own with its tax prorated, so a later release gives back exactly what is booked.
             var newTax = refund.AmountCents == 0 ? 0 : refund.TaxCents * usable / refund.AmountCents;
+            // The cut is conditional on the row still being this attempt and still reserved: one row changed or nothing else is done (a parallel worker already cut it).
+            var cut = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Attempt == p.Attempt && r.Status == RefundStatus.Reserved)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.AmountCents, usable).SetProperty(r => r.ShippingCents, 0L).SetProperty(r => r.TaxCents, newTax)
+                    .SetProperty(r => r.ShippingTaxCents, 0L).SetProperty(r => r.PartsJson, (string?)null).SetProperty(r => r.Attempt, p.Attempt + 1).SetProperty(r => r.UpdatedAt, now), ct);
+            if (cut != 1) { await tx.RollbackAsync(CancellationToken.None); return OutboxResult.Delivered(); }
             await RefundService.ReleaseCountersAsync(db, refund, ct);
-            await db.OrderRefunds.Where(r => r.Id == refund.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.AmountCents, usable).SetProperty(r => r.ShippingCents, 0L).SetProperty(r => r.TaxCents, newTax)
-                .SetProperty(r => r.ShippingTaxCents, 0L).SetProperty(r => r.PartsJson, (string?)null).SetProperty(r => r.Attempt, p.Attempt + 1).SetProperty(r => r.UpdatedAt, now), ct);
             await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + usable), ct);
             if (refund.GroupId is { } g) await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents + usable).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents + newTax), ct);
             outbox.Enqueue(RefundService.StripeRefundType, new RefundService.RefundPayload(refund.Key, p.Attempt + 1), $"refund:{refund.Key}:{p.Attempt + 1}");

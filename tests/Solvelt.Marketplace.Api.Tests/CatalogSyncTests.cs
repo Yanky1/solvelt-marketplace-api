@@ -50,6 +50,20 @@ public class CatalogSyncTests
     }
 
     [Fact]
+    public async Task L5_a_listing_currency_is_stored_as_upper_case_iso_whatever_the_feed_sends()
+    {
+        using var f = new TestFactory();
+        var id = ListingId("challah-classic");
+        Fixture(f).Upsert(id, l => l with { Currency = "usd" });
+        await Sync(f);
+        Assert.Equal("USD", Row(f, id).Currency);
+        Fixture(f).Upsert(id, l => l with { Currency = "U5D" });                                   // not letters: the snapshot is skipped, the stored currency stays
+        var r = await Sync(f);
+        Assert.Equal(1, r.Skipped);
+        Assert.Equal("USD", Row(f, id).Currency);
+    }
+
+    [Fact]
     public async Task A_changed_listing_replaces_its_variants_attributes_and_faqs_and_recomputes_prices()
     {
         using var f = new TestFactory();

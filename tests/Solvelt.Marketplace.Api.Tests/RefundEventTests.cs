@@ -1013,4 +1013,90 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal("rejected", (await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Reason == "order_failed"))).Status);
         Assert.Equal(0, (await Order(number)).RefundedCents);                                // given back: a person can reserve it again
     }
+
+    // ---- independent review of 341c655..f890812 (M1, M2, L3, L4; decision M3-36) ----
+
+    [Fact]
+    public async Task M1_a_slow_worker_overtaken_by_a_parallel_one_does_not_cut_or_release_the_refund_a_second_time()
+    {
+        var (o, g, line) = await Three();
+        await Stripe.RefundAsync(o.PaymentIntentId!, 6000, "dashboard", new Dictionary<string, string>(), default);
+        Assert.Equal("applied", await RefundLines(o, g, "rf-race", line, 2, 9174));
+        // worker 1 is refused by Stripe; before it takes the order lock, worker 2 (the redelivery after a lease expiry) does the whole refusal and cut
+        Stripe.OnRefusal = () => Assert.Equal(OutboxOutcome.Delivered, RunRefundHandler("portal:rf-race", 0).GetAwaiter().GetResult().Outcome);
+        Assert.Equal(OutboxOutcome.Delivered, (await RunRefundHandler("portal:rf-race", 0)).Outcome);
+        var cut = await Refund("portal:rf-race");
+        Assert.Equal((8262L, 1, "reserved"), (cut.AmountCents, cut.Attempt, cut.Status));
+        var after = await Order(o.Number);
+        Assert.Equal(6000L + 8262, after.RefundedCents);                                     // the dashboard money and the cut refund, each once
+        Assert.Equal(8262L, after.Groups.Single().RefundedCents);
+        Assert.Equal(0, after.Lines.Single().RefundedQuantity);                              // the cut refund is a plain amount: its units were given back once
+        Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.DedupeKey == "refund:portal:rf-race:1")));
+    }
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("canceled")]
+    public async Task M2_a_refund_Stripe_lists_as_failed_or_canceled_is_not_money_and_is_given_back(string listedAs)
+    {
+        var (o, g, line) = await Three();
+        Stripe.TimeoutAfterExecuteNext = true;
+        Assert.Equal("applied", await RefundLines(o, g, "rf-A", line, 1, 4587));
+        await Drain();
+        Assert.Equal("reserved", (await Refund("portal:rf-A")).Status);
+        Stripe.SetListedStatus("portal:rf-A", listedAs);                                     // Stripe's list shows it as failed or canceled
+        Stripe.RejectRefundWith = "charge_disputed";                                         // and the retry is refused
+        Assert.Equal(OutboxOutcome.Dead, (await RunRefundHandler("portal:rf-A", 0)).Outcome);   // dead-lettered for a person, with the counters given back
+        Assert.Equal("rejected", (await Refund("portal:rf-A")).Status);                      // it was NOT finished as if the money had left
+        var after = await Order(o.Number);
+        Assert.Equal((0L, 0L, 0), (after.RefundedCents, after.Groups.Single().RefundedCents, after.Lines.Single().RefundedQuantity));
+        Assert.Empty(await Sent("refund.processed"));
+        Assert.Equal(0, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external")));
+    }
+
+    [Fact]
+    public async Task M2_a_refund_Stripe_lists_as_pending_is_waited_for_not_finished_and_not_released()
+    {
+        var (o, g, line) = await Three();
+        Stripe.TimeoutAfterExecuteNext = true;
+        Assert.Equal("applied", await RefundLines(o, g, "rf-A", line, 1, 4587));
+        await Drain();
+        Stripe.SetListedStatus("portal:rf-A", "pending");
+        Stripe.RejectRefundWith = "charge_disputed";
+        var r = await RunRefundHandler("portal:rf-A", 0);
+        Assert.Equal(OutboxOutcome.Retry, r.Outcome);
+        Assert.Equal("reserved", (await Refund("portal:rf-A")).Status);
+        var after = await Order(o.Number);
+        Assert.Equal((4587L, 1), (after.RefundedCents, after.Lines.Single().RefundedQuantity));   // still reserved
+        Assert.Empty(await Sent("refund.processed"));
+    }
+
+    [Fact]
+    public async Task M2_a_refund_that_failed_later_is_found_by_its_refund_key_when_its_id_was_never_stored()
+    {
+        var (o, g, line) = await Three();
+        Stripe.TimeoutAfterExecuteNext = true;                                               // Stripe made the refund, we never saw its id
+        Assert.Equal("applied", await RefundLines(o, g, "rf-A", line, 1, 4587));
+        await Drain();
+        var row = await Refund("portal:rf-A");
+        Assert.Equal(("reserved", null), (row.Status, row.StripeRefundId));
+        var listed = (await Stripe.ListRefundsAsync(o.PaymentIntentId!, default)).Single();
+        var evt = "{\"id\":\"evt_ru_m2\",\"type\":\"charge.refund.updated\",\"data\":{\"object\":{\"id\":\"" + listed.Id + "\",\"object\":\"refund\",\"status\":\"failed\",\"amount\":4587,\"metadata\":{\"refund_key\":\"portal:rf-A\"}}}}";
+        Assert.True((await PostStripe(evt)).IsSuccessStatusCode);
+        Assert.Equal("failed", (await Refund("portal:rf-A")).Status);
+        var after = await Order(o.Number);
+        Assert.Equal((0L, 0), (after.RefundedCents, after.Lines.Single().RefundedQuantity));      // its counters are back
+    }
+
+    [Fact]
+    public async Task L4_only_idempotency_key_in_use_is_waited_for_any_other_idempotency_error_dies_visibly_and_releases_nothing()
+    {
+        var (o, g, line) = await Three();
+        Assert.Equal("applied", await RefundLines(o, g, "rf-idem", line, 1, 4587));
+        Stripe.RejectRefundWith = "idempotency_error";
+        var r = await RunRefundHandler("portal:rf-idem", 0);
+        Assert.Equal(OutboxOutcome.Dead, r.Outcome);
+        Assert.Equal("reserved", (await Refund("portal:rf-idem")).Status);                  // nothing was given back: money may have moved
+        Assert.Equal(4587L, (await Order(o.Number)).RefundedCents);
+    }
 }

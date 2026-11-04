@@ -155,6 +155,33 @@ public sealed class PendingHardeningTests : OrderFlowBase
         Assert.DoesNotContain("automatic_payment_methods", h.Body);
     }
 
+    [Fact]
+    public async Task L3_listing_refunds_follows_starting_after_while_has_more()
+    {
+        var urls = new List<string>();
+        var h = new PagedRefundsHandler(urls);
+        var provider = new StripeHttpProvider(new HttpClient(h), Microsoft.Extensions.Options.Options.Create(new StripeOptions { SecretKey = "sk_test_abc", BaseUrl = "https://stripe.test/" }));
+        var all = await provider.ListRefundsAsync("pi_1", default);
+        Assert.Equal(["re_1", "re_2", "re_3"], all.Select(r => r.Id));
+        Assert.Equal("portal:two", all.Single(r => r.Id == "re_2").RefundKey);
+        Assert.Equal(2, urls.Count);
+        Assert.DoesNotContain("starting_after", urls[0]);
+        Assert.Contains("starting_after=re_2", urls[1]);                  // the next page starts after the last refund of the first
+    }
+
+    private sealed class PagedRefundsHandler(List<string> urls) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken ct)
+        {
+            urls.Add(r.RequestUri!.PathAndQuery);
+            var first = !r.RequestUri.Query.Contains("starting_after");
+            var body = first
+                ? "{\"has_more\":true,\"data\":[{\"id\":\"re_1\",\"amount\":100,\"status\":\"succeeded\"},{\"id\":\"re_2\",\"amount\":200,\"status\":\"succeeded\",\"metadata\":{\"refund_key\":\"portal:two\"}}]}"
+                : "{\"has_more\":false,\"data\":[{\"id\":\"re_3\",\"amount\":300,\"status\":\"pending\"}]}";
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+        }
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         public string Body { get; private set; } = "";
