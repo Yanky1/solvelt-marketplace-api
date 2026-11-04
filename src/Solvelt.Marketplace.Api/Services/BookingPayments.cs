@@ -335,7 +335,7 @@ public sealed class BookingStripeRefundHandler(MarketplaceDb db, IPaymentProvide
             if (changed == 1)
             {
                 if (refund.ReportToPortal)
-                    outbox.EnqueuePaymentEvent($"refund-processed:{refund.Key}", PaymentEventTypes.RefundProcessed, new RefundProcessedData(result.Id, null, null, mid, refund.AmountCents, null, pay.Currency, refund.Reason));
+                    outbox.EnqueuePaymentEvent($"refund-processed:{refund.Key}", PaymentEventTypes.RefundProcessed, new RefundProcessedData(result.Id, null, null, mid, refund.AmountCents, null, pay.Currency.ToUpperInvariant(), refund.Reason));
                 await db.SaveChangesAsync(ct);
             }
             await tx.CommitAsync(ct);
