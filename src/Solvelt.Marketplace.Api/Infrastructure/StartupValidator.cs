@@ -9,6 +9,7 @@ public static class DevDefaults
     public const string PortalInboundSecret = "dev-only-portal-inbound-secret-not-for-production";
     public const string PortalWebhookSecret = "dev-only-portal-webhook-secret-not-for-production";
     public const string WebForwardingKey = "dev-only-web-forwarding-key-not-for-production";
+    public const string AdminApiKey = "dev-only-admin-api-key-not-for-production";
     public const string RelayDomain = "relay.solvelt.test";
     public const string SqliteConnection = "Data Source=marketplace-dev.db";
 }
@@ -28,11 +29,13 @@ public static class StartupValidator
             ("Portal:InboundSecret", "Portal__InboundSecret", config["Portal:InboundSecret"]),
             ("Portal:WebhookSecret", "Portal__WebhookSecret", config["Portal:WebhookSecret"]),
             ("Web:ForwardingKey", "Web__ForwardingKey", config["Web:ForwardingKey"]),
+            ("Admin:ApiKey", "Admin__ApiKey", config["Admin:ApiKey"]),
         };
-        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey };
+        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey };
         foreach (var (name, envName, value) in keys)
         {
-            if (string.IsNullOrWhiteSpace(value)) { problems.Add($"{name} (env {envName}) is required."); continue; }
+            // The admin key is optional: unset disables /api/admin/*. When set it is held to the same rules as every other key.
+            if (string.IsNullOrWhiteSpace(value)) { if (name != "Admin:ApiKey") problems.Add($"{name} (env {envName}) is required."); continue; }
             if (value.Length < 32) problems.Add($"{name} must be at least 32 characters.");
             // Any dev default in any slot is rejected, so swapped defaults cannot pass.
             if (devDefaults.Contains(value)) problems.Add($"{name}: Development default secrets must not be used outside Development/Testing.");

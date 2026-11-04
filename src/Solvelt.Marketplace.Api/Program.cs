@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Infrastructure;
+using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
 
@@ -25,6 +26,8 @@ var devLike = StartupValidator.IsDevLike(builder.Environment);
 builder.Services.Configure<PortalOptions>(o => OptionsSetup.Portal(o, builder.Configuration, devLike));
 builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, builder.Configuration, devLike));
 builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
+builder.Services.Configure<AdminOptions>(o => OptionsSetup.Admin(o, builder.Configuration, devLike));
+builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
 builder.Services.AddSingleton(TimeProvider.System);
@@ -56,6 +59,15 @@ builder.Services.AddScoped<ProjectionStore>();
 builder.Services.AddScoped<PortalEventProcessor>();
 builder.Services.AddScoped<PortalEventMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<PortalEventWorker>();
+builder.Services.AddScoped<OutboxWriter>();
+builder.Services.AddScoped<OutboxDispatcher>();
+builder.Services.AddScoped<OutboxMaintenance>();
+builder.Services.AddScoped<OutboxHandlerRegistry>();
+builder.Services.AddScoped<IOutboxHandler, EmailOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, PaymentEventOutboxHandler>();
+if (devLike) builder.Services.AddSingleton<IEmailSender, DevEmailSink>();
+else builder.Services.AddSingleton<IEmailSender, UnconfiguredEmailSender>();
+if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<OutboxWorker>();
 builder.Services.AddSingleton(sp => new AttemptLimiter(sp.GetRequiredService<TimeProvider>()));
 builder.Services.AddMarketplaceRateLimiting();
 builder.Services.AddDbContext<MarketplaceDb>(o =>
@@ -86,6 +98,7 @@ app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateL
 
 app.MapPortalWebhooks();
 app.MapCatalog();
+app.MapOutboxAdmin();
 
 app.Run();
 

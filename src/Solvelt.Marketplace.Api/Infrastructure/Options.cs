@@ -68,6 +68,12 @@ public static class OptionsSetup
         if (devLike) o.RelayDomain ??= DevDefaults.RelayDomain;
     }
 
+    public static void Admin(AdminOptions o, IConfiguration config, bool devLike)
+    {
+        config.GetSection("Admin").Bind(o);
+        if (devLike) o.ApiKey ??= DevDefaults.AdminApiKey;
+    }
+
     public static void Web(WebOptions o, IConfiguration config, bool devLike)
     {
         config.GetSection("Web").Bind(o);
@@ -83,4 +89,28 @@ public sealed class CatalogOptions
     public int PageSize { get; set; } = 100;
     public int MaxPagesPerRun { get; set; } = 50;
     public int MaxPendingFetchesPerRun { get; set; } = 100;
+}
+
+public sealed class OutboxOptions
+{
+    /// <summary>Failures before a message is dead-lettered (same as the portal's own outbox).</summary>
+    public int MaxAttempts { get; set; } = 8;
+    /// <summary>Backoff after failure n is <c>BackoffSeconds x 2^(n-1)</c>, capped at <see cref="MaxBackoffSeconds"/>.</summary>
+    public int BackoffSeconds { get; set; } = 30;
+    public int MaxBackoffSeconds { get; set; } = 3600;
+    /// <summary>How long a dispatcher owns a claimed message; must exceed the longest handler (a portal call is bounded by its own total deadline).</summary>
+    public int LeaseSeconds { get; set; } = 120;
+    public int BatchSize { get; set; } = 50;
+    public int PollSeconds { get; set; } = 5;
+    /// <summary>Delivered messages lose their payload after this many days (it may hold an address or a secret link); dead ones after <see cref="DeadPayloadRetentionDays"/>.</summary>
+    public int DeliveredPayloadRetentionDays { get; set; } = 1;
+    public int DeadPayloadRetentionDays { get; set; } = 30;
+    /// <summary>Rows are deleted after this many days (the dedupe key stops protecting then).</summary>
+    public int RowRetentionDays { get; set; } = 90;
+}
+
+public sealed class AdminOptions
+{
+    /// <summary>Key for the operations endpoints (<c>/api/admin/*</c>). Its own key. Unset means the endpoints answer 404 (disabled).</summary>
+    public string? ApiKey { get; set; }
 }

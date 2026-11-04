@@ -18,6 +18,7 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<CatalogFaq> CatalogFaqs => Set<CatalogFaq>();
     public DbSet<CatalogSyncState> CatalogSyncStates => Set<CatalogSyncState>();
     public DbSet<CatalogSearchRow> CatalogSearch => Set<CatalogSearchRow>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
