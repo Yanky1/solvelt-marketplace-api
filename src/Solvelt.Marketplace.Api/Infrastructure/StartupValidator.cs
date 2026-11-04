@@ -14,6 +14,7 @@ public static class DevDefaults
     public const string EmailLinkKey = "dev-only-email-link-key-not-for-production";
     public const string GuestLinkKey = "dev-only-guest-link-key-not-for-production";
     public const string AdminApiKey = "dev-only-admin-api-key-not-for-production";
+    public const string UnsubscribeKey = "dev-only-unsubscribe-key-not-for-production";
     public const string StripeWebhookSecret = "whsec_dev_only_not_for_production_0000000";
     public const string PublicBaseUrl = "http://localhost:3000";
     public const string RelayDomain = "relay.solvelt.test";
@@ -57,9 +58,10 @@ public static class StartupValidator
             ("Admin:ApiKey", "Admin__ApiKey", config["Admin:ApiKey"]),
             ("Auth:EmailLinkKey", "Auth__EmailLinkKey", config["Auth:EmailLinkKey"]),
             ("Auth:GuestLinkKey", "Auth__GuestLinkKey", config["Auth:GuestLinkKey"]),
+            ("Notifications:UnsubscribeKey", "Notifications__UnsubscribeKey", config["Notifications:UnsubscribeKey"]),
             ("Stripe:WebhookSecret", "Stripe__WebhookSecret", config["Stripe:WebhookSecret"]),
         };
-        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey, DevDefaults.EmailLinkKey, DevDefaults.GuestLinkKey, DevDefaults.StripeWebhookSecret };
+        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey, DevDefaults.EmailLinkKey, DevDefaults.GuestLinkKey, DevDefaults.UnsubscribeKey, DevDefaults.StripeWebhookSecret };
         foreach (var (name, envName, value) in keys)
         {
             // The admin key is optional: unset disables /api/admin/*. The Stripe webhook secret is required only once a Stripe key is set (checked below).
