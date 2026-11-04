@@ -285,6 +285,23 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         Assert.Equal("Asked for payment off the platform", await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.ModerationNote).SingleAsync()));
     }
 
+    [Fact]
+    public async Task N3_The_staffs_reason_shown_for_a_hidden_message_is_cleared_90_days_after_the_decision()
+    {
+        var (o, g) = await Placed();
+        var (_, msg, _, pid) = await Reported(o, g);
+        Assert.Equal("applied", await Decided("message", "MR-" + pid, pid, "removed", "Asked for payment off the platform"));
+        async Task<FulfilmentMaintenance.Result> Run() { using var s = _k.F.Services.CreateScope(); return await s.ServiceProvider.GetRequiredService<FulfilmentMaintenance>().RunAsync(); }
+        _k.F.Clock.Advance(TimeSpan.FromDays(89));
+        Assert.Equal(0, (await Run()).ModerationNotesCleared);
+        Assert.NotNull(await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.ModerationNote).SingleAsync()));
+        _k.F.Clock.Advance(TimeSpan.FromDays(2));
+        Assert.Equal(1, (await Run()).ModerationNotesCleared);
+        var row = await _k.Db(db => db.ThreadMessages.AsNoTracking().SingleAsync(m => m.Id == msg));
+        Assert.Null(row.ModerationNote);
+        Assert.NotNull(row.HiddenAt);                                                                      // the message stays hidden
+    }
+
     // ------------------------------------------------------------------ portal N3: ids are unique per seller only
 
     [Fact]
