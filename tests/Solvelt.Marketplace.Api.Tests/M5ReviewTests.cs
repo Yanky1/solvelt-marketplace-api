@@ -108,20 +108,24 @@ public sealed class M5ReviewTests : OrderFlowBase
     // ---------------------------------------------------------------- H2
 
     [Fact]
-    public async Task H2_A_malformed_number_in_a_refund_event_never_blocks_the_refund()
+    public async Task H2_A_malformed_number_in_an_event_never_fails_the_webhook_and_never_blocks_a_refund()
     {
         var (o, g) = await Placed();
-        await Ship(o, g, 2);
         var lid = o.Lines.Single().MarketplaceLineId;
-        Assert.Equal("applied", await Evt("refund.issued", o, g, new { refundId = "rf-bad", amountCents = 500, shippingCents = 0, lines = new object[] { new { marketplaceLineId = lid, quantity = "1" }, new { marketplaceLineId = lid, quantity = 1.5 }, new { marketplaceLineId = lid, quantity = 1 } } }));
-        await Drain();
-        Assert.Equal(1, await _k.Db(db => db.OrderRefunds.CountAsync()));                          // the money was reserved
-        Assert.Equal(1, (await Counters(o)).RefundedQty);                                          // the malformed lines were skipped, the good one counted: the projection itself did not fail
-        Assert.DoesNotContain(_k.F.Logs.Lines, l => l.Contains("projection of a"));
-        Assert.Single(Stripe.Refunds);
-        Assert.Equal("applied", await Evt("order.cancelled", o, g, new { refundDueCents = 100, partial = true, lines = new object[] { new { marketplaceLineId = lid, quantity = "x" } } }));
-        Assert.Equal("applied", await Evt("order.delivered", o, g, new { deliveredAt = 5, by = 7 }));   // numbers where strings belong
+        // events only the projection reads: numbers where strings belong and strings where numbers belong must be skipped, not thrown (a throw is a 500 and the portal retries for ever)
+        Assert.Equal("applied", await Evt("order.shipped", o, g, new { shipmentId = "sh-1", carrier = "USPS", lines = new object[] { new { marketplaceLineId = lid, quantity = "2" }, new { marketplaceLineId = lid, quantity = 1.5 }, new { marketplaceLineId = lid, quantity = 2 } } }));
+        Assert.Equal(2, (await Counters(o)).ShippedQty);                                            // the good line counted, the malformed ones skipped
         Assert.Equal("applied", await Evt("order.tracking_updated", o, g, new { shipmentId = "sh-1", status = "out_for_delivery", position = new { lat = "40.1", lng = "x" }, eta = 7 }));
+        Assert.Equal("applied", await Evt("order.delivered", o, g, new { deliveredAt = 5, by = 7 }));
+        Assert.Equal("applied", await Evt("delivery.attempt_failed", o, g, new { shipmentId = "sh-1", attempt = "two", reason = 3 }));
+        Assert.Equal("applied", await Evt("shipment.delivered", o, g, new { shipmentId = "sh-1", proof = new { photoUrls = new[] { "/api/public/delivery-proof/p?x=1" }, expiresInMinutes = "soon" } }));
+        // and a valid refund is reserved as always
+        Assert.Equal("applied", await Evt("refund.issued", o, g, new { refundId = "rf-ok", amountCents = 500, shippingCents = 0, full = false, lines = new[] { new { marketplaceLineId = lid, quantity = 1, amountCents = 500 } } }));
+        await Drain();
+        Assert.Equal(1, await _k.Db(db => db.OrderRefunds.CountAsync()));
+        Assert.Single(Stripe.Refunds);
+        Assert.Equal(1, (await Counters(o)).RefundedQty);
+        Assert.DoesNotContain(_k.F.Logs.Lines, l => l.Contains("projection of a"));
     }
 
     [Fact]
