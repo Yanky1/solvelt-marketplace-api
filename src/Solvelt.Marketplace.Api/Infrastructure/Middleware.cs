@@ -75,10 +75,12 @@ public static class SafeLogging
 {
     /// <summary>
     /// Categories whose loggers are silent, whatever any filter says: hosting diagnostics (request start/finish with the full URL, and the
-    /// <c>RequestPath</c> logging scope attached to every line of a request) and routing (DfaMatcher logs the request path at Debug).
-    /// Matched as case-insensitive prefixes, like .NET matches categories.
+    /// <c>RequestPath</c> logging scope attached to every line of a request), routing (DfaMatcher logs the request path at Debug), and EF Core's own
+    /// error logs (<c>Update</c>: "An exception occurred in SaveChanges"; <c>Database.Command</c>: "Failed executing DbCommand"), which carry the database
+    /// exception whose message can quote row values (a PostgreSQL unique violation names the key). Our code logs the exception type and an id instead
+    /// (M1-17, M2-12). Matched as case-insensitive prefixes, like .NET matches categories.
     /// </summary>
-    internal static readonly string[] SilentPrefixes = ["Microsoft.AspNetCore.Hosting.Diagnostics", "Microsoft.AspNetCore.Routing"];
+    internal static readonly string[] SilentPrefixes = ["Microsoft.AspNetCore.Hosting.Diagnostics", "Microsoft.AspNetCore.Routing", "Microsoft.EntityFrameworkCore.Update", "Microsoft.EntityFrameworkCore.Database.Command"];
 
     /// <summary>Categories that may only log warnings and above: the rest of ASP.NET Core, EF Core, and outgoing HttpClient requests (they log URLs below Warning).</summary>
     internal static readonly string[] WarningOnlyPrefixes = ["Microsoft.AspNetCore", "Microsoft.EntityFrameworkCore", "System.Net.Http.HttpClient"];

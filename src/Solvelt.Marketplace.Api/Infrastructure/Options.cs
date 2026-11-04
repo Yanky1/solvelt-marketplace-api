@@ -101,6 +101,8 @@ public sealed class CatalogOptions
     public int PageSize { get; set; } = 100;
     public int MaxPagesPerRun { get; set; } = 50;
     public int MaxPendingFetchesPerRun { get; set; } = 100;
+    /// <summary>A seller (display name) is deleted this many days after it last had a visible listing.</summary>
+    public int SellerRetentionDays { get; set; } = 90;
 }
 
 public sealed class OutboxOptions

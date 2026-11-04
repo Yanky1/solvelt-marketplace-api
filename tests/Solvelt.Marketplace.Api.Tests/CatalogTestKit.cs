@@ -31,8 +31,9 @@ public static class CatalogKit
         return await scope.ServiceProvider.GetRequiredService<CatalogSyncService>().RunAsync();
     }
 
-    public static CatalogSyncService Service(IServiceScope scope, ICatalogSource source, TimeProvider clock, int pageSize = 100)
-        => new(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), source, clock, Options.Create(new CatalogOptions { PageSize = pageSize }), NullLogger<CatalogSyncService>.Instance);
+    public static CatalogSyncService Service(IServiceScope scope, ICatalogSource source, TimeProvider clock, int pageSize = 100, int maxPendingFetches = 100, int sellerRetentionDays = 90)
+        => new(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), source, clock,
+            Options.Create(new CatalogOptions { PageSize = pageSize, MaxPendingFetchesPerRun = maxPendingFetches, SellerRetentionDays = sellerRetentionDays }), NullLogger<CatalogSyncService>.Instance);
 
     public static async Task<JsonElement> Json(HttpClient c, string url, HttpStatusCode expected = HttpStatusCode.OK)
     {
@@ -45,7 +46,7 @@ public static class CatalogKit
     public static async Task<(HttpStatusCode Status, string Json)> Event(TestFactory f, HttpClient c, string type, Guid listingId, long version, string? id = null)
         => await Post(c, Request(f, Body(id ?? $"evt-{type}-{listingId:N}-{version}-{Guid.NewGuid():N}"[..60], type, T0, new { listingId, version })));
 
-    public static CatalogListing Row(TestFactory f, Guid id) => WithDb(f, db => db.CatalogListings.AsNoTracking().Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).Single(l => l.Id == id));
+    public static CatalogListing Row(TestFactory f, Guid id) => WithDb(f, db => db.CatalogListings.AsNoTracking().Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).AsSplitQuery().Single(l => l.Id == id));
 
     public static List<string> Slugs(JsonElement page) => page.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("slug").GetString()!).ToList();
 }
@@ -55,6 +56,8 @@ public sealed class ProbeSource(ICatalogSource inner) : ICatalogSource
 {
     public int ListingCalls, GetListingCalls, ReferenceCalls;
     public Func<int, bool>? FailListingCall;
+    /// <summary>Runs on every feed call (tests move the clock here to make a page "take" time).</summary>
+    public Action<int>? OnListingCall;
     public bool FailReferenceData;
     public TaskCompletionSource? Gate;
     public TaskCompletionSource Entered { get; } = new();
@@ -64,6 +67,7 @@ public sealed class ProbeSource(ICatalogSource inner) : ICatalogSource
         var n = Interlocked.Increment(ref ListingCalls);
         Entered.TrySetResult();
         if (Gate is not null) await Gate.Task;
+        OnListingCall?.Invoke(n);
         if (FailListingCall?.Invoke(n) == true) throw new InvalidOperationException("simulated portal failure");
         return await inner.GetListingsAsync(since, limit, ct);
     }
