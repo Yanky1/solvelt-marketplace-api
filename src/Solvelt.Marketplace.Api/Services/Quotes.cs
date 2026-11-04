@@ -55,7 +55,7 @@ public sealed class BuyerQuoteService(MarketplaceDb db, ISignedPortalClient port
         var errors = Validate(input, now);
         if (errors.Count > 0) return new QuoteResult(QuoteOutcome.Invalid, Errors: errors);
         var r = input!;
-        var listing = await db.CatalogListings.AsNoTracking().Where(l => l.Id == r.ListingId && l.Type == ListingTypes.Service && l.Visible).Select(l => new { l.Id, l.Currency }).FirstOrDefaultAsync(ct);
+        var listing = await ServiceListings.Visible(db).Where(l => l.Id == r.ListingId).Select(l => new { l.Id, l.Currency }).FirstOrDefaultAsync(ct);
         if (listing is null) return new QuoteResult(QuoteOutcome.NotFound);
         var hash = HashOf(r);
         var row = await db.Quotes.FirstOrDefaultAsync(q => q.AccountId == buyer.AccountId && q.IdempotencyKey == key, ct);
