@@ -295,12 +295,15 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         // our cancellation refund of 18000 is reserved but has not reached Stripe yet
         await PortalEvent("booking.cancelled", Now.AddMinutes(1), b, new { cancelledBy = "buyer", cancellationFeeCents = 6000, refundDueCents = 18000 });
         Assert.Equal(18000, (await Pay(b.Id)).RefundedCents);
-        // somebody refunds 5000 in the Stripe dashboard: Stripe's cumulative amount_refunded is 5000
-        Assert.True((await StripeObject("charge.refunded", new { payment_intent = intent.Id, amount_refunded = 5000 })).IsSuccessStatusCode);
+        // our reserved refund is on its way to Stripe: the reconciliation must wait for it (a 5xx so Stripe retries), not guess
+        Stripe.RefundInDashboard(intent.Id, 5000);                                  // somebody refunds 5000 in the Stripe dashboard
+        Assert.False((await StripeObject("charge.refunded", new { payment_intent = intent.Id, amount_refunded = 5000 })).IsSuccessStatusCode);
+        await Drain();                                                              // ours reaches Stripe: 18000 + 5000 = 23000 refunded there
+        Assert.True((await StripeObject("charge.refunded", new { payment_intent = intent.Id, amount_refunded = 23000 })).IsSuccessStatusCode);
         var pay = await Pay(b.Id);
         Assert.Equal(5000, pay.ExternalRefundedCents);
         Assert.Equal(23000, pay.RefundedCents);
-        Assert.True((await StripeObject("charge.refunded", new { payment_intent = intent.Id, amount_refunded = 5000 })).IsSuccessStatusCode);   // the same fact again
+        Assert.True((await StripeObject("charge.refunded", new { payment_intent = intent.Id, amount_refunded = 23000 })).IsSuccessStatusCode);   // the same fact again
         Assert.Equal(5000, (await Pay(b.Id)).ExternalRefundedCents);
         // only 1000 of the 24000 is left to refund
         using var scope = _k.F.Services.CreateScope();

@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Solvelt.Marketplace.Api.Data;
+using Solvelt.Marketplace.Api.Notifications;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal;
@@ -18,7 +19,7 @@ namespace Solvelt.Marketplace.Api.Services;
 /// group, so a late one is not lost behind a newer status event, yet none of them can reopen a finished booking.
 /// What this handler does NOT do: money (refunds and fees are decided by the payment slice from the values stored here) and messages (<c>message.sent</c> is M5's).
 /// </summary>
-public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace, ILogger<BookingEventHandler> log) : IProjectionHandler
+public sealed class BookingEventHandler(ILogger<BookingEventHandler> log) : IProjectionHandler
 {
     public const string Requested = "booking.requested", Confirmed = "booking.confirmed", Declined = "booking.declined", TimeProposed = "booking.time_proposed",
         Rescheduled = "booking.rescheduled", RescheduleRequested = "booking.reschedule_requested", RescheduleDecided = "booking.reschedule_decided", Cancelled = "booking.cancelled",
@@ -149,20 +150,11 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
                 await BookingMoney.QueueCancelPendingIntentsAsync(c.Db, new OutboxWriter(c.Db, c.Time), b.Id, PaymentKinds.ExtraCharge, b.AdditionalChargeCents, ct);
                 break;
             case Reminder:
-            {
-                // The buyer's reminder is OUR job (SERVICES.md §11). Only for a live booking whose time still is the one the reminder was scheduled for (a moved or cancelled booking
-                // must not remind about the old time); one mail per event id (the receiver already refuses a repeated event).
+                // The buyer's reminder is OUR job (SERVICES.md §11), sent through M5's preference-aware notifier. Only for a live booking whose start still equals the reminded time (a moved or
+                // cancelled booking must not remind about the old time); the notifier dedupes on the event id.
                 if (b.Status is not (BookingStatus.Confirmed or BookingStatus.Rescheduled) || Time(data, "startAt") is not { } at || b.StartAt is not { } now0 || Math.Abs((at - now0).TotalMinutes) > 1)
                     return HandlerOutcome.Skipped("stale or not confirmed");
-                var email = await c.Db.BuyerAccounts.AsNoTracking().Where(a => a.Id == b.AccountId && a.DeletedAt == null).Select(a => a.Email).FirstOrDefaultAsync(ct);
-                if (email is null) return HandlerOutcome.Skipped("no recipient");
-                var title = await c.Db.CatalogListings.AsNoTracking().Where(l => l.Id == b.ListingId).Select(l => l.Title).FirstOrDefaultAsync(ct) ?? "your booking";
-                var baseUrl = (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
-                var when = Str(data, "kind") == "hour_before" ? "in about an hour" : "tomorrow";
-                new OutboxWriter(c.Db, c.Time).EnqueueEmail(new EmailMessage(email, "Reminder: your booking starts " + when,
-                    $"Hello,\n\nA reminder that \"{title}\" starts {when}: {at.UtcDateTime:yyyy-MM-dd HH:mm} UTC.\n\nSee the details, reschedule or cancel: {baseUrl}/account/bookings/{b.Id}\n"), "mail:reminder:" + c.Event.Id);
                 break;
-            }
             case ProviderChanged:
                 if (!await Step("provider")) return Done(false);
                 if (Guid.TryParse(Str(data, "providerId"), out var pid)) b.ProviderId = pid;
@@ -170,6 +162,7 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
             default:
                 return HandlerOutcome.Skipped("not a booking event we project");
         }
+        Notify(c, b, data);
         return HandlerOutcome.Applied();
     }
 
@@ -188,6 +181,30 @@ public sealed class BookingEventHandler(IOptions<MarketplaceOptions> marketplace
         var amount = Math.Min(wanted, pay.CapturedCents - pay.RefundedCents);
         if (amount <= 0) return;
         await new BookingRefundService(c.Db, new OutboxWriter(c.Db, c.Time), c.Time).ReserveAsync(pay.Id, amount, $"{reason}:{b.MarketplaceBookingId}", reason, true, ct);
+    }
+
+    /// <summary>
+    /// Tells the buyer through M5's notifier (in-app always, email per their preferences), inside this event's transaction and with the event id as the once-only key. Only what the buyer did not just do
+    /// themselves: their own cancel or reschedule is not news to them.
+    /// </summary>
+    private static void Notify(ProjectionContext c, Booking b, JsonElement data)
+    {
+        string? kind = c.Event.Type switch
+        {
+            Confirmed => NotificationKinds.BookingConfirmed,
+            Declined => NotificationKinds.BookingDeclined,
+            TimeProposed => NotificationKinds.BookingTimeProposed,
+            Rescheduled when !string.Equals(Str(data, "initiatedBy"), "buyer", StringComparison.OrdinalIgnoreCase) => NotificationKinds.BookingRescheduled,
+            Cancelled when string.Equals(Str(data, "cancelledBy"), "seller", StringComparison.OrdinalIgnoreCase) => NotificationKinds.BookingCancelled,
+            Completed => NotificationKinds.BookingCompleted,
+            Reminder => NotificationKinds.BookingReminder,
+            ExtraCharge => NotificationKinds.BookingExtraChargeRequested,
+            NoShow => NotificationKinds.BookingNoShow,
+            _ => null,
+        };
+        if (kind is null) return;
+        Notifications.Notifier.AddBooking(c.Db, new OutboxWriter(c.Db, c.Time), c.Time, b.AccountId, kind, c.Event.Id, b.Number ?? "", b.MarketplaceBookingId,
+            new { kind = Str(data, "kind"), startAt = b.StartAt, startsAt = b.StartAt });
     }
 
     /// <summary>The status an event moves a booking TO, or null for facts that do not change the status.</summary>
