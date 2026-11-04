@@ -174,24 +174,28 @@ public sealed class OutboxDispatcher(MarketplaceDb db, OutboxHandlerRegistry reg
     }
 }
 
-public sealed class OutboxWorker(IServiceScopeFactory scopes, IOptions<OutboxOptions> options, ILogger<OutboxWorker> log) : BackgroundService
+public sealed class OutboxWorker(IServiceScopeFactory scopes, IOptions<OutboxOptions> options, ILogger<OutboxWorker> log, TimeProvider time) : BackgroundService
 {
+    private readonly Solvelt.Marketplace.Api.Auth.AuthPurgeSchedule _authPurge = new(TimeSpan.FromMinutes(15));
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(1, options.Value.PollSeconds)));
         do
         {
-            try
-            {
-                using var scope = scopes.CreateScope();
-                var d = scope.ServiceProvider.GetRequiredService<OutboxDispatcher>();
-                while (await d.DispatchDueAsync(stoppingToken) >= Math.Max(1, options.Value.BatchSize)) { }   // keep draining while full batches come back
-                await scope.ServiceProvider.GetRequiredService<OutboxMaintenance>().PurgeAsync(stoppingToken);
-                await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Auth.AuthMaintenance>().PurgeAsync(stoppingToken);
-            }
+            try { await RunOnceAsync(stoppingToken); }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
             catch (Exception ex) { log.LogError("Outbox worker failed: {ExceptionType}", ex.GetType().FullName); }
         } while (await timer.WaitForNextTickAsync(stoppingToken));
+    }
+
+    /// <summary>One poll: deliver what is due, purge the outbox, and purge the auth tables when their turn has come (about every 15 minutes, L8).</summary>
+    public async Task RunOnceAsync(CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var d = scope.ServiceProvider.GetRequiredService<OutboxDispatcher>();
+        while (await d.DispatchDueAsync(ct) >= Math.Max(1, options.Value.BatchSize)) { }   // keep draining while full batches come back
+        await scope.ServiceProvider.GetRequiredService<OutboxMaintenance>().PurgeAsync(ct);
+        if (_authPurge.ShouldRun(time.GetUtcNow())) await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Auth.AuthMaintenance>().PurgeAsync(ct);
     }
 }
 

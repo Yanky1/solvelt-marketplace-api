@@ -32,6 +32,8 @@ public sealed class GuestLinks(IOptions<AuthOptions> options, TimeProvider time)
         if (parts.Length != 4 || parts[0] != Prefix || parts[1].Length != 32 || parts[3].Length != 43) return null;
         if (!Guid.TryParseExact(parts[1], "N", out var orderId)) return null;
         if (!long.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)) return null;
+        // Only the exact text Make produces: an upper-case id or a zero-padded expiry would be a second spelling of the same link (review of 44b5d27, L4).
+        if (parts[1] != orderId.ToString("N") || parts[2] != seconds.ToString(CultureInfo.InvariantCulture)) return null;
         var expected = Encoding.ASCII.GetBytes(Mac(orderId, seconds));
         var given = Encoding.ASCII.GetBytes(parts[3]);
         if (!CryptographicOperations.FixedTimeEquals(expected, given)) return null;
