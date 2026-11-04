@@ -27,6 +27,12 @@ if (problems.Count > 0)
     throw new InvalidOperationException("Invalid configuration:\n - " + string.Join("\n - ", problems));
 
 var devLike = StartupValidator.IsDevLike(builder.Environment);
+// Seller images are re-encoded with SkiaSharp (decision M5-22): without its native library every attachment would fail, so a production host that cannot decode a tiny embedded image does not start.
+if (!Solvelt.Marketplace.Api.Messaging.AttachmentSanitizer.SelfTest())
+{
+    if (!devLike) throw new InvalidOperationException("The image library (SkiaSharp native assets) cannot decode an embedded test image; seller attachments cannot be processed.");
+    Console.Error.WriteLine("WARNING: the image library (SkiaSharp native assets) is not working; seller image attachments will be rejected.");
+}
 builder.Services.Configure<PortalOptions>(o => OptionsSetup.Portal(o, builder.Configuration, devLike));
 builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, builder.Configuration, devLike));
 builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
