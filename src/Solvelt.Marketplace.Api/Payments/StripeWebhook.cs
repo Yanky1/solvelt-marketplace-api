@@ -91,6 +91,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
             "payment_intent.succeeded" => await SucceededAsync(evt, ct),
             "payment_intent.payment_failed" => await FailedAsync(evt, ct),
             "payment_intent.processing" => await ProcessingAsync(evt, ct),
+            "charge.refund.updated" or "refund.updated" => await RefundUpdatedAsync(evt, ct),
             "charge.refunded" => await ChargeRefundedAsync(evt, ct),
             "charge.dispute.created" or "charge.dispute.updated" or "charge.dispute.closed" or "charge.dispute.funds_withdrawn" or "charge.dispute.funds_reinstated" => await DisputeAsync(evt, ct),
             _ => StripeOutcome.Ignored,
@@ -211,7 +212,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         if (refunded <= current) return StripeOutcome.Ignored;   // ours (reserved before Stripe is called) or already recorded
         var delta = refunded.Value - current;
         var now = time.GetUtcNow().ToUniversalTime();
-        db.OrderRefunds.Add(new OrderRefund { Id = Guid.NewGuid(), Key = $"external:{order.Number}:{refunded}", OrderId = order.Id, AmountCents = delta, Reason = "external", Status = RefundStatus.Succeeded, CreatedAt = now, UpdatedAt = now });
+        db.OrderRefunds.Add(new OrderRefund { Id = Guid.NewGuid(), Key = $"external:{order.Number}:{evt.Id}", OrderId = order.Id, AmountCents = delta, Reason = "external", Status = RefundStatus.Succeeded, CreatedAt = now, UpdatedAt = now });
         await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, refunded.Value), ct);
         log.LogError("Order {Number} was refunded {Delta} cents outside this system (Stripe dashboard); it is recorded and needs a person to tell the seller", order.Number, delta);
         return StripeOutcome.Applied;
@@ -335,6 +336,26 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.PendingPayment).ExecuteUpdateAsync(s => s.SetProperty(o => o.FailureCode, code), ct);
         // a delayed payment that failed: the order is payable again
         await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.PaymentProcessing).ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.PendingPayment).SetProperty(o => o.FailureCode, code), ct);
+        return StripeOutcome.Applied;
+    }
+
+    /// <summary>
+    /// <c>charge.refund.updated</c>: a refund Stripe had accepted FAILED later (the card was closed, the bank returned it). A refund of OURS is marked <c>failed</c> and everything it took from the counters is
+    /// given back, so it can be sent again; the portal was already told it succeeded, so a log error asks a person to settle that (review R6). A refund we do not know (a dashboard one) cannot be matched to
+    /// an external row (the event names no cumulative figure): logged for a person; the next charge.refunded, which carries Stripe's cumulative figure, is the truth for the counters.
+    /// </summary>
+    private async Task<StripeOutcome> RefundUpdatedAsync(StripeEnvelope evt, CancellationToken ct)
+    {
+        var status = evt.Str("status");
+        var refundId = evt.Str("id");
+        if (refundId is null || status is not ("failed" or "canceled")) return StripeOutcome.Ignored;
+        var row = await db.OrderRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.StripeRefundId == refundId, ct);
+        if (row is null) { log.LogError("Stripe refund {RefundId} {Status}; it is not one of ours (a dashboard refund): a person should check the order's refund counters", refundId, status); return StripeOutcome.Unmatched; }
+        var now = time.GetUtcNow().ToUniversalTime();
+        var changed = await db.OrderRefunds.Where(r => r.Id == row.Id && r.Status == RefundStatus.Succeeded).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Failed).SetProperty(r => r.UpdatedAt, now), ct);
+        if (changed == 0) return StripeOutcome.Ignored;
+        await RefundService.ReleaseCountersAsync(db, row, ct);
+        log.LogError("Refund {Key} ({Amount} cents) of an order FAILED at Stripe after it was accepted; its counters were given back and the portal, which was told it succeeded, needs a person", row.Key, row.AmountCents);
         return StripeOutcome.Applied;
     }
 
