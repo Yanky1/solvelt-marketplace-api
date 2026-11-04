@@ -15,10 +15,12 @@ public static class ServicesModule
         services.Configure<BookingOptions>(configuration.GetSection("Bookings"));
         services.AddScoped<BookingService>();
         services.AddScoped<BookingMaintenance>();
+        services.AddScoped<BookingActions>();
         if (!env.IsEnvironment("Testing")) services.AddHostedService<BookingWorker>();
         services.AddSingleton<IProjectionHandler, BookingEventHandler>();
         services.AddScoped<BookingPaymentService>();
         services.AddScoped<BookingRefundService>();
+        services.AddScoped<ExtraChargeService>();
         services.AddScoped<BookingPaymentEvents>();
         services.AddScoped<IOutboxHandler, BookingConfirmHandler>();
         services.AddScoped<IOutboxHandler, BookingStripeRefundHandler>();

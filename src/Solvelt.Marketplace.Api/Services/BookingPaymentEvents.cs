@@ -43,10 +43,14 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, BookingRefundService 
         var now = time.GetUtcNow().ToUniversalTime();
         var mismatch = amount != pay.AmountCents || !string.Equals(evt.Str("currency"), pay.Currency, StringComparison.OrdinalIgnoreCase);
         // A booking that is already over (expired, declined, cancelled ...) cannot take the payment: it is refunded, never captured silently.
-        var closed = BookingStatus.IsTerminal(booking.Status);
-        if (mismatch || closed || pay.Kind != PaymentKinds.Booking)
+        var extra = pay.Kind == PaymentKinds.ExtraCharge;
+        // A booking that is already over (expired, declined, cancelled ...) cannot take the payment for it: refunded, never captured silently. An extra charge is paid AFTER the work, so
+        // the booking being Completed is normal for it; only the portal's cap matters (it refuses more than it asked for).
+        var closed = extra ? booking.Status is BookingStatus.CancelledByBuyer or BookingStatus.CancelledBySeller or BookingStatus.Declined or BookingStatus.Expired or BookingStatus.NoShow : BookingStatus.IsTerminal(booking.Status);
+        var overCap = extra && amount > booking.AdditionalChargeCents;
+        if (mismatch || closed || overCap || (pay.Kind != PaymentKinds.Booking && !extra))
         {
-            var code = mismatch ? "amount_mismatch" : closed ? "booking_closed" : "unsupported_kind";
+            var code = mismatch ? "amount_mismatch" : closed ? "booking_closed" : overCap ? "exceeds_request" : "unsupported_kind";
             var voided = await db.BookingPayments.Where(p => p.Id == pay.Id && p.Status == BookingPaymentStatus.Pending)
                 .ExecuteUpdateAsync(s => s.SetProperty(p => p.Status, BookingPaymentStatus.Void).SetProperty(p => p.CapturedCents, amount).SetProperty(p => p.CapturedAt, now).SetProperty(p => p.FailureCode, code).SetProperty(p => p.UpdatedAt, now), ct);
             if (voided == 0) return StripeOutcome.Ignored;
@@ -62,6 +66,14 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, BookingRefundService 
         var captured = await db.BookingPayments.Where(p => p.Id == pay.Id && p.Status == BookingPaymentStatus.Pending)
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.Status, BookingPaymentStatus.Captured).SetProperty(p => p.CapturedCents, amount).SetProperty(p => p.CapturedAt, now).SetProperty(p => p.UpdatedAt, now), ct);
         if (captured == 0) return StripeOutcome.Ignored;     // a repeat
+        if (extra)
+        {
+            // The sale is already known to the portal: report the extra charge (its own event id; the portal retries 404/409 until the booking and sale are there, and caps it at what it asked for).
+            await db.Bookings.Where(b => b.Id == booking.Id).ExecuteUpdateAsync(s => s.SetProperty(b => b.ExtraChargeState, ExtraChargeStates.Paid).SetProperty(b => b.UpdatedAt, now).SetProperty(b => b.Version, b => b.Version + 1), ct);
+            await db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.ReportedToPortal, true), ct);
+            outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.ExtraCharge, null, booking.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, amount, now));
+            return StripeOutcome.Applied;
+        }
         outbox.Enqueue(BookingConfirmHandler.Type, new BookingConfirmHandler.Payload(booking.Id, pay.Id), $"confirm:{booking.MarketplaceBookingId}");
         return StripeOutcome.Applied;
     }

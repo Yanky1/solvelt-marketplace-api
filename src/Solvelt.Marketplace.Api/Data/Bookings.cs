@@ -63,6 +63,11 @@ public sealed class Booking
     public long NoShowFeeCents { get; set; }
     public long AdditionalChargeCents { get; set; }
     public int RescheduleCount { get; set; }
+    // The policy snapshot as the portal sent it (null = the portal has not told us): used only to PREVIEW a fee; the fee itself is always the portal's.
+    public int? PolicyCancelFreeHours { get; set; }
+    public int? PolicyCancelFeePercent { get; set; }
+    public int? PolicyNoShowFeePercent { get; set; }
+    public int? PolicyMaxReschedules { get; set; }
     /// <summary>A seller moved the booking (<c>booking.rescheduled</c> with <c>requiresBuyerConsent</c>): the buyer must accept the new time or cancel without a fee.</summary>
     public bool RequiresBuyerConsent { get; set; }
     /// <summary>The time the buyer asked for while a request-mode service decides (<c>booking.reschedule_requested</c>), cleared by <c>reschedule_decided</c>.</summary>

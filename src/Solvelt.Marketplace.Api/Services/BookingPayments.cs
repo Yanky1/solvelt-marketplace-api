@@ -84,6 +84,68 @@ public sealed class BookingPaymentService(MarketplaceDb db, IPaymentProvider pay
     }
 }
 
+public static class ExtraChargeStates
+{
+    public const string Requested = "requested", Consented = "consented", Declined = "declined", Paid = "paid";
+}
+
+public enum ExtraChargeStatus { Ok, NotFound, NotRequested, AmountTooSmall, PaymentsUnavailable, PaymentRejected, AlreadyPaid }
+
+/// <summary>
+/// An additional charge (hourly work that ran over, SERVICES.md §4) is a REQUEST from the provider. Nothing is charged until the buyer accepts here (decision M4-06). The amount is the one the
+/// portal sent (<c>booking.additional_charge_requested</c>), never a client value, and it is the cap: the payment is one intent per request amount, and a payment that no longer fits under the
+/// portal's cap when it lands is refunded instead of reported (the portal would refuse it: <c>exceeds_booking</c>).
+/// </summary>
+public sealed class ExtraChargeService(MarketplaceDb db, IPaymentProvider payments, IOptions<StripeOptions> stripe, TimeProvider time, ILogger<ExtraChargeService> log)
+{
+    public static string PaymentKey(string mid, long amount) => $"pay:{mid}:extra:{amount}";
+    private static readonly string[] Payable = [BookingStatus.Confirmed, BookingStatus.Rescheduled, BookingStatus.InProgress, BookingStatus.Completed];
+
+    public async Task<(ExtraChargeStatus Status, CheckoutPayment? Payment, long AmountCents)> AcceptAsync(Guid accountId, Guid bookingId, CancellationToken ct)
+    {
+        var b = await db.Bookings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == bookingId && x.AccountId == accountId && x.Status != BookingStatus.Failed, ct);
+        if (b is null) return (ExtraChargeStatus.NotFound, null, 0);
+        if (b.ExtraChargeState == ExtraChargeStates.Paid) return (ExtraChargeStatus.AlreadyPaid, null, b.AdditionalChargeCents);
+        if (b.ExtraChargeState is not (ExtraChargeStates.Requested or ExtraChargeStates.Consented) || b.AdditionalChargeCents <= 0 || !Payable.Contains(b.Status)) return (ExtraChargeStatus.NotRequested, null, 0);
+        if (b.AdditionalChargeCents < 50) return (ExtraChargeStatus.AmountTooSmall, null, b.AdditionalChargeCents);
+        var now = time.GetUtcNow().ToUniversalTime();
+        var amount = b.AdditionalChargeCents;
+        var key = PaymentKey(b.MarketplaceBookingId, amount);
+        // Consent is recorded with the amount the buyer saw; if a newer request changed the amount meanwhile the row no longer matches and nothing is charged.
+        var consented = await db.Bookings.Where(x => x.Id == b.Id && x.AdditionalChargeCents == amount && (x.ExtraChargeState == ExtraChargeStates.Requested || x.ExtraChargeState == ExtraChargeStates.Consented))
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.ExtraChargeState, ExtraChargeStates.Consented).SetProperty(x => x.UpdatedAt, now).SetProperty(x => x.Version, x => x.Version + 1), ct);
+        if (consented == 0) return (ExtraChargeStatus.NotRequested, null, 0);
+        var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.Key == key, ct);
+        if (pay is null)
+        {
+            db.BookingPayments.Add(new BookingPayment { Id = Guid.NewGuid(), Key = key, BookingId = b.Id, Kind = PaymentKinds.ExtraCharge, Currency = b.Currency, AmountCents = amount, Status = BookingPaymentStatus.Pending, CreatedAt = now, UpdatedAt = now });
+            try { await db.SaveChangesAsync(ct); } catch (DbUpdateException) { db.ChangeTracker.Clear(); }
+            pay = await db.BookingPayments.AsNoTracking().FirstAsync(p => p.Key == key, ct);
+        }
+        if (pay.Status != BookingPaymentStatus.Pending) return (ExtraChargeStatus.AlreadyPaid, null, amount);
+        try
+        {
+            var intent = await payments.CreateIntentAsync(amount, pay.Currency, "pi:" + key, new Dictionary<string, string> { ["marketplace_booking_id"] = b.MarketplaceBookingId, ["kind"] = PaymentKinds.ExtraCharge }, ct);
+            await db.BookingPayments.Where(p => p.Id == pay.Id && p.IntentId == null).ExecuteUpdateAsync(s => s.SetProperty(p => p.IntentId, intent.Id), ct);
+            var stored = await db.BookingPayments.AsNoTracking().Where(p => p.Id == pay.Id).Select(p => p.IntentId).FirstAsync(ct);
+            if (stored != intent.Id) { log.LogError("Extra charge of booking {Mid} has two different intents", b.MarketplaceBookingId); return (ExtraChargeStatus.PaymentsUnavailable, null, amount); }
+            return (ExtraChargeStatus.Ok, new CheckoutPayment("stripe", intent.ClientSecret, stripe.Value.PublishableKey), amount);
+        }
+        catch (PaymentsUnavailableException) { return (ExtraChargeStatus.PaymentsUnavailable, null, amount); }
+        catch (PaymentRejectedException ex) { log.LogWarning("Payment provider refused an extra charge: {Code}", ex.Code); return (ExtraChargeStatus.PaymentRejected, null, amount); }
+    }
+
+    /// <summary>The buyer says no. Nothing is charged and nothing is sent; a later request from the provider can ask again.</summary>
+    public async Task<ExtraChargeStatus> DeclineAsync(Guid accountId, Guid bookingId, CancellationToken ct)
+    {
+        var b = await db.Bookings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == bookingId && x.AccountId == accountId && x.Status != BookingStatus.Failed, ct);
+        if (b is null) return ExtraChargeStatus.NotFound;
+        var n = await db.Bookings.Where(x => x.Id == b.Id && (x.ExtraChargeState == ExtraChargeStates.Requested || x.ExtraChargeState == ExtraChargeStates.Consented))
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.ExtraChargeState, ExtraChargeStates.Declined).SetProperty(x => x.UpdatedAt, time.GetUtcNow()).SetProperty(x => x.Version, x => x.Version + 1), ct);
+        return n == 1 ? ExtraChargeStatus.Ok : ExtraChargeStatus.NotRequested;
+    }
+}
+
 public enum BookingReserveOutcome { Reserved, Duplicate, ExceedsCaptured, NotCaptured }
 
 /// <summary>
