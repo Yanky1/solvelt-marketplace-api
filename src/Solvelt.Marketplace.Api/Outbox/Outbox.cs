@@ -53,6 +53,34 @@ public sealed class OutboxWriter(MarketplaceDb db, TimeProvider time)
         return m;
     }
 
+    /// <summary>
+    /// Producer pattern for a thing that must be sent once (a payment event, an order mail): queues the message in the caller's own transaction
+    /// <b>unless the dedupe key is taken</b>, and says which happened. A duplicate is an "already done", never an exception, so it can not roll back the
+    /// caller's business change. The insert is <c>ON CONFLICT DO NOTHING</c> (PostgreSQL) / <c>INSERT OR IGNORE</c> (SQLite): it needs no earlier read
+    /// and has no race. Call it inside the same transaction as the business change and commit them together.
+    /// </summary>
+    public async Task<bool> TryEnqueueAsync(string type, object payload, string dedupeKey, TimeSpan? delay = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(dedupeKey);
+        var now = time.GetUtcNow().ToUniversalTime();
+        var entity = db.Model.FindEntityType(typeof(OutboxMessage))!;
+        var table = Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("outbox_messages");
+        string Col(string property) => "\"" + entity.FindProperty(property)!.GetColumnName(table) + "\"";
+        object Time(DateTimeOffset t) => db.Database.IsSqlite() ? new Microsoft.EntityFrameworkCore.Storage.ValueConversion.DateTimeOffsetToBinaryConverter().ConvertToProvider(t.ToUniversalTime())! : t.ToUniversalTime();
+        var cols = new[] { "Id", "Type", "DedupeKey", "Payload", "Status", "Attempts", "NextAttemptAt", "CreatedAt", "Version" };
+        var values = new object[]
+        {
+            Guid.NewGuid(), type, dedupeKey, JsonSerializer.Serialize(payload, PortalJson.Options), OutboxStatus.Pending, 0,
+            Time(now + (delay ?? TimeSpan.Zero)), Time(now), 0,
+        };
+        var list = string.Join(", ", cols.Select(Col));
+        var marks = string.Join(", ", values.Select((_, i) => "{" + i + "}"));
+        var sql = db.Database.IsSqlite()
+            ? $"INSERT OR IGNORE INTO \"outbox_messages\" ({list}) VALUES ({marks})"
+            : $"INSERT INTO \"outbox_messages\" ({list}) VALUES ({marks}) ON CONFLICT ({Col("DedupeKey")}) DO NOTHING";
+        return await db.Database.ExecuteSqlRawAsync(sql, values, ct) == 1;
+    }
+
     /// <summary>True when a message with this dedupe key is already queued (or was delivered): the thing is not sent twice.</summary>
     public Task<bool> ExistsAsync(string dedupeKey, CancellationToken ct = default) => db.OutboxMessages.AnyAsync(m => m.DedupeKey == dedupeKey, ct);
 }
@@ -62,7 +90,7 @@ public sealed class OutboxWriter(MarketplaceDb db, TimeProvider time)
 /// same message), handled outside any transaction, then finished with another compare-and-set. A dispatcher that dies leaves a lease that simply expires.
 /// Failures back off exponentially (<see cref="OutboxOptions.BackoffSeconds"/> x 2^(n-1), capped) and become dead after <see cref="OutboxOptions.MaxAttempts"/>.
 /// </summary>
-public sealed class OutboxDispatcher(MarketplaceDb db, OutboxHandlerRegistry registry, TimeProvider time, IOptions<OutboxOptions> options, ILogger<OutboxDispatcher> log)
+public sealed class OutboxDispatcher(MarketplaceDb db, OutboxHandlerRegistry registry, TimeProvider time, IOptions<OutboxOptions> options, OpsCounters counters, ILogger<OutboxDispatcher> log)
 {
     public async Task<int> DispatchDueAsync(CancellationToken ct = default)
     {
@@ -123,7 +151,7 @@ public sealed class OutboxDispatcher(MarketplaceDb db, OutboxHandlerRegistry reg
             rows = await db.OutboxMessages.Where(m => m.Id == id && m.Version == claimedVersion).ExecuteUpdateAsync(s => s
                 .SetProperty(m => m.Status, OutboxStatus.Dead).SetProperty(m => m.DeadAt, (DateTimeOffset?)now).SetProperty(m => m.Attempts, attempts)
                 .SetProperty(m => m.LockedUntil, (DateTimeOffset?)null).SetProperty(m => m.LastError, error).SetProperty(m => m.Version, claimedVersion + 1), CancellationToken.None);
-            log.LogError("Outbox message of type {Type} is dead after {Attempts} attempt(s): {Error}", message.Type, attempts, error);
+            if (rows == 1) { counters.MessageDied(); log.LogError("Outbox message of type {Type} is dead after {Attempts} attempt(s): {Error}", message.Type, attempts, error); }
         }
         else
         {

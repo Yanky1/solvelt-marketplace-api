@@ -21,7 +21,7 @@ public sealed record AuthMailPayload(string Kind, Guid AccountId, Guid? TokenId 
 /// working link; the link is computed here from <c>Auth:EmailLinkKey</c> when the mail goes out. A link that is already used, replaced or expired, or an account
 /// that is gone, is not mailed at all (the message counts as delivered).
 /// </summary>
-public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSender sender, TimeProvider time, IOptions<MarketplaceOptions> marketplace) : IOutboxHandler
+public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSender sender, TimeProvider time, IOptions<MarketplaceOptions> marketplace, IOptions<EmailOptions> email) : IOutboxHandler
 {
     public const string Type = "auth.mail";
     public IReadOnlyCollection<string> Types { get; } = [Type];
@@ -51,8 +51,7 @@ public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSe
                 ? AuthEmails.VerifyEmail(account.Email!, account.DisplayName, baseUrl, token, (int)Math.Round((t.ExpiresAt - t.CreatedAt).TotalHours))
                 : AuthEmails.PasswordReset(account.Email!, baseUrl, token, (int)Math.Round((t.ExpiresAt - t.CreatedAt).TotalMinutes));
         }
-        try { await sender.SendAsync(mail, ct); }
-        catch (EmailNotConfiguredException) { return OutboxResult.Retry("email_not_configured"); }
+        await EmailSending.SendAsync(sender, mail, email.Value, ct);
         return OutboxResult.Delivered();
     }
 }

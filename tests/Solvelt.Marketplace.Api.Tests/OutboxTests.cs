@@ -329,9 +329,9 @@ public class OutboxTests
     }
 
     [Fact]
-    public async Task Without_an_email_provider_mail_waits_in_the_outbox()
+    public async Task A_failing_email_provider_leaves_the_mail_pending_and_stores_only_the_exception_type()
     {
-        using var f = new TestFactory(services: s => s.AddSingleton<IEmailSender, UnconfiguredEmailSender>());
+        using var f = new TestFactory(services: s => s.AddSingleton<IEmailSender, FailingEmailSender>());
         Guid id;
         using (var scope = f.Services.CreateScope())
         {
@@ -340,8 +340,25 @@ public class OutboxTests
         }
         await Dispatch(f);
         var m = await Load(f, id);
-        Assert.Equal("pending", m.Status);
-        Assert.Equal("email_not_configured", m.LastError);
+        Assert.Equal(("pending", "InvalidOperationException"), (m.Status, m.LastError));
+        Assert.DoesNotContain(f.Logs.Lines, l => l.Contains("jane@example.com"));
+    }
+
+    [Fact]
+    public async Task An_email_send_that_never_answers_is_cut_off_inside_the_lease_and_retried()
+    {
+        using var f = new TestFactory(new() { ["Email:SendTimeoutSeconds"] = "1" }, s => s.AddSingleton<IEmailSender, HangingEmailSender>());
+        Guid id;
+        using (var scope = f.Services.CreateScope())
+        {
+            id = scope.ServiceProvider.GetRequiredService<OutboxWriter>().EnqueueEmail(new EmailMessage("jane@example.com", "Hello", "Body")).Id;
+            await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().SaveChangesAsync();
+        }
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Dispatch(f);
+        Assert.InRange(sw.Elapsed.TotalSeconds, 0.9, 10);
+        var m = await Load(f, id);
+        Assert.Equal(("pending", "TimeoutException"), (m.Status, m.LastError));
     }
 
     [Theory]
@@ -419,7 +436,7 @@ public class OutboxTests
 
     [Theory]
     [InlineData(503)]
-    [InlineData(401)]
+    [InlineData(500)]
     public async Task A_payment_event_the_portal_cannot_take_now_is_retried_later(int status)
     {
         using var f = new TestFactory();
@@ -448,7 +465,9 @@ public class OutboxTests
     [InlineData(201, false, OutboxOutcome.Delivered)]
     [InlineData(404, true, OutboxOutcome.Retry)]
     [InlineData(409, true, OutboxOutcome.Retry)]
-    [InlineData(401, false, OutboxOutcome.Retry)]
+    [InlineData(401, false, OutboxOutcome.Dead)]
+    [InlineData(401, true, OutboxOutcome.Dead)]
+    [InlineData(413, true, OutboxOutcome.Dead)]
     [InlineData(408, false, OutboxOutcome.Retry)]
     [InlineData(429, false, OutboxOutcome.Retry)]
     [InlineData(500, false, OutboxOutcome.Retry)]
@@ -523,12 +542,15 @@ public class OutboxTests
     [InlineData("")]
     [InlineData("wrong-key")]
     [InlineData("dev-only-admin-api-key-not-for-production ")]
-    public async Task Admin_endpoints_need_the_key(string? key)
+    [InlineData("dev-only-admin")]                                        // a prefix of the key
+    [InlineData("dev-only-admin-api-key-not-for-production-x")]            // the key plus one character
+    [InlineData("DEV-ONLY-ADMIN-API-KEY-NOT-FOR-PRODUCTION")]              // another case
+    public async Task Admin_endpoints_answer_404_to_a_missing_or_wrong_key(string? key)
     {
         using var f = new TestFactory();
         var c = f.CreateClient();
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.SendAsync(Req(HttpMethod.Get, "/api/admin/outbox", key))).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.SendAsync(Req(HttpMethod.Post, $"/api/admin/outbox/{Guid.NewGuid()}/retry", key))).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await c.SendAsync(Req(HttpMethod.Get, "/api/admin/outbox", key))).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await c.SendAsync(Req(HttpMethod.Post, $"/api/admin/outbox/{Guid.NewGuid()}/retry", key))).StatusCode);
     }
 
     [Fact]
@@ -610,7 +632,8 @@ public class OutboxTests
 
     private static Dictionary<string, string?> GoodProd() => new()
     {
-        ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40), ["Auth:EmailLinkKey"] = new string('e', 40),
+        ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40), ["Auth:EmailLinkKey"] = new string('e', 40), ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example", ["Email:From"] = "no-reply@shop.example",
+        ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example", ["Email:From"] = "no-reply@shop.example",
         ["Portal:BaseUrl"] = "https://portal.example", ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
         ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",
     };
@@ -622,13 +645,13 @@ public class OutboxTests
     public void The_admin_key_is_optional_in_production_but_held_to_the_same_rules_when_set()
     {
         Assert.Empty(Validate(GoodProd()));
-        var ok = GoodProd(); ok["Admin:ApiKey"] = new string('d', 40);
+        var ok = GoodProd(); ok["Admin:ApiKey"] = new string('d', 40); ok["Admin:Host"] = "admin.internal:8443";
         Assert.Empty(Validate(ok));
-        var shortKey = GoodProd(); shortKey["Admin:ApiKey"] = "short";
+        var shortKey = new Dictionary<string, string?>(ok) { ["Admin:ApiKey"] = "short" };
         Assert.Contains(Validate(shortKey), p => p.Contains("Admin:ApiKey") && p.Contains("32"));
-        var dev = GoodProd(); dev["Admin:ApiKey"] = DevDefaults.AdminApiKey;
+        var dev = new Dictionary<string, string?>(ok) { ["Admin:ApiKey"] = DevDefaults.AdminApiKey };
         Assert.Contains(Validate(dev), p => p.Contains("Admin:ApiKey") && p.Contains("Development default"));
-        var reused = GoodProd(); reused["Admin:ApiKey"] = reused["Web:ForwardingKey"];
+        var reused = new Dictionary<string, string?>(ok) { ["Admin:ApiKey"] = ok["Web:ForwardingKey"] };
         Assert.Contains(Validate(reused), p => p.Contains("must differ"));
     }
 }
