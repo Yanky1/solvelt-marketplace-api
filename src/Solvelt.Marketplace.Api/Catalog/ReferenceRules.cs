@@ -39,19 +39,35 @@ public static class CategoryRules
         }
         // a parent that is itself, or not in the feed, makes a root
         var parent = byId.ToDictionary(kv => kv.Key, kv => kv.Value.ParentId is { } p && p != kv.Key && byId.ContainsKey(p) ? p : (Guid?)null);
+        // Linear time: a node whose walk reaches an already-checked node is acyclic from there on, so each node is walked once.
+        var checkedOk = new HashSet<Guid>();
         foreach (var start in byId.Keys.OrderBy(k => k))        // break cycles at the edge that closes them
         {
+            var path = new List<Guid> { start };
             var seen = new HashSet<Guid> { start };
             var cur = start;
-            while (parent[cur] is { } up) { if (!seen.Add(up)) { parent[cur] = null; break; } cur = up; }
+            while (!checkedOk.Contains(cur) && parent[cur] is { } up) { if (!seen.Add(up)) { parent[cur] = null; break; } path.Add(up); cur = up; }
+            foreach (var p in path) checkedOk.Add(p);
         }
-        var acyclic = new Dictionary<Guid, Guid?>(parent);
-        foreach (var id in byId.Keys)       // attach anything deeper than MaxDepth to its ancestor at MaxDepth - 1
+        // Depth (roots are level 1) and the ancestor at level MaxDepth - 1 are memoised per node; anything deeper than MaxDepth attaches to that ancestor.
+        var depth = new Dictionary<Guid, int>();
+        var capAncestor = new Dictionary<Guid, Guid>();
+        foreach (var id in byId.Keys)
         {
-            var chain = new List<Guid>();   // root first
-            for (Guid? cur = acyclic[id]; cur is { } c; cur = acyclic[c]) chain.Insert(0, c);
-            if (chain.Count + 1 > MaxDepth) parent[id] = chain[MaxDepth - 2];
+            var stack = new Stack<Guid>();
+            for (Guid? cur = id; cur is { } c && !depth.ContainsKey(c); cur = parent[c]) stack.Push(c);
+            while (stack.Count > 0)
+            {
+                var c = stack.Pop();
+                var d = parent[c] is { } up ? depth[up] + 1 : 1;
+                depth[c] = d;
+                if (d == MaxDepth - 1) capAncestor[c] = c;
+                else if (d > MaxDepth - 1) capAncestor[c] = capAncestor[parent[c]!.Value];
+            }
         }
+        var attached = new Dictionary<Guid, Guid?>(parent);
+        foreach (var id in byId.Keys) if (depth[id] > MaxDepth) attached[id] = capAncestor[parent[id]!.Value];
+        parent = attached;
         return byId.Values.Select(c => c with { ParentId = parent[c.Id] }).ToList();
     }
 }
