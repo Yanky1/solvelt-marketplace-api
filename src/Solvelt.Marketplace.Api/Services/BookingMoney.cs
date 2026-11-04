@@ -24,12 +24,8 @@ public static class BookingMoney
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.Status, BookingPaymentStatus.Void).SetProperty(p => p.FailureCode, code).SetProperty(p => p.UpdatedAt, now), ct);
         if (voided == 0) return false;
         var left = await db.BookingPayments.AsNoTracking().Where(p => p.Id == pay.Id).Select(p => p.CapturedCents - p.RefundedCents).FirstAsync(ct);
-        if (left > 0)
-        {
-            var outcome = await refunds.ReserveAsync(pay.Id, left, $"void:{pay.Key}", code, false, ct);
-            if (outcome is BookingReserveOutcome.ExceedsCaptured or BookingReserveOutcome.NotCaptured)
-                log.LogError("ALERT: the {Code} refund of booking payment {Key} could not be reserved ({Outcome}); the money is still held and needs a person", code, pay.Key, outcome);
-        }
+        // The undisputed part goes back now; what an open chargeback holds is deferred and released when it is decided.
+        if (left > 0) await refunds.ReserveOrDeferAsync(pay.Id, left, $"void:{pay.Key}", code, false, log, ct);
         return true;
     }
 

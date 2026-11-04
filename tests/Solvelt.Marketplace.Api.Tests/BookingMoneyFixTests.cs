@@ -64,9 +64,8 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         Assert.False(pay.ReportedToPortal);
         Assert.Equal(24000, Assert.Single(Stripe.Refunds).AmountCents);
         Assert.Empty(_portal.PaymentEvents);                                // never a sale for a booking we show as Expired
-        Assert.Equal("Confirmed", _portal.Find(b.MarketplaceBookingId)!.Status.Replace("CancelledByBuyer", "Confirmed"));   // it was confirmed over there ...
-        await Drain();
-        Assert.Contains(_portal.Holds.Single().RequestIds, r => r.StartsWith("cancel-late-"));   // ... and is cancelled there now
+        Assert.Contains(_portal.Holds.Single().RequestIds, r => r.StartsWith("cancel-late-"));   // it was confirmed over there and is cancelled there now
+        Assert.Equal("CancelledByBuyer", _portal.Find(b.MarketplaceBookingId)!.Status);
     }
 
     [Fact]
@@ -343,7 +342,7 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
     }
 
     [Fact]
-    public async Task A_booking_refund_that_stripe_accepted_and_then_failed_goes_back_under_the_cap_once()
+    public async Task A_booking_refund_that_stripe_accepted_and_then_failed_is_given_back_and_re_issued_once()
     {
         await Ready();
         var b = await PaidBooking();
@@ -352,9 +351,100 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         var refund = Assert.Single(Stripe.Refunds);
         Assert.Equal(24000, (await Pay(b.Id)).RefundedCents);
         Assert.True((await StripeObject("charge.refund.updated", new { id = refund.Id, status = "failed" })).IsSuccessStatusCode);
-        Assert.Equal(0, (await Pay(b.Id)).RefundedCents);                          // the money did not leave: it can be refunded again
-        Assert.True((await StripeObject("charge.refund.updated", new { id = refund.Id, status = "failed" })).IsSuccessStatusCode);
-        Assert.Equal(0, (await Pay(b.Id)).RefundedCents);                          // and a repeat does not give it back twice
+        Assert.Equal(24000, (await Pay(b.Id)).RefundedCents);                      // given back and reserved again under a new attempt key
+        Assert.Equal(1, await _k.Db(db => db.BookingRefunds.CountAsync(r => r.Key.Contains(":retry1"))));
+        Assert.True((await StripeObject("charge.refund.updated", new { id = refund.Id, status = "failed" })).IsSuccessStatusCode);   // a repeat of the same failure
+        Assert.Equal(1, await _k.Db(db => db.BookingRefunds.CountAsync(r => r.Key.Contains(":retry1"))));                             // does not re-issue twice
         Assert.Contains(_k.F.Logs.Lines, l => l.Contains("ALERT"));
+    }
+
+    [Fact]
+    public async Task R3_an_earlier_confirm_that_the_portal_applied_and_we_never_heard_of_is_cancelled_there_when_the_booking_closes()
+    {
+        await Ready();
+        var (b, _) = await PaidNotConfirmed();
+        _portal.ConfirmAppliesThenFails = true;
+        await Drain();                                                              // attempt 1: confirmed over there, the answer is lost
+        Assert.Equal("Confirmed", _portal.Find(b.MarketplaceBookingId)!.Status);
+        await PortalEvent("booking.hold_expired", Now.AddMinutes(11), b);           // our side: the hold lapsed
+        _portal.ConfirmAppliesThenFails = false;
+        _k.F.Clock.Advance(TimeSpan.FromHours(2));
+        await Drain();                                                              // attempt 2 finds a closed booking: void, refund, and clean up the portal
+        Assert.Equal(BookingPaymentStatus.Void, (await Pay(b.Id)).Status);
+        Assert.Equal(24000, Assert.Single(Stripe.Refunds).AmountCents);
+        Assert.Empty(_portal.PaymentEvents);
+        Assert.Equal("CancelledByBuyer", _portal.Find(b.MarketplaceBookingId)!.Status);   // no live, unpaid booking left in the provider's calendar
+    }
+
+    [Fact]
+    public async Task R2_a_refund_blocked_by_an_open_dispute_is_deferred_and_made_when_the_dispute_is_won()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        var t0 = Now.ToUnixTimeSeconds();
+        await StripeObject("charge.dispute.created", new { id = "dp_7", payment_intent = intent.Id, amount = 10000, status = "needs_response" }, t0 + 1);
+        await PortalEvent("booking.cancelled", Now.AddMinutes(1), b, new { cancelledBy = "seller", refundDueCents = 24000 });
+        await Drain();
+        Assert.Equal(14000, Assert.Single(Stripe.Refunds).AmountCents);              // the undisputed part goes back at once
+        var deferred = await _k.Db(db => db.BookingRefunds.AsNoTracking().SingleAsync(r => r.Status == RefundStatus.Deferred));
+        Assert.Equal(10000, deferred.AmountCents);                                  // the rest is owed, not lost
+        await StripeObject("charge.dispute.closed", new { id = "dp_7", payment_intent = intent.Id, amount = 10000, status = "won" }, t0 + 5);
+        await Drain();
+        Assert.Equal(new long[] { 14000, 10000 }, Stripe.Refunds.Select(r => r.AmountCents).ToArray());
+        Assert.Equal(24000, (await Pay(b.Id)).RefundedCents);
+        Assert.DoesNotContain(await _k.Db(db => db.BookingRefunds.AsNoTracking().ToListAsync()), r => r.Status == RefundStatus.Deferred);
+        Assert.Equal(2, RefundEvents().Count());                                    // both parts are reported to the portal as the sale's refunds
+    }
+
+    [Fact]
+    public async Task L1_a_refund_failure_that_beats_our_commit_waits_then_the_refund_is_given_back_and_made_again_once()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        await PortalEvent("booking.cancelled", Now.AddMinutes(1), b, new { cancelledBy = "seller", refundDueCents = 24000 });
+        var key = await _k.Db(db => db.BookingRefunds.Select(r => r.Key).SingleAsync());
+        // Stripe says the refund failed before we ever stored its id: the event is not lost, Stripe is told to retry
+        Assert.False((await StripeObject("charge.refund.updated", new { id = "re_fake_000001", status = "failed", metadata = new { refund_key = key } })).IsSuccessStatusCode);
+        await Drain();
+        Stripe.RefundInDashboard(intent.Id, -24000);                                 // the failed refund did not move money
+        Assert.True((await StripeObject("charge.refund.updated", new { id = "re_fake_000001", status = "failed", metadata = new { refund_key = key } })).IsSuccessStatusCode);
+        await Drain();
+        Assert.Equal(2, Stripe.Refunds.Count);                                       // made again, once
+        Assert.Equal(24000, (await Pay(b.Id)).RefundedCents);
+        Assert.Single(RefundEvents());                                               // and the portal is not told twice
+        Assert.Equal(RefundStatus.Succeeded, await _k.Db(db => db.BookingRefunds.Where(r => r.Key.Contains(":retry1")).Select(r => r.Status).SingleAsync()));
+    }
+
+    [Fact]
+    public async Task L2_a_dispute_that_arrives_before_the_sale_is_reported_is_held_and_sent_when_the_confirm_reports_the_sale()
+    {
+        await Ready();
+        var (b, intent) = await PaidNotConfirmed();
+        _portal.ConfirmDown = true;
+        await Drain();
+        await StripeObject("charge.dispute.created", new { id = "dp_9", payment_intent = intent.Id, amount = 24000, status = "needs_response" });
+        await Drain();
+        Assert.DoesNotContain(_portal.PaymentEvents, e => e.Contains("dispute"));    // the portal has no sale to book it against yet
+        _portal.ConfirmDown = false;
+        _k.F.Clock.Advance(TimeSpan.FromHours(2));
+        await Drain();
+        Assert.Contains(_portal.PaymentEvents, e => e.Contains("payment.captured"));
+        Assert.Contains(_portal.PaymentEvents, e => e.Contains("dispute.created") && e.Contains(b.MarketplaceBookingId));
+    }
+
+    [Fact]
+    public async Task R1_parallel_charge_refunded_events_record_one_dashboard_refund_once()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        Stripe.RefundInDashboard(intent.Id, 5000);
+        var all = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => StripeObject("charge.refunded", new { payment_intent = intent.Id, amount_refunded = 5000 })));
+        Assert.All(all, r => Assert.True(r.IsSuccessStatusCode));
+        var pay = await Pay(b.Id);
+        Assert.Equal(5000, pay.ExternalRefundedCents);
+        Assert.Equal(5000, pay.RefundedCents);
     }
 }
