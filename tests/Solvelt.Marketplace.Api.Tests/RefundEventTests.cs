@@ -165,8 +165,12 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
         await Drain();
         var after = await Order(o.Number);
-        // the money is already gone: releasing the reservation would let the cap allow the same money to be refunded again, so it STAYS (a person resolves it)
-        Assert.Equal((4587L, 387L, 1), (after.Groups.Single().RefundedCents, after.Groups.Single().RefundedTaxCents, after.Lines.Single().RefundedQuantity));
+        // the money is already gone (everything was refunded in the dashboard): this refund never reached the buyer, so its unit and amounts are given back (the portal is not told it was refunded);
+        // the dashboard's money, confirmed by a fresh read at Stripe, takes the order's cap, so the same money still cannot be refunded twice (decision M3-28, review R2)
+        Assert.Equal((0L, 0L, 0), (after.Groups.Single().RefundedCents, after.Groups.Single().RefundedTaxCents, after.Lines.Single().RefundedQuantity));
+        Assert.Equal(after.PaidCents, after.RefundedCents);
+        Assert.Equal("skipped", await RefundLines(o, g, "rf-again", line, 1, 4587));          // another try is refused by the order cap (skipped, an alarm), not sent to Stripe again
+        Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == "stripe.refund")));
         Assert.Equal("rejected", (await _k.Db(db => db.OrderRefunds.SingleAsync(r => r.Key == "portal:rf-1"))).Status);
         Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == "stripe.refund" && m.Status == "dead" && m.LastError == "stripe_charge_exceeds_amount")));
 
@@ -178,6 +182,24 @@ public sealed class RefundEventTests : OrderFlowBase
         var back = (await Order(o2.Number)).Groups.Single();
         Assert.Equal((0L, 0L, 0L), (back.RefundedCents, back.RefundedTaxCents, back.RefundedShippingCents));
         Assert.Equal(0, (await Order(o2.Number)).Lines.Single().RefundedQuantity);
+    }
+
+    [Fact]
+    public async Task A_portal_refund_that_no_longer_fits_after_a_dashboard_refund_is_cut_to_what_is_really_left_and_resent()
+    {
+        var (o, g, line) = await Three();                                                  // paid 14262
+        await Stripe.RefundAsync(o.PaymentIntentId!, 6000, "dashboard", new Dictionary<string, string>(), default);   // not processed by our webhook yet (review R2)
+        Assert.Equal("applied", await RefundLines(o, g, "rf-big", line, 2, 9174));       // the portal asks 9174: 6000 + 9174 > 14262
+        await Drain();
+        var refund = await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Key == "portal:rf-big"));
+        Assert.Equal(("succeeded", 8262L), (refund.Status, refund.AmountCents));         // what is really left, sent under a new idempotency attempt
+        Assert.Equal(14262, Stripe.Intents.Single().RefundedCents);                       // the buyer has all of it back: 6000 + 8262
+        var after = await Order(o.Number);
+        Assert.Equal(after.PaidCents, after.RefundedCents);                               // the counters follow the confirmed money
+        Assert.Equal(8262, after.Groups.Single().RefundedCents);
+        Assert.Equal(1, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external" && r.AmountCents == 6000)));
+        Assert.Single(await Sent("refund.processed"));                                    // the portal is told once, after the money went
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("was cut from 9174 to 8262"));
     }
 
     [Fact]
