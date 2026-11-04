@@ -102,6 +102,9 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
 
             LocalOption? local = null;
             var allLocal = g.Lines.All(l => attrs.Any(x => x.ListingId == l.ListingId && x.Key == "delivery" && x.Value == "local"));
+            // A group whose listings say "delivery: local" and never "ships" is not shipped by carrier (decision M3-22): without an eligible local window there is nothing to pay with, so the quote cannot be paid.
+            var shipsToo = g.Lines.Any(l => attrs.Any(x => x.ListingId == l.ListingId && x.Key == "delivery" && x.Value == "ships"));
+            if (allLocal && !shipsToo) opts = [];   // "local" without "ships" on every line: local delivery only
             if (allLocal)
             {
                 try

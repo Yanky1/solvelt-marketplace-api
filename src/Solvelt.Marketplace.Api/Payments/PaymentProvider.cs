@@ -17,6 +17,9 @@ public sealed class StripeOptions
     public string? WebhookSecret { get; set; }
     public string BaseUrl { get; set; } = "https://api.stripe.com";
     public int TimeoutSeconds { get; set; } = 20;
+    /// <summary>Stripe answers 409 idempotency_key_in_use while the first request with the same key is still running (a double submit). Wait this long and ask again, up to <see cref="InUseRetries"/> times, before giving up as "try again".</summary>
+    public int InUseRetryDelayMs { get; set; } = 400;
+    public int InUseRetries { get; set; } = 3;
 }
 
 public sealed record PaymentIntentResult(string Id, string ClientSecret, string Status);
@@ -69,24 +72,33 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
         var key = options.Value.SecretKey;
         if (string.IsNullOrWhiteSpace(key)) throw new PaymentsUnavailableException("not_configured");
         if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 255) throw new ArgumentException("An idempotency key is required.", nameof(idempotencyKey));
-        using var req = new HttpRequestMessage(HttpMethod.Post, options.Value.BaseUrl.TrimEnd('/') + path) { Content = new FormUrlEncodedContent(form) };
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-        req.Headers.Add("Idempotency-Key", idempotencyKey);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.Value.TimeoutSeconds, 1, 60)));
-        HttpResponseMessage res;
-        try { res = await http.SendAsync(req, timeout.Token); }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
-        { throw new PaymentsUnavailableException("unreachable", ex); }
-        using (res)
+        for (var attempt = 0; ; attempt++)
         {
-            var text = await res.Content.ReadAsStringAsync(ct);
-            if (res.IsSuccessStatusCode) return JsonDocument.Parse(text).RootElement.Clone();
-            // 429 and 5xx are worth retrying with the same key; any other 4xx will not change (never echo Stripe's message: it may carry card details).
-            if ((int)res.StatusCode is 429 or >= 500 or 409) throw new PaymentsUnavailableException($"stripe_{(int)res.StatusCode}");
-            string? code = null;
-            try { code = JsonDocument.Parse(text).RootElement.GetProperty("error").GetProperty("code").GetString(); } catch { /* not JSON */ }
-            throw new PaymentRejectedException(string.IsNullOrEmpty(code) ? $"stripe_{(int)res.StatusCode}" : new string(code.Where(c => char.IsAsciiLetterOrDigit(c) || c == '_').Take(60).ToArray()));
+            using var req = new HttpRequestMessage(HttpMethod.Post, options.Value.BaseUrl.TrimEnd('/') + path) { Content = new FormUrlEncodedContent(form) };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+            req.Headers.Add("Idempotency-Key", idempotencyKey);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.Value.TimeoutSeconds, 1, 60)));
+            HttpResponseMessage res;
+            try { res = await http.SendAsync(req, timeout.Token); }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
+            { throw new PaymentsUnavailableException("unreachable", ex); }
+            using (res)
+            {
+                var text = await res.Content.ReadAsStringAsync(ct);
+                if (res.IsSuccessStatusCode) return JsonDocument.Parse(text).RootElement.Clone();
+                // 409 = the same key is still being processed: wait briefly and ask again (the answer will be the first request's result), then give up as "try again".
+                if ((int)res.StatusCode == 409 && attempt < Math.Max(0, options.Value.InUseRetries))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(Math.Clamp(options.Value.InUseRetryDelayMs, 0, 5000)), ct);
+                    continue;
+                }
+                // 429 and 5xx are worth retrying with the same key; any other 4xx will not change (never echo Stripe's message: it may carry card details).
+                if ((int)res.StatusCode is 429 or >= 500 or 409) throw new PaymentsUnavailableException($"stripe_{(int)res.StatusCode}");
+                string? code = null;
+                try { code = JsonDocument.Parse(text).RootElement.GetProperty("error").GetProperty("code").GetString(); } catch { /* not JSON */ }
+                throw new PaymentRejectedException(string.IsNullOrEmpty(code) ? $"stripe_{(int)res.StatusCode}" : new string(code.Where(c => char.IsAsciiLetterOrDigit(c) || c == '_').Take(60).ToArray()));
+            }
         }
     }
 
