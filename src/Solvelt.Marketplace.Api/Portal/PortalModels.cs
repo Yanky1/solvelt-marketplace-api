@@ -75,7 +75,7 @@ public sealed record PaymentCapturedData(string Kind, string? MarketplaceOrderId
 public sealed record RefundProcessedData(string RefundId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
     long AmountCents, long? ShippingCents = null, string? Currency = null, string? Reason = null);
 public sealed record DisputeData(string DisputeId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
-    long AmountCents, string Status, long? FeeCents = null, string? Currency = null, string? Reason = null, DateTimeOffset? EvidenceDueBy = null);
+    long AmountCents, string Status, long? FeeCents = null, string? Currency = null, string? Reason = null, DateTimeOffset? EvidenceDueBy = null, DateTimeOffset? CreatedAt = null);
 /// <summary><see cref="EventId"/> is ours, stored in our outbox before sending (the portal dedupes on it).</summary>
 public sealed record PaymentEventRequest(string EventId, string Type, object Data);
 public sealed record PaymentEventResponse(string Status, JsonElement? Result);

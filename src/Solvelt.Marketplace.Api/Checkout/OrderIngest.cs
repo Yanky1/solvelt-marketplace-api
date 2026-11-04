@@ -12,7 +12,7 @@ namespace Solvelt.Marketplace.Api.Checkout;
 /// with the same id and yields one order. On success it stores the seller orders and queues one <c>payment.captured</c> per seller order. A <c>422 invalid_order</c> (nothing was
 /// created at the portal, for example a delivery window that filled up) fails the order and refunds the buyer in full.
 /// </summary>
-public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient portal, OutboxWriter outbox, RefundService refunds, Portal.Webhooks.PortalEventProcessor portalEvents, TimeProvider time) : IOutboxHandler
+public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient portal, OutboxWriter outbox, RefundService refunds, Portal.Webhooks.PortalEventProcessor portalEvents, TimeProvider time, ILogger<OrderIngestHandler> log) : IOutboxHandler
 {
     public const string Type = "order.ingest";
     public sealed record Payload(Guid OrderId);
@@ -119,11 +119,25 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         var claimed = await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.Paid)
             .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.Failed).SetProperty(o => o.FailureCode, code).SetProperty(o => o.UpdatedAt, now), ct);
         if (claimed == 0) { await tx.RollbackAsync(ct); return OutboxResult.Delivered(); }
-        // Nothing was created at the portal, so the whole payment goes back; the reservation, the Stripe refund and the mail are queued with the status change.
-        await refunds.ReserveAsync(order.Id, null, order.TotalCents, 0, $"fail:{order.Number}", "order_failed", reportToPortal: false, portalRefundId: null, ct);
+        // Nothing was created at the portal, so everything paid and not yet returned goes back (PaidCents - RefundedCents: a refund recorded earlier, for example one made in Stripe's dashboard,
+        // must not turn this into a request above the cap that is silently ignored while the buyer is told "refunded in full"). The outcome is checked: anything but reserved (or already reserved)
+        // is a bug alarm, the whole change is rolled back and the message dies for a person, so no buyer is mailed a refund that was not queued.
+        var paidNow = await db.Orders.AsNoTracking().Where(o => o.Id == order.Id).Select(o => new { o.PaidCents, o.RefundedCents }).FirstAsync(ct);
+        var owed = paidNow.PaidCents - paidNow.RefundedCents;
+        if (owed > 0)
+        {
+            var outcome = await refunds.ReserveAsync(order.Id, null, owed, 0, $"fail:{order.Number}", "order_failed", reportToPortal: false, portalRefundId: null, ct);
+            if (outcome is not (ReserveOutcome.Reserved or ReserveOutcome.Duplicate))
+            {
+                await tx.RollbackAsync(ct);
+                log.LogError("The refund of failed order {Number} could not be reserved ({Outcome}); the order is left paid and the ingest message is dead for a person", order.Number, outcome);
+                return OutboxResult.Dead("refund_not_reserved");
+            }
+        }
+        var refundText = owed == paidNow.PaidCents ? $"{Money(owed, order.Currency)} is being refunded to your card in full" : owed > 0 ? $"the remaining {Money(owed, order.Currency)} is being refunded to your card (the rest was already returned)" : "everything has already been returned to your card";
         await EnqueueBuyerMailAsync(order, "We couldn't place your order " + order.Number,
             (windowGone ? "The delivery time you chose is no longer available, so the seller couldn't accept your order. " : "One of the items could no longer be ordered, so the sellers couldn't accept your order. ")
-            + $"You have not been charged: {Money(order.TotalCents, order.Currency)} is being refunded to your card in full (it can take a few days to show). Please place the order again and choose again.\n", $"failed:{order.Number}", ct);
+            + $"You have not been charged: {refundText} (it can take a few days to show). Please place the order again and choose again.\n", $"failed:{order.Number}", ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return OutboxResult.Delivered();

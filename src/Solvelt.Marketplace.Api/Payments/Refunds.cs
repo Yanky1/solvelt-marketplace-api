@@ -190,11 +190,13 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
         catch (PaymentRejectedException ex)
         {
-            // Stripe will never do this one (for example it exceeds what was captured): give the reservation back and leave it for a person.
+            // Stripe will never do this one. If the reason is that the money is already gone (more than was captured, or already refunded: a refund made in Stripe's dashboard), the reservation
+            // STAYS (releasing it would let the cap allow the same money to be refunded again); otherwise nothing moved and the reservation is given back. Either way it waits for a person.
+            var moneyGone = ex.Code is "charge_exceeds_amount" or "charge_already_refunded";
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             var changed = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved)
                 .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Rejected).SetProperty(r => r.UpdatedAt, time.GetUtcNow()), ct);
-            if (changed == 1)
+            if (changed == 1 && !moneyGone)
             {
                 await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - refund.AmountCents), ct);
                 if (refund.GroupId is { } g)

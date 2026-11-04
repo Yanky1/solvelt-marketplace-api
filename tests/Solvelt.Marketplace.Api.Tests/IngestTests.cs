@@ -368,7 +368,7 @@ public sealed class IngestTests : OrderFlowBase
     }
 
     [Fact]
-    public async Task A_refund_stripe_refuses_gives_its_reservation_back_and_waits_for_a_person_and_an_outage_is_retried()
+    public async Task A_refund_stripe_refuses_because_the_money_is_gone_keeps_its_reservation_and_waits_for_a_person_and_an_outage_is_retried()
     {
         var (order, svc, scope) = await PaidOrder();
         using var _ = scope;
@@ -381,7 +381,7 @@ public sealed class IngestTests : OrderFlowBase
         await Drain();
         Assert.Single(Stripe.Refunds);                                    // the retry went through with the same key
 
-        // Stripe says no (more than was captured, because of a refund made in its dashboard): the reservation is released and the message is dead
+        // Stripe says no (more than was captured, because of a refund made in its dashboard): the reservation stays and the message is dead
         Stripe.Capture(Stripe.Intents.Single().Id);
         var intent = Stripe.Intents.Single();
         await Stripe.RefundAsync(intent.Id, intent.CapturedCents - intent.RefundedCents, "dashboard", new Dictionary<string, string>(), default);
@@ -390,7 +390,7 @@ public sealed class IngestTests : OrderFlowBase
         await Drain();
         var rejected = await _k.Db(db => db.OrderRefunds.SingleAsync(r => r.Key == "k-no"));
         Assert.Equal("rejected", rejected.Status);
-        Assert.Equal(before - 700, (await Order(order.Number)).RefundedCents);
+        Assert.Equal(before, (await Order(order.Number)).RefundedCents);                   // the money is already gone (refunded in the dashboard): the reservation STAYS, so the cap cannot allow it twice
         Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == "stripe.refund" && m.Status == "dead" && m.LastError == "stripe_charge_exceeds_amount")));
     }
 
@@ -567,5 +567,97 @@ public sealed class IngestTests : OrderFlowBase
         await PostStripe(Event("payment_intent.succeeded", intent, number, total - 100));
         await Drain();
         Assert.Contains(_k.Sink.Sent, m => m.Subject.Contains(number) && m.TextBody.Contains("refunded"));
+    }
+
+    // ---- the 422 refund (review F3) and parallel dashboard refunds (F4) ----
+
+    [Fact]
+    public async Task A_rejected_order_after_an_earlier_refund_refunds_what_is_left_and_says_so_and_a_refund_that_cannot_be_reserved_is_not_mailed()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        _onOrder = _ => FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"invalid_order\",\"errors\":[{\"index\":0,\"code\":\"product_inactive\",\"message\":\"x\"}]}");
+        await Pay(number, intent, total);
+        // 300 cents were already refunded in Stripe's dashboard before the ingest ran
+        Assert.Equal(HttpStatusCode.OK, (await PostStripe(Event("charge.refunded", "ch_1", null, 0, extra: new { payment_intent = intent, amount_refunded = 300L }))).StatusCode);
+        await Drain();
+        var order = await Order(number);
+        Assert.Equal("failed", order.Status);
+        Assert.Equal(total, order.RefundedCents);                                         // 300 + the rest: the whole payment is accounted for
+        var refund = Assert.Single(Stripe.Refunds);
+        Assert.Equal(total - 300, refund.AmountCents);                                    // not TotalCents: that would have exceeded the cap and been ignored
+        var mail = Assert.Single(_k.Sink.Sent, m => m.Subject.Contains("couldn't place"));
+        Assert.Contains("remaining", mail.TextBody);
+    }
+
+    [Fact]
+    public async Task When_the_refund_of_a_failed_order_cannot_be_reserved_nothing_changes_and_nobody_is_mailed_a_refund_that_does_not_exist()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        _onOrder = _ => FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"invalid_order\",\"errors\":[{\"index\":0,\"code\":\"product_inactive\",\"message\":\"x\"}]}");
+        await Pay(number, intent, total);
+        await _k.Db(db => db.Orders.Where(o => o.Number == number).ExecuteUpdateAsync(s => s.SetProperty(o => o.PaidAt, (DateTimeOffset?)null)));   // a corrupt row: the reservation refuses it
+        await Drain();
+        Assert.Equal("paid", (await Order(number)).Status);                               // rolled back: still waiting for a person, not "failed"
+        Assert.Empty(Stripe.Refunds);
+        Assert.DoesNotContain(_k.Sink.Sent, m => m.Subject.Contains("couldn't place"));
+        Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == "order.ingest" && m.Status == "dead" && m.LastError == "refund_not_reserved")));
+    }
+
+    [Fact]
+    public async Task Each_of_the_two_protections_against_a_second_refund_of_a_rejected_order_works_alone()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        _onOrder = _ => FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"invalid_order\",\"errors\":[{\"index\":0,\"code\":\"product_inactive\",\"message\":\"x\"}]}");
+        await Pay(number, intent, total);
+        await Drain();
+        Assert.Single(Stripe.Refunds);
+        // 1) the status claim: the ingest message delivered again finds the order no longer paid and does nothing
+        await _k.Db(db => db.OutboxMessages.Where(m => m.Type == "order.ingest").ExecuteUpdateAsync(s => s.SetProperty(m => m.Status, "pending").SetProperty(m => m.NextAttemptAt, _k.F.Clock.GetUtcNow())));
+        await Drain();
+        Assert.Single(Stripe.Refunds);
+        // 2) the refund key: even if the status claim were lost (the order looks paid again), the unique refund key refuses a second refund
+        await _k.Db(db => db.Orders.Where(o => o.Number == number).ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, "paid")));
+        await _k.Db(db => db.OutboxMessages.Where(m => m.Type == "order.ingest").ExecuteUpdateAsync(s => s.SetProperty(m => m.Status, "pending").SetProperty(m => m.NextAttemptAt, _k.F.Clock.GetUtcNow())));
+        await Drain();
+        Assert.Single(Stripe.Refunds);
+        Assert.Equal(1, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Key == $"fail:{number}")));
+    }
+
+    [Fact]
+    public async Task Parallel_dashboard_refunds_are_recorded_exactly_once_each_and_add_up_to_stripes_figure()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        await Pay(number, intent, total);
+        await Drain();
+        var bodies = new[] { Event("charge.refunded", "ch_1", null, 0, id: "evt_r300", extra: new { payment_intent = intent, amount_refunded = 300L }),
+                             Event("charge.refunded", "ch_1", null, 0, id: "evt_r500", extra: new { payment_intent = intent, amount_refunded = 500L }) };
+        var results = await Task.WhenAll(bodies.Select(b => PostStripe(b)));
+        Assert.All(results, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
+        var order = await Order(number);
+        Assert.Equal(500, order.RefundedCents);                                           // not 800
+        var external = await _k.Db(db => db.OrderRefunds.AsNoTracking().Where(r => r.Reason == "external").ToListAsync());
+        Assert.Equal(500, external.Sum(r => r.AmountCents));                              // the rows add up to Stripe's cumulative figure
+        // a stale (smaller) cumulative arriving late changes nothing
+        await PostStripe(Event("charge.refunded", "ch_1", null, 0, id: "evt_r200", extra: new { payment_intent = intent, amount_refunded = 200L }));
+        Assert.Equal(500, (await Order(number)).RefundedCents);
+    }
+
+    [Fact]
+    public async Task The_stripe_signature_is_checked_before_the_body_is_parsed()
+    {
+        var garbage = "this is not json";
+        var bad = await PostStripe(garbage, secret: "whsec_wrong_wrong_wrong_wrong_wrong_0");
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+        Assert.Contains("bad_signature", await bad.Content.ReadAsStringAsync());          // not "invalid_event": nothing was parsed
+        var good = await PostStripe(garbage);
+        Assert.Contains("invalid_event", await good.Content.ReadAsStringAsync());          // only a valid signature gets as far as parsing
     }
 }

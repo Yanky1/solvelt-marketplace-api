@@ -82,6 +82,6 @@ public static class OutboxWriterExtensions
         => w.Enqueue(EmailOutboxHandler.Type, email, dedupeKey);
 
     /// <summary>Queues a payment event for the portal. The event id is ours and is the dedupe key, so one event is queued once and the portal dedupes on it too.</summary>
-    public static OutboxMessage EnqueuePaymentEvent(this OutboxWriter w, string eventId, string type, object data)
-        => w.Enqueue(PaymentEventOutboxHandler.Type, new PaymentEventPayload(eventId, type, JsonSerializer.SerializeToElement(data, PortalJson.Options)), $"payment:{eventId}");
+    public static OutboxMessage EnqueuePaymentEvent(this OutboxWriter w, string eventId, string type, object data, TimeSpan? delay = null)
+        => w.Enqueue(PaymentEventOutboxHandler.Type, new PaymentEventPayload(eventId, type, JsonSerializer.SerializeToElement(data, PortalJson.Options)), $"payment:{eventId}", delay);
 }

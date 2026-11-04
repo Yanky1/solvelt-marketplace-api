@@ -71,7 +71,7 @@ public sealed record StripeEnvelope(string Id, string Type, long Created, JsonEl
 public enum StripeOutcome { Applied, Ignored, Unmatched, Duplicate }
 
 /// <summary>The event-id insert and the handler's changes commit in ONE transaction: a failure rolls both back and answers 5xx, so Stripe's retry sees a clean slate.</summary>
-public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, RefundService refunds, TimeProvider time, ILogger<StripeEventProcessor> log)
+public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, RefundService refunds, Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions, TimeProvider time, ILogger<StripeEventProcessor> log)
 {
     public async Task<StripeOutcome> ProcessAsync(StripeEnvelope evt, CancellationToken ct)
     {
@@ -190,11 +190,15 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         if (intentId is null || refunded is null) return StripeOutcome.Unmatched;
         var order = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.PaymentIntentId == intentId, ct);
         if (order is null) return StripeOutcome.Unmatched;
-        if (refunded <= order.RefundedCents) return StripeOutcome.Ignored;   // ours (or already recorded)
-        var delta = refunded.Value - order.RefundedCents;
+        // The order's row lock (a no-op write) serialises parallel charge.refunded events: each then reads the counter the one before it left, so the recorded amounts add up to Stripe's
+        // cumulative figure instead of each counting from a stale read (300 then 500 cumulative was recorded as 800).
+        await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents), ct);
+        var current = await db.Orders.AsNoTracking().Where(o => o.Id == order.Id).Select(o => o.RefundedCents).FirstAsync(ct);
+        if (refunded <= current) return StripeOutcome.Ignored;   // ours (reserved before Stripe is called) or already recorded
+        var delta = refunded.Value - current;
         var now = time.GetUtcNow().ToUniversalTime();
         db.OrderRefunds.Add(new OrderRefund { Id = Guid.NewGuid(), Key = $"external:{order.Number}:{refunded}", OrderId = order.Id, AmountCents = delta, Reason = "external", Status = RefundStatus.Succeeded, CreatedAt = now, UpdatedAt = now });
-        await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + delta), ct);
+        await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, refunded.Value), ct);
         log.LogError("Order {Number} was refunded {Delta} cents outside this system (Stripe dashboard); it is recorded and needs a person to tell the seller", order.Number, delta);
         return StripeOutcome.Applied;
     }
@@ -222,12 +226,23 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         if (order.Status == OrderStatus.Failed) return StripeOutcome.Ignored;   // never placed and already refunded: nothing at the portal to tell
         if (order.Groups.Any(g => g.SellerOrderNumber is null)) throw new StripeOrderNotYetKnownException();   // not ingested yet: Stripe retries
         var type = evt.Type == "charge.dispute.created" ? PaymentEventTypes.DisputeCreated : portalStatus is "won" or "lost" or "warning_closed" ? PaymentEventTypes.DisputeClosed : PaymentEventTypes.DisputeUpdated;
+        // Our own order guard (webhooks arrive in any order): an event older than the last one sent for this dispute is dropped, and nothing follows a closed dispute.
+        var state = await db.DisputeStates.FirstOrDefaultAsync(d => d.DisputeId == disputeId, ct);
+        if (state is not null && (state.Closed || evt.Created < state.LastCreated)) return StripeOutcome.Ignored;
+        var closed = portalStatus is "won" or "lost" or "warning_closed";
+        if (state is null) db.DisputeStates.Add(new DisputeState { DisputeId = disputeId, LastCreated = evt.Created, Closed = closed });
+        else { state.LastCreated = evt.Created; state.Closed = closed; }
+
         var groups = order.Groups.OrderByDescending(g => g.TotalCents).ThenBy(g => g.Id).ToList();
         var share = Allocate(amount.Value * groups.Sum(g => g.ItemsCents + g.ShippingCents) / Math.Max(1, order.TotalCents), groups.Select(g => g.ItemsCents + g.ShippingCents).ToList());
         DateTimeOffset? due = evt.Object.TryGetProperty("evidence_details", out var ed) && ed.ValueKind == JsonValueKind.Object && ed.TryGetProperty("due_by", out var db2) && db2.TryGetInt64(out var unix) ? DateTimeOffset.FromUnixTimeSeconds(unix) : null;
+        var createdAt = evt.Created > 0 ? DateTimeOffset.FromUnixTimeSeconds(evt.Created) : (DateTimeOffset?)null;
+        // Until the portal merges C10 (a dispute keyed per seller order), a multi-seller dispute must not go out as several events with the same dispute id: only the first would book money.
+        // They are queued but held (due in ten years) and released when Portal:PerSellerOrderDisputes is turned on (OrderMaintenance). Single-seller disputes go out at once.
+        TimeSpan? hold = groups.Count > 1 && !portalOptions.Value.PerSellerOrderDisputes ? TimeSpan.FromDays(3650) : null;
         for (var i = 0; i < groups.Count; i++)
             outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{groups[i].SellerOrderNumber}", type,
-                new DisputeData(disputeId, order.Number, groups[i].SellerOrderNumber, null, share[i], portalStatus, i == 0 ? null : 0, order.Currency, evt.Str("reason"), due));   // the dispute fee: portal default, once
+                new DisputeData(disputeId, order.Number, groups[i].SellerOrderNumber, null, share[i], portalStatus, i == 0 ? null : 0, order.Currency, evt.Str("reason"), due, createdAt), hold);   // the dispute fee: portal default, once
         return StripeOutcome.Applied;
     }
 
