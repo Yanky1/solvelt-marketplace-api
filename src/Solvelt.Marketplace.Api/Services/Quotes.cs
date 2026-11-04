@@ -100,11 +100,11 @@ public sealed class BuyerQuoteService(MarketplaceDb db, ISignedPortalClient port
         if (res.IsSuccess && res.Value is { } v && (v.MarketplaceQuoteId is null || v.MarketplaceQuoteId == row.MarketplaceQuoteId))
         {
             var status = v.Status is "Requested" or "Quoted" ? v.Status : QuoteStatus.Requested;
-            var n = await db.Quotes.Where(q => q.Id == row.Id && q.Status == QuoteStatus.Requesting).ExecuteUpdateAsync(s => s.SetProperty(q => q.PortalQuoteId, v.QuoteId).SetProperty(q => q.Status, status).SetProperty(q => q.UpdatedAt, now).SetProperty(q => q.Version, q => q.Version + 1), ct);
+            await db.Quotes.Where(q => q.Id == row.Id && q.Status == QuoteStatus.Requesting).ExecuteUpdateAsync(s => s.SetProperty(q => q.PortalQuoteId, v.QuoteId).SetProperty(q => q.Status, status).SetProperty(q => q.UpdatedAt, now).SetProperty(q => q.Version, q => q.Version + 1), ct);
             db.ChangeTracker.Clear();
             await events.ReplayParkedAsync(QuoteEventHandler.Aggregate, row.MarketplaceQuoteId, ct);
             var fresh = await db.Quotes.AsNoTracking().FirstAsync(q => q.Id == row.Id, ct);
-            return new QuoteResult(QuoteOutcome.Ok, ToView(fresh, now), Created: created && n == 1);
+            return new QuoteResult(QuoteOutcome.Ok, ToView(fresh, now), Created: created);
         }
         if (res.Retryable || res.Status is 408 or 429 or >= 500) return new QuoteResult(QuoteOutcome.Unavailable);
         var code = Code(res.Error?.Code);
