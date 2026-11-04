@@ -5,7 +5,7 @@ Rate limited endpoints answer `429 { code: "rate_limited" }` with `Retry-After`.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/health` | none | Liveness: `{ "status": "ok", "forwarding": { "invalid": <count since start> } }` |
+| GET | `/health` | none | Liveness: `{ "status": "ok", "forwarding": { "invalid": n }, "outbox": { "deadLettered": n }, "admin": { "refused": n } }`; counts since start-up, for a monitor to alert on a rise |
 | POST | `/api/portal/webhooks` | portal signature | Portal -> marketplace events; see below |
 | GET | `/api/v1/catalog/categories` | none | Category tree with visible-listing counts; see Catalog |
 | GET | `/api/v1/catalog/brands` | none | Brands that have visible listings |
@@ -176,16 +176,16 @@ Listings come first (best matches, visible only), then at most three brands and 
 `listing.upserted` and `listing.unlisted` (`data: { listingId, version }`) arrive on `POST /api/portal/webhooks`: an upsert records that a newer version exists and the sync job fetches it; an unlist hides the listing immediately and keeps it hidden against any snapshot of that version or older.
 
 ## Operations (outbox)
-For operators and the future staff area (M7), not for browsers. Send `X-Solvelt-Admin-Key: <Admin:ApiKey>` (env `Admin__ApiKey`, at least 32 characters, its own key). Without a configured key the endpoints answer `404`; a missing or wrong key is `401 { code: "unauthorized" }`. Rate limited like the auth endpoints.
+For operators and the future staff area (M7), not for browsers, and **never through the public host**: the endpoints exist only on `Admin:Host` (decision O-12; the web server must never proxy `/api/admin`). Send `X-Solvelt-Admin-Key: <Admin:ApiKey>` (env `Admin__ApiKey`, at least 32 characters, its own key). Everything that is not an authorised request on the admin host (no key configured, a blank key, another host, a missing or wrong key) answers **`404`**. Own rate limit (`RateLimits:AdminPerMinute`, default 30 per client IP). Refusals show as `admin.refused` on `GET /health`, next to `outbox.deadLettered`.
 
-### `GET /api/admin/outbox?status=pending|delivered|dead&limit=1..200`
-`200 { counts: { pending, delivered, dead }, messages: [{ id, type, status, attempts, nextAttemptAt, lastError, createdAt, deliveredAt, deadAt }] }`, newest first (default 50). `lastError` is a short code (for example `portal_422_exceeds_sale`, `email_not_configured`, an exception type). The payload is never returned. An unknown `status` is `400 invalid_status`.
+### `GET /api/admin/outbox?status=pending|delivered|dead&limit=1..200&cursor=`
+`200 { counts: { pending, delivered, dead }, messages: [{ id, type, status, attempts, nextAttemptAt, lastError, createdAt, deliveredAt, deadAt }], nextCursor }`, newest first (default 50 per page). `nextCursor` is null on the last page; pass it back as `cursor` for the next one (a bad cursor is `400 invalid_cursor`). `lastError` is a short code (for example `portal_422_exceeds_sale`, `portal_401`, an exception type such as `TimeoutException`). The payload is never returned. An unknown `status` is `400 invalid_status`.
 
 ### `POST /api/admin/outbox/{id}/retry`
-`204`: a dead message goes back to pending with 0 attempts and is due now. `409 not_retryable`: the message is not dead, or its payload was already purged (30 days after dead-lettering). `404`: unknown id.
+`204`: a dead message goes back to pending with 0 attempts and is due now; `lastError` keeps saying why it died until the next attempt replaces it. `409 not_retryable`: the message is not dead, or its payload was already purged (30 days after dead-lettering). `404`: unknown id.
 
 ### Delivery rules
-At least once. A failed message is retried after 30 s, 60 s, 120 s ... doubling, capped at 1 h, and is dead after 8 failures (or at once when waiting cannot help, such as a portal `422`). Configuration: `Outbox:MaxAttempts`, `BackoffSeconds`, `MaxBackoffSeconds`, `LeaseSeconds`, `BatchSize`, `PollSeconds`, `DeliveredPayloadRetentionDays`, `DeadPayloadRetentionDays`, `RowRetentionDays`.
+At least once. A failed message is retried after 30 s, 60 s, 120 s ... doubling, capped at 1 h, and is dead after 8 failures, or at once when waiting cannot help: a portal `401` (fix the key, then retry from here), `413`, `422` and other 4xx. A portal `429` waits at least 60 s. Configuration: `Outbox:MaxAttempts`, `BackoffSeconds`, `MaxBackoffSeconds`, `LeaseSeconds` (must be at least the portal total deadline and the email timeout plus 30 s, checked at start-up), `BatchSize`, `PollSeconds`, `DeliveredPayloadRetentionDays`, `DeadPayloadRetentionDays`, `RowRetentionDays`.
 
 ## Auth (buyers)
 All bodies are JSON. The web server holds the session token in its own HttpOnly cookie and sends `Authorization: Bearer <token>`. Auth endpoints share the strict per-client-IP rate limit (`RateLimits:AuthPerMinute`, default 10), forwarded as described above. This is the contract the web app assumed (its W1-21), confirmed.
