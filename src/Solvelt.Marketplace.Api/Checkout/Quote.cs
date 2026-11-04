@@ -17,7 +17,7 @@ public sealed record LocalOption(bool Eligible, string? Reason, long? FeeCents, 
 public sealed record SelectedDelivery(string Kind, string? Speed, Guid? WindowId, string? Date, long ShippingCents);
 public sealed record QuoteLine(Guid LineId, Guid ListingId, Guid VariantId, string Title, string VariantName, int Quantity, long UnitPriceCents, long LineTotalCents, long TaxCents);
 public sealed record QuoteGroup(Guid SellerId, string SellerName, Guid BrandId, string BrandName, IReadOnlyList<QuoteLine> Lines, long ItemsCents,
-    IReadOnlyList<ShippingOption> ShippingOptions, LocalOption? Local, SelectedDelivery? Selected, long ShippingCents, long ShippingTaxCents, long TaxCents, long TotalCents);
+    IReadOnlyList<ShippingOption> ShippingOptions, IReadOnlyList<UnavailableSpeed> UnavailableSpeeds, LocalOption? Local, SelectedDelivery? Selected, long ShippingCents, long ShippingTaxCents, long TaxCents, long TotalCents);
 public sealed record QuoteView(string Currency, IReadOnlyList<QuoteGroup> Groups, long ItemsCents, long ShippingCents, long TaxCents, long TotalCents, bool CanPay);
 
 public enum QuoteStatus { Ok, EmptyOrUnavailableCart, InvalidAddress, InvalidSelection, ShippingUnavailable }
@@ -55,14 +55,17 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
         bool Taxable(Guid listingId) => !exemptRoots.Contains(RootSlug(facts.First(f => f.Id == listingId).CategoryId), StringComparer.OrdinalIgnoreCase);
 
         var today = DateOnly.FromDateTime(time.GetUtcNow().UtcDateTime);
-        var built = new List<(CartGroupView G, IReadOnlyList<ShippingOption> Opts, LocalOption? Local, SelectedDelivery? Sel, List<TaxLineInput> TaxLines)>();
+        var built = new List<(CartGroupView G, IReadOnlyList<ShippingOption> Opts, IReadOnlyList<UnavailableSpeed> Unavailable, LocalOption? Local, SelectedDelivery? Sel, List<TaxLineInput> TaxLines)>();
         foreach (var g in cart.Groups)
         {
             ShippingSettings s;
             try { s = await settings.GetAsync(g.SellerId, g.BrandId, ct); }
             catch (ShippingUnavailableException) { return (QuoteStatus.ShippingUnavailable, null, null); }
-            var weight = g.Lines.Sum(l => ShippingRates.Grams(attrs.FirstOrDefault(x => x.ListingId == l.ListingId && x.Key == "weight")?.Value) * l.Quantity);
-            var opts = ShippingRates.Options(s, country, g.SubtotalCents, weight, today, shippingOptions.Value);
+            // The group's weight is known only when EVERY line's is (decision O-15); one unknown makes weight-based speeds unavailable.
+            var lineWeights = g.Lines.Select(l => ShippingRates.Grams(attrs.FirstOrDefault(x => x.ListingId == l.ListingId && x.Key == "weight")?.Value) is { } gr ? gr * l.Quantity : (long?)null).ToList();
+            long? weight = lineWeights.All(w => w is not null) ? lineWeights.Sum(w => w!.Value) : null;
+            var priced = ShippingRates.Options(s, country, g.SubtotalCents, weight, today, shippingOptions.Value);
+            var opts = priced.Options;
 
             LocalOption? local = null;
             var allLocal = g.Lines.All(l => attrs.Any(x => x.ListingId == l.ListingId && x.Key == "delivery" && x.Value == "local"));
@@ -91,18 +94,18 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
                 sel = new SelectedDelivery("carrier", o.Speed, null, null, o.PriceCents);
             }
             else if (opts.Count > 0) sel = new SelectedDelivery("carrier", opts[0].Speed, null, null, opts[0].PriceCents);   // cheapest by default
-            built.Add((g, opts, local, sel, g.Lines.Select(l => new TaxLineInput(l.Id.ToString(), l.LineTotalCents, Taxable(l.ListingId))).ToList()));
+            built.Add((g, opts, priced.Unavailable, local, sel, g.Lines.Select(l => new TaxLineInput(l.Id.ToString(), l.LineTotalCents, Taxable(l.ListingId))).ToList()));
         }
 
         var taxes = tax.Calculate(country, region, built.Select(b => new TaxGroupInput(b.G.SellerId + ":" + b.G.BrandId, b.Sel?.ShippingCents ?? 0, b.TaxLines)).ToList());
         var groups = new List<QuoteGroup>();
-        foreach (var (g, opts, local, sel, _) in built)
+        foreach (var (g, opts, unavailable, local, sel, _) in built)
         {
             var lines = g.Lines.Select(l => new QuoteLine(l.Id, l.ListingId, l.VariantId, l.Title, l.VariantName, l.Quantity, l.UnitPriceCents, l.LineTotalCents, taxes.LineTaxCents[l.Id.ToString()])).ToList();
             var shipping = sel?.ShippingCents ?? 0;
             var shipTax = taxes.ShippingTaxCents[g.SellerId + ":" + g.BrandId];
             var groupTax = lines.Sum(l => l.TaxCents) + shipTax;
-            groups.Add(new QuoteGroup(g.SellerId, g.SellerName, g.BrandId, g.BrandName, lines, g.SubtotalCents, opts, local, sel, shipping, shipTax, groupTax, g.SubtotalCents + shipping + groupTax));
+            groups.Add(new QuoteGroup(g.SellerId, g.SellerName, g.BrandId, g.BrandName, lines, g.SubtotalCents, opts, unavailable, local, sel, shipping, shipTax, groupTax, g.SubtotalCents + shipping + groupTax));
         }
         var view = new QuoteView(cart.Currency, groups, groups.Sum(x => x.ItemsCents), groups.Sum(x => x.ShippingCents), groups.Sum(x => x.TaxCents), groups.Sum(x => x.TotalCents), groups.All(x => x.Selected is not null));
         return (QuoteStatus.Ok, view, null);

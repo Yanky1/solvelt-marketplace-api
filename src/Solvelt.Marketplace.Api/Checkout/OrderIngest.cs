@@ -12,7 +12,8 @@ namespace Solvelt.Marketplace.Api.Checkout;
 /// with the same id and yields one order. On success it stores the seller orders and queues one <c>payment.captured</c> per seller order. A <c>422 invalid_order</c> (nothing was
 /// created at the portal, for example a delivery window that filled up) fails the order and refunds the buyer in full.
 /// </summary>
-public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient portal, OutboxWriter outbox, RefundService refunds, Portal.Webhooks.PortalEventProcessor portalEvents, TimeProvider time) : IOutboxHandler
+public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient portal, OutboxWriter outbox, RefundService refunds, Portal.Webhooks.PortalEventProcessor portalEvents,
+    Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions, TimeProvider time) : IOutboxHandler
 {
     public const string Type = "order.ingest";
     public sealed record Payload(Guid OrderId);
@@ -29,7 +30,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         if (order.Status != OrderStatus.Paid) return OutboxResult.Delivered();   // already placed, or failed and refunded: nothing left to do
 
         PortalResult<CreateOrderResponse> result;
-        try { result = await portal.CreateOrderAsync(BuildRequest(order), ct); }
+        try { result = await portal.CreateOrderAsync(BuildRequest(order, portalOptions.Value.PerGroupShipping), ct); }
         catch (PortalUnavailableException) { return OutboxResult.Retry("portal_unavailable"); }
         catch (PortalNotConfiguredException) { return OutboxResult.Retry("portal_not_configured"); }
 
@@ -39,48 +40,33 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
     }
 
     /// <summary>The ingest body, from stored ids and server amounts only. A line names its product by ids, never by SKU (CONTRACT.md §3).</summary>
-    public static CreateOrderRequest BuildRequest(MarketplaceOrder o)
+    public static CreateOrderRequest BuildRequest(MarketplaceOrder o, bool perGroupShipping = false)
     {
+        var groups = o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId).ToList();
         var lines = new List<OrderLineRequest>();
-        foreach (var g in o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId))
+        foreach (var g in groups)
         {
             var gl = o.Lines.Where(l => l.GroupId == g.Id).OrderBy(l => l.MarketplaceLineId, StringComparer.Ordinal).ToList();
-            var shipTax = AllocateShippingTax(g.ShippingTaxCents, gl);
+            var shipTax = IngestMapping.LineShippingTax(g, gl, perGroupShipping);
             for (var i = 0; i < gl.Count; i++)
             {
                 var l = gl[i];
                 lines.Add(new OrderLineRequest(l.MarketplaceLineId, l.SellerId, l.BrandId, l.ListingId, l.VariantId, l.Quantity, l.UnitPriceCents, 0, l.TaxCents + shipTax[i]));
             }
         }
-        var carrier = o.Groups.Where(g => g.DeliveryKind == "carrier").ToList();
-        // The portal takes one method and speed per order (a gap, see M3-09): the FASTEST chosen speed, so no seller plans for slower delivery than promised.
-        var speed = carrier.Select(g => g.ShippingSpeed!).OrderBy(SpeedRank).FirstOrDefault() ?? "standard";
-        var method = carrier.Count == 0 ? "local" : char.ToUpperInvariant(speed[0]) + speed[1..];
-        var deliveries = o.Groups.Where(g => g.DeliveryKind == "local").Select(g => new LocalDeliveryRequest(g.SellerId, g.BrandId, "local", g.LocalWindowId!.Value, g.LocalDate!)).ToList();
+        var (method, speed) = IngestMapping.OrderMethodAndSpeed(groups);
+        var deliveries = groups.Where(g => g.DeliveryKind == "local").Select(g => new LocalDeliveryRequest(g.SellerId, g.BrandId, "local", g.LocalWindowId!.Value, g.LocalDate!)).ToList();
         return new CreateOrderRequest(o.Number, o.PaidAt ?? o.CreatedAt, o.Currency, new PortalBuyer(o.BuyerName, o.RelayEmail, o.Phone),
             new PortalAddress(o.ShipName, o.ShipLine1, o.ShipLine2, o.ShipCity, o.ShipRegion, o.ShipPostalCode, o.ShipCountry, o.ShipLat, o.ShipLng),
-            method, speed, o.GiftMessage, lines,
-            o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId).Select(g => new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents)).ToList(), deliveries.Count == 0 ? null : deliveries);
+            method, speed, o.GiftMessage, lines, groups.Select(g => IngestMapping.ShippingCharge(g, perGroupShipping)).ToList(), deliveries.Count == 0 ? null : deliveries);
     }
 
-    private static int SpeedRank(string s) => s.ToLowerInvariant() switch { "overnight" => 0, "expedited" => 1, "standard" => 2, _ => 3 };
 
     /// <summary>
     /// The portal's total is items + shipping + the tax on the LINES, with no field for tax on shipping. Tax charged on shipping is therefore added to the group's taxable lines
     /// (in proportion to their tax, the first line takes the remainder), so the portal's total for the seller order equals what the buyer paid for it, exactly.
     /// </summary>
-    public static long[] AllocateShippingTax(long shippingTaxCents, IReadOnlyList<OrderLine> lines)
-    {
-        var result = new long[lines.Count];
-        if (shippingTaxCents <= 0 || lines.Count == 0) return result;
-        var weights = lines.Select(l => l.TaxCents > 0 ? l.TaxCents : 0L).ToArray();
-        if (weights.Sum() == 0) weights = lines.Select(l => l.LineTotalCents).ToArray();
-        var total = weights.Sum();
-        long given = 0;
-        for (var i = 0; i < lines.Count; i++) { result[i] = total == 0 ? 0 : shippingTaxCents * weights[i] / total; given += result[i]; }
-        result[0] += shippingTaxCents - given;
-        return result;
-    }
+    public static long[] AllocateShippingTax(long shippingTaxCents, IReadOnlyList<OrderLine> lines) => IngestMapping.Allocate(shippingTaxCents, lines);
 
     private async Task<OutboxResult> StoreAsync(MarketplaceOrder order, CreateOrderResponse created, CancellationToken ct)
     {
@@ -138,4 +124,44 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
     }
 
     public static string Money(long cents, string currency) => $"{(currency == "USD" ? "$" : currency + " ")}{cents / 100}.{cents % 100:D2}";
+}
+
+/// <summary>
+/// THE one place that knows what the portal's ingest contract can express today (decision M3-09, request C8). Interim (<c>Portal:PerGroupShipping</c> off): the order carries one
+/// method and speed (the fastest chosen, so no seller plans for slower delivery than promised) and the tax charged on shipping is folded into the group's taxable lines, because the
+/// portal's total has no field for it. With the switch on (the portal merged C8): every <c>shipping[]</c> entry carries its own speed and method and its own <c>taxCents</c>, and no
+/// line tax is touched. Flipping the switch changes nothing else.
+/// </summary>
+public static class IngestMapping
+{
+    public static (string Method, string Speed) OrderMethodAndSpeed(IReadOnlyList<OrderGroup> groups)
+    {
+        var carrier = groups.Where(g => g.DeliveryKind == "carrier").ToList();
+        var speed = carrier.Select(g => g.ShippingSpeed!).OrderBy(SpeedRank).FirstOrDefault() ?? "standard";
+        return (carrier.Count == 0 ? "local" : char.ToUpperInvariant(speed[0]) + speed[1..], speed);
+    }
+
+    public static ShippingChargeRequest ShippingCharge(OrderGroup g, bool perGroup)
+        => !perGroup ? new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents)
+         : g.DeliveryKind == "local" ? new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents, "standard", "local", g.ShippingTaxCents)
+         : new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents, g.ShippingSpeed, char.ToUpperInvariant(g.ShippingSpeed![0]) + g.ShippingSpeed[1..], g.ShippingTaxCents);
+
+    /// <summary>The shipping tax each line carries to the portal: all of it folded in while the interim mapping is on, none once the portal has its own field.</summary>
+    public static long[] LineShippingTax(OrderGroup g, IReadOnlyList<OrderLine> lines, bool perGroup)
+        => perGroup ? new long[lines.Count] : Allocate(g.ShippingTaxCents, lines);
+
+    public static long[] Allocate(long shippingTaxCents, IReadOnlyList<OrderLine> lines)
+    {
+        var result = new long[lines.Count];
+        if (shippingTaxCents <= 0 || lines.Count == 0) return result;
+        var weights = lines.Select(l => l.TaxCents > 0 ? l.TaxCents : 0L).ToArray();
+        if (weights.Sum() == 0) weights = lines.Select(l => l.LineTotalCents).ToArray();
+        var total = weights.Sum();
+        long given = 0;
+        for (var i = 0; i < lines.Count; i++) { result[i] = total == 0 ? 0 : shippingTaxCents * weights[i] / total; given += result[i]; }
+        result[0] += shippingTaxCents - given;
+        return result;
+    }
+
+    private static int SpeedRank(string s) => s.ToLowerInvariant() switch { "overnight" => 0, "expedited" => 1, "standard" => 2, _ => 3 };
 }

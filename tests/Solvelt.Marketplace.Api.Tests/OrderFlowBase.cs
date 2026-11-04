@@ -20,7 +20,7 @@ public abstract class OrderFlowBase : IDisposable
     protected static readonly Guid Mazel = FixtureCatalogSource.Id("seller:mazel"), ChallahCorner = FixtureCatalogSource.Id("brand:challah-corner"),
         Judaica = FixtureCatalogSource.Id("seller:judaica"), ShabbatTable = FixtureCatalogSource.Id("brand:shabbat-table");
 
-    protected readonly AuthKit _k = new();
+    protected readonly AuthKit _k;
     protected FakePaymentProvider Stripe => _k.F.Services.GetRequiredService<FakePaymentProvider>();
     protected string _session = "";
     protected int _eventCounter;
@@ -31,8 +31,9 @@ public abstract class OrderFlowBase : IDisposable
     protected readonly Dictionary<string, (Guid Id, string Number)> _sellerOrders = new();
     protected bool _oversold;
 
-    protected OrderFlowBase()
+    protected OrderFlowBase(Dictionary<string, string?>? config = null)
     {
+        _k = new AuthKit(config);
         _k.F.Portal.RespondAlways(c =>
         {
             var path = c.PathAndQuery;

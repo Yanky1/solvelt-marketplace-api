@@ -21,11 +21,15 @@ public sealed class QuoteTests : IDisposable
 
     private static Guid Variant(string slug, int i = 0) => FixtureCatalogSource.Id($"variant:{slug}:{i}");
 
-    private static string Settings(Guid seller, Guid brand, long? threshold = 2000, int handling = 2) => JsonSerializer.Serialize(new
+    private bool _weightOnly;
+
+    private string Settings(Guid seller, Guid brand, long? threshold = 2000, int handling = 2) => JsonSerializer.Serialize(new
     {
         sellerId = seller, brandId = brand, handlingDays = handling, shipsFrom = new { country = "US", region = "NY" },
         profiles = new[] { new { id = Guid.NewGuid(), name = "Default", isDefault = true, currency = "USD", freeShippingThresholdCents = threshold, zones = new[] { new { name = "Domestic", kind = "domestic", countries = new[] { "US" },
-            speeds = new object[] { new { speed = "standard", enabled = true, method = "flat", flatCents = 500 }, new { speed = "overnight", enabled = true, method = "weight", baseCents = 1500, perKgCents = 300 }, new { speed = "expedited", enabled = false, method = "flat", flatCents = 900 } } } } } },
+            speeds = _weightOnly
+                ? new object[] { new { speed = "standard", enabled = true, method = "weight", baseCents = 400, perKgCents = 100 }, new { speed = "overnight", enabled = true, method = "weight", baseCents = 1500, perKgCents = 300 } }
+                : new object[] { new { speed = "standard", enabled = true, method = "flat", flatCents = 500 }, new { speed = "overnight", enabled = true, method = "weight", baseCents = 1500, perKgCents = 300 }, new { speed = "expedited", enabled = false, method = "flat", flatCents = 900 } } } } } },
     });
 
     private void PortalAnswers(Func<ReceivedCall, HttpResponseMessage>? local = null)
@@ -276,14 +280,17 @@ public sealed class QuoteTests : IDisposable
     }
 
     [Theory]
-    [InlineData("550 g", 550)]
-    [InlineData("1.5 kg", 1500)]
-    [InlineData("12 oz", 341)]
-    [InlineData("2 lb", 908)]
-    [InlineData("heavy", 0)]
-    [InlineData("-3 kg", 0)]
-    [InlineData(null, 0)]
-    public void Weights_are_parsed_from_the_weight_attribute_and_unknown_is_zero(string? text, long grams)
+    [InlineData("550 g", 550L)]
+    [InlineData("1.5 kg", 1500L)]
+    [InlineData("12 oz", 341L)]
+    [InlineData("2 lb", 908L)]
+    [InlineData("heavy", null)]
+    [InlineData("-3 kg", null)]
+    [InlineData("0 g", null)]
+    [InlineData("5 stone", null)]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void Weights_are_parsed_from_the_weight_attribute_and_unknown_is_null_never_zero(string? text, long? grams)
         => Assert.Equal(grams, ShippingRates.Grams(text));
 
     [Fact]
@@ -292,5 +299,67 @@ public sealed class QuoteTests : IDisposable
         var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout/quote") { Content = JsonContent.Create(new { address = Addr() }) };
         r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "bogus");
         Assert.Equal(HttpStatusCode.Unauthorized, (await _k.Http.SendAsync(r)).StatusCode);
+    }
+
+    [Fact]
+    public async Task An_unknown_weight_makes_weight_based_speeds_unavailable_but_flat_speeds_still_work_decision_O_15()
+    {
+        PortalAnswers();
+        // the pewter cup has no weight attribute: standard (flat) is offered, overnight (weight based) is not, and the quote says why
+        await Cart(("kiddush-cup-pewter", 1, 0));
+        var g = Group(await Ok(await Quote(new { address = Addr() })), ShabbatTable);
+        Assert.Equal("standard", Assert.Single(g.GetProperty("shippingOptions").EnumerateArray()).GetProperty("speed").GetString());
+        var gone = Assert.Single(g.GetProperty("unavailableSpeeds").EnumerateArray());
+        Assert.Equal(("overnight", "weight_unknown"), (gone.GetProperty("speed").GetString(), gone.GetProperty("reason").GetString()));
+        var refused = await Ok(await Quote(new { address = Addr(), selections = new[] { new { sellerId = Judaica, brandId = ShabbatTable, speed = "overnight" } } }), HttpStatusCode.UnprocessableEntity);
+        Assert.Equal("invalid_selection", refused.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task One_line_of_unknown_weight_is_enough_and_a_fully_known_group_is_priced()
+    {
+        PortalAnswers();
+        await Cart(("challah-classic", 1, 0), ("challah-whole-wheat", 1, 0));      // 550 g known, the whole wheat challah has no weight
+        var g = Group(await Ok(await Quote(new { address = Addr() })), ChallahCorner);
+        Assert.DoesNotContain(g.GetProperty("shippingOptions").EnumerateArray(), o => o.GetProperty("speed").GetString() == "overnight");
+        Assert.Equal("weight_unknown", g.GetProperty("unavailableSpeeds")[0].GetProperty("reason").GetString());
+        // remove it again: with every weight known the weight-based speed is back, priced on the whole group
+        var cart = await Ok(await _k.Http.SendAsync(Get("/api/v1/cart")));
+        var wheat = cart.GetProperty("groups")[0].GetProperty("lines").EnumerateArray().Single(l => l.GetProperty("title").GetString()!.Contains("Whole Wheat")).GetProperty("id").GetGuid();
+        var del = new HttpRequestMessage(HttpMethod.Delete, $"/api/v1/cart/lines/{wheat}");
+        del.Headers.Add(CartEndpoints.GuestHeader, _token);
+        await _k.Http.SendAsync(del);
+        var again = Group(await Ok(await Quote(new { address = Addr() })), ChallahCorner);
+        Assert.Equal(1500 + 300, Price(again, "overnight"));                          // 550 g -> 1 kg
+        Assert.Equal(0, again.GetProperty("unavailableSpeeds").GetArrayLength());
+    }
+
+    private HttpRequestMessage Get(string path)
+    {
+        var r = new HttpRequestMessage(HttpMethod.Get, path);
+        r.Headers.Add(CartEndpoints.GuestHeader, _token);
+        return r;
+    }
+
+    [Fact]
+    public async Task A_group_with_only_weight_priced_speeds_and_an_unknown_weight_cannot_be_ordered_but_local_delivery_still_can()
+    {
+        _weightOnly = true;
+        var window = Guid.NewGuid();
+        PortalAnswers(c => FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
+        {
+            eligible = true, method = "local", feeCents = 400, timeZone = "America/New_York",
+            windows = new[] { new { windowId = window, date = "2026-11-06", start = "2026-11-06T17:00:00Z", end = "2026-11-06T19:00:00Z", remaining = 2 } },
+        })));
+        await Cart(("challah-whole-wheat", 1, 0));       // no weight, a bakery item that can be delivered locally
+        var q = await Ok(await Quote(new { address = Addr() }));
+        var g = Group(q, ChallahCorner);
+        Assert.Equal(0, g.GetProperty("shippingOptions").GetArrayLength());
+        Assert.Equal(2, g.GetProperty("unavailableSpeeds").GetArrayLength());
+        Assert.False(q.GetProperty("canPay").GetBoolean());                           // "shipping unavailable for this seller": nothing to ship it with
+        Assert.Equal(JsonValueKind.Null, g.GetProperty("selected").ValueKind);
+        var local = await Ok(await Quote(new { address = Addr(), selections = new[] { new { sellerId = Mazel, brandId = ChallahCorner, localWindowId = window, localDate = "2026-11-06" } } }));
+        Assert.True(local.GetProperty("canPay").GetBoolean());
+        Assert.Equal("local", Group(local, ChallahCorner).GetProperty("selected").GetProperty("kind").GetString());
     }
 }

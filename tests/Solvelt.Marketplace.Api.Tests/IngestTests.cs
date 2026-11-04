@@ -424,4 +424,76 @@ public sealed class IngestTests : OrderFlowBase
         Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));
         Assert.Equal("paid", (await Order(number)).Status);
     }
+
+    // ---- the one mapping function for the portal's ingest contract (request C8) ----
+
+    private static MarketplaceOrder Sample()
+    {
+        var sellerA = Guid.NewGuid(); var sellerB = Guid.NewGuid(); var brandA = Guid.NewGuid(); var brandB = Guid.NewGuid();
+        var ga = new OrderGroup { Id = Guid.NewGuid(), SellerId = sellerA, BrandId = brandA, DeliveryKind = "carrier", ShippingSpeed = "standard", ItemsCents = 4200, ShippingCents = 500, ShippingTaxCents = 44, TaxCents = 417, TotalCents = 5117 };
+        var gb = new OrderGroup { Id = Guid.NewGuid(), SellerId = sellerB, BrandId = brandB, DeliveryKind = "carrier", ShippingSpeed = "overnight", ItemsCents = 1300, ShippingCents = 1800, TaxCents = 0, TotalCents = 3100 };
+        var o = new MarketplaceOrder { Id = Guid.NewGuid(), Number = "MP-20261104-AAAAAAAA", Currency = "USD", BuyerName = "Jane B.", RelayEmail = "relay-x@relay.test", TotalCents = 8217, PaidAt = DateTimeOffset.UtcNow, ShipCountry = "US" };
+        o.Groups.AddRange([ga, gb]);
+        o.Lines.Add(new OrderLine { GroupId = ga.Id, MarketplaceLineId = "L-1", SellerId = sellerA, BrandId = brandA, Quantity = 1, UnitPriceCents = 4200, LineTotalCents = 4200, TaxCents = 373, ListingId = Guid.NewGuid(), VariantId = Guid.NewGuid() });
+        o.Lines.Add(new OrderLine { GroupId = gb.Id, MarketplaceLineId = "L-2", SellerId = sellerB, BrandId = brandB, Quantity = 2, UnitPriceCents = 650, LineTotalCents = 1300, TaxCents = 0, ListingId = Guid.NewGuid(), VariantId = Guid.NewGuid() });
+        return o;
+    }
+
+    [Fact]
+    public void Interim_mapping_sends_the_fastest_speed_for_the_order_and_folds_shipping_tax_into_line_tax()
+    {
+        var o = Sample();
+        var r = OrderIngestHandler.BuildRequest(o);
+        Assert.Equal(("Overnight", "overnight"), (r.ShippingMethod, r.ShippingSpeed));
+        Assert.All(r.Shipping, s => Assert.Null(s.Speed));
+        Assert.All(r.Shipping, s => Assert.Null(s.TaxCents));
+        Assert.Equal(373 + 44, r.Lines.Single(l => l.MarketplaceLineId == "L-1").TaxCents);        // the 44 on shipping rides on the taxable line
+        var total = r.Lines.Sum(l => l.UnitPriceCents * l.Quantity + l.TaxCents) + r.Shipping.Sum(s => s.AmountCents);
+        Assert.Equal(o.TotalCents, total);                                                         // the portal's total equals what the buyer paid
+    }
+
+    [Fact]
+    public void With_the_C8_switch_on_each_shipping_entry_carries_its_speed_and_tax_and_line_tax_is_untouched()
+    {
+        var o = Sample();
+        var r = OrderIngestHandler.BuildRequest(o, perGroupShipping: true);
+        var a = r.Shipping.Single(s => s.AmountCents == 500);
+        var b = r.Shipping.Single(s => s.AmountCents == 1800);
+        Assert.Equal(("standard", "Standard", 44L), (a.Speed, a.Method, a.TaxCents));
+        Assert.Equal(("overnight", "Overnight", 0L), (b.Speed, b.Method, b.TaxCents));
+        Assert.Equal(373, r.Lines.Single(l => l.MarketplaceLineId == "L-1").TaxCents);              // nothing folded any more
+        var total = r.Lines.Sum(l => l.UnitPriceCents * l.Quantity + l.TaxCents) + r.Shipping.Sum(s => s.AmountCents + s.TaxCents!.Value);
+        Assert.Equal(o.TotalCents, total);                                                         // same total, expressed with the portal's new fields
+        // local delivery groups say so
+        o.Groups[1].DeliveryKind = "local"; o.Groups[1].ShippingSpeed = null; o.Groups[1].LocalWindowId = Guid.NewGuid(); o.Groups[1].LocalDate = "2026-11-06";
+        var local = OrderIngestHandler.BuildRequest(o, perGroupShipping: true).Shipping.Single(s => s.AmountCents == 1800);
+        Assert.Equal("local", local.Method);
+    }
+
+    [Fact]
+    public async Task The_switch_is_configuration_and_the_whole_flow_works_with_it_on()
+    {
+        using var flow = new SwitchedFlow();
+        await flow.Run();
+    }
+
+    private sealed class SwitchedFlow : OrderFlowBase
+    {
+        public SwitchedFlow() : base(new Dictionary<string, string?> { ["Portal:PerGroupShipping"] = "true" }) { }
+
+        public async Task Run()
+        {
+            await Login();
+            await AddToCart("kiddush-cup-pewter");
+            var (number, intent, total) = await Checkout();
+            await Pay(number, intent, total);
+            await Drain();
+            var call = Assert.Single(_k.F.Portal.VerifiedCalls, c => c.PathAndQuery == "/api/internal/v1/orders");
+            using var doc = JsonDocument.Parse(call.BodyText);
+            var ship = doc.RootElement.GetProperty("shipping")[0];
+            Assert.Equal("standard", ship.GetProperty("speed").GetString());
+            Assert.Equal(44, ship.GetProperty("taxCents").GetInt64());
+            Assert.Equal("placed", (await Order(number)).Status);
+        }
+    }
 }
