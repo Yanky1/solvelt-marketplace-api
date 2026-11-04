@@ -140,15 +140,27 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
     /// <c>charge.refund.updated</c> for one of OUR booking refunds that Stripe accepted and then failed (the card was closed): the refund is marked failed and its amount goes back under the cap, so it can
     /// be made again, and a person is alerted because the portal may have been told it succeeded. Null when the refund is not a booking refund of ours.
     /// </summary>
-    public async Task<StripeOutcome?> RefundFailedAsync(string refundId, CancellationToken ct)
+    public async Task<StripeOutcome?> RefundFailedAsync(StripeEnvelope evt, CancellationToken ct)
     {
-        var row = await db.BookingRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.StripeRefundId == refundId, ct);
+        var refundId = evt.Str("id");
+        var key = evt.Meta("refund_key");
+        if (refundId is null) return null;
+        // Matched by Stripe's refund id, or by the refund_key we put in its metadata: the failure can arrive before our own commit has stored the id.
+        var row = await db.BookingRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.StripeRefundId == refundId || (key != null && r.Key == key), ct);
         if (row is null) return null;
+        if (row.Status == RefundStatus.Reserved) throw new StripeOrderNotYetKnownException();      // ours, still being recorded: the event is retried
         var changed = await db.BookingRefunds.Where(r => r.Id == row.Id && r.Status == RefundStatus.Succeeded)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Failed).SetProperty(r => r.UpdatedAt, time.GetUtcNow()), ct);
         if (changed == 0) return StripeOutcome.Ignored;
         await db.BookingPayments.Where(p => p.Id == row.PaymentId).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents - row.AmountCents), ct);
-        log.LogError("ALERT: booking refund {Key} ({Amount} cents) FAILED at Stripe after it was accepted; its amount is back under the cap and the portal may have been told it succeeded", row.Key, row.AmountCents);
+        // Re-issued once under a new attempt key (never reported to the portal again: it was told the first one succeeded); a second failure is only an alert.
+        var baseKey = row.Key.Contains(":retry") ? row.Key[..row.Key.IndexOf(":retry", StringComparison.Ordinal)] : row.Key;
+        if (!row.Key.Contains(":retry"))
+        {
+            var outcome = await refunds.ReserveAsync(row.PaymentId, row.AmountCents, baseKey + ":retry1", row.Reason, false, ct);
+            log.LogError("ALERT: booking refund {Key} ({Amount} cents) FAILED at Stripe after it was accepted; it was re-issued once ({Outcome}) and the portal may have been told the first one succeeded", row.Key, row.AmountCents, outcome);
+        }
+        else log.LogError("ALERT: the re-issued booking refund {Key} ({Amount} cents) FAILED again; the buyer is owed it and a person must look", row.Key, row.AmountCents);
         return StripeOutcome.Applied;
     }
 
@@ -176,12 +188,14 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
         // What a chargeback holds: the amount while it is open or lost; nothing once it is won or was only an inquiry that closed.
         var held = portalStatus is "won" or "warning_closed" ? 0 : Math.Clamp(amount.Value, 0, pay.CapturedCents);
         await db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.DisputedCents, held), ct);
-        // The portal can only book a dispute against a sale it recorded.
-        if (!pay.ReportedToPortal) return StripeOutcome.Applied;
+        if (held < pay.DisputedCents) await refunds.ReleaseDeferredAsync(pay.Id, ct);       // a won or closed dispute frees what was deferred behind it (M4-17)
+        if (pay.Status == BookingPaymentStatus.Void && !pay.ReportedToPortal) return StripeOutcome.Applied;   // refunded and never a sale: nothing at the portal to tell
         var type = evt.Type == "charge.dispute.created" ? PaymentEventTypes.DisputeCreated : closed ? PaymentEventTypes.DisputeClosed : PaymentEventTypes.DisputeUpdated;
         DateTimeOffset? due = evt.Object.TryGetProperty("evidence_details", out var ed) && ed.ValueKind == JsonValueKind.Object && ed.TryGetProperty("due_by", out var d2) && d2.TryGetInt64(out var unix) ? DateTimeOffset.FromUnixTimeSeconds(unix) : null;
         var createdAt = evt.Created > 0 ? DateTimeOffset.FromUnixTimeSeconds(evt.Created) : (DateTimeOffset?)null;
-        outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{booking.MarketplaceBookingId}", type, new DisputeData(disputeId, null, null, booking.MarketplaceBookingId, amount.Value, portalStatus, null, pay.Currency, evt.Str("reason"), due, createdAt));
+        // The portal can only book a dispute against a sale it recorded: until the confirm has reported it, the event is queued but HELD, and the confirm releases it (L2).
+        outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{booking.MarketplaceBookingId}", type, new DisputeData(disputeId, null, null, booking.MarketplaceBookingId, amount.Value, portalStatus, null, pay.Currency, evt.Str("reason"), due, createdAt),
+            pay.ReportedToPortal ? null : TimeSpan.FromDays(3650));
         return StripeOutcome.Applied;
     }
 
@@ -234,7 +248,7 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         // is not theirs. The payment is voided and refunded in full instead, and no sale is reported (decision M4-15).
         if (BookingStatus.IsTerminal(b.Status))
         {
-            await VoidClosedAsync(b, pay, account.Email, "booking_closed", false, ct);
+            await VoidClosedAsync(b, pay, account.Email, "booking_closed", true, ct);   // true: an EARLIER attempt may have confirmed at the portal and lost its answer; cancelling a booking that is not live there is a 404/409, which counts as done
             return OutboxResult.Delivered();
         }
 
@@ -275,12 +289,27 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
                 await VoidClosedAsync(fresh, pay, account.Email, "booking_closed", true, ct);
                 return OutboxResult.Delivered();
             }
-            var marked = await db.BookingPayments.Where(x => x.Id == pay.Id && !x.ReportedToPortal).ExecuteUpdateAsync(x => x.SetProperty(y => y.ReportedToPortal, true).SetProperty(y => y.UpdatedAt, now), ct);
-            if (marked == 1)
+            // Reported only while the payment is still Captured: a cancel or void that won the race on this row has already refunded it, and a sale must never be reported for a void payment.
+            var marked = await db.BookingPayments.Where(x => x.Id == pay.Id && !x.ReportedToPortal && x.Status == BookingPaymentStatus.Captured)
+                .ExecuteUpdateAsync(x => x.SetProperty(y => y.ReportedToPortal, true).SetProperty(y => y.UpdatedAt, now), ct);
+            if (marked == 0)
             {
-                outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, null, pay.CapturedAt));
-                await db.SaveChangesAsync(ct);
+                await tx.RollbackAsync(CancellationToken.None);
+                db.ChangeTracker.Clear();
+                var current = await db.BookingPayments.AsNoTracking().Where(x => x.Id == pay.Id).Select(x => x.Status).FirstAsync(ct);
+                if (current == BookingPaymentStatus.Void)
+                {
+                    // It was voided and refunded in parallel while the portal confirmed: the portal's booking must not stay live.
+                    outbox.Enqueue(BookingLateCancelHandler.Type, new BookingLateCancelHandler.Payload(b.MarketplaceBookingId), "late-cancel:" + b.MarketplaceBookingId);
+                    await db.SaveChangesAsync(ct);
+                }
+                return OutboxResult.Delivered();
             }
+            outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, null, pay.CapturedAt));
+            // A dispute that arrived before the sale was reported was held back: release it now that the portal knows the sale.
+            await db.OutboxMessages.Where(m => m.Status == OutboxStatus.Pending && m.DedupeKey != null && m.DedupeKey.StartsWith("payment:dispute:") && m.DedupeKey.EndsWith(":" + b.MarketplaceBookingId))
+                .ExecuteUpdateAsync(m => m.SetProperty(x => x.NextAttemptAt, now), ct);
+            await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
             db.ChangeTracker.Clear();
             await events.ReplayParkedAsync(BookingEventHandler.Aggregate, b.MarketplaceBookingId, ct);

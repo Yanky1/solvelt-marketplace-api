@@ -47,6 +47,8 @@ public sealed class FakeBookingPortal
     public (HttpStatusCode Status, string Code)? ConfirmFailNext { get; set; }
     /// <summary>Every confirm answers 503 while set (an outage between the payment and the confirmation).</summary>
     public bool ConfirmDown { get; set; }
+    /// <summary>The portal confirms the booking but the answer never arrives (a timeout after the write): the ambiguous confirm.</summary>
+    public bool ConfirmAppliesThenFails { get; set; }
     /// <summary>Runs inside the portal's confirm, after the booking is confirmed there and before the answer leaves (a race with an event on our side).</summary>
     public Action? OnConfirmed { get; set; }
     public List<string> ConfirmBodies { get; } = [];
@@ -212,6 +214,7 @@ public sealed class FakeBookingPortal
             if (ConfirmFailNext is { } f) { ConfirmFailNext = null; return FakePortal.Json(f.Status, JsonSerializer.Serialize(new { code = f.Code })); }
             if (!_byMid.TryGetValue(mid, out var h)) return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
             if (h.Status == "Hold") h.Status = Instant ? "Confirmed" : "Requested";
+            if (ConfirmAppliesThenFails) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
             var body = Summary(h);
             var hook = OnConfirmed; OnConfirmed = null; hook?.Invoke();
             return FakePortal.Json(HttpStatusCode.OK, body);
