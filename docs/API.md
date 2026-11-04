@@ -239,9 +239,9 @@ All endpoints need `Authorization: Bearer <token>` (`401 unauthorized` otherwise
 | `GET /api/v1/account/addresses` | none | `200 [address]`, default first then oldest |
 | `POST /api/v1/account/addresses` | `{ fullName, line1, line2?, city, region?, postalCode, country, phone?, lat?, lng?, isDefault? }` | `201` the address; `422`; `409 too_many_addresses` (20); the first address is always the default |
 | `GET/PUT/DELETE /api/v1/account/addresses/{id}` | as above for PUT | `200`/`204`; `404` for another buyer's, unknown or malformed ids; deleting the default promotes the oldest remaining |
-| `POST /api/v1/account/addresses/{id}/default` | none | `200` the address, now the only default |
-| `POST /api/v1/account/password` | `{ currentPassword, newPassword }` | `204`; `403 reauthentication_required` (sign in again within 10 minutes: call `/auth/reauthenticate`, then repeat); `401 invalid_credentials`; `422` weak password; `429` with `Retry-After`; other sessions are revoked |
-| `POST /api/v1/account/delete` | `{ password }` | `204`; same errors as the password change; the session and every other one stop at once, personal data is erased by a job shortly after |
+| `POST /api/v1/account/addresses/{id}/default` | none | `204`; the address is now the only default; `404` for another buyer's, unknown or malformed ids |
+| `POST /api/v1/account/password` | `{ currentPassword, newPassword }` | `204`; `403 reauthentication_required` (sign in again within 10 minutes: call `/auth/reauthenticate`, then repeat); `401 invalid_credentials`; `409 account_changed` (the account changed while this ran, for example a reset: sign in again); `422` weak password; `429` with `Retry-After`; other sessions are revoked |
+| `POST /api/v1/account/delete` | `{ password }` | `204`; same errors as the password change (including `409 account_changed`); the session and every other one stop at once and the email address is free for a new sign-up at once, the rest of the personal data is erased by a job shortly after |
 
 US addresses (`country: "US"`) need a 5 or 9 digit ZIP and a state code; other countries a plain postal code. `lat` and `lng` come together or not at all.
 

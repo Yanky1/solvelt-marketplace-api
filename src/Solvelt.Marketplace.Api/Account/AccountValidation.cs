@@ -26,7 +26,8 @@ public static partial class AccountValidation
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9 \-]{0,18}[A-Za-z0-9]$|^[A-Za-z0-9]$")] private static partial Regex PostalCode();
     [GeneratedRegex(@"^[0-9+()\-. xX]{5,30}$")] private static partial Regex Phone();
 
-    private static bool Clean(string? s) => s is not null && !s.Any(char.IsControl);
+    /// <summary>No control, format (zero-width, bidi overrides), surrogate-half or private-use characters: text that looks like something it is not, or breaks a mail or a label (L3). NFC normalising follows with the managed normaliser slice (M1-68).</summary>
+    private static bool Clean(string? s) => s is not null && !Auth.AuthValidation.HasForbiddenCharacters(s);
 
     public static string? PhoneProblem(string? phone)
     {

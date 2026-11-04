@@ -9,7 +9,7 @@ namespace Solvelt.Marketplace.Api.Account;
 
 public sealed record ProfileView(Guid Id, string DisplayName, string Email, string? Phone);
 public sealed record AddressView(Guid Id, string FullName, string Line1, string? Line2, string City, string? Region, string PostalCode, string Country, string? Phone, double? Lat, double? Lng, bool IsDefault);
-public enum AccountOutcome { Ok, NotFound, TooMany, ReauthenticationRequired, InvalidCredentials, RateLimited, WeakPassword }
+public enum AccountOutcome { Ok, NotFound, TooMany, ReauthenticationRequired, InvalidCredentials, RateLimited, WeakPassword, Conflict }
 public sealed record AccountResult(AccountOutcome Outcome, string? Problem = null, int RetryAfterSeconds = 0);
 
 /// <summary>
@@ -84,7 +84,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
             try
             {
                 await using var tx = await db.Database.BeginTransactionAsync(ct);
-                await LockAccountAsync(accountId, ct);
+                if (!await LockAccountAsync(accountId, ct)) return (null, AccountOutcome.NotFound);
                 var count = await db.BuyerAddresses.CountAsync(a => a.AccountId == accountId, ct);
                 if (count >= AccountValidation.MaxAddresses) return (null, AccountOutcome.TooMany);
                 var now = Now;
@@ -110,7 +110,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
             try
             {
                 await using var tx = await db.Database.BeginTransactionAsync(ct);
-                await LockAccountAsync(accountId, ct);
+                if (!await LockAccountAsync(accountId, ct)) return null;
                 var address = await db.BuyerAddresses.FirstOrDefaultAsync(a => a.Id == id && a.AccountId == accountId, ct);
                 if (address is null) return null;
                 Apply(address, body, Now);
@@ -136,7 +136,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
             try
             {
                 await using var tx = await db.Database.BeginTransactionAsync(ct);
-                await LockAccountAsync(accountId, ct);
+                if (!await LockAccountAsync(accountId, ct)) return false;
                 if (!await db.BuyerAddresses.AnyAsync(a => a.Id == id && a.AccountId == accountId, ct)) return false;
                 await UnsetDefaultsAsync(accountId, id, ct);
                 var now = Now;
@@ -158,7 +158,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
             try
             {
                 await using var tx = await db.Database.BeginTransactionAsync(ct);
-                await LockAccountAsync(accountId, ct);
+                if (!await LockAccountAsync(accountId, ct)) return false;
                 var row = await db.BuyerAddresses.AsNoTracking().Where(a => a.Id == id && a.AccountId == accountId).Select(a => new { a.IsDefault }).FirstOrDefaultAsync(ct);
                 if (row is null) return false;
                 if (await db.BuyerAddresses.Where(a => a.Id == id && a.AccountId == accountId).ExecuteDeleteAsync(ct) != 1) return false;
@@ -179,8 +179,8 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
     /// Takes the account's row lock (a no-op UPDATE of it) as the first statement of every address-book write, so two writes of ONE buyer's address book never run side by
     /// side: no lost default, no count past the cap, no promotion of an address someone else just deleted. Other buyers are not held up. The unique index stays as the net.
     /// </summary>
-    private Task LockAccountAsync(Guid accountId, CancellationToken ct)
-        => db.BuyerAccounts.Where(a => a.Id == accountId).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct);
+    private async Task<bool> LockAccountAsync(Guid accountId, CancellationToken ct)
+        => await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct) == 1;   // a deleted or missing account takes no writes (L5)
 
     private Task UnsetDefaultsAsync(Guid accountId, Guid exceptId, CancellationToken ct)
         => db.BuyerAddresses.Where(a => a.AccountId == accountId && a.IsDefault && a.Id != exceptId).ExecuteUpdateAsync(s => s.SetProperty(a => a.IsDefault, false), ct);
@@ -201,13 +201,15 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
 
         var hash = passwords.Hash(newPassword);
         var now = Now;
+        var checkedHash = proof.CheckedHash; var checkedEpoch = proof.CheckedEpoch;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        // The epoch bump kills every other session even if one is being created right now (M1-75); this session is re-stamped with the new epoch so it lives on.
-        var changed = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, a => a.SessionEpoch + 1), ct);
-        if (changed != 1) return new AccountResult(AccountOutcome.InvalidCredentials);
-        var epoch = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId).Select(a => a.SessionEpoch).FirstAsync(ct);
-        await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.Epoch, epoch), ct);
+        // Only if the account is still exactly what the password was checked against (A1): a reset that landed during the slow hash above changed the hash and the epoch,
+        // and this change must not overwrite it or bring this session back to life. The epoch bump kills every other session even one being created right now (M1-75).
+        var changed = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == checkedHash && a.SessionEpoch == checkedEpoch)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, checkedEpoch + 1), ct);
+        if (changed != 1) return new AccountResult(AccountOutcome.Conflict);
+        // this session joins the new epoch, but only if it was still on the one the check saw
+        await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null && s.Epoch == checkedEpoch).ExecuteUpdateAsync(s => s.SetProperty(x => x.Epoch, checkedEpoch + 1), ct);
         await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.Id != who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasswordChanged, who.AccountId));
         await db.SaveChangesAsync(ct);
@@ -229,10 +231,13 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         if (proof.Status != SignInStatus.Ok) return new AccountResult(AccountOutcome.InvalidCredentials);
 
         var now = Now;
+        var checkedHash = proof.CheckedHash; var checkedEpoch = proof.CheckedEpoch;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var rows = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now).SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.UpdatedAt, now), ct);
-        if (rows != 1) return new AccountResult(AccountOutcome.NotFound);
+        // Only if the account is still what the password was checked against (a reset in between means somebody else holds the account now), and the address is
+        // freed at once (L2: a sign-up for it used to be swallowed until the redaction job ran). The rest of the personal data goes in the job.
+        var rows = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == checkedHash && a.SessionEpoch == checkedEpoch)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now).SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.Email, (string?)null).SetProperty(a => a.UpdatedAt, now), ct);
+        if (rows != 1) return new AccountResult(AccountOutcome.Conflict);
         await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         await outbox.TryEnqueueAsync(AccountRedactionHandler.Type, new AccountRedactionPayload(who.AccountId), $"redact:{who.AccountId:N}", ct: ct);
         await tx.CommitAsync(ct);
@@ -250,13 +255,14 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         if (account is null) return false;
         foreach (var e in erasers) await e.EraseAsync(accountId, ct);
         var now = Now;
+        var tombstone = RelayIdentity.Tombstone(accountId);   // the relay address stops working and is never issued again (L1)
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.BuyerAddresses.Where(a => a.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.EmailTokens.Where(t => t.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerSessions.Where(s => s.AccountId == accountId).ExecuteDeleteAsync(ct);
         if (account.Email is { } email) await gate.ClearAddressAsync(gateKeys.Address(email), ct);
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.RedactedAt == null).ExecuteUpdateAsync(s => s
-            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null)
+            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null)
             .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
         await tx.CommitAsync(ct);
         return true;

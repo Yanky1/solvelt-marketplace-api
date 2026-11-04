@@ -9,7 +9,7 @@ namespace Solvelt.Marketplace.Api.Auth;
 public sealed record BuyerPrincipal(Guid AccountId, Guid SessionId, string DisplayName, string Email, DateTimeOffset AuthenticatedAt);
 public sealed record ResetOutcome(bool Ok, string? PasswordProblem = null);
 public enum SignInStatus { Ok, InvalidCredentials, EmailNotVerified, TooManyAttempts }
-public sealed record SignInResult(SignInStatus Status, string? Token = null, BuyerAccount? Account = null, int? RetryAfterSeconds = null);
+public sealed record SignInResult(SignInStatus Status, string? Token = null, BuyerAccount? Account = null, int? RetryAfterSeconds = null, string? CheckedHash = null, long CheckedEpoch = 0);
 
 /// <summary>
 /// Buyer authentication. Every answer that could reveal whether an address has an account is the same either way (sign-up, resend, forgot): the
@@ -164,13 +164,14 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var ipKey = gateKeys.Ip(clientIp);
         var claim = await gate.ClaimAsync(addressKey, ipKey, ct);
         if (!claim.Allowed) return new SignInResult(SignInStatus.TooManyAttempts, RetryAfterSeconds: claim.RetryAfterSeconds);
-        var hash = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null).Select(a => a.PasswordHash).FirstOrDefaultAsync(ct);
+        var row = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null).Select(a => new { a.PasswordHash, a.SessionEpoch }).FirstOrDefaultAsync(ct);
+        var hash = row?.PasswordHash;
         if (hash is null) { passwords.BurnTime(password); return new SignInResult(SignInStatus.InvalidCredentials); }
         if (!passwords.Verify(hash, password).Ok) return new SignInResult(SignInStatus.InvalidCredentials);
         await gate.SucceededAsync(addressKey, ipKey, ct);
         var now = Now;
         await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.AuthenticatedAt, now), ct);
-        return new SignInResult(SignInStatus.Ok);
+        return new SignInResult(SignInStatus.Ok, CheckedHash: hash, CheckedEpoch: row!.SessionEpoch);   // what the password was checked against (A1)
     }
 
     /// <summary>

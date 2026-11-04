@@ -74,6 +74,9 @@ public static class RelayIdentity
         return sb.Append('@').Append(relayDomain).ToString();
     }
 
+    /// <summary>What a deleted account's relay address becomes: unique (the id is in it), unroutable (<c>.invalid</c>) and never issued again.</summary>
+    public static string Tombstone(Guid accountId) => $"deleted-{accountId:N}@relay.invalid";
+
     /// <summary>"Jane Brown" becomes "Jane B."; a single name stays as it is.</summary>
     public static string PublicName(string displayName)
     {
@@ -113,7 +116,11 @@ public static class AuthValidation
     {
         if (string.IsNullOrWhiteSpace(name)) return "Enter your name.";
         if (name.Trim().Length > 60) return "Use at most 60 characters.";
-        if (name.Any(char.IsControl)) return "That name has characters that are not allowed.";
+        if (HasForbiddenCharacters(name)) return "That name has characters that are not allowed.";
         return null;
     }
+
+    /// <summary>Control, format (zero-width, bidi overrides), surrogate-half and private-use characters: text that looks like something it is not, or breaks a mail or a label (L3). Used for every free-text field a buyer types.</summary>
+    public static bool HasForbiddenCharacters(string s)
+        => s.Any(c => char.IsControl(c) || char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.Surrogate or System.Globalization.UnicodeCategory.PrivateUse);
 }

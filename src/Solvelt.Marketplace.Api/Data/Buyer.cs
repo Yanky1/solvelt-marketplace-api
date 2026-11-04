@@ -160,6 +160,7 @@ internal sealed class BuyerAccountConfiguration : IEntityTypeConfiguration<Buyer
         b.Property(a => a.Email).HasMaxLength(254);
         b.Property(a => a.DisplayName).HasMaxLength(60).IsRequired();
         b.Property(a => a.PasswordHash).HasMaxLength(400);
+        b.Property(a => a.Phone).HasMaxLength(30);
         b.Property(a => a.RelayEmail).HasMaxLength(120).IsRequired();
         b.HasIndex(a => a.Email).IsUnique();
         b.HasIndex(a => a.RelayEmail).IsUnique();
