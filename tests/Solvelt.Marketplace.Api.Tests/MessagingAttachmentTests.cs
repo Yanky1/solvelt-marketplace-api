@@ -118,6 +118,21 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task G6_A_file_the_scanner_refuses_is_never_stored_and_the_default_scanner_allows()
+    {
+        var (o, g) = await Placed();
+        Guid ok = Guid.NewGuid(), bad = Guid.NewGuid();
+        _files[ok] = () => File(Pdf(), "application/pdf");
+        _files[bad] = () => File(Pdf("/Title(EICAR)"), "application/pdf");
+        _k.F.ScannerVerdict = (bytes, type) => !Encoding.Latin1.GetString(bytes).Contains("EICAR") && type == "application/pdf";
+        await SellerMessage(o, g, "two files", (ok, "ok.pdf", "application/pdf", 1), (bad, "bad.pdf", "application/pdf", 1));
+        await Drain();
+        var atts = await Attachments();
+        Assert.Equal(("stored", "rejected"), (atts.Single(a => a.FileName == "ok.pdf").Status, atts.Single(a => a.FileName == "bad.pdf").Status));
+        Assert.Equal(1, await _k.Db(db => db.MessageAttachmentData.CountAsync()));                    // the refused file's bytes were never kept
+    }
+
+    [Fact]
     public async Task Files_that_are_not_what_they_say_too_big_or_active_are_refused_and_never_stored()
     {
         var (o, g) = await Placed();

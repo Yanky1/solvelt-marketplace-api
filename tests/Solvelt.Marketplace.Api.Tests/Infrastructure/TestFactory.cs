@@ -25,6 +25,12 @@ public sealed class TestFactory : WebApplicationFactory<Program>
     public CaptureLoggerProvider Logs { get; } = new();
     /// <summary>Answers the unsigned public GETs the app makes to the portal (proof-of-delivery images). Calls are recorded in <see cref="PublicCalls"/>.</summary>
     public Func<HttpRequestMessage, HttpResponseMessage>? PublicResponder { get; set; }
+    /// <summary>The attachment scanner seam (decision M5-22): null allows every file, as the default does.</summary>
+    public Func<byte[], string, bool>? ScannerVerdict { get; set; }
+    private sealed class TestScanner(TestFactory f) : Solvelt.Marketplace.Api.Messaging.IAttachmentScanner
+    {
+        public Task<bool> AllowsAsync(byte[] bytes, string contentType, CancellationToken ct) => Task.FromResult(f.ScannerVerdict?.Invoke(bytes, contentType) ?? true);
+    }
     public System.Collections.Concurrent.ConcurrentQueue<Uri> PublicCalls { get; } = new();
     private readonly string _provider = ResolveProvider(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER"));
 
@@ -78,6 +84,8 @@ public sealed class TestFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(s =>
         {
             _services?.Invoke(s);
+            s.RemoveAll<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner>();
+            s.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner>(new TestScanner(this));
             s.RemoveAll<TimeProvider>();
             s.AddSingleton<TimeProvider>(Clock);
             s.AddHttpClient<ISignedPortalClient, SignedPortalClient>().ConfigurePrimaryHttpMessageHandler(() => Portal);
