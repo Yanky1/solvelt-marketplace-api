@@ -30,7 +30,11 @@ public static class RateLimitPolicies
         return services;
     }
 
+    /// <summary>One bucket per (policy, end user); the end user comes from <see cref="ClientIpResolver"/>, not the socket.</summary>
+    internal static string PartitionKey(HttpContext ctx, string bucket)
+        => $"{bucket}:{ctx.RequestServices.GetRequiredService<ClientIpResolver>().Resolve(ctx)}";
+
     private static RateLimitPartition<string> Fixed(HttpContext ctx, string bucket, int permits) =>
-        RateLimitPartition.GetFixedWindowLimiter($"{bucket}:{ctx.Connection.RemoteIpAddress}",
+        RateLimitPartition.GetFixedWindowLimiter(PartitionKey(ctx, bucket),
             _ => new FixedWindowRateLimiterOptions { PermitLimit = permits, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 });
 }

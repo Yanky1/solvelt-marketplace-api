@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Time.Testing;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Portal;
@@ -20,7 +21,18 @@ public sealed class TestFactory : WebApplicationFactory<Program>
     public FakeTimeProvider Clock { get; } = new(new DateTimeOffset(2026, 11, 4, 12, 0, 0, TimeSpan.Zero));
     /// <summary>In-process seller portal; the app's <c>ISignedPortalClient</c> talks to it. Verifies signatures with the portal's rules.</summary>
     public FakePortal Portal { get; }
-    private readonly string _provider = Environment.GetEnvironmentVariable("TEST_DB_PROVIDER")?.ToLowerInvariant() ?? "sqlite";
+    /// <summary>Captures every log line (message, state values, scopes) written while the app runs.</summary>
+    public CaptureLoggerProvider Logs { get; } = new();
+    private readonly string _provider = ResolveProvider(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER"));
+
+    /// <summary>"sqlite" (default when unset) or "postgres". Anything else throws: a typo must not silently run on SQLite.</summary>
+    public static string ResolveProvider(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "sqlite" => "sqlite",
+        "postgres" => "postgres",
+        _ => throw new InvalidOperationException($"Unknown TEST_DB_PROVIDER '{value}'. Use 'sqlite' or 'postgres'."),
+    };
+    public string Provider => _provider;
     private readonly string _dbName = "mp_test_" + Guid.NewGuid().ToString("N");
     private readonly string _sqlitePath;
     private readonly Dictionary<string, string?> _extra = new();
@@ -35,6 +47,7 @@ public sealed class TestFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        builder.ConfigureLogging(l => l.AddProvider(Logs));
         var settings = new Dictionary<string, string?> { ["Portal:BaseUrl"] = "https://portal.test", ["Portal:RetryBaseDelayMs"] = "0" };
         foreach (var kv in _extra) settings[kv.Key] = kv.Value;
         if (_provider == "postgres")
@@ -83,5 +96,34 @@ public sealed class TestFactory : WebApplicationFactory<Program>
             else foreach (var f in new[] { _sqlitePath, _sqlitePath + "-shm", _sqlitePath + "-wal" }) File.Delete(f);
         }
         catch { /* best-effort cleanup of test databases */ }
+    }
+}
+
+public sealed class CaptureLoggerProvider : ILoggerProvider, ISupportExternalScope
+{
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _lines = new();
+    private IExternalScopeProvider _scopes = new LoggerExternalScopeProvider();
+    public IReadOnlyList<string> Lines => _lines.ToArray();
+    public ILogger CreateLogger(string categoryName) => new Capture(this, categoryName);
+    public void SetScopeProvider(IExternalScopeProvider scopeProvider) => _scopes = scopeProvider;
+    public void Dispose() { }
+
+    private sealed class Capture(CaptureLoggerProvider owner, string category) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append(category).Append(" | ").Append(formatter(state, exception));
+            if (state is IEnumerable<KeyValuePair<string, object?>> kvs) foreach (var kv in kvs) sb.Append(" | ").Append(kv.Key).Append('=').Append(kv.Value);
+            owner._scopes.ForEachScope((scope, sbArg) =>
+            {
+                sbArg.Append(" | scope:").Append(scope);
+                if (scope is IEnumerable<KeyValuePair<string, object?>> sk) foreach (var kv in sk) sbArg.Append(' ').Append(kv.Key).Append('=').Append(kv.Value);
+            }, sb);
+            if (exception is not null) sb.Append(" | ex:").Append(exception);
+            owner._lines.Enqueue(sb.ToString());
+        }
     }
 }

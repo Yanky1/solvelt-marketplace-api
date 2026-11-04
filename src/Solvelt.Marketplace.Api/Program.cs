@@ -10,24 +10,15 @@ if (problems.Count > 0)
     throw new InvalidOperationException("Invalid configuration:\n - " + string.Join("\n - ", problems));
 
 var devLike = StartupValidator.IsDevLike(builder.Environment);
-builder.Services.Configure<PortalOptions>(o =>
-{
-    builder.Configuration.GetSection("Portal").Bind(o);
-    if (devLike)
-    {
-        o.InboundSecret ??= DevDefaults.PortalInboundSecret;
-        o.WebhookSecret ??= DevDefaults.PortalWebhookSecret;
-    }
-});
-builder.Services.Configure<MarketplaceOptions>(o =>
-{
-    builder.Configuration.GetSection("Marketplace").Bind(o);
-    if (devLike) o.RelayDomain ??= DevDefaults.RelayDomain;
-});
+builder.Services.Configure<PortalOptions>(o => OptionsSetup.Portal(o, builder.Configuration, devLike));
+builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, builder.Configuration, devLike));
+builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddPortalClient();
+builder.Services.AddSingleton<ClientIpResolver>();
+builder.Services.AddSingleton<AttemptLimiter>();
 builder.Services.AddMarketplaceRateLimiting();
 builder.Services.AddDbContext<MarketplaceDb>(o =>
 {

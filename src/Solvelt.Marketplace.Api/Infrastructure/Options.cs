@@ -26,3 +26,35 @@ public sealed class DatabaseOptions
     /// <summary>"Sqlite" (dev/tests) or "Postgres" (production).</summary>
     public string Provider { get; set; } = "Sqlite";
 }
+
+public sealed class WebOptions
+{
+    /// <summary>
+    /// Key the web server (BFF) signs the forwarded end-user IP with. Its own key: never a portal secret.
+    /// </summary>
+    public string? ForwardingKey { get; set; }
+}
+
+/// <summary>Option defaults, separated from Program.cs so the dev-only fallbacks can be unit tested.</summary>
+public static class OptionsSetup
+{
+    public static void Portal(PortalOptions o, IConfiguration config, bool devLike)
+    {
+        config.GetSection("Portal").Bind(o);
+        if (!devLike) return;
+        o.InboundSecret ??= DevDefaults.PortalInboundSecret;
+        o.WebhookSecret ??= DevDefaults.PortalWebhookSecret;
+    }
+
+    public static void Marketplace(MarketplaceOptions o, IConfiguration config, bool devLike)
+    {
+        config.GetSection("Marketplace").Bind(o);
+        if (devLike) o.RelayDomain ??= DevDefaults.RelayDomain;
+    }
+
+    public static void Web(WebOptions o, IConfiguration config, bool devLike)
+    {
+        config.GetSection("Web").Bind(o);
+        if (devLike) o.ForwardingKey ??= DevDefaults.WebForwardingKey;
+    }
+}
