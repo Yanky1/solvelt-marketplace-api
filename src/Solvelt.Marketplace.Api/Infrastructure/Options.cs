@@ -28,10 +28,11 @@ public sealed class PortalOptions
     /// <summary>Deadline for the whole call across all attempts and backoffs (decision O-08). Longer persistence is the outbox's job.</summary>
     public int TotalDeadlineSeconds { get; set; } = 30;
     /// <summary>
-    /// Contract request C10 (accepted by the portal, not merged yet): disputes keyed per (dispute id, seller order). Off: a dispute that spans several seller orders is held in the outbox
-    /// (it would book only its first seller order). On: those events are released and sent, one per seller order. Single-seller disputes are not affected.
+    /// Contract request C10 (merged by the portal in 3ee6752 and confirmed by its own verification, decision M3-33): disputes keyed per (dispute id, seller order). ON by default: a dispute that spans
+    /// several seller orders is sent as one event per seller order. Off (an emergency switch, or a portal older than C10): those events are held in the outbox until it is turned on again, when the
+    /// order worker releases them. Single-seller disputes are not affected.
     /// </summary>
-    public bool PerSellerOrderDisputes { get; set; }
+    public bool PerSellerOrderDisputes { get; set; } = true;
     /// <summary>
     /// Contract request C8 (portal accepted, bundled with C7, not merged yet): per seller order shipping speed and the tax on shipping as their own fields of <c>shipping[]</c>.
     /// Off (interim): one order-level speed (the fastest chosen) and tax on shipping folded into line tax. Turning it on is this one switch; see <c>IngestMapping</c>.
