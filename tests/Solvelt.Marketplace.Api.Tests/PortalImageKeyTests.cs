@@ -88,15 +88,18 @@ public class PortalImageKeyTests
     }
     private static IReadOnlyList<string> Problems(params (string, string?)[] extra) => StartupValidator.Validate(Config(extra), new Env("Production"));
 
+    /// <summary>Only what is said about the image key: other workers add their own required settings to the validator and this file must not depend on them.</summary>
+    private static IReadOnlyList<string> ImageProblems(params (string, string?)[] extra) => Problems(extra).Where(p => p.Contains("Portal:ImageKey") || p.Contains("Portal:RequireImageKey")).ToList();
+
     [Fact]
     public void The_image_key_is_optional_until_it_is_made_required()
     {
-        Assert.Empty(Problems());
-        Assert.Empty(Problems(("Portal:ImageKey", new string('i', 40))));
-        var required = Problems(("Portal:RequireImageKey", "true"));
+        Assert.Empty(ImageProblems());
+        Assert.Empty(ImageProblems(("Portal:ImageKey", new string('i', 40))));
+        var required = ImageProblems(("Portal:RequireImageKey", "true"));
         Assert.Contains(required, p => p.Contains("Portal:ImageKey") && p.Contains("required"));
-        Assert.Empty(Problems(("Portal:RequireImageKey", "true"), ("Portal:ImageKey", new string('i', 40))));
-        Assert.Empty(Problems(("Portal:RequireImageKey", "false")));
+        Assert.Empty(ImageProblems(("Portal:RequireImageKey", "true"), ("Portal:ImageKey", new string('i', 40))));
+        Assert.Empty(ImageProblems(("Portal:RequireImageKey", "false")));
     }
 
     [Fact]
