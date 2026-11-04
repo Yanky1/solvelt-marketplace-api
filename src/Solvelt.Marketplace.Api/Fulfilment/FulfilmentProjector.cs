@@ -153,7 +153,7 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
                 sh.DriverFirstName = Cap(Str(data, "driverFirstName"), 60) ?? sh.DriverFirstName;
                 if (data.TryGetProperty("events", out var evs) && evs.ValueKind == JsonValueKind.Array) sh.TrackingEventsJson = TimelineJson(evs) ?? sh.TrackingEventsJson;
                 // The position exists only while the buyer's stop is next. Anything else (another status, or an event without one) clears it: it is never carried over.
-                if (Str(data, "status") == "out_for_delivery" && data.TryGetProperty("position", out var pos) && pos.ValueKind == JsonValueKind.Object
+                if (Str(data, "status") == "out_for_delivery" && state.Status is not (FulfilmentStatus.Delivered or FulfilmentStatus.Cancelled or FulfilmentStatus.Refunded) && data.TryGetProperty("position", out var pos) && pos.ValueKind == JsonValueKind.Object
                     && Dbl(pos, "lat") is { } lat && Dbl(pos, "lng") is { } lng
                     && lat is >= -90 and <= 90 && lng is >= -180 and <= 180)
                 { sh.PositionLat = Math.Round(lat, 3); sh.PositionLng = Math.Round(lng, 3); sh.PositionAt = Time(data, "occurredAt") is { } oc && oc <= now ? oc : now; }
@@ -185,6 +185,7 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
                 var sh = await ShipmentAsync(c, group, Str(data, "shipmentId"));
                 if (sh is null) return HandlerOutcome.Skipped("shipment id missing");
                 sh.VoidedAt ??= now;
+                sh.PositionLat = sh.PositionLng = null; sh.PositionAt = null;
                 sh.UpdatedAt = now;
                 await c.Db.SaveChangesAsync(ct);
                 await RecomputeShippedAsync(c.Db, group.Id, lines, ct);
@@ -193,6 +194,7 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
             case Delivered:
             {
                 var ok = await Step("status", FulfilmentStatus.Delivered, TerminalStates.Delivered);
+                if (ok) await ClearPositionsAsync(c.Db, group.Id, ct);
                 if (ok) { state.DeliveredAt = Time(data, "deliveredAt") ?? now; state.DeliveredBy = Str(data, "by") is "seller" or "buyer" ? Str(data, "by") : null; Tell(NotificationKinds.OrderDelivered, null); }
                 return Done(ok, "older or terminal");
             }
@@ -205,6 +207,7 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
                     return HandlerOutcome.Applied();
                 }
                 var ok = await Step("status", FulfilmentStatus.Cancelled, TerminalStates.Cancelled);
+                if (ok) await ClearPositionsAsync(c.Db, group.Id, ct);
                 if (ok)
                 {
                     state.CancelledAt = now;
@@ -254,7 +257,7 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
                     var ret = await c.Db.OrderReturns.FirstOrDefaultAsync(r => r.ReturnId == retId && r.GroupId == group.Id, ct);
                     if (ret is not null && ret.Status == ReturnStatus.Received) { ret.Status = ReturnStatus.Refunded; ret.UpdatedAt = now; }
                 }
-                if (full) await Step("status", FulfilmentStatus.Refunded, TerminalStates.Refunded);
+                if (full && await Step("status", FulfilmentStatus.Refunded, TerminalStates.Refunded)) await ClearPositionsAsync(c.Db, group.Id, ct);
                 if (refundMoneyMoved) Tell(NotificationKinds.RefundIssued, new { amountCents = (Long(data, "amountCents") ?? 0) + (Long(data, "shippingCents") ?? 0), full });
                 return HandlerOutcome.Applied();
             }
@@ -332,6 +335,13 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
             var f = await db.OrderLineFulfilments.FindAsync([line.Id], ct);
             if (f is not null) add(f, Math.Min(qty, line.Quantity));
         }
+    }
+
+    /// <summary>A terminal seller order has no live position: it is cleared from every shipment of the group (M5 review P2).</summary>
+    internal static async Task ClearPositionsAsync(MarketplaceDb db, Guid groupId, CancellationToken ct)
+    {
+        var sh = await db.OrderShipments.Where(x => x.GroupId == groupId && x.PositionAt != null).ToListAsync(ct);
+        foreach (var x in sh) { x.PositionLat = x.PositionLng = null; x.PositionAt = null; }
     }
 
     public const string ProofPrefix = "/api/public/delivery-proof/";
