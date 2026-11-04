@@ -9,28 +9,56 @@ public sealed class SyncCounts { public int Applied, Skipped, Fetched, Pending; 
 
 public sealed record CatalogSyncResult(bool Ran, int Applied, int Skipped, int Pending, int Fetched, string? Error);
 
+/// <summary>The lease was taken over by another instance (ours expired): stop at once and write nothing more.</summary>
+public sealed class LeaseLostException : Exception;
+
+/// <summary>Limits on what one snapshot may carry (M2-10). Variants cannot be truncated (a buyer must be able to buy every one), so more is an invalid snapshot; the rest is cut.</summary>
+public static class SnapshotLimits
+{
+    public const int MaxVariants = 200, MaxImages = 50, MaxAttributes = 100, MaxFaqs = 50;
+    public const int Title = 300, Summary = 600, Name = 300, Alt = 300, AttributeKey = 100, AttributeValue = 500, Question = 500, DisplayName = 200, Slug = 120;
+    public static string Clip(string? s, int max) { s ??= ""; return s.Length <= max ? s : s[..max].TrimEnd(); }
+}
+
 /// <summary>
 /// Keeps the read model in step with <see cref="ICatalogSource"/>: reference data (categories, brands), then a cursor-based poll of the
 /// listing feed, then a fetch of the listings that events said have a newer version than we hold. Everything is versioned by the portal's
 /// <c>version</c>: a snapshot is applied only when newer than what we have, so the job is idempotent, may overlap with events, and does not
-/// care about order (CONTRACT.md §2). One instance runs at a time (a lease row). The cursor moves in the same transaction as the page.
+/// care about order (CONTRACT.md §2). One instance runs at a time (a lease row with an owner token, renewed per page). The cursor moves in the
+/// same transaction as the page, and only a <b>deterministic</b> failure skips a record (see <see cref="SyncErrors"/>).
 /// </summary>
 public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, TimeProvider time, IOptions<CatalogOptions> options, ILogger<CatalogSyncService> log)
 {
     public const string StateKey = "listings";
     private static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
+    private string _owner = "";
 
     public async Task<CatalogSyncResult> RunAsync(CancellationToken ct = default)
     {
         if (!await TryAcquireLeaseAsync(ct)) return new(false, 0, 0, 0, 0, null);
         var counts = new SyncCounts();
         string? error = null;
+        var lost = false;
         try
         {
-            await SyncReferenceDataAsync(ct);
+            // A broken reference record or a failing reference source must not stop the listings: the poll goes on, and listings whose category is not
+            // known yet wait as pending fetches (with backoff) until it is.
+            try { await SyncReferenceDataAsync(ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException and not LeaseLostException)
+            {
+                error = ex.GetType().Name;
+                log.LogError("Catalog reference data failed: {ExceptionType}", ex.GetType().FullName);
+                db.ChangeTracker.Clear();
+            }
             await PollAsync(counts, ct);
             await FetchPendingAsync(counts, ct);
             await SearchIndexer.BackfillAsync(db, ct);
+            await MaintainSellersAsync(ct);
+        }
+        catch (LeaseLostException)
+        {
+            lost = true;
+            log.LogWarning("Catalog sync stopped: its lease was taken over by another instance");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -40,12 +68,17 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         finally
         {
             db.ChangeTracker.Clear();
-            var now = time.GetUtcNow().ToUniversalTime();
-            var err = error;
-            await db.CatalogSyncStates.Where(s => s.Key == StateKey).ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.LeaseUntil, (DateTimeOffset?)null).SetProperty(x => x.LastRunAt, (DateTimeOffset?)now)
-                .SetProperty(x => x.LastError, err)
-                .SetProperty(x => x.LastSuccessAt, x => err == null ? now : x.LastSuccessAt), CancellationToken.None);
+            if (!lost)
+            {
+                var now = time.GetUtcNow().ToUniversalTime();
+                var err = error;
+                var owner = _owner;
+                // only the owner releases: a run whose lease expired and was taken over must not null the new owner's lease
+                await db.CatalogSyncStates.Where(s => s.Key == StateKey && s.LeaseOwner == owner).ExecuteUpdateAsync(s => s
+                    .SetProperty(x => x.LeaseUntil, (DateTimeOffset?)null).SetProperty(x => x.LeaseOwner, (string?)null).SetProperty(x => x.LastRunAt, (DateTimeOffset?)now)
+                    .SetProperty(x => x.LastError, err)
+                    .SetProperty(x => x.LastSuccessAt, x => err == null ? now : x.LastSuccessAt), CancellationToken.None);
+            }
         }
         log.LogInformation("Catalog sync: {Applied} applied, {Skipped} skipped, {Fetched} fetched, {Pending} still pending", counts.Applied, counts.Skipped, counts.Fetched, counts.Pending);
         return new(true, counts.Applied, counts.Skipped, counts.Pending, counts.Fetched, error);
@@ -60,33 +93,122 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             catch (DbUpdateException) { db.ChangeTracker.Clear(); }   // another instance created it first
         }
         var until = now + Lease;
+        var owner = Guid.NewGuid().ToString("N");
         var rows = await db.CatalogSyncStates.Where(s => s.Key == StateKey && (s.LeaseUntil == null || s.LeaseUntil < now))
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.LeaseUntil, (DateTimeOffset?)until), ct);
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.LeaseUntil, (DateTimeOffset?)until).SetProperty(x => x.LeaseOwner, (string?)owner), ct);
+        if (rows == 1) _owner = owner;
         return rows == 1;
     }
 
+    /// <summary>Extends the lease while we still own it; if another instance has taken it over, stops this run.</summary>
+    private async Task RenewLeaseAsync(CancellationToken ct)
+    {
+        var until = time.GetUtcNow().ToUniversalTime() + Lease;
+        var owner = _owner;
+        var rows = await db.CatalogSyncStates.Where(s => s.Key == StateKey && s.LeaseOwner == owner)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.LeaseUntil, (DateTimeOffset?)until), ct);
+        if (rows != 1) throw new LeaseLostException();
+    }
+
     // ---------- reference data ----------
+    /// <summary>
+    /// Categories and brands from the feed, made safe before they touch the database: names are cut to their column, slugs are made unique
+    /// (an existing row keeps its slug; a clash gives the newcomer an id suffix), categories deeper than <see cref="CategoryRules.MaxDepth"/> are
+    /// attached to their ancestor at that depth, parent cycles and self-parents are broken. If the batch still cannot be saved, the records are
+    /// applied one at a time and only a record that breaks a database rule is skipped, so one bad record never blocks the others.
+    /// </summary>
     private async Task SyncReferenceDataAsync(CancellationToken ct)
     {
-        var categories = await source.GetCategoriesAsync(ct);
-        var brands = await source.GetBrandsAsync(ct);
-        var existingCategories = await db.CatalogCategories.ToDictionaryAsync(c => c.Id, ct);
-        foreach (var c in categories)
+        var categories = CategoryRules.Normalise(await source.GetCategoriesAsync(ct));
+        var brands = BrandRules.Normalise(await source.GetBrandsAsync(ct));
+        await ApplyReferenceAsync(perRecord => ApplyCategoriesAsync(categories, perRecord, ct), ct);
+        await ApplyReferenceAsync(perRecord => ApplyBrandsAsync(brands, perRecord, ct), ct);
+    }
+
+    private async Task ApplyReferenceAsync(Func<bool, Task> apply, CancellationToken ct)
+    {
+        try { await apply(false); }
+        catch (Exception ex) when (SyncErrors.IsDeterministic(ex))
         {
-            if (string.IsNullOrWhiteSpace(c.Slug) || string.IsNullOrWhiteSpace(c.Name)) continue;
-            if (!existingCategories.TryGetValue(c.Id, out var row)) { row = new CatalogCategory { Id = c.Id }; db.CatalogCategories.Add(row); existingCategories[c.Id] = row; }
-            row.ParentId = c.ParentId; row.Slug = c.Slug; row.Name = c.Name; row.SortOrder = c.SortOrder;
+            log.LogWarning("Catalog reference data could not be saved as a whole ({ExceptionType}); applying it record by record", ex.GetType().Name);
+            db.ChangeTracker.Clear();
+            await apply(true);
         }
-        var existingBrands = await db.CatalogBrands.ToDictionaryAsync(b => b.Id, ct);
-        foreach (var b in brands)
+        ct.ThrowIfCancellationRequested();
+    }
+
+    private async Task ApplyCategoriesAsync(IReadOnlyList<CategoryDto> feed, bool perRecord, CancellationToken ct)
+    {
+        var existing = await db.CatalogCategories.ToDictionaryAsync(c => c.Id, ct);
+        var slugs = existing.Values.ToDictionary(c => c.Slug, c => c.Id, StringComparer.Ordinal);
+        foreach (var c in feed)
         {
-            if (string.IsNullOrWhiteSpace(b.Slug) || string.IsNullOrWhiteSpace(b.Name)) continue;
-            if (!existingBrands.TryGetValue(b.Id, out var row)) { row = new CatalogBrand { Id = b.Id }; db.CatalogBrands.Add(row); existingBrands[b.Id] = row; }
+            var row = existing.GetValueOrDefault(c.Id);
+            var slug = SlugRules.Choose(c.Slug, c.Id, row?.Slug, slugs);
+            if (row is null) { row = new CatalogCategory { Id = c.Id }; db.CatalogCategories.Add(row); existing[c.Id] = row; }
+            else if (row.Slug != slug) slugs.Remove(row.Slug);
+            row.ParentId = c.ParentId; row.Slug = slug; row.Name = c.Name; row.SortOrder = c.SortOrder;
+            slugs[slug] = c.Id;
+            if (perRecord && !await TrySaveRecordAsync(c.Id, "category", ct))
+            {
+                existing.Remove(c.Id); slugs.Remove(slug);
+                db.ChangeTracker.Clear();
+                existing = await db.CatalogCategories.ToDictionaryAsync(x => x.Id, ct);
+                slugs = existing.Values.ToDictionary(x => x.Slug, x => x.Id, StringComparer.Ordinal);
+            }
+        }
+        if (!perRecord) await db.SaveChangesAsync(ct);
+    }
+
+    private async Task ApplyBrandsAsync(IReadOnlyList<BrandDto> feed, bool perRecord, CancellationToken ct)
+    {
+        var existing = await db.CatalogBrands.ToDictionaryAsync(b => b.Id, ct);
+        var slugs = existing.Values.ToDictionary(b => b.Slug, b => b.Id, StringComparer.Ordinal);
+        foreach (var b in feed)
+        {
+            var row = existing.GetValueOrDefault(b.Id);
+            var slug = SlugRules.Choose(b.Slug, b.Id, row?.Slug, slugs);
+            if (row is null) { row = new CatalogBrand { Id = b.Id }; db.CatalogBrands.Add(row); existing[b.Id] = row; }
+            else if (row.Slug != slug) slugs.Remove(row.Slug);
             var renamed = row.Name != b.Name && !string.IsNullOrEmpty(row.Name);
-            row.SellerId = b.SellerId; row.Slug = b.Slug; row.Name = b.Name; row.LogoImageId = b.LogoImageId;
+            row.SellerId = b.SellerId; row.Slug = slug; row.Name = b.Name; row.LogoImageId = b.LogoImageId;
+            slugs[slug] = b.Id;
             if (renamed) await SearchIndexer.RenameBrandAsync(db, b.Id, b.Name, ct);
+            if (perRecord && !await TrySaveRecordAsync(b.Id, "brand", ct))
+            {
+                db.ChangeTracker.Clear();
+                existing = await db.CatalogBrands.ToDictionaryAsync(x => x.Id, ct);
+                slugs = existing.Values.ToDictionary(x => x.Slug, x => x.Id, StringComparer.Ordinal);
+            }
         }
-        await db.SaveChangesAsync(ct);
+        if (!perRecord) await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Saves what is tracked; a deterministic failure skips (and logs the id only), anything else propagates.</summary>
+    private async Task<bool> TrySaveRecordAsync(Guid id, string what, CancellationToken ct)
+    {
+        try { await db.SaveChangesAsync(ct); return true; }
+        catch (Exception ex) when (SyncErrors.IsDeterministic(ex))
+        {
+            log.LogWarning("Skipping catalog {What} {Id}: it could not be saved ({ExceptionType})", what, id, ex.GetType().Name);
+            return false;
+        }
+    }
+
+    // ---------- seller retention (PII) ----------
+    /// <summary>
+    /// Seller display names can be a person's name. A seller is kept while it has a visible listing and for <see cref="CatalogOptions.SellerRetentionDays"/>
+    /// (90) days after the last time it had one, then deleted; a seller that comes back is re-created by its next snapshot.
+    /// </summary>
+    private async Task MaintainSellersAsync(CancellationToken ct)
+    {
+        var now = time.GetUtcNow().ToUniversalTime();
+        await db.CatalogSellers.Where(s => s.Active && db.CatalogListings.Any(l => l.SellerId == s.Id && l.Visible))
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastVisibleAt, now), ct);
+        var cutoff = now - TimeSpan.FromDays(Math.Max(1, options.Value.SellerRetentionDays));
+        // "visible" means shown to buyers: an active seller with a visible listing (refreshed just above). A suspended seller's listings keep their own Visible flag
+        // (the seller's flag is joined at query time), so that flag alone must not keep the display name alive.
+        await db.CatalogSellers.Where(s => s.LastVisibleAt < cutoff && !(s.Active && db.CatalogListings.Any(l => l.SellerId == s.Id && l.Visible))).ExecuteDeleteAsync(ct);
     }
 
     // ---------- poll ----------
@@ -96,6 +218,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         var cursor = (await db.CatalogSyncStates.AsNoTracking().SingleAsync(s => s.Key == StateKey, ct)).Cursor;
         for (var pageNo = 0; pageNo < Math.Max(1, o.MaxPagesPerRun); pageNo++)
         {
+            await RenewLeaseAsync(ct);
             var page = await source.GetListingsAsync(cursor, Math.Clamp(o.PageSize, 1, 500), ct);
             var next = page.NextCursor ?? cursor;
             await ApplyPageAsync(page, next, counts, ct);
@@ -124,7 +247,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             db.ChangeTracker.Clear();
             return;
         }
-        catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
+        catch (Exception ex) when (SyncErrors.IsDeterministic(ex))
         {
             log.LogWarning("A catalog page could not be applied as a whole ({ExceptionType}); applying its {Count} listings one by one", ex.GetType().Name, page.Items.Count);
             db.ChangeTracker.Clear();
@@ -140,7 +263,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
                 await tx.CommitAsync(ct);
                 if (ok) counts.Applied++; else counts.Skipped++;
             }
-            catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
+            catch (Exception ex) when (SyncErrors.IsDeterministic(ex))
             {
                 log.LogWarning("Skipping catalog listing {ListingId}: it could not be saved ({ExceptionType})", snapshot.Id, ex.GetType().Name);
                 counts.Skipped++;
@@ -156,26 +279,42 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     private async Task FetchPendingAsync(SyncCounts counts, CancellationToken ct)
     {
         var o = options.Value;
-        var ids = await db.CatalogListings.AsNoTracking().Where(l => l.KnownVersion > l.Version)
-            .OrderBy(l => l.KnownVersion).Select(l => l.Id).Take(Math.Max(1, o.MaxPendingFetchesPerRun)).ToListAsync(ct);
-        foreach (var id in ids)
+        var now = time.GetUtcNow().ToUniversalTime();
+        // Rows that never apply (a snapshot that fails every time) back off instead of taking the same hundred slots on every run, so good rows behind them are reached.
+        var due = await db.CatalogListings.AsNoTracking().Where(l => l.KnownVersion > l.Version && (l.NextFetchAt == null || l.NextFetchAt <= now))
+            .OrderBy(l => l.NextFetchAt == null ? 0 : 1).ThenBy(l => l.NextFetchAt).ThenBy(l => l.KnownVersion)
+            .Select(l => new { l.Id, l.FetchAttempts }).Take(Math.Max(1, o.MaxPendingFetchesPerRun)).ToListAsync(ct);
+        foreach (var item in due)
         {
-            var snapshot = await source.GetListingAsync(id, ct);
+            await RenewLeaseAsync(ct);
+            var snapshot = await source.GetListingAsync(item.Id, ct);     // a portal that is down throws: the run fails and the rows stay pending
             db.ChangeTracker.Clear();
-            if (snapshot is null) { await MarkRemovedAsync(id, ct); continue; }
+            if (snapshot is null) { await MarkRemovedAsync(item.Id, ct); continue; }
             try
             {
                 if (await ApplySnapshotAsync(snapshot, ct)) counts.Fetched++;
                 await db.SaveChangesAsync(ct);
             }
-            catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
+            catch (Exception ex) when (SyncErrors.IsDeterministic(ex))
             {
-                log.LogWarning("Skipping catalog listing {ListingId}: it could not be saved ({ExceptionType})", id, ex.GetType().Name);
+                log.LogWarning("Skipping catalog listing {ListingId}: it could not be saved ({ExceptionType})", item.Id, ex.GetType().Name);
                 counts.Skipped++;
             }
             db.ChangeTracker.Clear();
+            await BackOffIfStillPendingAsync(item.Id, item.FetchAttempts, ct);
         }
         counts.Pending = await db.CatalogListings.CountAsync(l => l.KnownVersion > l.Version, ct);
+    }
+
+    /// <summary>The wait before the next try of a pending fetch: 1, 2, 4 ... minutes, at most 6 hours.</summary>
+    public static TimeSpan Backoff(int attempts) => TimeSpan.FromMinutes(Math.Min(360, Math.Pow(2, Math.Clamp(attempts, 1, 10) - 1)));
+
+    private async Task BackOffIfStillPendingAsync(Guid id, int previousAttempts, CancellationToken ct)
+    {
+        var attempts = previousAttempts + 1;
+        var next = time.GetUtcNow().ToUniversalTime() + Backoff(attempts);
+        await db.CatalogListings.Where(l => l.Id == id && l.KnownVersion > l.Version)
+            .ExecuteUpdateAsync(l => l.SetProperty(x => x.FetchAttempts, attempts).SetProperty(x => x.NextFetchAt, (DateTimeOffset?)next), ct);
     }
 
     /// <summary>The portal answered "no such listing" for a version we were told about: hide it and stop asking for that version.</summary>
@@ -199,7 +338,8 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     public async Task<bool> ApplySnapshotAsync(ListingSnapshot s, CancellationToken ct)
     {
         if (!IsValid(s, out var why)) { log.LogWarning("Skipping an invalid catalog snapshot ({Why}) for listing {ListingId}", why, s.Id); return false; }
-        var listing = await db.CatalogListings.Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs)
+        // four collection includes in one query multiply (variants x images x attributes x FAQs rows): always split
+        var listing = await db.CatalogListings.Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).AsSplitQuery()
             .FirstOrDefaultAsync(l => l.Id == s.Id, ct);
         if (listing is not null && s.Version <= listing.Version)
         {
@@ -208,7 +348,12 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         }
         if (!await db.CatalogCategories.AnyAsync(c => c.Id == s.CategoryId, ct) && !db.CatalogCategories.Local.Any(c => c.Id == s.CategoryId))
         {
-            log.LogWarning("Skipping catalog listing {ListingId}: unknown category", s.Id);
+            // The category feed may be late or failing. Dropping the snapshot would lose the listing (the cursor moves on), so it is held as a hidden
+            // stub that knows the version it is waiting for; the pending fetch (with backoff) applies it once the category exists.
+            log.LogWarning("Holding catalog listing {ListingId}: its category is not known yet", s.Id);
+            if (listing is null) { listing = CatalogEventHandler.NewStub(s.Id, time.GetUtcNow().ToUniversalTime()); db.CatalogListings.Add(listing); }
+            listing.KnownVersion = Math.Max(listing.KnownVersion, s.Version);
+            listing.Row++;
             return false;
         }
 
@@ -219,15 +364,18 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             listing = new CatalogListing { Id = s.Id, FirstSeenAt = now, Slug = await UniqueSlugAsync(s.Title, s.Id, ct) };
             db.CatalogListings.Add(listing);
         }
-        else if (listing.IsStub) listing.Slug = await UniqueSlugAsync(s.Title, s.Id, ct);   // a stub made from an event has a placeholder slug
+        else if (listing.IsStub) listing.Slug = await UniqueSlugAsync(SnapshotLimits.Clip(s.Title, SnapshotLimits.Title), s.Id, ct);   // a stub made from an event has a placeholder slug
 
-        listing.Type = s.Type; listing.Title = s.Title; listing.TitleSort = Slug.From(s.Title); listing.Summary = s.Summary; listing.Description = s.Description;
+        // oversized text is cut to its column rather than dropping the whole listing
+        var title = SnapshotLimits.Clip(s.Title, SnapshotLimits.Title);
+        listing.Type = s.Type; listing.Title = title; listing.TitleSort = Slug.From(title); listing.Summary = SnapshotLimits.Clip(s.Summary, SnapshotLimits.Summary); listing.Description = s.Description ?? "";
         listing.SellerId = s.Seller.Id; listing.BrandId = s.Brand.Id; listing.CategoryId = s.CategoryId;
         listing.Status = s.Status; listing.Currency = s.Currency;
         listing.CreatedAt = s.CreatedAt.ToUniversalTime(); listing.UpdatedAt = s.UpdatedAt.ToUniversalTime();
         listing.Version = s.Version;
         listing.KnownVersion = Math.Max(listing.KnownVersion, s.Version);
         listing.IsStub = false;
+        listing.FetchAttempts = 0; listing.NextFetchAt = null;
         listing.Row++;
 
         var basis = s.Variants.Any(v => v.Available) ? s.Variants.Where(v => v.Available).ToList() : s.Variants.ToList();
@@ -238,13 +386,15 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.RecomputeVisibility();
 
         var brandName = (await db.CatalogBrands.FindAsync([s.Brand.Id], ct))?.Name ?? s.Brand.Name;
-        SearchIndexer.Upsert(db, s.Id, s.Brand.Id, s.Title, brandName, s.SearchTerms, s.Description);
+        SearchIndexer.Upsert(db, s.Id, s.Brand.Id, title, brandName, s.SearchTerms, s.Description ?? "");
         SyncVariants(listing, s);
         SyncImages(listing, s);
         db.CatalogAttributes.RemoveRange(listing.Attributes);
-        listing.Attributes = s.Attributes.Select((a, i) => new CatalogAttribute { ListingId = s.Id, Key = a.Key, Value = a.Value, SortOrder = i }).ToList();
+        listing.Attributes = s.Attributes.Where(a => !string.IsNullOrWhiteSpace(a.Key) && !string.IsNullOrWhiteSpace(a.Value)).Take(SnapshotLimits.MaxAttributes)
+            .Select((a, i) => new CatalogAttribute { ListingId = s.Id, Key = SnapshotLimits.Clip(a.Key, SnapshotLimits.AttributeKey), Value = SnapshotLimits.Clip(a.Value, SnapshotLimits.AttributeValue), SortOrder = i }).ToList();
         db.CatalogFaqs.RemoveRange(listing.Faqs);
-        listing.Faqs = s.Faqs.Select((f, i) => new CatalogFaq { ListingId = s.Id, Question = f.Question, Answer = f.Answer, SortOrder = i }).ToList();
+        listing.Faqs = s.Faqs.Where(f => !string.IsNullOrWhiteSpace(f.Question)).Take(SnapshotLimits.MaxFaqs)
+            .Select((f, i) => new CatalogFaq { ListingId = s.Id, Question = SnapshotLimits.Clip(f.Question, SnapshotLimits.Question), Answer = f.Answer ?? "", SortOrder = i }).ToList();
         return true;
     }
 
@@ -256,6 +406,8 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         else if (string.IsNullOrWhiteSpace(s.Status)) why = "status";
         else if (s.Version < 1) why = "version";
         else if (s.Variants.Count == 0) why = "no variants";
+        else if (s.Variants.Count > SnapshotLimits.MaxVariants) why = "too many variants";
+        else if (s.Variants.Select(v => v.Id).Distinct().Count() != s.Variants.Count) why = "duplicate variant ids";
         else if (s.Variants.Any(v => v.PriceCents < 0)) why = "negative price";
         else if (s.Currency is not { Length: 3 }) why = "currency";
         return why.Length == 0;
@@ -263,14 +415,17 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
 
     private async Task UpsertSellerAndBrandAsync(ListingSnapshot s, CancellationToken ct)
     {
+        var now = time.GetUtcNow().ToUniversalTime();
+        var stateAt = s.UpdatedAt.ToUniversalTime();
         var seller = await db.CatalogSellers.FindAsync([s.Seller.Id], ct);
-        if (seller is null) db.CatalogSellers.Add(new CatalogSeller { Id = s.Seller.Id, DisplayName = s.Seller.DisplayName, Active = s.Seller.Active });
-        else { seller.DisplayName = s.Seller.DisplayName; seller.Active = s.Seller.Active; }
+        if (seller is null) db.CatalogSellers.Add(new CatalogSeller { Id = s.Seller.Id, DisplayName = SnapshotLimits.Clip(s.Seller.DisplayName, SnapshotLimits.DisplayName), Active = s.Seller.Active, StateAt = stateAt, LastVisibleAt = now });
+        else if (stateAt >= seller.StateAt)   // the seller's state is ordered by the portal time of the snapshot that carried it: an older page cannot reactivate a suspended seller
+        { seller.DisplayName = SnapshotLimits.Clip(s.Seller.DisplayName, SnapshotLimits.DisplayName); seller.Active = s.Seller.Active; seller.StateAt = stateAt; }
         if (await db.CatalogBrands.FindAsync([s.Brand.Id], ct) is null)   // normally supplied by the brand feed; keep the listing usable if it is late
         {
             var slug = Slug.From(s.Brand.Name);
             if (await db.CatalogBrands.AnyAsync(b => b.Slug == slug, ct) || db.CatalogBrands.Local.Any(b => b.Slug == slug)) slug += "-" + s.Brand.Id.ToString("N")[..6];
-            db.CatalogBrands.Add(new CatalogBrand { Id = s.Brand.Id, SellerId = s.Seller.Id, Name = s.Brand.Name, Slug = slug });
+            db.CatalogBrands.Add(new CatalogBrand { Id = s.Brand.Id, SellerId = s.Seller.Id, Name = SnapshotLimits.Clip(s.Brand.Name, SnapshotLimits.DisplayName), Slug = SnapshotLimits.Clip(slug, SnapshotLimits.Slug) });
         }
     }
 
@@ -291,37 +446,44 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         {
             var row = listing.Variants.FirstOrDefault(e => e.Id == v.Id);
             if (row is null) { row = new CatalogVariant { Id = v.Id, ListingId = s.Id }; listing.Variants.Add(row); }
-            row.Name = v.Name; row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available; row.SortOrder = i;
+            row.Name = SnapshotLimits.Clip(v.Name, SnapshotLimits.Name); row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available; row.SortOrder = i;
         }
     }
 
     private void SyncImages(CatalogListing listing, ListingSnapshot s)
     {
-        var incoming = s.Images.Select((im, i) => (im, i)).ToList();
+        var incoming = s.Images.GroupBy(im => im.Id).Select(g => g.First()).Take(SnapshotLimits.MaxImages).Select((im, i) => (im, i)).ToList();
         foreach (var gone in listing.Images.Where(e => incoming.All(x => x.im.Id != e.Id)).ToList()) { listing.Images.Remove(gone); db.CatalogImages.Remove(gone); }
         foreach (var (im, i) in incoming)
         {
             var row = listing.Images.FirstOrDefault(e => e.Id == im.Id);
             if (row is null) { row = new CatalogImage { Id = im.Id, ListingId = s.Id }; listing.Images.Add(row); }
-            row.Width = im.Width; row.Height = im.Height; row.Alt = im.Alt; row.SortOrder = i;
+            row.Width = im.Width; row.Height = im.Height; row.Alt = SnapshotLimits.Clip(im.Alt, SnapshotLimits.Alt); row.SortOrder = i;
         }
     }
 }
 
 public sealed class CatalogSyncWorker(IServiceScopeFactory scopes, IOptions<CatalogOptions> options, ILogger<CatalogSyncWorker> log) : BackgroundService
 {
+    /// <summary>The wait after <paramref name="failures"/> failed runs in a row: the normal interval, doubled each time, at most 10 minutes (a down portal or database is not hammered).</summary>
+    public static TimeSpan Delay(int intervalSeconds, int failures)
+        => TimeSpan.FromSeconds(Math.Min(600, Math.Max(5, intervalSeconds) * Math.Pow(2, Math.Min(failures, 10))));
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(5, options.Value.SyncIntervalSeconds)));
-        do
+        var failures = 0;
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 using var scope = scopes.CreateScope();
-                await scope.ServiceProvider.GetRequiredService<CatalogSyncService>().RunAsync(stoppingToken);
+                var result = await scope.ServiceProvider.GetRequiredService<CatalogSyncService>().RunAsync(stoppingToken);
+                failures = result.Error is null ? 0 : failures + 1;
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-            catch (Exception ex) { log.LogError("Catalog sync worker failed: {ExceptionType}", ex.GetType().FullName); }
-        } while (await timer.WaitForNextTickAsync(stoppingToken));
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            catch (Exception ex) { failures++; log.LogError("Catalog sync worker failed: {ExceptionType}", ex.GetType().FullName); }
+            try { await Task.Delay(Delay(options.Value.SyncIntervalSeconds, failures), stoppingToken); }
+            catch (OperationCanceledException) { return; }
+        }
     }
 }

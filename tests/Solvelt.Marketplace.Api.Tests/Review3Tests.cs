@@ -64,8 +64,9 @@ public class Review3LoggingTests
         Assert.Equal(LogLevel.Warning, byCategory["Microsoft.AspNetCore"].Single().LogLevel);
         Assert.Equal(LogLevel.Warning, byCategory["Microsoft.EntityFrameworkCore"].Single().LogLevel);
         Assert.Equal(LogLevel.Warning, byCategory["System.Net.Http.HttpClient"].Single().LogLevel);
-        Assert.DoesNotContain(o.Rules, r => r.CategoryName is "Microsoft.AspNetCore.Routing.Matching.DfaMatcher" or "Microsoft.EntityFrameworkCore.Database.Command"
-                                            or "System.Net.Http.HttpClient.ISignedPortalClient.ClientHandler");
+        Assert.Equal(LogLevel.None, byCategory["Microsoft.EntityFrameworkCore.Database.Command"].Single().LogLevel);       // the looser Information rule is replaced by None (M2-12)
+        Assert.Equal(LogLevel.None, byCategory["Microsoft.EntityFrameworkCore.Update"].Single().LogLevel);
+        Assert.DoesNotContain(o.Rules, r => r.CategoryName is "Microsoft.AspNetCore.Routing.Matching.DfaMatcher" or "System.Net.Http.HttpClient.ISignedPortalClient.ClientHandler");
         Assert.Equal(LogLevel.Debug, byCategory["Solvelt.Marketplace"].Single().LogLevel);   // unrelated rules are left alone
         Assert.Contains(o.Rules, r => r.CategoryName is null && r.LogLevel == LogLevel.Trace);
     }
@@ -164,6 +165,9 @@ public class Review3LoggingTests
     [InlineData("Microsoft.AspNetCore.Routing")]
     [InlineData("Microsoft.AspNetCore.Routing.Matching.DfaMatcher")]
     [InlineData("MICROSOFT.ASPNETCORE.ROUTING.EndpointMiddleware")]
+    [InlineData("Microsoft.EntityFrameworkCore.Update")]              // M2-12: EF's SaveChanges error log carries the database exception message
+    [InlineData("Microsoft.EntityFrameworkCore.Database.Command")]    // moved here from the warning-only theory: "Failed executing DbCommand" carries it too
+    [InlineData("microsoft.entityframeworkcore.database.command")]
     public void Silent_categories_log_nothing_at_any_level_and_open_no_scope(string category)
     {
         var (factory, rec) = Guarded();
@@ -181,7 +185,7 @@ public class Review3LoggingTests
     [Theory]
     [InlineData("Microsoft.AspNetCore.Server.Kestrel")]
     [InlineData("microsoft.aspnetcore.cors")]
-    [InlineData("Microsoft.EntityFrameworkCore.Database.Command")]
+    [InlineData("Microsoft.EntityFrameworkCore.Infrastructure")]
     [InlineData("System.Net.Http.HttpClient.ISignedPortalClient.ClientHandler")]
     public void Broad_categories_log_warnings_and_above_only_and_open_no_scope(string category)
     {
