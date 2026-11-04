@@ -94,6 +94,7 @@ builder.Services.AddScoped<IPaymentProvider>(sp =>
     : devLike ? sp.GetRequiredService<FakePaymentProvider>() : new UnconfiguredPaymentProvider());
 builder.Services.AddSingleton<CheckoutHooks>();
 builder.Services.AddScoped<CheckoutService>();
+builder.Services.AddScoped<IGuestOrderClaimer, GuestOrderClaimer>();
 builder.Services.AddScoped<IOutboxHandler, StripeCancelHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeOrphanCancelHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeIntentRefundHandler>();

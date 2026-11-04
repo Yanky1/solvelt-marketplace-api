@@ -42,11 +42,13 @@ public sealed class MessageSentHandler : IProjectionHandler
             if (order.Groups.Any(g => g.SellerOrderId is null)) return HandlerOutcome.Parked("order", order.Number, "seller orders not stored yet");
             var group = son is null ? (order.Groups.Count == 1 ? order.Groups[0] : null) : order.Groups.FirstOrDefault(g => g.SellerOrderNumber == son);   // equal numbers only
             if (group is null) return HandlerOutcome.Skipped("no such seller order on this order");
-            thread = await c.Db.MessageThreads.FirstOrDefaultAsync(t => t.GroupId == group.Id && t.AccountId == order.AccountId, ct);
+            // A guest order has no account to hold a thread (decision M3-32): the seller's message waits, parked, until a verified account claims the order (the parked-event loop replays it).
+            if (order.AccountId is not { } orderAccountId) return HandlerOutcome.Parked("order", order.Number, "guest order not claimed yet");
+            thread = await c.Db.MessageThreads.FirstOrDefaultAsync(t => t.GroupId == group.Id && t.AccountId == orderAccountId, ct);
             if (thread is null)
             {
                 // a seller-started thread: ours is created now; the buyer's first reply joins it
-                thread = new MessageThread { Id = Guid.NewGuid(), ConversationKey = "CV-" + Guid.NewGuid().ToString("N")[..24].ToUpperInvariant(), AccountId = order.AccountId, Kind = ThreadKinds.Order, OrderId = order.Id, GroupId = group.Id,
+                thread = new MessageThread { Id = Guid.NewGuid(), ConversationKey = "CV-" + Guid.NewGuid().ToString("N")[..24].ToUpperInvariant(), AccountId = orderAccountId, Kind = ThreadKinds.Order, OrderId = order.Id, GroupId = group.Id,
                     SellerName = group.SellerName, Subject = $"Order {order.Number}", CreatedAt = now, LastMessageAt = now };
                 c.Db.MessageThreads.Add(thread);
             }

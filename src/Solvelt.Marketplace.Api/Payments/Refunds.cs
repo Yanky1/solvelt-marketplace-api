@@ -314,7 +314,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
 
     private async Task MailFailedOrderAsync(MarketplaceOrder order, long refunded, CancellationToken ct)
     {
-        var email = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == order.AccountId && a.DeletedAt == null).Select(a => a.Email).FirstOrDefaultAsync(ct);
+        var email = await Checkout.OrderMail.AddressAsync(db, order, ct);
         if (email is null) return;
         var windowGone = order.FailureCode?.StartsWith("delivery_", StringComparison.Ordinal) == true;
         var text = refunded <= 0 ? "everything has already been returned to your card"
