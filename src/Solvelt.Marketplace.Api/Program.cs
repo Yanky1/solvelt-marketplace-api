@@ -3,6 +3,7 @@ using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Auth;
+using Solvelt.Marketplace.Api.Carts;
 using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
@@ -65,6 +66,9 @@ builder.Services.AddScoped<ProjectionStore>();
 builder.Services.AddScoped<PortalEventProcessor>();
 builder.Services.AddScoped<PortalEventMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<PortalEventWorker>();
+builder.Services.AddScoped<CartService>();
+builder.Services.AddScoped<CartMaintenance>();
+if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();
 builder.Services.AddScoped<OutboxWriter>();
 builder.Services.AddScoped<OutboxDispatcher>();
 builder.Services.AddScoped<OutboxMaintenance>();
@@ -106,6 +110,7 @@ app.MapPortalWebhooks();
 app.MapCatalog();
 app.MapOutboxAdmin();
 app.MapAuth();
+app.MapCart();
 
 app.Run();
 

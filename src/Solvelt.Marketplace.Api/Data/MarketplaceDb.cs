@@ -22,6 +22,8 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<BuyerAccount> BuyerAccounts => Set<BuyerAccount>();
     public DbSet<BuyerSession> BuyerSessions => Set<BuyerSession>();
     public DbSet<EmailToken> EmailTokens => Set<EmailToken>();
+    public DbSet<Cart> Carts => Set<Cart>();
+    public DbSet<CartLine> CartLines => Set<CartLine>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

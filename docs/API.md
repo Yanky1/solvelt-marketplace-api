@@ -203,3 +203,16 @@ All bodies are JSON. The web server holds the session token in its own HttpOnly 
 | `GET /api/v1/account/me` | none | `200 { id, displayName, email }`, or `401 { code: "unauthorized" }` |
 
 Rules: email is trimmed and lower-cased; password 10 to 128 characters and not the email address; display name 1 to 60 characters. The token returned by sign-in is 43 characters of base64url, shown once. Sessions end after 7 idle days (sliding) or 30 days in all. Five wrong passwords lock the account for 15 minutes. Links in mails open `<Marketplace:PublicBaseUrl>/verify-email?token=...` and `/reset-password?token=...` (24 h and 60 min; the token is `<32 hex>.<43 base64url>` and is opaque to the web: pass it through unchanged); the pages must POST the token (a mail scanner opening the link then cannot use it up). The buyer is known to the portal only as a relay address and a name like "Jane B." (decision M1-55 and the PII table).
+
+## Cart (M3)
+`/api/v1/cart`, public rate limit. The owner is the signed-in buyer (`Authorization: Bearer`) or a guest (`X-Solvelt-Cart-Token`). A guest cart is created by the first add; the answer carries `cartToken` **once** (43 base64url characters; the web server keeps it in its own HttpOnly cookie). An unknown guest token never becomes a cart id: it gets a fresh cart and a fresh token. A present but invalid Bearer is `401` (never a silent guest cart).
+
+| Endpoint | Body | Answers |
+|---|---|---|
+| `GET /api/v1/cart` | none | `200 CartView` (an empty cart when none exists) |
+| `POST /api/v1/cart/lines` | `{ variantId, quantity? = 1 }` | `200 CartView`; `404` hidden, unlisted, suspended-seller or unknown variant; `422 not_purchasable` (service or sold out), `quantity_limit` (1..20), `cart_full` (50 lines), `currency_mismatch`. Adding a variant already in the cart adds to its line (capped at 20) |
+| `PATCH /api/v1/cart/lines/{lineId}` | `{ quantity }` (0 removes) | `200 CartView`; `404` for a line that is not in this cart; `422 quantity_limit` |
+| `DELETE /api/v1/cart/lines/{lineId}` | none | `200 CartView`; `404` |
+| `POST /api/v1/cart/merge` | `{ guestToken }`, Bearer required | `200 CartView`: moves the guest cart into the buyer's (quantities add, capped at 20). Call it right after sign-in; repeating it or an unknown token changes nothing |
+
+`CartView = { currency, groups: [{ sellerId, sellerName, brandId, brandName, subtotalCents, lines: [{ id, listingId, variantId, slug, title, variantName, imageId, quantity, unitPriceCents, compareAtCents, lineTotalCents, status: ok|unavailable, previousUnitPriceCents }] }], itemCount, subtotalCents, canCheckout, cartToken }`. Groups are per (seller, brand), exactly as the portal splits seller orders. Everything is read from the catalog on every call: a client-supplied price, total or name is not an input anywhere. `unavailable` lines (hidden, unlisted, seller inactive, sold out, gone) count as 0 and make `canCheckout` false until removed. `previousUnitPriceCents` is set when the price differs from the one the buyer last saw (changing the quantity accepts the new price).
