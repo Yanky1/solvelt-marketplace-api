@@ -68,7 +68,7 @@ public static class CheckoutEndpoints
     private static async Task<IResult> GetOrder(string number, HttpContext ctx, MarketplaceDb db, CancellationToken ct)
     {
         var buyer = ctx.Buyer();
-        var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);
+        var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).AsSplitQuery().FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);
         if (o is null) return Problems.NotFound();
         return Results.Json(new
         {
