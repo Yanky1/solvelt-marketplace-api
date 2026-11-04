@@ -13,7 +13,7 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
     public const int RedactAfterDays = 90;
     public const string Redacted = "Redacted";
     public const int PositionRetentionHours = 24;
-    public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0, int NotificationsDeleted = 0, int ThreadsRedacted = 0);
+    public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0, int NotificationsDeleted = 0, int ThreadsRedacted = 0, int ModerationNotesCleared = 0);
 
     /// <summary>Stored driver positions older than 24 h. Also run on its own by the worker, so a failure of any other retention step never leaves a position behind (review P7).</summary>
     public async Task<int> ClearPositionsAsync(CancellationToken ct = default)
@@ -38,6 +38,10 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
         var deleted = await db.Notifications.Where(n => n.CreatedAt < notifCut).ExecuteDeleteAsync(ct);
 
         var cutoff = now.AddDays(-RedactAfterDays);
+        // The free text of a message report (portal N3): the buyer's reason and note live only in the outbox payload (purged 1 day after delivery, 30 days when dead: stricter than 90, kept); the
+        // staff's reason shown to the buyer is kept 90 days after the decision, then cleared. The message itself stays hidden.
+        var moderationNotes = await db.ThreadMessages.Where(m => m.ModerationNote != null && m.HiddenAt != null && m.HiddenAt <= cutoff)
+            .ExecuteUpdateAsync(s => s.SetProperty(m => m.ModerationNote, (string?)null), ct);
         // CLOSED orders are chosen in SQL: every seller order is delivered/cancelled/refunded since before the cut-off, and no return is still open (its address is still needed). Oldest first,
         // in batches, so a backlog drains instead of stalling behind open orders.
         string[] closedStates = [FulfilmentStatus.Delivered, FulfilmentStatus.Cancelled, FulfilmentStatus.Refunded];
@@ -85,6 +89,6 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
             }
         } while (due.Count == 200 && !ct.IsCancellationRequested);
 
-        return new Result(labels, redacted, positions, proofs, deleted, threads);
+        return new Result(labels, redacted, positions, proofs, deleted, threads, moderationNotes);
     }
 }
