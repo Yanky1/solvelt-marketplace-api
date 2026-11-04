@@ -25,6 +25,11 @@ public sealed class PortalOptions
     public int InboundRowRetentionDays { get; set; } = 90;
     /// <summary>Deadline for the whole call across all attempts and backoffs (decision O-08). Longer persistence is the outbox's job.</summary>
     public int TotalDeadlineSeconds { get; set; } = 30;
+    /// <summary>
+    /// Contract request C10 (accepted by the portal, not merged yet): disputes keyed per (dispute id, seller order). Off: a dispute that spans several seller orders is held in the outbox
+    /// (it would book only its first seller order). On: those events are released and sent, one per seller order. Single-seller disputes are not affected.
+    /// </summary>
+    public bool PerSellerOrderDisputes { get; set; }
     /// <summary>Total attempts per call including the first.</summary>
     public int MaxAttempts { get; set; } = 5;
     /// <summary>Backoff base in milliseconds: base x 2^(attempt-1), jittered, capped at 30 s.</summary>

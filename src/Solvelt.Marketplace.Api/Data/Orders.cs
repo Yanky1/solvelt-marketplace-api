@@ -166,6 +166,24 @@ public sealed class StripeEvent
     public string? ObjectId { get; set; }
 }
 
+/// <summary>The last Stripe event time sent for a dispute and whether it is closed: events older than it, or after it closed, are dropped (disputes arrive in any order).</summary>
+public sealed class DisputeState
+{
+    public string DisputeId { get; set; } = "";
+    public long LastCreated { get; set; }
+    public bool Closed { get; set; }
+}
+
+internal sealed class DisputeStateConfiguration : IEntityTypeConfiguration<DisputeState>
+{
+    public void Configure(EntityTypeBuilder<DisputeState> b)
+    {
+        b.ToTable("dispute_states");
+        b.HasKey(d => d.DisputeId);
+        b.Property(d => d.DisputeId).HasMaxLength(100);
+    }
+}
+
 internal sealed class OrderExtrasConfiguration : IEntityTypeConfiguration<OrderRefund>, IEntityTypeConfiguration<StripeEvent>
 {
     public void Configure(EntityTypeBuilder<OrderRefund> b)

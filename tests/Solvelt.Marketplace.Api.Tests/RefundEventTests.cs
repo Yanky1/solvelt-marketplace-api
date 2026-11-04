@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Solvelt.Marketplace.Api.Checkout;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Payments;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
@@ -155,7 +156,7 @@ public sealed class RefundEventTests : OrderFlowBase
     }
 
     [Fact]
-    public async Task A_refund_stripe_refuses_gives_back_the_line_counters_and_the_tax_too()
+    public async Task A_refund_stripe_refuses_because_the_money_is_gone_keeps_its_reservation_and_one_that_never_moved_money_gives_the_counters_back()
     {
         var (o, g, line) = await Three();
         Stripe.Capture(o.PaymentIntentId!);
@@ -164,10 +165,19 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
         await Drain();
         var after = await Order(o.Number);
-        Assert.Equal((0L, 0L, 0L, 0), (after.Groups.Single().RefundedCents, after.Groups.Single().RefundedTaxCents, after.Groups.Single().RefundedShippingCents, after.Lines.Single().RefundedQuantity));
+        // the money is already gone: releasing the reservation would let the cap allow the same money to be refunded again, so it STAYS (a person resolves it)
+        Assert.Equal((4587L, 387L, 1), (after.Groups.Single().RefundedCents, after.Groups.Single().RefundedTaxCents, after.Lines.Single().RefundedQuantity));
         Assert.Equal("rejected", (await _k.Db(db => db.OrderRefunds.SingleAsync(r => r.Key == "portal:rf-1"))).Status);
-        // the reservation is free again: the same unit can be refunded under a new refund id
-        Assert.Equal("applied", await RefundLines(o, g, "rf-1b", line, 1, 4587));
+        Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == "stripe.refund" && m.Status == "dead" && m.LastError == "stripe_charge_exceeds_amount")));
+
+        // a refusal that moved no money (the intent is unknown to Stripe): everything is given back, the unit can be refunded again
+        var (o2, g2, line2) = await SecondThree();
+        await _k.Db(db => db.Orders.Where(x => x.Id == o2.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.PaymentIntentId, "pi_unknown_to_stripe")));
+        Assert.Equal("applied", await RefundLines(o2, g2, "rf-2", line2, 1, 4587));
+        await Drain();
+        var back = (await Order(o2.Number)).Groups.Single();
+        Assert.Equal((0L, 0L, 0L), (back.RefundedCents, back.RefundedTaxCents, back.RefundedShippingCents));
+        Assert.Equal(0, (await Order(o2.Number)).Lines.Single().RefundedQuantity);
     }
 
     [Fact]
@@ -286,26 +296,34 @@ public sealed class RefundEventTests : OrderFlowBase
         => Event(type, dp, null, amount, id: id, extra: new { payment_intent = o.PaymentIntentId, status, reason = "fraudulent", evidence_details = new { due_by = 1_800_000_000L } });
 
     [Fact]
-    public async Task A_dispute_is_reported_to_the_portal_per_seller_order_with_the_amount_split_exactly()
+    public async Task A_multi_seller_dispute_is_held_until_the_portal_keys_disputes_per_seller_order_and_then_split_exactly()
     {
         var o = await Paid();
         Assert.Contains("applied", await (await PostStripe(Dispute("charge.dispute.created", o, "needs_response", amount: o.TotalCents, id: "evt_d1"))).Content.ReadAsStringAsync());
         await Drain();
+        Assert.Empty(await Sent("dispute.created"));                                       // C10 not merged: several events with one dispute id would book only the first, so they wait
+        Assert.Equal(2, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == "portal.payment-event" && m.Status == "pending" && m.DedupeKey!.StartsWith("payment:dispute:"))));
+        using (var s0 = _k.F.Services.CreateScope()) Assert.Equal(0, await s0.ServiceProvider.GetRequiredService<OrderMaintenance>().ReleaseHeldDisputesAsync());   // flag off: nothing is released
+        _k.F.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Infrastructure.PortalOptions>>().Value.PerSellerOrderDisputes = true;
+        using (var s1 = _k.F.Services.CreateScope()) Assert.Equal(2, await s1.ServiceProvider.GetRequiredService<OrderMaintenance>().ReleaseHeldDisputesAsync());
+        await Drain();
         var created = await Sent("dispute.created");
-        Assert.Equal(2, created.Count);                                  // one per seller order of the payment
+        Assert.Equal(2, created.Count);                                                    // one per seller order of the payment
         Assert.Equal(2, created.Select(e => e.GetProperty("eventId").GetString()).Distinct().Count());
         var datas = created.Select(e => e.GetProperty("data")).ToList();
-        Assert.All(datas, d => { Assert.Equal("dp_1", d.GetProperty("disputeId").GetString()); Assert.Equal("needs_response", d.GetProperty("status").GetString()); Assert.Equal(o.Number, d.GetProperty("marketplaceOrderId").GetString()); });
+        Assert.All(datas, d => { Assert.Equal("dp_1", d.GetProperty("disputeId").GetString()); Assert.Equal("needs_response", d.GetProperty("status").GetString()); Assert.Equal(o.Number, d.GetProperty("marketplaceOrderId").GetString()); Assert.True(d.TryGetProperty("createdAt", out _)); });
         // the seller orders hold items + shipping (tax is the marketplace's): 4700 + 1800 = 6500 of the 6917 paid
         Assert.Equal(6500, datas.Sum(d => d.GetProperty("amountCents").GetInt64()));
         Assert.Equal(4700, datas.Single(d => d.GetProperty("sellerOrderNumber").GetString() == JudaicaGroup(o).SellerOrderNumber).GetProperty("amountCents").GetInt64());
-        Assert.Single(datas, d => d.TryGetProperty("feeCents", out var f) && f.ValueKind == JsonValueKind.Number);   // the portal's default dispute fee applies once, not per seller order... the others say 0
+        Assert.Single(datas, d => d.TryGetProperty("feeCents", out var f) && f.ValueKind == JsonValueKind.Number);   // the portal's default dispute fee applies once; the others say 0
         // the same Stripe event again changes nothing
         await PostStripe(Dispute("charge.dispute.created", o, "needs_response", amount: o.TotalCents, id: "evt_d1"));
         await Drain();
         Assert.Equal(2, (await Sent("dispute.created")).Count);
         // evidence update, then closed won / lost map to updated / closed
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(1));
         await PostStripe(Dispute("charge.dispute.updated", o, "under_review", amount: o.TotalCents, id: "evt_d2"));
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(1));
         await PostStripe(Dispute("charge.dispute.closed", o, "won", amount: o.TotalCents, id: "evt_d3"));
         await Drain();
         Assert.Equal(2, (await Sent("dispute.updated")).Count);
@@ -313,6 +331,34 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal(2, closed.Count);
         Assert.All(closed, e => Assert.Equal("won", e.GetProperty("data").GetProperty("status").GetString()));
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1_800_000_000L), created[0].GetProperty("data").GetProperty("evidenceDueBy").GetDateTimeOffset());
+    }
+
+    [Fact]
+    public async Task A_single_seller_dispute_goes_out_at_once_and_nothing_follows_a_closed_one_and_older_events_are_dropped()
+    {
+        var (o, g, _) = await Three();
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(1));
+        await PostStripe(Dispute("charge.dispute.created", o, "needs_response", amount: 14000, id: "evt_s1"));
+        await Drain();
+        var created = Assert.Single(await Sent("dispute.created"));                       // one seller order: no C10 needed, no hold
+        Assert.Equal(g.SellerOrderNumber, created.GetProperty("data").GetProperty("sellerOrderNumber").GetString());
+        Assert.Equal(12859, created.GetProperty("data").GetProperty("amountCents").GetInt64());   // 14000 x (12600 + 500) / 14262, rounded down: the seller share, tax excluded
+        // an update that is OLDER than what we already sent (Stripe delivers out of order) is dropped
+        var older = Dispute("charge.dispute.updated", o, "under_review", amount: 14000, id: "evt_s0");
+        var closedBody = Dispute("charge.dispute.closed", o, "lost", amount: 14000, id: "evt_s2");
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(2));
+        var newer = Dispute("charge.dispute.updated", o, "under_review", amount: 14000, id: "evt_s1b");
+        Assert.Contains("applied", await (await PostStripe(newer)).Content.ReadAsStringAsync());
+        Assert.Contains("ignored", await (await PostStripe(older)).Content.ReadAsStringAsync());       // created earlier than the update just sent
+        Assert.Contains("ignored", await (await PostStripe(closedBody)).Content.ReadAsStringAsync());   // created before the update just sent: stale, dropped
+        await Drain();
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Contains("applied", await (await PostStripe(Dispute("charge.dispute.closed", o, "lost", amount: 14000, id: "evt_s3"))).Content.ReadAsStringAsync());
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Contains("ignored", await (await PostStripe(Dispute("charge.dispute.updated", o, "under_review", amount: 14000, id: "evt_s4"))).Content.ReadAsStringAsync());   // nothing after closed
+        await Drain();
+        Assert.Single(await Sent("dispute.closed"));
+        Assert.Single(await Sent("dispute.updated"));
     }
 
     [Fact]
@@ -341,5 +387,71 @@ public sealed class RefundEventTests : OrderFlowBase
             Assert.All(parts, p => Assert.True(p >= 0));
         }
         Assert.Equal([34L, 33L, 33L], StripeEventProcessor.Allocate(100, [1, 1, 1]));
+    }
+
+    // ---- survivors of the review: each protection and each cap alone, and the tax remainder with a non-exact split ----
+
+    private async Task<(Guid OrderId, Guid GroupId)> HandmadeOrder(long paid, long groupTotal, long groupTax, int qty = 3)
+    {
+        var order = new MarketplaceOrder
+        {
+            Id = Guid.NewGuid(), Number = "MP-20261104-" + Guid.NewGuid().ToString("N")[..8].ToUpperInvariant(), AccountId = Guid.NewGuid(), Status = "placed", Currency = "USD",
+            PaidAt = _k.F.Clock.GetUtcNow(), PaidCents = paid, TotalCents = paid, ItemsCents = groupTotal - groupTax, TaxCents = groupTax, CreatedAt = _k.F.Clock.GetUtcNow(), UpdatedAt = _k.F.Clock.GetUtcNow(),
+            BuyerName = "x", RelayEmail = "x", ShipName = "x", ShipLine1 = "x", ShipCity = "x", ShipPostalCode = "x", ShipCountry = "US", PaymentIntentId = "pi_hand_" + Guid.NewGuid().ToString("N")[..8],
+        };
+        var group = new OrderGroup { Id = Guid.NewGuid(), OrderId = order.Id, SellerId = Guid.NewGuid(), BrandId = Guid.NewGuid(), DeliveryKind = "carrier", ItemsCents = groupTotal - groupTax, ShippingCents = 0, TaxCents = groupTax, TotalCents = groupTotal, SellerOrderNumber = "SO-HAND" };
+        order.Groups.Add(group);
+        order.Lines.Add(new OrderLine { Id = Guid.NewGuid(), GroupId = group.Id, MarketplaceLineId = order.Number + "-1", SellerId = group.SellerId, BrandId = group.BrandId, Quantity = qty, UnitPriceCents = (groupTotal - groupTax) / qty, LineTotalCents = groupTotal - groupTax, TaxCents = groupTax, ListingId = Guid.NewGuid(), VariantId = Guid.NewGuid() });
+        await _k.Db(async db => { db.Orders.Add(order); await db.SaveChangesAsync(); return 0; });
+        return (order.Id, group.Id);
+    }
+
+    [Fact]
+    public async Task A_tax_of_100_refunded_as_three_thirds_returns_33_33_and_34_and_never_more_than_100()
+    {
+        await Login();
+        var (orderId, groupId) = await HandmadeOrder(paid: 1000, groupTotal: 1000, groupTax: 100);   // 900 net + 100 tax, 3 units
+        var lineId = (await _k.Db(db => db.OrderLines.AsNoTracking().SingleAsync(l => l.GroupId == groupId))).MarketplaceLineId;
+        using var scope = _k.F.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        var taxes = new List<long>();
+        foreach (var (key, amount) in new[] { ("a", 333L), ("b", 333L), ("c", 334L) })
+        {
+            Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, amount, 0, [new PortalRefundLine(lineId, 1)], null, false, false, key, "t", key), false, default));
+            taxes.Add((await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Key == key))).TaxCents);
+        }
+        Assert.Equal([33L, 33L, 34L], taxes);                                                        // floor, floor, the remainder
+        Assert.Equal(100, taxes.Sum());
+        Assert.Equal(ReserveOutcome.ExceedsPaid, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 1, 0, [], null, false, false, "d", "t", null), false, default));
+    }
+
+    [Fact]
+    public async Task The_seller_order_cap_and_the_order_cap_each_hold_alone()
+    {
+        await Login();
+        // seller-order cap alone: the order was paid far more than this seller order's total (another seller order holds the rest)
+        var (o1, g1) = await HandmadeOrder(paid: 5000, groupTotal: 1000, groupTax: 0);
+        using var scope = _k.F.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        Assert.Equal(ReserveOutcome.ExceedsPaid, await svc.ReservePortalAsync(new PortalRefund(o1, g1, 1001, 0, [], null, false, false, "g-over", "t", "g"), false, default));
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(o1, g1, 1000, 0, [], null, false, false, "g-fits", "t", "g2"), false, default));
+        // order cap alone: the seller order claims to hold more than the order was paid (a corrupted row): the order's own cap still stops it
+        var (o2, g2) = await HandmadeOrder(paid: 500, groupTotal: 1000, groupTax: 0);
+        Assert.Equal(ReserveOutcome.ExceedsPaid, await svc.ReservePortalAsync(new PortalRefund(o2, g2, 501, 0, [], null, false, false, "o-over", "t", "o"), false, default));
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(o2, g2, 500, 0, [], null, false, false, "o-fits", "t", "o2"), false, default));
+        Assert.Equal((500L, 500L), ((await Order((await _k.Db(db => db.Orders.AsNoTracking().SingleAsync(x => x.Id == o2))).Number)).RefundedCents, 500L));
+    }
+
+    [Fact]
+    public async Task The_raw_refund_reservation_has_its_own_total_cap()
+    {
+        await Login();
+        var (orderId, groupId) = await HandmadeOrder(paid: 1000, groupTotal: 1000, groupTax: 0);
+        using var scope = _k.F.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        Assert.Equal(ReserveOutcome.ExceedsPaid, await svc.ReserveAsync(orderId, groupId, 1001, 0, "raw-over", "t", false, null, default));
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReserveAsync(orderId, groupId, 600, 0, "raw-1", "t", false, null, default));
+        Assert.Equal(ReserveOutcome.ExceedsPaid, await svc.ReserveAsync(orderId, null, 401, 0, "raw-2", "t", false, null, default));
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReserveAsync(orderId, null, 400, 0, "raw-3", "t", false, null, default));
     }
 }
