@@ -58,6 +58,7 @@ public static class CheckoutEndpoints
             CheckoutStatus.Quote when detail == "delivery_unavailable" => Problems.Json(409, "delivery_unavailable", "We can't deliver part of your cart to that address."),
             CheckoutStatus.Quote => Problems.Json(409, "cart_not_ready", "Your cart is empty or has items that are no longer available."),
             CheckoutStatus.AmountTooSmall => Problems.Unprocessable("amount_too_small", "The total is below the minimum we can charge."),
+            CheckoutStatus.Superseded => Problems.Json(409, "checkout_superseded", "Another checkout of this cart replaced this one. Review your cart and pay again."),
             CheckoutStatus.NotPending => Problems.Json(409, "order_not_pending", "This order has already been paid or closed."),
             CheckoutStatus.PaymentRejected => Problems.Json(502, "payment_rejected", "The payment could not be started."),
             _ => Problems.Json(503, "payments_unavailable", "Payments are unavailable right now. Please try again in a moment."),

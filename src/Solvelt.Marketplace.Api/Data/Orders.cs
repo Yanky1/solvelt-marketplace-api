@@ -212,6 +212,7 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceO
         b.Property(o => o.FailureCode).HasMaxLength(60);
         b.HasIndex(o => o.Number).IsUnique();
         b.HasIndex(o => o.ActiveKey).IsUnique();             // at most one pending order per identical checkout (NULLs allowed)
+        b.HasIndex(o => o.CartId).IsUnique().HasFilter("\"Status\" = 'pending_payment'");   // and at most ONE pending order per cart, whatever differs between checkouts
         b.HasIndex(o => o.PaymentIntentId).IsUnique();
         b.HasIndex(o => new { o.AccountId, o.CreatedAt });
         b.HasIndex(o => new { o.Status, o.CreatedAt });

@@ -15,9 +15,15 @@ public sealed record CheckoutRequest(CheckoutAddress? Address, IReadOnlyList<Gro
 public sealed record CheckoutPayment(string Provider, string ClientSecret, string? PublishableKey);
 public sealed record CheckoutResult(string OrderNumber, string Status, QuoteView Quote, CheckoutPayment Payment);
 
-public enum CheckoutStatus { Ok, Invalid, Quote, NotPending, PaymentsUnavailable, AmountTooSmall, PaymentRejected }
+public enum CheckoutStatus { Ok, Invalid, Quote, NotPending, PaymentsUnavailable, AmountTooSmall, PaymentRejected, Superseded }
 
-public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartService carts, IPaymentProvider payments, IOptions<StripeOptions> stripe, TimeProvider time, ILogger<CheckoutService> log)
+/// <summary>Test seam (one instance per application): awaited right after the intent was created and before it is stored on the order.</summary>
+public sealed class CheckoutHooks
+{
+    public Func<Task>? AfterIntentCreated { get; set; }
+}
+
+public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartService carts, IPaymentProvider payments, IOptions<StripeOptions> stripe, Outbox.OutboxWriter outbox, CheckoutHooks hooks, TimeProvider time, ILogger<CheckoutService> log)
 {
     private DateTimeOffset Now => time.GetUtcNow().ToUniversalTime();
     private static string Clean(string? s) => new string((s ?? "").Where(c => !char.IsControl(c)).ToArray()).Trim();
@@ -51,18 +57,22 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartS
         var cartId = await carts.CartIdAsync(owner, ct);
 
         var order = Build(buyer, relayEmail, cartId, a, req.GiftMessage, quote);
-        var existing = await InsertOrFindAsync(order, ct);
+        var existing = await LockedInsertOrFindAsync(order, ct);
         if (existing.Status != OrderStatus.PendingPayment) return (CheckoutStatus.NotPending, null, null);
 
-        if (existing.Id == order.Id) await SupersedeOthersAsync(existing, ct);
         try
         {
-            // The key is the order number: a double-click, a retry and a parallel request all reach Stripe with the SAME key, so there is exactly one PaymentIntent.
+            // The key is the order number: a double-click, a retry and a parallel request all reach Stripe with the SAME key, so there is exactly one PaymentIntent per order.
             var intent = await payments.CreateIntentAsync(existing.TotalCents, existing.Currency, "pi:" + existing.Number,
                 new Dictionary<string, string> { ["marketplace_order_id"] = existing.Number }, ct);
-            await db.Orders.Where(o => o.Id == existing.Id && o.PaymentIntentId == null).ExecuteUpdateAsync(s => s.SetProperty(o => o.PaymentIntentId, intent.Id), ct);
-            var stored = await db.Orders.AsNoTracking().Where(o => o.Id == existing.Id).Select(o => o.PaymentIntentId).FirstAsync(ct);
-            if (stored != intent.Id) { log.LogError("Order {Number} has two different payment intents (stored {Stored}, returned {Returned})", existing.Number, stored, intent.Id); return (CheckoutStatus.PaymentsUnavailable, null, "intent_mismatch"); }
+            if (hooks.AfterIntentCreated is { } hook) await hook();
+            // Stored only while the order is still the pending one. A newer checkout of the same cart supersedes this order FIRST (status change) and only then reads the intent id to cancel
+            // it, so one of the two always sees the other: either the superseder cancels this intent, or this check fails and cancels it here. No intent is left payable on a closed order.
+            await db.Orders.Where(o => o.Id == existing.Id && o.PaymentIntentId == null && o.Status == OrderStatus.PendingPayment).ExecuteUpdateAsync(s => s.SetProperty(o => o.PaymentIntentId, intent.Id), ct);
+            var row = await db.Orders.AsNoTracking().Where(o => o.Id == existing.Id).Select(o => new { o.Status, o.PaymentIntentId }).FirstAsync(ct);
+            if (row.Status is OrderStatus.Superseded or OrderStatus.Expired) { await QueueCancelAsync(intent.Id, ct); return (CheckoutStatus.Superseded, null, null); }
+            if (row.Status != OrderStatus.PendingPayment) return (CheckoutStatus.NotPending, null, null);
+            if (row.PaymentIntentId != intent.Id) { log.LogError("Order {Number} has two different payment intents (stored {Stored}, returned {Returned})", existing.Number, row.PaymentIntentId, intent.Id); return (CheckoutStatus.PaymentsUnavailable, null, "intent_mismatch"); }
             return (CheckoutStatus.Ok, new CheckoutResult(existing.Number, existing.Status, quote, new CheckoutPayment("stripe", intent.ClientSecret, stripe.Value.PublishableKey)), null);
         }
         catch (PaymentsUnavailableException) { return (CheckoutStatus.PaymentsUnavailable, null, null); }   // the order stays pending; the same request later finds it and retries the intent
@@ -118,18 +128,35 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartS
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
     }
 
-    /// <summary>Inserts the order; when the unique <c>ActiveKey</c> says an identical pending order exists (a parallel or repeated submit) returns that one.</summary>
-    private async Task<MarketplaceOrder> InsertOrFindAsync(MarketplaceOrder order, CancellationToken ct)
+    /// <summary>
+    /// One transaction per checkout of a cart, under the cart's row lock (a write to it: every checkout of the cart waits for the one before it): an identical pending order is returned as is
+    /// (a double-submit); otherwise every other pending order of the cart is superseded and the new one inserted. Together with the partial unique index (one pending order per cart) a cart can
+    /// never have two payable orders, however many different checkouts arrive in parallel.
+    /// </summary>
+    private async Task<MarketplaceOrder> LockedInsertOrFindAsync(MarketplaceOrder order, CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
         {
-            var found = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.ActiveKey == order.ActiveKey, ct);
-            if (found is not null) return found;
-            db.Orders.Add(order);
-            try { await db.SaveChangesAsync(ct); return order; }
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            try
+            {
+                if (order.CartId is { } cart)
+                {
+                    var now = Now;
+                    await db.Carts.Where(c => c.Id == cart).ExecuteUpdateAsync(s => s.SetProperty(c => c.UpdatedAt, now), ct);
+                }
+                var found = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.ActiveKey == order.ActiveKey, ct);
+                if (found is not null) { await tx.CommitAsync(ct); return found; }
+                await SupersedeOthersAsync(order, ct);
+                db.Orders.Add(order);
+                await db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+                return order;
+            }
             catch (DbUpdateException) when (attempt < 3)
             {
-                db.ChangeTracker.Clear();   // lost a race on ActiveKey (or, rarely, drew an existing order number): look again, with a new number if needed
+                await tx.RollbackAsync(CancellationToken.None);
+                db.ChangeTracker.Clear();   // lost a race on a unique key (or, rarely, drew an existing order number): look again, with a new number if needed
                 if (await db.Orders.AnyAsync(o => o.Number == order.Number, ct)) RenumberFor(order);
             }
         }
@@ -142,21 +169,37 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartS
         foreach (var l in order.Lines) l.MarketplaceLineId = order.Number + l.MarketplaceLineId[old.Length..];
     }
 
-    /// <summary>A newer pending order for the same cart replaces the older ones; their intents are cancelled (best effort: a payment that still lands is honoured by the payment webhook).</summary>
+    /// <summary>
+    /// Every other pending order of the cart is closed (status first, then the intent id is read: see the comment in <see cref="PlaceAsync"/>) and its intent is cancelled through the outbox, which
+    /// retries. Called inside the checkout transaction; the caller saves. A payment that still lands on a closed order is refunded in full by the webhook, never fulfilled (decision M3-18).
+    /// </summary>
     private async Task SupersedeOthersAsync(MarketplaceOrder fresh, CancellationToken ct)
     {
         if (fresh.CartId is not { } cart) return;
-        var old = await db.Orders.Where(o => o.CartId == cart && o.AccountId == fresh.AccountId && o.Id != fresh.Id && o.Status == OrderStatus.PendingPayment)
-            .Select(o => new { o.Id, o.Number, o.PaymentIntentId }).ToListAsync(ct);
+        var old = await db.Orders.AsNoTracking().Where(o => o.CartId == cart && o.AccountId == fresh.AccountId && o.Status == OrderStatus.PendingPayment).Select(o => new { o.Id, o.Number }).ToListAsync(ct);
         var now = Now;
         foreach (var o in old)
         {
             var changed = await db.Orders.Where(x => x.Id == o.Id && x.Status == OrderStatus.PendingPayment)
                 .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, OrderStatus.Superseded).SetProperty(x => x.ActiveKey, (string?)null).SetProperty(x => x.UpdatedAt, now), ct);
-            if (changed == 1 && o.PaymentIntentId is { } pi)
-                try { await payments.CancelIntentAsync(pi, "cancel:" + o.Number, ct); }
-                catch (Exception ex) when (ex is PaymentsUnavailableException or PaymentRejectedException) { log.LogWarning("Could not cancel the intent of superseded order {Number}", o.Number); }
+            if (changed == 0) continue;
+            var pi = await db.Orders.AsNoTracking().Where(x => x.Id == o.Id).Select(x => x.PaymentIntentId).FirstAsync(ct);   // read AFTER the status change
+            if (pi is not null) await EnqueueCancelAsync(pi, ct);
         }
+    }
+
+    private async Task EnqueueCancelAsync(string intentId, CancellationToken ct)
+    {
+        var key = StripeCancelHandler.DedupeKey(intentId);
+        if (!await outbox.ExistsAsync(key, ct)) outbox.Enqueue(StripeCancelHandler.Type, new StripeCancelHandler.Payload(intentId), key);
+    }
+
+    /// <summary>Queues the cancel on its own (outside any transaction); a duplicate key means it is already queued.</summary>
+    private async Task QueueCancelAsync(string intentId, CancellationToken ct)
+    {
+        await EnqueueCancelAsync(intentId, ct);
+        try { await db.SaveChangesAsync(ct); }
+        catch (DbUpdateException) { db.ChangeTracker.Clear(); }
     }
 
     public static string NewNumber(DateTimeOffset at)
