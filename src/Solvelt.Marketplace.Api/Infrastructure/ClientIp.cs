@@ -97,18 +97,22 @@ public sealed class ClientIpResolver(IOptions<WebOptions> options, TimeProvider 
 /// In-memory fixed-window limiter for keys the partitioned rate limiter cannot see before the body is read (an email on a
 /// sign-in or reset request, an account id). Keys are hashed so addresses are not kept in memory. It is per instance;
 /// durable lockout lives in the auth tables. Expired windows are pruned at most once per <see cref="PruneInterval"/> (not per call);
-/// the table is hard-capped at <c>maxKeys</c>: beyond it the oldest tenth of the windows is evicted, so a spray of distinct keys
-/// cannot grow memory and recently attacked keys stay tracked.
+/// the table is hard-capped at <c>maxKeys</c>: beyond it a tenth of the entries is evicted in one batch, <b>lowest hit count first</b>
+/// (then oldest window), so a spray of distinct single-hit keys can never evict, and so reset, a key that is being brute-forced.
+/// The number of keys is an interlocked counter: <c>ConcurrentDictionary.Count</c> takes every lock, which a limiter must not do per call.
 /// </summary>
 public sealed class AttemptLimiter(TimeProvider time, int maxKeys)
 {
     public AttemptLimiter(TimeProvider time) : this(time, 100_000) { }
 
     public static readonly TimeSpan PruneInterval = TimeSpan.FromSeconds(30);
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Start, int Count, long WindowMs)> _windows = new();
+    private readonly record struct Entry(long Start, int Count, long WindowMs);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Entry> _windows = new();
+    private int _keys;
     private long _lastPruneMs;
     private int _evicting;
-    internal int TrackedKeys => _windows.Count;
+    internal int TrackedKeys => Volatile.Read(ref _keys);
+    internal int ActualKeys => _windows.Count;   // for tests: the counter must always agree with the table
     internal int PruneRuns;
     internal int Evictions;
 
@@ -118,10 +122,23 @@ public sealed class AttemptLimiter(TimeProvider time, int maxKeys)
         var now = time.GetUtcNow().ToUnixTimeMilliseconds();
         var windowMs = (long)window.TotalMilliseconds;
         var id = bucket + ":" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key.Trim().ToLowerInvariant())));
-        var w = _windows.AddOrUpdate(id, _ => (now, 1, windowMs), (_, old) => now - old.Start >= windowMs ? (now, 1, windowMs) : (old.Start, old.Count + 1, old.WindowMs));
+        Entry current;
+        while (true)
+        {
+            if (_windows.TryGetValue(id, out var old))
+            {
+                current = now - old.Start >= windowMs ? new Entry(now, 1, windowMs) : old with { Count = old.Count + 1 };
+                if (_windows.TryUpdate(id, current, old)) break;
+            }
+            else
+            {
+                current = new Entry(now, 1, windowMs);
+                if (_windows.TryAdd(id, current)) { Interlocked.Increment(ref _keys); break; }
+            }
+        }
         MaybePrune(now);
-        if (_windows.Count > maxKeys) Evict();
-        return w.Count <= limit;
+        if (Volatile.Read(ref _keys) > maxKeys) Evict();
+        return current.Count <= limit;
     }
 
     private void MaybePrune(long now)
@@ -130,7 +147,7 @@ public sealed class AttemptLimiter(TimeProvider time, int maxKeys)
         if (now - last < PruneInterval.TotalMilliseconds || Interlocked.CompareExchange(ref _lastPruneMs, now, last) != last) return;
         Interlocked.Increment(ref PruneRuns);
         foreach (var kv in _windows)
-            if (now - kv.Value.Start >= kv.Value.WindowMs) _windows.TryRemove(kv);
+            if (now - kv.Value.Start >= kv.Value.WindowMs && _windows.TryRemove(kv)) Interlocked.Decrement(ref _keys);
     }
 
     private void Evict()
@@ -139,8 +156,14 @@ public sealed class AttemptLimiter(TimeProvider time, int maxKeys)
         try
         {
             var target = maxKeys - Math.Max(1, maxKeys / 10);
-            foreach (var kv in _windows.OrderBy(kv => kv.Value.Start).Take(Math.Max(0, _windows.Count - target)).ToList())
-                _windows.TryRemove(kv);
+            var excess = Volatile.Read(ref _keys) - target;
+            if (excess <= 0) return;
+            // Snapshot by enumerating: LINQ (OrderBy, ToList) would copy through ICollection.CopyTo, which throws ArgumentException when another thread
+            // adds a key between sizing the array and filling it. The enumerator is safe under concurrent writes.
+            var snapshot = new List<KeyValuePair<string, Entry>>(Volatile.Read(ref _keys) + 16);
+            foreach (var kv in _windows) snapshot.Add(kv);
+            foreach (var kv in snapshot.OrderBy(kv => kv.Value.Count).ThenBy(kv => kv.Value.Start).Take(excess))
+                if (_windows.TryRemove(kv)) Interlocked.Decrement(ref _keys);
             Interlocked.Increment(ref Evictions);
         }
         finally { Volatile.Write(ref _evicting, 0); }

@@ -74,35 +74,72 @@ public sealed class StatusProblemMiddleware(RequestDelegate next)
 public static class SafeLogging
 {
     /// <summary>
-    /// Category prefixes that would write a full URL, path or query: hosting diagnostics (request start/finish and the RequestPath logging
-    /// scope attached to every line of a request), routing (DfaMatcher logs the path at Debug), the rest of ASP.NET Core, EF Core, and
-    /// outgoing HttpClient requests.
+    /// Categories whose loggers are silent, whatever any filter says: hosting diagnostics (request start/finish with the full URL, and the
+    /// <c>RequestPath</c> logging scope attached to every line of a request) and routing (DfaMatcher logs the request path at Debug).
+    /// Matched as case-insensitive prefixes, like .NET matches categories.
     /// </summary>
-    internal static readonly (string Prefix, LogLevel Level)[] Enforced =
-    [
-        ("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.None),
-        ("Microsoft.AspNetCore", LogLevel.Warning),
-        ("Microsoft.EntityFrameworkCore", LogLevel.Warning),
-        ("System.Net.Http.HttpClient", LogLevel.Warning),
-    ];
+    internal static readonly string[] SilentPrefixes = ["Microsoft.AspNetCore.Hosting.Diagnostics", "Microsoft.AspNetCore.Routing"];
+
+    /// <summary>Categories that may only log warnings and above: the rest of ASP.NET Core, EF Core, and outgoing HttpClient requests (they log URLs below Warning).</summary>
+    internal static readonly string[] WarningOnlyPrefixes = ["Microsoft.AspNetCore", "Microsoft.EntityFrameworkCore", "System.Net.Http.HttpClient"];
+
+    internal static bool IsSilent(string category) => SilentPrefixes.Any(p => category.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+    internal static bool IsWarningOnly(string category) => WarningOnlyPrefixes.Any(p => category.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
-    /// .NET picks the filter rule with the MOST SPECIFIC category prefix, whatever its order, so a configuration entry such as
-    /// <c>Microsoft.AspNetCore.Routing.Matching.DfaMatcher: Trace</c> would beat a coarser rule set in code. This post-configuration
-    /// therefore removes every rule under the sensitive prefixes (config, environment, command line, AddFilter) and adds the enforced
-    /// ones last, so nothing can loosen them (decision M1-29).
+    /// Filters are the wrong layer to protect against: .NET picks the rule with the most specific category, a provider-specific rule beats a
+    /// provider-less one, wildcards and different casing slip past removal. So the guarantee is enforced where loggers are CREATED: the logger factory
+    /// is wrapped (<see cref="SafeLoggerFactory"/>), and a logger for a sensitive category is a no-op (or warning-only) whatever the configuration, the
+    /// environment or the command line say. The filter post-configuration below is only a second layer (it also tidies the rules).
     /// </summary>
     public static ILoggingBuilder AddSafeLogFilters(this ILoggingBuilder logging)
     {
         logging.Services.PostConfigure<LoggerFilterOptions>(Enforce);
+        var original = logging.Services.LastOrDefault(d => d.ServiceType == typeof(ILoggerFactory));
+        if (original is not null)
+        {
+            logging.Services.Remove(original);
+            logging.Services.AddSingleton<ILoggerFactory>(sp => new SafeLoggerFactory(Create(sp, original)));
+        }
         return logging;
     }
 
+    private static ILoggerFactory Create(IServiceProvider sp, ServiceDescriptor d)
+        => d.ImplementationInstance as ILoggerFactory
+           ?? (d.ImplementationFactory?.Invoke(sp) as ILoggerFactory)
+           ?? (ILoggerFactory)ActivatorUtilities.CreateInstance(sp, d.ImplementationType!);
+
+    /// <summary>Second layer: drop every rule that could name a sensitive category (case-insensitive prefix, or any wildcard rule) and add the enforced levels.</summary>
     internal static void Enforce(LoggerFilterOptions options)
     {
-        foreach (var rule in options.Rules.Where(r => r.CategoryName is { } c && Enforced.Any(e => c.StartsWith(e.Prefix, StringComparison.Ordinal))).ToList())
+        var sensitive = SilentPrefixes.Concat(WarningOnlyPrefixes).ToArray();
+        foreach (var rule in options.Rules.Where(r => r.CategoryName is { } c && (c.Contains('*') || sensitive.Any(p => c.StartsWith(p, StringComparison.OrdinalIgnoreCase)))).ToList())
             options.Rules.Remove(rule);
-        foreach (var (prefix, level) in Enforced)
-            options.Rules.Add(new LoggerFilterRule(null, prefix, level, null));
+        foreach (var p in SilentPrefixes) options.Rules.Add(new LoggerFilterRule(null, p, LogLevel.None, null));
+        foreach (var p in WarningOnlyPrefixes) options.Rules.Add(new LoggerFilterRule(null, p, LogLevel.Warning, null));
+    }
+}
+
+/// <summary>Hands out no-op loggers for silent categories and warning-only loggers for the broad ones; everything else comes from the real factory.</summary>
+internal sealed class SafeLoggerFactory(ILoggerFactory inner) : ILoggerFactory
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ILogger> _loggers = new(StringComparer.Ordinal);
+
+    public ILogger CreateLogger(string categoryName) => _loggers.GetOrAdd(categoryName, name =>
+        SafeLogging.IsSilent(name) ? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
+        : SafeLogging.IsWarningOnly(name) ? new WarningOnlyLogger(inner.CreateLogger(name))
+        : inner.CreateLogger(name));
+
+    public void AddProvider(ILoggerProvider provider) => inner.AddProvider(provider);
+    public void Dispose() => inner.Dispose();
+}
+
+internal sealed class WarningOnlyLogger(ILogger inner) : ILogger
+{
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;   // no request scopes from these categories either
+    public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning && inner.IsEnabled(logLevel);
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+    {
+        if (logLevel >= LogLevel.Warning) inner.Log(logLevel, eventId, state, exception, formatter);
     }
 }

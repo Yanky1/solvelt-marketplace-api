@@ -70,10 +70,14 @@ public class Review3LoggingTests
         Assert.Contains(o.Rules, r => r.CategoryName is null && r.LogLevel == LogLevel.Trace);
     }
 
-    [Fact]
-    public async Task Running_the_published_dll_from_another_directory_does_not_log_urls()
+    [Theory]
+    [InlineData("everything-at-trace")]            // the original scenario
+    [InlineData("console-provider-default-trace")] // a) a provider-specific rule beats provider-less ones
+    [InlineData("wildcard-dfamatcher")]            // b) a wildcard rule does not start with the prefix, and its longer name wins
+    [InlineData("uppercase-routing")]              // c) removal was case sensitive, category matching is not
+    public async Task Running_the_published_dll_from_another_directory_does_not_log_urls_whatever_the_logging_configuration_says(string scenario)
     {
-        // The review's scenario: `dotnet <path>/Solvelt.Marketplace.Api.dll` from a directory with no appsettings.json.
+        // The review's scenario: `dotnet <path>/Solvelt.Marketplace.Api.dll` from a directory with no appsettings.json, plus ONE logging env var.
         var dll = Path.Combine(AppContext.BaseDirectory, "Solvelt.Marketplace.Api.dll");
         Assert.True(File.Exists(dll));
         var cwd = Directory.CreateTempSubdirectory("solvelt-cwd-").FullName;
@@ -83,8 +87,14 @@ public class Review3LoggingTests
         };
         psi.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
         psi.Environment["ConnectionStrings__Default"] = $"Data Source={Path.Combine(cwd, "cwd.db")}";
-        psi.Environment["Logging__LogLevel__Default"] = "Trace";
-        psi.Environment["Logging__LogLevel__Microsoft.AspNetCore"] = "Trace";
+        switch (scenario)
+        {
+            case "everything-at-trace": psi.Environment["Logging__LogLevel__Default"] = "Trace"; psi.Environment["Logging__LogLevel__Microsoft.AspNetCore"] = "Trace"; break;
+            case "console-provider-default-trace": psi.Environment["Logging__Console__LogLevel__Default"] = "Trace"; break;
+            case "wildcard-dfamatcher": psi.Environment["Logging__LogLevel__*Routing.Matching.DfaMatcher"] = "Trace"; break;
+            case "uppercase-routing": psi.Environment["Logging__LogLevel__MICROSOFT.ASPNETCORE.ROUTING"] = "Trace"; break;
+            default: throw new ArgumentOutOfRangeException(nameof(scenario));
+        }
         using var p = Process.Start(psi)!;
         var output = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var listening = new TaskCompletionSource<string>();
@@ -110,6 +120,113 @@ public class Review3LoggingTests
         Assert.Contains(output, l => l.Contains("Now listening"));   // not vacuous
         AssertClean(output);
     }
+
+    [Theory]
+    [InlineData("Logging:CaptureLoggerProvider:LogLevel:Default", "Trace")]                                     // a) provider-specific default
+    [InlineData("Logging:CaptureLoggerProvider:LogLevel:Microsoft.AspNetCore.Routing.Matching.DfaMatcher", "Trace")]
+    [InlineData("Logging:LogLevel:*Routing.Matching.DfaMatcher", "Trace")]                                      // b) wildcard
+    [InlineData("Logging:LogLevel:MICROSOFT.ASPNETCORE.ROUTING", "Trace")]                                      // c) different casing
+    [InlineData("Logging:LogLevel:microsoft.aspnetcore.hosting.diagnostics", "Trace")]
+    [InlineData("Logging:CaptureLoggerProvider:LogLevel:Microsoft.AspNetCore.Hosting.Diagnostics", "Trace")]
+    public async Task No_filter_configuration_can_bring_back_the_url_logging(string key, string level)
+    {
+        using var f = new TestFactory(new() { ["Logging:LogLevel:Default"] = "Trace", [key] = level });
+        await HitUrls(f.CreateClient());
+        Assert.NotEmpty(f.Logs.Lines);
+        AssertClean(f.Logs.Lines);
+    }
+
+    private sealed class Recorder : ILoggerProvider
+    {
+        public List<string> Lines { get; } = [];
+        public int Scopes;
+        public ILogger CreateLogger(string categoryName) => new L(this, categoryName);
+        public void Dispose() { }
+        private sealed class L(Recorder r, string category) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull { r.Scopes++; return null; }
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+                => r.Lines.Add($"{category}|{logLevel}|{formatter(state, exception)}");
+        }
+    }
+
+    private static (ILoggerFactory Factory, Recorder Rec) Guarded()
+    {
+        var rec = new Recorder();
+        var real = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(rec));
+        return (new SafeLoggerFactory(real), rec);
+    }
+
+    [Theory]
+    [InlineData("Microsoft.AspNetCore.Hosting.Diagnostics")]
+    [InlineData("microsoft.aspnetcore.hosting.diagnostics")]
+    [InlineData("Microsoft.AspNetCore.Routing")]
+    [InlineData("Microsoft.AspNetCore.Routing.Matching.DfaMatcher")]
+    [InlineData("MICROSOFT.ASPNETCORE.ROUTING.EndpointMiddleware")]
+    public void Silent_categories_log_nothing_at_any_level_and_open_no_scope(string category)
+    {
+        var (factory, rec) = Guarded();
+        var log = factory.CreateLogger(category);
+        foreach (var level in Enum.GetValues<LogLevel>().Where(l => l != LogLevel.None))
+        {
+            Assert.False(log.IsEnabled(level));
+            log.Log(level, "request /verify/jane.doe@example.com/SECRETTOKEN123");
+        }
+        using (log.BeginScope(new Dictionary<string, object> { ["RequestPath"] = "/verify/jane.doe@example.com" })) { }   // the no-op scope: nothing reaches a provider
+        Assert.Empty(rec.Lines);
+        Assert.Equal(0, rec.Scopes);
+    }
+
+    [Theory]
+    [InlineData("Microsoft.AspNetCore.Server.Kestrel")]
+    [InlineData("microsoft.aspnetcore.cors")]
+    [InlineData("Microsoft.EntityFrameworkCore.Database.Command")]
+    [InlineData("System.Net.Http.HttpClient.ISignedPortalClient.ClientHandler")]
+    public void Broad_categories_log_warnings_and_above_only_and_open_no_scope(string category)
+    {
+        var (factory, rec) = Guarded();
+        var log = factory.CreateLogger(category);
+        foreach (var level in new[] { LogLevel.Trace, LogLevel.Debug, LogLevel.Information })
+        {
+            Assert.False(log.IsEnabled(level));
+            log.Log(level, "below warning");
+        }
+        Assert.True(log.IsEnabled(LogLevel.Warning));
+        log.Log(LogLevel.Warning, "a warning");
+        log.Log(LogLevel.Error, "an error");
+        Assert.Equal([$"{category}|Warning|a warning", $"{category}|Error|an error"], rec.Lines);
+        Assert.Null(log.BeginScope("scope"));
+        Assert.Equal(0, rec.Scopes);
+    }
+
+    [Fact]
+    public void Our_own_and_unrelated_categories_are_untouched()
+    {
+        var (factory, rec) = Guarded();
+        var ours = factory.CreateLogger("Solvelt.Marketplace.Api.Catalog.CatalogSyncService");
+        ours.Log(LogLevel.Information, "hello");
+        ours.Log(LogLevel.Debug, "debug");
+        using (ours.BeginScope("scope")) { }
+        Assert.Equal(["Solvelt.Marketplace.Api.Catalog.CatalogSyncService|Information|hello", "Solvelt.Marketplace.Api.Catalog.CatalogSyncService|Debug|debug"], rec.Lines);
+        Assert.Equal(1, rec.Scopes);
+        Assert.Same(factory.CreateLogger("Solvelt.X"), factory.CreateLogger("Solvelt.X"));   // loggers are cached per category
+        Assert.Same(factory.CreateLogger("Microsoft.AspNetCore.Server.Kestrel"), factory.CreateLogger("Microsoft.AspNetCore.Server.Kestrel"));   // including the wrapped ones (the inner factory caches only its own)
+    }
+
+    [Fact]
+    public void The_enforcement_also_removes_wildcard_and_differently_cased_rules()
+    {
+        var o = new LoggerFilterOptions();
+        o.Rules.Add(new LoggerFilterRule(null, "*Routing.Matching.DfaMatcher", LogLevel.Trace, null));
+        o.Rules.Add(new LoggerFilterRule(null, "MICROSOFT.ASPNETCORE.ROUTING", LogLevel.Trace, null));
+        o.Rules.Add(new LoggerFilterRule("Console", "microsoft.aspnetcore.hosting.diagnostics", LogLevel.Trace, null));
+        o.Rules.Add(new LoggerFilterRule(null, "Solvelt.*", LogLevel.Debug, null));
+        SafeLogging.Enforce(o);
+        Assert.DoesNotContain(o.Rules, r => r.CategoryName is "*Routing.Matching.DfaMatcher" or "MICROSOFT.ASPNETCORE.ROUTING" or "microsoft.aspnetcore.hosting.diagnostics" or "Solvelt.*");
+        Assert.Contains(o.Rules, r => r.CategoryName == "Microsoft.AspNetCore.Routing" && r.LogLevel == LogLevel.None);
+    }
+
 }
 
 public class Review3ForwardingTests
@@ -277,7 +394,7 @@ public class Review3AttemptLimiterTests
     }
 
     [Fact]
-    public void The_table_is_hard_capped_and_evicts_the_oldest_windows_first()
+    public void The_table_is_hard_capped_and_evicts_in_batches()
     {
         var clock = Clock();
         var l = new AttemptLimiter(clock, maxKeys: 100);
@@ -318,6 +435,123 @@ public class Review3AttemptLimiterTests
         for (var i = 0; i < 1000; i++) { l.TryAcquire("signin", $"spray{i}", 5, TimeSpan.FromMinutes(15)); clock.Advance(TimeSpan.FromMilliseconds(1)); }
         Assert.InRange(l.TrackedKeys, 85, 100);
         Assert.InRange(l.Evictions, 1, 150);   // about one eviction per tenth of the cap (one per insert would be ~900)
+    }
+
+    [Fact]
+    public void A_key_under_brute_force_survives_a_spray_of_more_keys_than_the_table_holds_even_when_it_is_the_oldest()
+    {
+        var clock = Clock();
+        var l = new AttemptLimiter(clock, maxKeys: 100);
+        var w = TimeSpan.FromMinutes(15);
+        // the victim is attacked FIRST, so its window is the oldest in the table, and it reaches its limit
+        for (var i = 0; i < 6; i++) l.TryAcquire("signin", "victim@example.com", 5, w);
+        Assert.False(l.TryAcquire("signin", "victim@example.com", 5, w));
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        // then a spray of ten times the table size in distinct single-hit keys
+        for (var i = 0; i < 1000; i++) { l.TryAcquire("signin", $"spray{i}@example.com", 5, w); clock.Advance(TimeSpan.FromMilliseconds(1)); }
+        Assert.True(l.Evictions > 1);
+        Assert.False(l.TryAcquire("signin", "victim@example.com", 5, w));          // still blocked: its count was not reset by an eviction
+    }
+
+    [Fact]
+    public void Among_equal_counts_the_oldest_window_goes_first()
+    {
+        var clock = Clock();
+        var l = new AttemptLimiter(clock, maxKeys: 100);
+        var w = TimeSpan.FromMinutes(15);
+        void Hit2(string key) { l.TryAcquire("signin", key, 5, w); l.TryAcquire("signin", key, 5, w); clock.Advance(TimeSpan.FromMilliseconds(1)); }
+        Hit2("oldest");
+        for (var i = 0; i < 9; i++) Hit2($"a{i}");
+        Hit2("newer");                                              // the 11th oldest window ...
+        for (var i = 0; i < 88; i++) Hit2($"b{i}");                 // ... 99 keys in all, each with count 2
+        l.TryAcquire("signin", "trigger1", 5, w);                   // 100 keys: at the cap
+        Assert.Equal(0, l.Evictions);
+        l.TryAcquire("signin", "trigger2", 5, w);                   // 101: evicts down to 90, i.e. 11 keys: the two count-1 triggers, then the 9 oldest of the count-2 keys
+        Assert.Equal(1, l.Evictions);
+        Assert.Equal(90, l.TrackedKeys);
+        // "oldest" was evicted (its count starts again), "newer" was not (its count continues from 2)
+        for (var i = 0; i < 3; i++) Assert.True(l.TryAcquire("signin", "oldest", 3, w));   // counts 1, 2, 3
+        Assert.False(l.TryAcquire("signin", "oldest", 3, w));                              // count 4
+        Assert.True(l.TryAcquire("signin", "newer", 3, w));                                // count 3: continued from 2
+        Assert.False(l.TryAcquire("signin", "newer", 3, w));                               // count 4
+    }
+
+    [Fact]
+    public void The_key_counter_always_agrees_with_the_table_through_adds_prunes_and_evictions()
+    {
+        var clock = Clock();
+        var l = new AttemptLimiter(clock, maxKeys: 50);
+        for (var i = 0; i < 40; i++) l.TryAcquire("a", $"k{i}", 5, TimeSpan.FromSeconds(10));
+        Assert.Equal(l.ActualKeys, l.TrackedKeys);
+        Assert.Equal(40, l.TrackedKeys);
+        for (var i = 0; i < 40; i++) l.TryAcquire("a", $"k{i}", 5, TimeSpan.FromSeconds(10));    // updating existing keys does not count them again
+        Assert.Equal(40, l.TrackedKeys);
+        for (var i = 40; i < 120; i++) { clock.Advance(TimeSpan.FromMilliseconds(1)); l.TryAcquire("a", $"k{i}", 5, TimeSpan.FromSeconds(10)); }
+        Assert.True(l.Evictions >= 1);
+        Assert.Equal(l.ActualKeys, l.TrackedKeys);
+        Assert.InRange(l.TrackedKeys, 1, 50);
+        clock.Advance(TimeSpan.FromMinutes(1));                                                  // everything expires, the next call prunes
+        l.TryAcquire("a", "fresh", 5, TimeSpan.FromSeconds(10));
+        Assert.Equal(1, l.TrackedKeys);
+        Assert.Equal(l.ActualKeys, l.TrackedKeys);
+    }
+
+    [Fact]
+    public void The_key_counter_stays_exact_under_parallel_load_and_eviction_never_throws()
+    {
+        // Eviction snapshots a table that other threads are adding to (LINQ over the dictionary throws ArgumentException when a key lands between sizing
+        // and filling its buffer): a high cap-to-spray ratio and many threads starting together make that collision near certain.
+        var l = new AttemptLimiter(Clock(), maxKeys: 200);
+        const int threads = 16, perThread = 6000;
+        using var start = new Barrier(threads);
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var workers = Enumerable.Range(0, threads).Select(t => new Thread(() =>
+        {
+            start.SignalAndWait();
+            try { for (var i = 0; i < perThread; i++) l.TryAcquire("signin", $"t{t}-{i}@example.com", 5, TimeSpan.FromMinutes(15)); }
+            catch (Exception ex) { failures.Enqueue(ex); }
+        })).ToList();
+        workers.ForEach(w => w.Start());
+        workers.ForEach(w => w.Join());
+        Assert.True(failures.IsEmpty, failures.TryPeek(out var first) ? first.ToString() : "");
+        Assert.Equal(l.ActualKeys, l.TrackedKeys);                                               // no add or remove was lost or counted twice
+        Assert.InRange(l.TrackedKeys, 1, 200 + threads * 4);                                     // bounded (a few adds can land while an eviction runs)
+        Assert.True(l.Evictions >= 1);
+    }
+
+    [Fact]
+    public void The_same_key_hit_from_many_threads_loses_no_count()
+    {
+        // 16 threads x 5000 hits on ONE key, started together. A compare-and-swap loop loses nothing: after N hits the (N+1)th is the first to exceed a
+        // limit of N. An unconditional write would lose increments under contention and let it through.
+        var l = new AttemptLimiter(Clock());
+        const int threads = 16, perThread = 5000, total = threads * perThread;
+        using var start = new Barrier(threads);
+        var workers = Enumerable.Range(0, threads).Select(_ => new Thread(() =>
+        {
+            start.SignalAndWait();
+            for (var i = 0; i < perThread; i++) l.TryAcquire("signin", "same@example.com", total, TimeSpan.FromMinutes(15));
+        })).ToList();
+        workers.ForEach(w => w.Start());
+        workers.ForEach(w => w.Join());
+        Assert.False(l.TryAcquire("signin", "same@example.com", total, TimeSpan.FromMinutes(15)));   // hit number total + 1
+        Assert.Equal(1, l.TrackedKeys);
+    }
+
+    [Fact]
+    public void The_limit_is_enforced_exactly_for_a_key_hit_concurrently()
+    {
+        var l = new AttemptLimiter(Clock());
+        var allowed = 0;
+        using var start = new Barrier(16);
+        var workers = Enumerable.Range(0, 16).Select(_ => new Thread(() =>
+        {
+            start.SignalAndWait();
+            for (var i = 0; i < 200; i++) if (l.TryAcquire("signin", "same@example.com", 50, TimeSpan.FromMinutes(15))) Interlocked.Increment(ref allowed);
+        })).ToList();
+        workers.ForEach(w => w.Start());
+        workers.ForEach(w => w.Join());
+        Assert.Equal(50, allowed);                                                               // exactly the limit, whatever the interleaving
     }
 }
 
