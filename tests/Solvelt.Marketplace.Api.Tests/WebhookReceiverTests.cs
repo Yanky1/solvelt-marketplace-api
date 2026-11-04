@@ -128,7 +128,7 @@ public class WebhookReceiverTests
             foreach (var d in s.Where(d => d.ServiceType == typeof(IProjectionHandler) && d.ImplementationType == typeof(Solvelt.Marketplace.Api.Fulfilment.FulfilmentHandler) && handler.EventTypes.Intersect(Solvelt.Marketplace.Api.Fulfilment.FulfilmentProjector.OwnTypes).Any()).ToList())
                 s.Remove(d);
             foreach (var d in s.Where(d => d.ServiceType == typeof(IProjectionHandler) && d.ImplementationType is { } t && t != typeof(ScriptedHandler)
-                         && (t == typeof(Solvelt.Marketplace.Api.Checkout.PortalRefundHandler)) && handler.EventTypes.Intersect(new Solvelt.Marketplace.Api.Checkout.PortalRefundHandler(Microsoft.Extensions.Logging.Abstractions.NullLogger<Solvelt.Marketplace.Api.Checkout.PortalRefundHandler>.Instance).EventTypes).Any()).ToList())
+                         && (t == typeof(Solvelt.Marketplace.Api.Checkout.PortalRefundHandler)) && handler.EventTypes.Intersect(new Solvelt.Marketplace.Api.Checkout.PortalRefundHandler(Microsoft.Extensions.Logging.Abstractions.NullLogger<Solvelt.Marketplace.Api.Checkout.PortalRefundHandler>.Instance, Microsoft.Extensions.Options.Options.Create(new Solvelt.Marketplace.Api.Infrastructure.PortalOptions())).EventTypes).Any()).ToList())
                 s.Remove(d);
             s.AddSingleton<IProjectionHandler>(handler);
         });

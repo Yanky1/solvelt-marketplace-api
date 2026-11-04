@@ -391,7 +391,7 @@ public sealed class RefundEventTests : OrderFlowBase
 
     // ---- survivors of the review: each protection and each cap alone, and the tax remainder with a non-exact split ----
 
-    private async Task<(Guid OrderId, Guid GroupId)> HandmadeOrder(long paid, long groupTotal, long groupTax, int qty = 3)
+    private async Task<(Guid OrderId, Guid GroupId)> HandmadeOrder(long paid, long groupTotal, long groupTax, int qty = 3, long shipping = 0, long shippingTax = 0)
     {
         var order = new MarketplaceOrder
         {
@@ -399,9 +399,9 @@ public sealed class RefundEventTests : OrderFlowBase
             PaidAt = _k.F.Clock.GetUtcNow(), PaidCents = paid, TotalCents = paid, ItemsCents = groupTotal - groupTax, TaxCents = groupTax, CreatedAt = _k.F.Clock.GetUtcNow(), UpdatedAt = _k.F.Clock.GetUtcNow(),
             BuyerName = "x", RelayEmail = "x", ShipName = "x", ShipLine1 = "x", ShipCity = "x", ShipPostalCode = "x", ShipCountry = "US", PaymentIntentId = "pi_hand_" + Guid.NewGuid().ToString("N")[..8],
         };
-        var group = new OrderGroup { Id = Guid.NewGuid(), OrderId = order.Id, SellerId = Guid.NewGuid(), BrandId = Guid.NewGuid(), DeliveryKind = "carrier", ItemsCents = groupTotal - groupTax, ShippingCents = 0, TaxCents = groupTax, TotalCents = groupTotal, SellerOrderNumber = "SO-HAND" };
+        var group = new OrderGroup { Id = Guid.NewGuid(), OrderId = order.Id, SellerId = Guid.NewGuid(), BrandId = Guid.NewGuid(), DeliveryKind = "carrier", ItemsCents = groupTotal - groupTax - shipping, ShippingCents = shipping, ShippingTaxCents = shippingTax, TaxCents = groupTax, TotalCents = groupTotal, SellerOrderNumber = "SO-HAND" };
         order.Groups.Add(group);
-        order.Lines.Add(new OrderLine { Id = Guid.NewGuid(), GroupId = group.Id, MarketplaceLineId = order.Number + "-1", SellerId = group.SellerId, BrandId = group.BrandId, Quantity = qty, UnitPriceCents = (groupTotal - groupTax) / qty, LineTotalCents = groupTotal - groupTax, TaxCents = groupTax, ListingId = Guid.NewGuid(), VariantId = Guid.NewGuid() });
+        order.Lines.Add(new OrderLine { Id = Guid.NewGuid(), GroupId = group.Id, MarketplaceLineId = order.Number + "-1", SellerId = group.SellerId, BrandId = group.BrandId, Quantity = qty, UnitPriceCents = (groupTotal - groupTax - shipping) / qty, LineTotalCents = groupTotal - groupTax - shipping, TaxCents = groupTax - shippingTax, ListingId = Guid.NewGuid(), VariantId = Guid.NewGuid() });
         await _k.Db(async db => { db.Orders.Add(order); await db.SaveChangesAsync(); return 0; });
         return (order.Id, group.Id);
     }
@@ -453,5 +453,38 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal(ReserveOutcome.Reserved, await svc.ReserveAsync(orderId, groupId, 600, 0, "raw-1", "t", false, null, default));
         Assert.Equal(ReserveOutcome.ExceedsPaid, await svc.ReserveAsync(orderId, null, 401, 0, "raw-2", "t", false, null, default));
         Assert.Equal(ReserveOutcome.Reserved, await svc.ReserveAsync(orderId, null, 400, 0, "raw-3", "t", false, null, default));
+    }
+
+    // ---- C8 switch on: shipping tax is the portal's own field, so it comes back with the shipping, proportionally (decision M3-15) ----
+
+    [Fact]
+    public async Task With_per_group_shipping_on_the_tax_on_shipping_is_refunded_proportionally_with_shipping_and_the_last_takes_the_remainder()
+    {
+        await Login();
+        // seller order: 3 units, items 3000, line tax 300, shipping 500, tax on shipping 45 => total 3845; the line carries ONLY its own tax (C8 on: nothing folded in)
+        var (orderId, groupId) = await HandmadeOrder(paid: 3845, groupTotal: 3845, groupTax: 345, qty: 3, shipping: 500, shippingTax: 45);
+        var line = await _k.Db(db => db.OrderLines.AsNoTracking().SingleAsync(l => l.GroupId == groupId));
+        Assert.Equal(300, line.TaxCents);
+        using var scope = _k.F.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<RefundService>();
+        // refund 200 of the 500 shipping (no lines): shipping tax floor(45 x 200 / 500) = 18 comes back with it
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 218, 200, [], null, false, false, "s1", "t", "s1"), perGroupShipping: true, default));
+        var r1 = await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Key == "s1"));
+        Assert.Equal((218L, 200L, 18L, 18L), (r1.AmountCents, r1.ShippingCents, r1.TaxCents, r1.ShippingTaxCents));
+        // the other 300 of the shipping is the last: it returns the remaining 27, exactly 45 in all
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 327, 300, [], null, false, false, "s2", "t", "s2"), perGroupShipping: true, default));
+        var r2 = await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Key == "s2"));
+        Assert.Equal((27L, 27L), (r2.TaxCents, r2.ShippingTaxCents));
+        var g = await _k.Db(db => db.OrderGroups.AsNoTracking().SingleAsync(x => x.Id == groupId));
+        Assert.Equal((500L, 45L), (g.RefundedShippingCents, g.RefundedShippingTaxCents));
+        // a full cancel of what is left then returns the line tax only (300), the shipping tax is already back
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(orderId, groupId, 3300, 0, [], null, true, true, "s3", "t", null), perGroupShipping: true, default));
+        var r3 = await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(x => x.Key == "s3"));
+        Assert.Equal((3300L, 300L, 0L), (r3.AmountCents, r3.TaxCents, r3.ShippingTaxCents));
+        Assert.Equal(3845, (await _k.Db(db => db.OrderGroups.AsNoTracking().SingleAsync(x => x.Id == groupId))).RefundedCents);
+        // with the switch OFF (shipping tax folded into the line) the same shipping refund backs out no shipping tax of its own
+        var (o2, g2) = await HandmadeOrder(paid: 3845, groupTotal: 3845, groupTax: 345, qty: 3, shipping: 500, shippingTax: 45);
+        Assert.Equal(ReserveOutcome.Reserved, await svc.ReservePortalAsync(new PortalRefund(o2, g2, 200, 200, [], null, false, false, "off", "t", "off"), perGroupShipping: false, default));
+        Assert.Equal(0, (await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Key == "off"))).ShippingTaxCents);
     }
 }

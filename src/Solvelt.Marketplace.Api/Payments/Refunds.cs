@@ -130,13 +130,19 @@ public sealed class RefundService(MarketplaceDb db, OutboxWriter outbox, TimePro
             var remainingGross = g.ItemsCents + g.TaxCents - (g.RefundedCents - g.RefundedShippingCents);
             tax = itemsGross <= 0 || remainingGross <= 0 ? 0 : itemsGross >= remainingGross ? remainingTax : remainingTax * itemsGross / remainingGross;
         }
+        // C8 mode (shipping tax is the portal's own field, not folded into line tax): the tax on the shipping refunded comes back in proportion, the last shipping refund taking the remainder
+        long shippingTaxBack = 0;
+        if (perGroupShipping && shipping > 0 && g.ShippingCents > 0)
+            shippingTaxBack = g.RefundedShippingCents + shipping >= g.ShippingCents ? g.ShippingTaxCents - g.RefundedShippingTaxCents : g.ShippingTaxCents * shipping / g.ShippingCents;
+        shippingTaxBack = Math.Clamp(shippingTaxBack, 0, g.ShippingTaxCents - g.RefundedShippingTaxCents);
+        if (r.TaxCents is null) tax += shippingTaxBack;
         tax = Math.Clamp(tax, 0, Math.Min(remainingTax, total - shipping));
 
         if (await db.Orders.Where(o => o.Id == r.OrderId && o.PaidAt != null && o.RefundedCents + total <= o.PaidCents).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + total), ct) == 0)
             return ReserveOutcome.ExceedsPaid;
         var moved = await db.OrderGroups.Where(x => x.Id == g.Id && x.RefundedCents + total <= x.TotalCents && x.RefundedShippingCents + shipping <= x.ShippingCents)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents + total).SetProperty(x => x.RefundedShippingCents, x => x.RefundedShippingCents + shipping)
-                .SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents + tax), ct);
+                .SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents + tax).SetProperty(x => x.RefundedShippingTaxCents, x => x.RefundedShippingTaxCents + shippingTaxBack), ct);
         if (moved == 0)
         {
             await db.Orders.Where(o => o.Id == r.OrderId).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - total), ct);
@@ -150,7 +156,7 @@ public sealed class RefundService(MarketplaceDb db, OutboxWriter outbox, TimePro
         var now = time.GetUtcNow().ToUniversalTime();
         db.OrderRefunds.Add(new OrderRefund
         {
-            Id = Guid.NewGuid(), Key = r.Key, OrderId = r.OrderId, GroupId = g.Id, AmountCents = total, ShippingCents = shipping, TaxCents = tax, Reason = r.Reason, Status = RefundStatus.Reserved,
+            Id = Guid.NewGuid(), Key = r.Key, OrderId = r.OrderId, GroupId = g.Id, AmountCents = total, ShippingCents = shipping, TaxCents = tax, ShippingTaxCents = shippingTaxBack, Reason = r.Reason, Status = RefundStatus.Reserved,
             ReportToPortal = true, PortalRefundId = r.PortalRefundId, CreatedAt = now, UpdatedAt = now,
             PartsJson = JsonSerializer.Serialize(parts.Select(p => new RefundPart(p.Line.Id, p.Qty, p.Tax)).ToList()),
         });
@@ -202,7 +208,8 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
                 if (refund.GroupId is { } g)
                 {
                     await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents)
-                        .SetProperty(x => x.RefundedShippingCents, x => x.RefundedShippingCents - refund.ShippingCents).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - refund.TaxCents), ct);
+                        .SetProperty(x => x.RefundedShippingCents, x => x.RefundedShippingCents - refund.ShippingCents).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - refund.TaxCents)
+                        .SetProperty(x => x.RefundedShippingTaxCents, x => x.RefundedShippingTaxCents - refund.ShippingTaxCents), ct);
                     foreach (var part in refund.PartsJson is null ? [] : JsonSerializer.Deserialize<List<RefundService.RefundPart>>(refund.PartsJson) ?? [])
                     {
                         var (id, qty, lt) = (part.LineId, part.Quantity, part.TaxCents);

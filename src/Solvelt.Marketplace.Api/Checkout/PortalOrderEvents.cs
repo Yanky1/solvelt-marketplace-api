@@ -12,7 +12,7 @@ namespace Solvelt.Marketplace.Api.Checkout;
 /// under its unique key (the portal refund id, or the cancelling event) inside the webhook transaction; Stripe is called from the outbox, then <c>refund.processed</c> goes back.
 /// An event for an order whose ingest has not stored the seller orders yet is parked and re-applied when it does.
 /// </summary>
-public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IProjectionHandler
+public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions) : IProjectionHandler
 {
     public const string Issued = "refund.issued", Cancelled = "order.cancelled";
     public IReadOnlyCollection<string> EventTypes { get; } = [Issued, Cancelled];
@@ -62,7 +62,7 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IPro
             if (lines is null) return HandlerOutcome.Skipped("invalid cancellation lines");
             request = new PortalRefund(order.Id, group.Id, due, 0, lines.Select(l => new PortalRefundLine(l.Id, l.Quantity)).ToList(), Num(data, "taxCents"), !partial, true, "cancelled:" + c.Event.Id, "order_cancelled", null);
         }
-        switch (await refunds.ReservePortalAsync(request, perGroupShipping: false, ct))
+        switch (await refunds.ReservePortalAsync(request, perGroupShipping: portalOptions.Value.PerGroupShipping, ct))
         {
             case ReserveOutcome.Reserved or ReserveOutcome.Duplicate: return HandlerOutcome.Applied();
             case ReserveOutcome.ExceedsPaid:
@@ -83,6 +83,7 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IPro
         if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() > 200) return null;
         foreach (var l in arr.EnumerateArray())
         {
+            if (l.ValueKind != JsonValueKind.Object) return null;   // a non-object element is a malformed payload, not an exception
             if (Str(l, "marketplaceLineId") is not { Length: > 0 and <= 100 } id || Num(l, "quantity") is not { } q || q <= 0 || q > 10_000) return null;
             if (l.TryGetProperty("amountCents", out var a)) { if (a.ValueKind != JsonValueKind.Number || !a.TryGetInt64(out var amount) || amount < 0) return null; amountSum += amount; }
             result.Add((id, (int)q));
@@ -90,7 +91,7 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IPro
         return result;
     }
 
-    private static string? Str(JsonElement d, string n) => d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-    private static long? Num(JsonElement d, string n) => d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var x) ? x : null;
+    private static string? Str(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+    private static long? Num(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var x) ? x : null;
 }
 

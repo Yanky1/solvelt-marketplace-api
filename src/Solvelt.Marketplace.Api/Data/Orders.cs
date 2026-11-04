@@ -92,6 +92,8 @@ public sealed class OrderGroup
     public long RefundedCents { get; set; }
     /// <summary>Shipping returned so far (shipping excl. tax; never above <see cref="ShippingCents"/>).</summary>
     public long RefundedShippingCents { get; set; }
+    /// <summary>Tax on shipping returned so far (only used while the portal takes shipping tax as its own field, C8; otherwise it is inside the line tax).</summary>
+    public long RefundedShippingTaxCents { get; set; }
     /// <summary>
     /// Tax inside what was returned so far: the portal's amounts include line tax, its ledger excludes it, so this is what we back out of every <c>refund.processed</c>
     /// (floor proration per line, the last refund of a line takes the remainder; decision M3-16).
@@ -142,6 +144,8 @@ public sealed class OrderRefund
     public long ShippingCents { get; set; }
     /// <summary>The tax inside <see cref="AmountCents"/> (the portal's amounts include line tax; <c>refund.processed</c> reports the amount without it).</summary>
     public long TaxCents { get; set; }
+    /// <summary>The part of <see cref="TaxCents"/> that is tax on shipping (C8 mode), so a refusal gives it back to the right counter.</summary>
+    public long ShippingTaxCents { get; set; }
     /// <summary>JSON <c>[{ "lineId", "quantity", "taxCents" }]</c>: which line counters this refund moved, so a refusal by Stripe gives them back exactly.</summary>
     public string? PartsJson { get; set; }
     public string Reason { get; set; } = "";
