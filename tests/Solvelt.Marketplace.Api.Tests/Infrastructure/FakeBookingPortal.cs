@@ -58,7 +58,75 @@ public sealed class FakeBookingPortal
     /// <summary>The policy the NEXT hold is created with (the portal freezes it on the booking); null = the portal does not send one.</summary>
     public object? PolicyForNext { get; set; }
 
+    public sealed class QuoteState
+    {
+        public Guid QuoteId { get; } = Guid.NewGuid();
+        public string Mid { get; init; } = "";
+        public Guid ServiceId { get; init; }
+        public string Status { get; set; } = "Requested";
+        public List<DateTimeOffset> Slots { get; set; } = [];
+        public DateTimeOffset? ExpiresAt { get; set; }
+        public long Price { get; set; }
+        public int Minutes { get; set; }
+        public string BodyText { get; init; } = "";
+        public string? AcceptedMid { get; set; }
+    }
+
+    private readonly Dictionary<string, QuoteState> _quotes = new();
+    public IReadOnlyList<QuoteState> Quotes { get { lock (_lock) return _quotes.Values.ToList(); } }
+    public QuoteState? FindQuote(string mid) { lock (_lock) return _quotes.GetValueOrDefault(mid); }
+    /// <summary>Travel fee the portal adds when a quote is accepted (price = quote + travel fee).</summary>
+    public long QuoteTravelFeeCents { get; set; }
+    public bool LoseQuoteAnswer { get; set; }
+    public int QuoteRequestCalls, QuoteAcceptCalls;
+    public (HttpStatusCode Status, string Code)? AcceptFailNext { get; set; }
+
     public FakeBookingPortal(TimeProvider clock) => _clock = clock;
+
+    public void Quote(string mid, long price, int minutes, IEnumerable<DateTimeOffset> slots, DateTimeOffset expires)
+    {
+        lock (_lock) { var q = _quotes[mid]; q.Status = "Quoted"; q.Price = price; q.Minutes = minutes; q.Slots = slots.ToList(); q.ExpiresAt = expires; }
+    }
+
+    private HttpResponseMessage QuoteRequestCall(ReceivedCall c)
+    {
+        Interlocked.Increment(ref QuoteRequestCalls);
+        if (Down) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+        var j = JsonDocument.Parse(c.Body).RootElement;
+        var mid = j.GetProperty("marketplaceQuoteId").GetString()!;
+        lock (_lock)
+        {
+            if (_quotes.TryGetValue(mid, out var ex)) return LoseQuoteAnswer ? FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}") : FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new { created = false, quoteId = ex.QuoteId, marketplaceQuoteId = mid, status = ex.Status }));
+            if (FailNext is { } f) { FailNext = null; return FakePortal.Json(f.Status, JsonSerializer.Serialize(new { code = f.Code })); }
+            var q = new QuoteState { Mid = mid, ServiceId = j.GetProperty("serviceId").GetGuid(), BodyText = c.BodyText };
+            _quotes[mid] = q;
+            if (LoseQuoteAnswer) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+            return FakePortal.Json(HttpStatusCode.Created, JsonSerializer.Serialize(new { created = true, quoteId = q.QuoteId, marketplaceQuoteId = mid, status = q.Status }));
+        }
+    }
+
+    private HttpResponseMessage QuoteActionCall(ReceivedCall c, string qid, bool accept)
+    {
+        if (Down) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+        var j = JsonDocument.Parse(c.Body).RootElement;
+        lock (_lock)
+        {
+            if (!_quotes.TryGetValue(qid, out var q)) return Err(HttpStatusCode.NotFound, "quote_not_found");
+            if (!accept) { if (q.Status is "Requested" or "Quoted") { q.Status = "Withdrawn"; return FakePortal.Json(HttpStatusCode.OK, "{}"); } return q.Status == "Withdrawn" ? FakePortal.Json(HttpStatusCode.OK, "{}") : Err(HttpStatusCode.Conflict, "quote_not_open"); }
+            Interlocked.Increment(ref QuoteAcceptCalls);
+            var mid = j.GetProperty("marketplaceBookingId").GetString()!;
+            if (q.Status == "Accepted" && q.AcceptedMid == mid && _byMid.TryGetValue(mid, out var done)) return FakePortal.Json(HttpStatusCode.OK, Wrap(done, false));
+            if (AcceptFailNext is { } f) { AcceptFailNext = null; return Err(f.Status, f.Code); }
+            if (q.Status != "Quoted") return Err(HttpStatusCode.Conflict, "quote_not_open");
+            if (q.ExpiresAt is { } e && e <= _clock.GetUtcNow()) return Err(HttpStatusCode.Conflict, "quote_expired");
+            var start = j.GetProperty("start").GetDateTimeOffset();
+            if (!q.Slots.Contains(start)) return Err(HttpStatusCode.UnprocessableEntity, "slot_not_offered");
+            if (_byMid.Values.Any(h => h.ServiceId == q.ServiceId && h.Start == start && h.Status is "Hold" or "Requested" or "Confirmed")) return Err(HttpStatusCode.Conflict, "slot_unavailable");
+            var hold = new Hold { Mid = mid, ServiceId = q.ServiceId, Start = start, Location = "customer", Minutes = q.Minutes, Price = q.Price + QuoteTravelFeeCents, ExpiresAt = _clock.GetUtcNow(), BodyText = c.BodyText, Status = Instant ? "Confirmed" : "Requested" };
+            _byMid[mid] = hold; q.Status = "Accepted"; q.AcceptedMid = mid;
+            return FakePortal.Json(HttpStatusCode.Created, Wrap(hold, true));
+        }
+    }
 
     public IReadOnlyList<Hold> Holds { get { lock (_lock) return _byMid.Values.ToList(); } }
     public Hold? Find(string mid) { lock (_lock) return _byMid.GetValueOrDefault(mid); }
@@ -66,6 +134,9 @@ public sealed class FakeBookingPortal
     public HttpResponseMessage? Handle(ReceivedCall c)
     {
         if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/bookings/holds") return HoldCall(c);
+        if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/quote-requests") return QuoteRequestCall(c);
+        if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/quotes/") && c.PathAndQuery.EndsWith("/accept")) return QuoteActionCall(c, c.PathAndQuery["/api/internal/v1/quotes/".Length..^"/accept".Length], true);
+        if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/quotes/") && c.PathAndQuery.EndsWith("/decline")) return QuoteActionCall(c, c.PathAndQuery["/api/internal/v1/quotes/".Length..^"/decline".Length], false);
         if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/payment-events")
         {
             lock (_lock) PaymentEvents.Add(c.BodyText);

@@ -196,6 +196,14 @@ Errors: `404` not a visible service; `422 validation_failed` (field errors) or a
 ### `GET /api/v1/services/{listingId}/options`
 Public. `200 { available, version, addOns: [{ id, name, description?, priceCents, extraMinutes }], intakeQuestions: [{ id, label, kind: text|longText|choice|yesNo|number, required, choices?, maxLength? }], providers: [{ providerId, displayName, photoImageId? }], assignment: leastBusy|roundRobin|buyerChoice, policy: { cancelFreeHours, cancelFeePercent, noShowFeePercent, maxReschedules, approvalHours }, travelFeeCents, serviceAreaPostalCodes?, serviceRadiusKm? }`. `available:false` with empty lists means the portal does not provide options yet: show the widget without add-ons and intake questions. `404` not a visible service, `503 options_unavailable`. `Cache-Control: public, max-age=60`. Send `addOnIds` and `intakeAnswers` (`checkout`) only with ids from this list; the portal validates them.
 
+### Quotes (signed-in buyer, `Cache-Control: private, no-store`)
+| Call | Body | Answer |
+|---|---|---|
+| `POST /api/v1/quotes` (header `Idempotency-Key`) | `{ listingId, location, details (10-2000 characters), address? (required for `customer`), phone?, preferredTimes? (max 5, future) }` | `201 { created: true, quote }` / `200 { created: false, quote }`; `409 idempotency_conflict`, `404`, `422 validation_failed | too_many_quotes | outside_service_area`, `503 quote_unavailable` (retry with the SAME key) |
+| `GET /api/v1/quotes`, `GET /api/v1/quotes/{id}` | - | `QuoteView`: `id, listingId, status` (`Requested | Quoted | Accepted | Declined | Withdrawn | Expired`), `location, details, preferredTimes, currency, priceCents, durationMinutes, slots` (the offered times, UTC), `providerId, expiresAt, expired, note, declineReason, bookingId, createdAt`. Another buyer's quote is `404` |
+| `POST /api/v1/quotes/{id}/accept` | `{ start, addOnIds?, intake?, phone? }` (`start` is one of `slots`; there is no price field) | `201 { created, quote, booking }` (or `200` repeated): the booking is already Confirmed (or Requested) and **must be paid within 30 minutes** (`POST /bookings/{id}/checkout`) or it is cancelled; `409 quote_expired | quote_not_open | slot_unavailable`, `422 validation_failed | slot_not_offered` |
+| `POST /api/v1/quotes/{id}/decline` | `{ reason? }` | `200 { quote }` (repeatable); `409 quote_not_open` |
+
 ### Bookings (signed-in buyer; `Authorization: Bearer`, `Cache-Control: private, no-store`)
 | Call | Body | Answer |
 |---|---|---|

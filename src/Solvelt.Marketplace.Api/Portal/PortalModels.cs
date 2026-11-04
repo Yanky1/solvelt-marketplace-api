@@ -91,6 +91,13 @@ public sealed record PortalBookingSummary(Guid BookingId, string? Number, string
 public sealed record PortalBookingPolicy(int? CancelFreeHours, int? CancelFeePercent, int? NoShowFeePercent, int? MaxReschedules, int? ApprovalHours);
 public sealed record BookingResponse(bool Created, PortalBookingSummary Booking);
 
+// ---- quotes (SERVICES.md §5, §6) ----
+public sealed record QuoteRequestBody(string MarketplaceQuoteId, Guid ServiceId, PortalBuyer Buyer, string Details, string Location, PortalAddress? Address, IReadOnlyList<DateTimeOffset>? PreferredTimes);
+public sealed record QuoteCreatedResponse(bool Created, Guid QuoteId, string? MarketplaceQuoteId, string? Status);
+/// <summary>Accepting a quote creates the booking (Confirmed, or Requested for request-mode services) at once: there is no hold. The price is the quote plus the travel fee, the portal's.</summary>
+public sealed record QuoteAcceptBody(string MarketplaceBookingId, DateTimeOffset Start, IReadOnlyList<string>? AddOnIds, PortalBuyer? Buyer, IReadOnlyList<IntakeAnswerBody>? IntakeAnswers);
+public sealed record QuoteDeclineBody(string? Reason);
+
 // ---- GET /services/{id}/options (contract request M4-C1; the portal has not shipped it yet, so every field is optional and the reader degrades) ----
 public sealed record ServiceAddOn(string? Id, string? Name, string? Description, long PriceCents, int ExtraMinutes);
 public sealed record IntakeQuestion(string? Id, string? Label, string? Kind, bool Required, IReadOnlyList<string>? Choices, int? MaxLength);
