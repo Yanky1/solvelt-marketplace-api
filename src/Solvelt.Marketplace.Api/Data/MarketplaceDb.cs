@@ -35,6 +35,7 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<MessageThread> MessageThreads => Set<MessageThread>();
     public DbSet<ThreadMessage> ThreadMessages => Set<ThreadMessage>();
     public DbSet<MessageAttachment> MessageAttachments => Set<MessageAttachment>();
+    public DbSet<MessageAttachmentData> MessageAttachmentData => Set<MessageAttachmentData>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<NotificationPreference> NotificationPreferences => Set<NotificationPreference>();
     public DbSet<SellerOrderState> SellerOrderStates => Set<SellerOrderState>();
