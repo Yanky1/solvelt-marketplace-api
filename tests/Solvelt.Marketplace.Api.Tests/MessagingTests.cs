@@ -157,13 +157,30 @@ public sealed class MessagingTests : OrderFlowBase
         var key = await _k.Db(db => db.MessageThreads.Select(t => t.ConversationKey).SingleAsync());
         Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = Guid.NewGuid() }));
         Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: "CV-UNKNOWN", extra: new { productId = listing.Id }));
-        Assert.Equal("applied", await SellerMessage(null!, null!, "Yes, we do.", kind: "product", conv: key, extra: new { productId = listing.Id }));
+        // G1: our conversation id plus the product is not enough either: the product id must be a valid id, and the seller must be the listing's seller
+        Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key));                                                                                       // no productId
+        Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = "xyz", sellerId = listing.SellerId }));                        // not an id
+        Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = listing.Id }));                                               // no seller
+        Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = listing.Id, sellerId = Guid.NewGuid() }));                   // another seller
+        Assert.Equal(0, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "seller")));
+        Assert.Equal("applied", await SellerMessage(null!, null!, "Yes, we do.", kind: "product", conv: key, extra: new { productId = listing.Id, sellerId = listing.SellerId }));
         var thread = await _k.Db(db => db.MessageThreads.Select(t => t.Id).SingleAsync());
         var view = await Json(await Call(HttpMethod.Get, $"/api/v1/messages/threads/{thread}"));
         Assert.Equal(new[] { "buyer", "seller" }, view.GetProperty("messages").EnumerateArray().Select(m => m.GetProperty("direction").GetString()!).ToArray());
     }
 
     // ------------------------------------------------------------------ seller -> buyer
+
+    [Fact]
+    public async Task G3_An_order_message_without_the_sellers_order_number_is_skipped_even_for_a_single_seller_order()
+    {
+        var (o, g) = await Placed();
+        await Call(HttpMethod.Post, "/api/v1/messages", new { orderNumber = o.Number, text = "Hi" });
+        await Drain();
+        Assert.Equal("skipped", await SellerMessage(o, g, "Hello", sellerOrderNumber: null));
+        Assert.Equal(0, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "seller")));
+        Assert.Equal("applied", await SellerMessage(o, g, "Hello"));
+    }
 
     [Fact]
     public async Task A_seller_reply_is_stored_once_notified_acknowledged_and_counted_unread()
