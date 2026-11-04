@@ -40,6 +40,8 @@ public interface IPaymentProvider
     Task CancelIntentAsync(string intentId, string idempotencyKey, CancellationToken ct);
     /// <summary>Stripe's current status of an intent (<c>requires_payment_method</c>, <c>processing</c>, <c>requires_capture</c>, <c>succeeded</c>, <c>canceled</c> ...). Read-only.</summary>
     Task<string> GetIntentStatusAsync(string intentId, CancellationToken ct);
+    /// <summary>What Stripe says has been refunded on the intent's charge so far, in cents (everything: ours and the dashboard's). A fresh read, the only truth about money that has left.</summary>
+    Task<long> GetAmountRefundedAsync(string intentId, CancellationToken ct);
     Task<RefundResult> RefundAsync(string intentId, long amountCents, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct);
 }
 
@@ -60,6 +62,13 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
 
     public async Task<string> GetIntentStatusAsync(string intentId, CancellationToken ct)
         => Str(await PostAsync($"/v1/payment_intents/{Uri.EscapeDataString(intentId)}", null, null, ct), "status");
+
+    public async Task<long> GetAmountRefundedAsync(string intentId, CancellationToken ct)
+    {
+        var json = await PostAsync($"/v1/payment_intents/{Uri.EscapeDataString(intentId)}?expand%5B%5D=latest_charge", null, null, ct);
+        return json.TryGetProperty("latest_charge", out var c) && c.ValueKind == JsonValueKind.Object && c.TryGetProperty("amount_refunded", out var a) && a.TryGetInt64(out var n) ? n
+            : throw new PaymentsUnavailableException("bad_response");
+    }
 
     public async Task CancelIntentAsync(string intentId, string idempotencyKey, CancellationToken ct)
         => await PostAsync($"/v1/payment_intents/{Uri.EscapeDataString(intentId)}/cancel", [], idempotencyKey, ct);
@@ -118,6 +127,7 @@ public sealed class UnconfiguredPaymentProvider : IPaymentProvider
     public Task<PaymentIntentResult> CreateIntentAsync(long a, string c, string k, IReadOnlyDictionary<string, string> m, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task CancelIntentAsync(string i, string k, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<string> GetIntentStatusAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
+    public Task<long> GetAmountRefundedAsync(string i, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
     public Task<RefundResult> RefundAsync(string i, long a, string k, IReadOnlyDictionary<string, string> m, CancellationToken ct) => throw new PaymentsUnavailableException("not_configured");
 }
 
@@ -191,6 +201,16 @@ public sealed class FakePaymentProvider : IPaymentProvider
             MaybeFail();
             if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
             return Task.FromResult(i.Cancelled ? "canceled" : i.CapturedCents > 0 ? "succeeded" : i.Processing ? "processing" : "requires_payment_method");
+        }
+    }
+
+    public Task<long> GetAmountRefundedAsync(string intentId, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            MaybeFail();
+            if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
+            return Task.FromResult(i.RefundedCents);
         }
     }
 
