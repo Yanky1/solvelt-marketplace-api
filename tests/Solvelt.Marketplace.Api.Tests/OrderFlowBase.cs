@@ -29,6 +29,8 @@ public abstract class OrderFlowBase : IDisposable
     protected Func<ReceivedCall, HttpResponseMessage>? _onOrder;
     /// <summary>A test's own portal routes (buyer events, messages ...): asked before the default 404.</summary>
     protected Func<ReceivedCall, HttpResponseMessage?>? _onOther;
+    /// <summary>A test's own answer to <c>POST /payment-events</c> (for example a 422); null means 200.</summary>
+    protected Func<ReceivedCall, HttpResponseMessage?>? _onPaymentEvent;
     protected int _orderCalls;
     protected readonly Dictionary<string, (Guid Id, string Number)> _sellerOrders = new();
     protected bool _oversold;
@@ -54,7 +56,7 @@ public abstract class OrderFlowBase : IDisposable
                 Interlocked.Increment(ref _orderCalls);
                 return _onOrder is not null ? _onOrder(c) : Created(c, 201, true);
             }
-            if (path == "/api/internal/v1/payment-events") return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\"}");
+            if (path == "/api/internal/v1/payment-events") return _onPaymentEvent?.Invoke(c) ?? FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\"}");
             if (_onOther?.Invoke(c) is { } other) return other;
             return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
         });

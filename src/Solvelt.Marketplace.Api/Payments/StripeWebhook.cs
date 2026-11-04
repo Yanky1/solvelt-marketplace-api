@@ -248,7 +248,13 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         else { state.LastCreated = evt.Created; state.Closed = closed; }
 
         var groups = order.Groups.OrderByDescending(g => g.TotalCents).ThenBy(g => g.Id).ToList();
-        var share = Allocate(amount.Value * groups.Sum(g => g.ItemsCents + g.ShippingCents) / Math.Max(1, order.TotalCents), groups.Select(g => g.ItemsCents + g.ShippingCents).ToList());
+        var sales = groups.Select(g => g.ItemsCents + g.ShippingCents).ToList();   // what each seller order SOLD: the portal's cap per share (items + shipping, no tax)
+        var share = AllocateDispute(amount.Value, groups.Select(g => g.TotalCents).ToList(), sales);
+        // The dispute fee, when Stripe tells us (the balance transactions of the dispute), is split the same way; otherwise the portal's default applies once (first seller order says nothing, the others 0).
+        var fee = 0L;
+        if (evt.Object.TryGetProperty("balance_transactions", out var bts) && bts.ValueKind == JsonValueKind.Array)
+            foreach (var bt in bts.EnumerateArray()) if (bt.ValueKind == JsonValueKind.Object && bt.TryGetProperty("fee", out var f) && f.TryGetInt64(out var fv) && fv > 0) fee += fv;
+        var feeShare = fee > 0 ? Allocate(fee, groups.Select(g => g.TotalCents).ToList()) : null;
         DateTimeOffset? due = evt.Object.TryGetProperty("evidence_details", out var ed) && ed.ValueKind == JsonValueKind.Object && ed.TryGetProperty("due_by", out var db2) && db2.TryGetInt64(out var unix) ? DateTimeOffset.FromUnixTimeSeconds(unix) : null;
         var createdAt = evt.Created > 0 ? DateTimeOffset.FromUnixTimeSeconds(evt.Created) : (DateTimeOffset?)null;
         // Until the portal merges C10 (a dispute keyed per seller order), a multi-seller dispute must not go out as several events with the same dispute id: only the first would book money.
@@ -256,8 +262,34 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         TimeSpan? hold = groups.Count > 1 && !portalOptions.Value.PerSellerOrderDisputes ? TimeSpan.FromDays(3650) : null;
         for (var i = 0; i < groups.Count; i++)
             outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{groups[i].SellerOrderNumber}", type,
-                new DisputeData(disputeId, order.Number, groups[i].SellerOrderNumber, null, share[i], portalStatus, i == 0 ? null : 0, order.Currency, evt.Str("reason"), due, createdAt), hold);   // the dispute fee: portal default, once
+                new DisputeData(disputeId, order.Number, groups[i].SellerOrderNumber, null, share[i], portalStatus, feeShare is not null ? feeShare[i] : i == 0 ? null : 0, order.Currency, evt.Str("reason"), due, createdAt), hold);
         return StripeOutcome.Applied;
+    }
+
+    /// <summary>
+    /// The seller order shares of a dispute (portal C10, decision M3-26): in proportion to what each group was CHARGED (<paramref name="totals"/>, tax included), floor allocation with the remainder to
+    /// the largest group, then every share capped at what that seller order SOLD (<paramref name="sales"/>: items + shipping, no tax: the portal answers 422 exceeds_sale above it). What a cap cuts off goes to the
+    /// groups that still have room (largest room first), so the shares add up to min(amount, sum of sales); the part that is tax and cannot be placed stays with the portal's staff flag. Never negative.
+    /// </summary>
+    public static long[] AllocateDispute(long amount, IReadOnlyList<long> totals, IReadOnlyList<long> sales)
+    {
+        var n = totals.Count;
+        var share = new long[n];
+        var sum = totals.Sum();
+        if (amount <= 0 || sum <= 0 || n == 0) return share;
+        for (var i = 0; i < n; i++) share[i] = (long)((System.Numerics.BigInteger)amount * totals[i] / sum);
+        var rest = amount - share.Sum();
+        if (rest > 0) share[Enumerable.Range(0, n).OrderByDescending(i => totals[i]).ThenBy(i => i).First()] += rest;   // the remainder to the largest group
+        for (var i = 0; i < n; i++) share[i] = Math.Clamp(share[i], 0, Math.Max(0, sales[i]));
+        var excess = amount - share.Sum();
+        foreach (var i in Enumerable.Range(0, n).OrderByDescending(i => Math.Max(0, sales[i]) - share[i]).ThenBy(i => i))
+        {
+            if (excess <= 0) break;
+            var room = Math.Max(0, sales[i]) - share[i];
+            var give = Math.Min(room, excess);
+            share[i] += give; excess -= give;
+        }
+        return share;
     }
 
     /// <summary>Splits <paramref name="total"/> in proportion to <paramref name="weights"/>, exactly (largest remainder; ties go to the earlier entry).</summary>
