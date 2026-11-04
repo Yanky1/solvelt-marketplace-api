@@ -68,3 +68,39 @@ public sealed class StatusProblemMiddleware(RequestDelegate next)
         }
     }
 }
+
+public static class SafeLogging
+{
+    /// <summary>
+    /// Category prefixes that would write a full URL, path or query: hosting diagnostics (request start/finish and the RequestPath logging
+    /// scope attached to every line of a request), routing (DfaMatcher logs the path at Debug), the rest of ASP.NET Core, EF Core, and
+    /// outgoing HttpClient requests.
+    /// </summary>
+    internal static readonly (string Prefix, LogLevel Level)[] Enforced =
+    [
+        ("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.None),
+        ("Microsoft.AspNetCore", LogLevel.Warning),
+        ("Microsoft.EntityFrameworkCore", LogLevel.Warning),
+        ("System.Net.Http.HttpClient", LogLevel.Warning),
+    ];
+
+    /// <summary>
+    /// .NET picks the filter rule with the MOST SPECIFIC category prefix, whatever its order, so a configuration entry such as
+    /// <c>Microsoft.AspNetCore.Routing.Matching.DfaMatcher: Trace</c> would beat a coarser rule set in code. This post-configuration
+    /// therefore removes every rule under the sensitive prefixes (config, environment, command line, AddFilter) and adds the enforced
+    /// ones last, so nothing can loosen them (decision M1-29).
+    /// </summary>
+    public static ILoggingBuilder AddSafeLogFilters(this ILoggingBuilder logging)
+    {
+        logging.Services.PostConfigure<LoggerFilterOptions>(Enforce);
+        return logging;
+    }
+
+    internal static void Enforce(LoggerFilterOptions options)
+    {
+        foreach (var rule in options.Rules.Where(r => r.CategoryName is { } c && Enforced.Any(e => c.StartsWith(e.Prefix, StringComparison.Ordinal))).ToList())
+            options.Rules.Remove(rule);
+        foreach (var (prefix, level) in Enforced)
+            options.Rules.Add(new LoggerFilterRule(null, prefix, level, null));
+    }
+}
