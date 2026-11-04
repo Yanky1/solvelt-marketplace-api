@@ -1,110 +1,82 @@
 using System.Text;
+using SkiaSharp;
 
 namespace Solvelt.Marketplace.Api.Messaging;
 
 /// <summary>
-/// What a seller's attachment must pass before we keep it (decision M5-13): the type is decided from the BYTES (JPEG, PNG, WebP, PDF; the declared type and name are ignored), at most 5 MB,
-/// image metadata (EXIF, XMP, text chunks, comments, thumbnails of GPS) is removed by rewriting the container, and a PDF with active content is refused. A file that is not exactly what its
-/// bytes say (a truncated image, a bad chunk length) is refused, not repaired.
+/// What a seller's attachment must pass before we keep it (decisions M5-13, M5-22): the type is decided from the BYTES (JPEG, PNG, WebP, PDF; the declared type and name are ignored), at most
+/// 5 MB, and an IMAGE is never kept as it came: it is decoded and a fresh image is encoded (SkiaSharp), so no metadata can survive whatever the container hides (EXIF, XMP, MPF and secondary
+/// images, GPS, comments, trailing data). The EXIF orientation is applied first, the longer side is capped at <see cref="MaxLongSide"/> pixels and a picture of more than
+/// <see cref="MaxPixels"/> pixels is refused before it is decoded (a decompression bomb). A file that does not decode is refused. A PDF with active content is refused.
 /// </summary>
 public static class AttachmentSanitizer
 {
     public const int MaxBytes = 5 * 1024 * 1024;
+    public const int MaxLongSide = 4096;
+    public const long MaxPixels = 40_000_000;
     public sealed record Result(string? ContentType, byte[]? Bytes, string? Rejected);
 
     public static Result Process(byte[] input)
     {
         if (input.Length == 0) return Reject("empty");
         if (input.Length > MaxBytes) return Reject("too_large");
-        if (input.Length >= 3 && input[0] == 0xFF && input[1] == 0xD8 && input[2] == 0xFF) return Wrap("image/jpeg", StripJpeg(input));
-        if (input.Length >= 8 && input[0] == 0x89 && input[1] == 0x50 && input[2] == 0x4E && input[3] == 0x47 && input[4] == 0x0D && input[5] == 0x0A && input[6] == 0x1A && input[7] == 0x0A) return Wrap("image/png", StripPng(input));
-        if (input.Length >= 12 && input[0] == 'R' && input[1] == 'I' && input[2] == 'F' && input[3] == 'F' && input[8] == 'W' && input[9] == 'E' && input[10] == 'B' && input[11] == 'P') return Wrap("image/webp", StripWebp(input));
+        if (input.Length >= 3 && input[0] == 0xFF && input[1] == 0xD8 && input[2] == 0xFF) return Image(input, "image/jpeg", SKEncodedImageFormat.Jpeg);
+        if (input.Length >= 8 && input[0] == 0x89 && input[1] == 0x50 && input[2] == 0x4E && input[3] == 0x47 && input[4] == 0x0D && input[5] == 0x0A && input[6] == 0x1A && input[7] == 0x0A) return Image(input, "image/png", SKEncodedImageFormat.Png);
+        if (input.Length >= 12 && input[0] == 'R' && input[1] == 'I' && input[2] == 'F' && input[3] == 'F' && input[8] == 'W' && input[9] == 'E' && input[10] == 'B' && input[11] == 'P') return Image(input, "image/webp", SKEncodedImageFormat.Webp);
         if (input.Length >= 5 && input[0] == '%' && input[1] == 'P' && input[2] == 'D' && input[3] == 'F' && input[4] == '-') return HasActiveContent(input) ? Reject("pdf_active_content") : new Result("application/pdf", input, null);
         return Reject("unsupported_type");
     }
 
     private static Result Reject(string why) => new(null, null, why);
-    private static Result Wrap(string type, byte[]? bytes) => bytes is null ? Reject("malformed_" + type[6..]) : new Result(type, bytes, null);
 
-    /// <summary>Keeps JFIF, ICC profile and Adobe markers (colour) and the image data; drops every other APPn (EXIF, XMP, IPTC...) and comments.</summary>
-    internal static byte[]? StripJpeg(byte[] b)
+    private static Result Image(byte[] input, string type, SKEncodedImageFormat format)
     {
-        var o = new MemoryStream(b.Length);
-        o.Write(b, 0, 2);   // SOI
-        var i = 2;
-        while (i + 4 <= b.Length)
+        var malformed = Reject("malformed_" + type[6..]);
+        try
         {
-            if (b[i] != 0xFF) return null;
-            var marker = b[i + 1];
-            if (marker == 0xFF) { i++; continue; }                       // fill byte
-            if (marker == 0xD9) { o.Write(b, i, 2); return o.ToArray(); }   // EOI
-            if (marker is >= 0xD0 and <= 0xD7 or 0x01) { o.Write(b, i, 2); i += 2; continue; }
-            var len = (b[i + 2] << 8) | b[i + 3];
-            if (len < 2 || i + 2 + len > b.Length) return null;
-            if (marker == 0xDA)                                           // start of scan: the rest is entropy-coded data up to EOI, copied as it is
+            using var data = SKData.CreateCopy(input);
+            using var codec = SKCodec.Create(data);
+            if (codec is null) return malformed;
+            var (w, h) = (codec.Info.Width, codec.Info.Height);
+            if (w <= 0 || h <= 0) return malformed;
+            if ((long)w * h > MaxPixels) return Reject("image_too_large");   // decided from the header, before a single pixel is decoded
+            using var decoded = SKBitmap.Decode(codec);
+            if (decoded is null) return malformed;
+            var origin = codec.EncodedOrigin;
+            var swap = origin is SKEncodedOrigin.LeftTop or SKEncodedOrigin.RightTop or SKEncodedOrigin.RightBottom or SKEncodedOrigin.LeftBottom;
+            int ow = swap ? h : w, oh = swap ? w : h;                       // size after the orientation is applied
+            var scale = Math.Max(ow, oh) > MaxLongSide ? (float)MaxLongSide / Math.Max(ow, oh) : 1f;
+            int dw = Math.Max(1, (int)Math.Round(ow * scale)), dh = Math.Max(1, (int)Math.Round(oh * scale));
+            using var dest = new SKBitmap(new SKImageInfo(dw, dh, SKColorType.Rgba8888, format == SKEncodedImageFormat.Jpeg ? SKAlphaType.Opaque : SKAlphaType.Unpremul));
+            using (var canvas = new SKCanvas(dest))
             {
-                o.Write(b, i, b.Length - i);
-                return b.Length >= 2 && b[^2] == 0xFF && b[^1] == 0xD9 ? o.ToArray() : null;
+                if (format == SKEncodedImageFormat.Jpeg) canvas.Clear(SKColors.White);
+                canvas.Scale(scale);
+                canvas.Concat(OrientationMatrix(origin, w, h));
+                using var image = SKImage.FromBitmap(decoded);
+                canvas.DrawImage(image, 0, 0, new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear), null);
             }
-            var drop = marker == 0xFE || (marker is >= 0xE1 and <= 0xEF && marker is not (0xE2 or 0xEE));
-            if (!drop) o.Write(b, i, 2 + len);
-            i += 2 + len;
+            using var fresh = SKImage.FromBitmap(dest);
+            using var encoded = fresh.Encode(format, 85);
+            if (encoded is null) return malformed;
+            var bytes = encoded.ToArray();
+            return bytes.Length > MaxBytes ? Reject("too_large") : new Result(type, bytes, null);
         }
-        return null;
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return malformed; }
     }
 
-    private static readonly HashSet<string> PngKeep = ["IHDR", "PLTE", "IDAT", "IEND", "tRNS", "gAMA", "cHRM", "sRGB", "iCCP", "sBIT", "pHYs", "acTL", "fcTL", "fdAT", "cICP"];
-
-    /// <summary>Keeps the chunks needed to show the picture; drops tEXt, zTXt, iTXt, eXIf, tIME and every unknown ancillary chunk.</summary>
-    internal static byte[]? StripPng(byte[] b)
+    /// <summary>Maps the stored pixels to the way the picture is meant to be seen (EXIF orientation 1-8); <paramref name="w"/> and <paramref name="h"/> are the stored size.</summary>
+    internal static SKMatrix OrientationMatrix(SKEncodedOrigin origin, int w, int h) => origin switch
     {
-        var o = new MemoryStream(b.Length);
-        o.Write(b, 0, 8);
-        var i = 8;
-        var sawEnd = false;
-        while (i + 12 <= b.Length)
-        {
-            var len = (long)((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]);
-            if (len < 0 || i + 12 + len > b.Length) return null;
-            var type = Encoding.ASCII.GetString(b, i + 4, 4);
-            if (PngKeep.Contains(type)) o.Write(b, i, (int)(12 + len));
-            else if ((b[i + 4] & 0x20) == 0) return null;                  // an unknown CRITICAL chunk: not something we can vouch for
-            i += (int)(12 + len);
-            if (type == "IEND") { sawEnd = true; break; }
-        }
-        return sawEnd ? o.ToArray() : null;
-    }
-
-    /// <summary>Drops the EXIF and XMP chunks, clears their flags in VP8X and rewrites the RIFF size.</summary>
-    internal static byte[]? StripWebp(byte[] b)
-    {
-        var declared = (long)(b[4] | (b[5] << 8) | (b[6] << 16) | (b[7] << 24)) + 8;
-        if (declared > b.Length || declared < 12) return null;
-        var body = new MemoryStream();
-        var i = 12;
-        while (i + 8 <= declared)
-        {
-            var size = (long)(b[i + 4] | (b[i + 5] << 8) | (b[i + 6] << 16) | (b[i + 7] << 24));
-            var padded = size + (size & 1);
-            if (i + 8 + padded > declared) return null;
-            var fourcc = Encoding.ASCII.GetString(b, i, 4);
-            if (fourcc is not ("EXIF" or "XMP "))
-            {
-                var chunk = b.AsSpan(i, (int)(8 + padded)).ToArray();
-                if (fourcc == "VP8X" && size >= 10) chunk[8] &= unchecked((byte)~0x0C);   // no EXIF (0x08) or XMP (0x04) flag any more
-                body.Write(chunk, 0, chunk.Length);
-            }
-            i += (int)(8 + padded);
-        }
-        if (i != declared) return null;
-        var o = new MemoryStream();
-        o.Write("RIFF"u8);
-        var total = 4 + body.Length;
-        o.Write([(byte)total, (byte)(total >> 8), (byte)(total >> 16), (byte)(total >> 24)]);
-        o.Write("WEBP"u8);
-        body.WriteTo(o);
-        return o.ToArray();
-    }
+        SKEncodedOrigin.TopRight => new SKMatrix(-1, 0, w, 0, 1, 0, 0, 0, 1),
+        SKEncodedOrigin.BottomRight => new SKMatrix(-1, 0, w, 0, -1, h, 0, 0, 1),
+        SKEncodedOrigin.BottomLeft => new SKMatrix(1, 0, 0, 0, -1, h, 0, 0, 1),
+        SKEncodedOrigin.LeftTop => new SKMatrix(0, 1, 0, 1, 0, 0, 0, 0, 1),
+        SKEncodedOrigin.RightTop => new SKMatrix(0, -1, h, 1, 0, 0, 0, 0, 1),
+        SKEncodedOrigin.RightBottom => new SKMatrix(0, -1, h, -1, 0, w, 0, 0, 1),
+        SKEncodedOrigin.LeftBottom => new SKMatrix(0, 1, 0, -1, 0, w, 0, 0, 1),
+        _ => SKMatrix.Identity,
+    };
 
     private static readonly string[] ActiveTokens = ["/JavaScript", "/JS", "/Launch", "/EmbeddedFile", "/AA", "/RichMedia", "/OpenAction"];
 

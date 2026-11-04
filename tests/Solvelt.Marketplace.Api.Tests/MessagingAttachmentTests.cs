@@ -9,6 +9,7 @@ using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Fulfilment;
 using Solvelt.Marketplace.Api.Messaging;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
+using SkiaSharp;
 using static Solvelt.Marketplace.Api.Tests.Infrastructure.WebhookTestKit;
 
 namespace Solvelt.Marketplace.Api.Tests;
@@ -31,30 +32,67 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         };
     }
 
-    // ---- sample files (structurally valid; the sanitizer checks structure, not pixels)
-    private static byte[] Jpeg(bool exif = true)
+    // ---- sample files: REAL images (the sanitizer decodes and re-encodes them), with metadata spliced in where a test wants some
+    private static byte[] Encode(SKEncodedImageFormat f, int w = 8, int h = 6, SKColor? left = null)
     {
-        var o = new List<byte> { 0xFF, 0xD8 };
-        void Seg(byte marker, byte[] data) { o.AddRange([0xFF, marker, (byte)((data.Length + 2) >> 8), (byte)(data.Length + 2)]); o.AddRange(data); }
-        Seg(0xE0, "JFIF\0\u0001\u0001\0\0\u0001\0\u0001\0\0"u8.ToArray());
-        if (exif) { Seg(0xE1, Encoding.ASCII.GetBytes("Exif\0\0GPSLatitude=40.69 Make=Phone")); Seg(0xFE, Encoding.ASCII.GetBytes("secret comment")); Seg(0xE1, Encoding.ASCII.GetBytes("http://ns.adobe.com/xap/1.0/\0<x:xmpmeta>jane</x:xmpmeta>")); }
-        Seg(0xDB, new byte[65]);
-        Seg(0xDA, [1, 2, 3, 4]);
-        o.AddRange([9, 9, 9, 0xFF, 0xD9]);
-        return o.ToArray();
+        using var bmp = new SKBitmap(w, h);
+        bmp.Erase(SKColors.CornflowerBlue);
+        if (left is { } c) for (var y = 0; y < h; y++) for (var x = 0; x < Math.Max(1, w / 2); x++) bmp.SetPixel(x, y, c);
+        using var img = SKImage.FromBitmap(bmp);
+        return img.Encode(f, 90).ToArray();
     }
 
-    private static byte[] Chunk(string type, byte[] data) => [.. new[] { (byte)(data.Length >> 24), (byte)(data.Length >> 16), (byte)(data.Length >> 8), (byte)data.Length }, .. Encoding.ASCII.GetBytes(type), .. data, 0, 0, 0, 0];
-    private static byte[] Png(bool text = true) => [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, .. Chunk("IHDR", new byte[13]), .. (text ? Chunk("tEXt", Encoding.ASCII.GetBytes("Author\0Jane Brown")) : []),
-        .. (text ? Chunk("eXIf", Encoding.ASCII.GetBytes("GPS")) : []), .. Chunk("IDAT", [1, 2, 3]), .. Chunk("IEND", [])];
+    private static byte[] Seg(byte marker, byte[] data) => [0xFF, marker, (byte)((data.Length + 2) >> 8), (byte)(data.Length + 2), .. data];
 
-    private static byte[] WebpChunk(string cc, byte[] data) => [.. Encoding.ASCII.GetBytes(cc), (byte)data.Length, (byte)(data.Length >> 8), 0, 0, .. data, .. (data.Length % 2 == 1 ? new byte[] { 0 } : [])];
+    /// <summary>A JPEG with every kind of identifying data the review found: EXIF with GPS, a comment, XMP, an MPF (APP2) segment, and an EXIF segment after the image data and after the end of the image.</summary>
+    private static byte[] Jpeg(bool exif = true, int w = 8, int h = 6)
+    {
+        var j = Encode(SKEncodedImageFormat.Jpeg, w, h);
+        if (!exif) return j;
+        byte[] A(string t) => Encoding.ASCII.GetBytes(t);
+        var head = new List<byte> { 0xFF, 0xD8 };
+        head.AddRange(Seg(0xE1, A("Exif\0\0GPSLatitude=40.69 Make=Phone")));
+        head.AddRange(Seg(0xFE, A("secret comment")));
+        head.AddRange(Seg(0xE1, A("http://ns.adobe.com/xap/1.0/\0<x:xmpmeta>Jane</x:xmpmeta>")));
+        head.AddRange(Seg(0xE2, A("MPF\0GPSSECRET")));
+        // the real JPEG without its SOI, its last two bytes (EOI) replaced by an EXIF segment after the scan, then a real EOI, then a whole second image with its own EXIF
+        var body = j[2..^2];
+        return [.. head, .. body, .. Seg(0xE1, A("Exif\0\0GPSAFTERSCAN")), 0xFF, 0xD9, .. Seg(0xE1, A("Exif\0\0GPSTRAILER")), 0xFF, 0xD8, 0xFF, 0xD9];
+    }
+
+    private static readonly uint[] CrcTable = Enumerable.Range(0, 256).Select(n => { var c = (uint)n; for (var k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1; return c; }).ToArray();
+    private static uint Crc(byte[] b) { var c = 0xFFFFFFFFu; foreach (var x in b) c = CrcTable[(c ^ x) & 0xFF] ^ (c >> 8); return c ^ 0xFFFFFFFFu; }
+    private static byte[] Chunk(string type, byte[] data)
+    {
+        var td = Encoding.ASCII.GetBytes(type).Concat(data).ToArray();
+        var crc = Crc(td);
+        return [.. new[] { (byte)(data.Length >> 24), (byte)(data.Length >> 16), (byte)(data.Length >> 8), (byte)data.Length }, .. td, (byte)(crc >> 24), (byte)(crc >> 16), (byte)(crc >> 8), (byte)crc];
+    }
+
+    /// <summary>A real PNG with text and EXIF chunks (a PNG's first chunk is IHDR, 25 bytes after the 8-byte signature).</summary>
+    private static byte[] Png(bool text = true, int w = 8, int h = 6)
+    {
+        var p = Encode(SKEncodedImageFormat.Png, w, h);
+        if (!text) return p;
+        return [.. p[..33], .. Chunk("tEXt", Encoding.ASCII.GetBytes("Author\0Jane Brown")), .. Chunk("eXIf", Encoding.ASCII.GetBytes("GPS")), .. p[33..]];
+    }
+
+    /// <summary>A real WebP with EXIF and XMP chunks appended (the RIFF size is fixed up).</summary>
     private static byte[] Webp()
     {
-        var vp8x = new byte[10]; vp8x[0] = 0x0C;   // EXIF + XMP flags
-        var body = new[] { WebpChunk("VP8X", vp8x), WebpChunk("VP8 ", [1, 2, 3, 4]), WebpChunk("EXIF", Encoding.ASCII.GetBytes("GPS here")), WebpChunk("XMP ", Encoding.ASCII.GetBytes("jane")) }.SelectMany(x => x).ToArray();
-        var size = 4 + body.Length;
-        return [.. "RIFF"u8.ToArray(), (byte)size, (byte)(size >> 8), (byte)(size >> 16), (byte)(size >> 24), .. "WEBP"u8.ToArray(), .. body];
+        var w = Encode(SKEncodedImageFormat.Webp);
+        byte[] C(string cc, string data) { var d = Encoding.ASCII.GetBytes(data); return [.. Encoding.ASCII.GetBytes(cc), (byte)d.Length, (byte)(d.Length >> 8), 0, 0, .. d, .. (d.Length % 2 == 1 ? new byte[] { 0 } : [])]; }
+        var all = w.Concat(C("EXIF", "GPS here")).Concat(C("XMP ", "jane")).ToArray();
+        var size = all.Length - 8;
+        all[4] = (byte)size; all[5] = (byte)(size >> 8); all[6] = (byte)(size >> 16); all[7] = (byte)(size >> 24);
+        return all;
+    }
+
+    /// <summary>A JPEG with an EXIF orientation tag (1-8) in a big-endian TIFF block.</summary>
+    private static byte[] JpegWithOrientation(byte[] jpeg, int orientation)
+    {
+        byte[] tiff = [.. "Exif\0\0MM"u8.ToArray(), 0, 0x2A, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, (byte)orientation, 0, 0, 0, 0, 0, 0];
+        return [0xFF, 0xD8, .. Seg(0xE1, tiff), .. jpeg[2..]];
     }
 
     private static byte[] Pdf(string extra = "") => Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj<</Type/Catalog" + extra + ">>endobj\ntrailer<</Root 1 0 R>>\n%%EOF");
@@ -112,9 +150,13 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         foreach (var name in new[] { "a.jpg", "b.png", "c.webp" })
             foreach (var secret in new[] { "GPS", "Exif", "secret comment", "Jane", "jane", "xmpmeta", "Make=Phone" })
                 Assert.DoesNotContain(secret, Text(name));                                           // all metadata is gone
-        Assert.StartsWith("ÿØ", Text("a.jpg"));
-        Assert.Contains("JFIF", Text("a.jpg"));                                                      // colour/format markers stay
-        Assert.Contains("IDAT", Text("b.png"));
+        foreach (var secret in new[] { "GPSSECRET", "MPF", "AFTERSCAN", "TRAILER", "here" }) Assert.DoesNotContain(secret, Text("a.jpg") + Text("c.webp"));   // MPF / EXIF after the scan / data after the end of the image
+        // what is stored is a fresh, valid image of the same size
+        foreach (var name in new[] { "a.jpg", "b.png", "c.webp" })
+        {
+            using var bmp = SKBitmap.Decode(data.Single(d => d.AttachmentId == atts.Single(a => a.FileName == name).Id).Bytes);
+            Assert.Equal((8, 6), (bmp.Width, bmp.Height));
+        }
     }
 
     [Fact]
@@ -278,23 +320,59 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
     // ------------------------------------------------------------------ the sanitizer on its own
 
     [Fact]
-    public void The_sanitizer_keeps_what_shows_the_picture_and_rewrites_the_containers_correctly()
+    public void G2_Images_are_decoded_and_encoded_afresh_so_no_metadata_survives_in_any_container()
     {
+        var jpg = AttachmentSanitizer.Process(Jpeg());
+        var png = AttachmentSanitizer.Process(Png());
         var webp = AttachmentSanitizer.Process(Webp());
-        Assert.Equal("image/webp", webp.ContentType);
-        var b = webp.Bytes!;
-        Assert.Equal(b.Length - 8, b[4] | (b[5] << 8) | (b[6] << 16) | (b[7] << 24));                       // RIFF size matches
-        Assert.Equal(0, b[20] & 0x0C);                                                                          // VP8X no longer claims EXIF or XMP
-        Assert.DoesNotContain("EXIF", Encoding.ASCII.GetString(b));
+        Assert.Equal(("image/jpeg", "image/png", "image/webp"), (jpg.ContentType, png.ContentType, webp.ContentType));
+        foreach (var r in new[] { jpg, png, webp })
+        {
+            var text = Encoding.Latin1.GetString(r.Bytes!);
+            foreach (var secret in new[] { "GPS", "Exif", "MPF", "secret comment", "Jane", "jane", "xmpmeta", "Make=Phone", "AFTERSCAN", "TRAILER", "EXIF", "Author" }) Assert.DoesNotContain(secret, text);
+        }
+        Assert.Equal(1, Encoding.Latin1.GetString(jpg.Bytes!).Split("\u00ff\u00d8").Length - 1);   // exactly one image: no second picture hidden behind the first
         Assert.Equal("malformed_png", AttachmentSanitizer.Process(Png().Take(40).ToArray()).Rejected);
         Assert.Equal("malformed_jpeg", AttachmentSanitizer.Process(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02, 0xFF, 0xD8 }).Rejected);
+        Assert.Equal("malformed_png", AttachmentSanitizer.Process([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, .. Chunk("IHDR", new byte[13]), .. Chunk("IDAT", [1]), .. Chunk("IEND", [])]).Rejected);
         Assert.Equal("unsupported_type", AttachmentSanitizer.Process(Encoding.ASCII.GetBytes("GIF89a....")).Rejected);
         Assert.Equal("empty", AttachmentSanitizer.Process([]).Rejected);
         Assert.NotNull(AttachmentSanitizer.Process(Pdf("/Subtype/JSON")).ContentType);                         // /JSON is not /JS
         Assert.Equal("pdf_active_content", AttachmentSanitizer.Process(Pdf("/AA<<>>")).Rejected);
-        // an unknown CRITICAL png chunk is refused; an unknown ancillary one is dropped
-        byte[] withChunk(string t) => [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, .. Chunk("IHDR", new byte[13]), .. Chunk(t, [1]), .. Chunk("IDAT", [1]), .. Chunk("IEND", [])];
-        Assert.Equal("malformed_png", AttachmentSanitizer.Process(withChunk("ZZZZ")).Rejected);
-        Assert.DoesNotContain("zzzz", Encoding.ASCII.GetString(AttachmentSanitizer.Process(withChunk("zzzz")).Bytes!));
+    }
+
+    [Theory]
+    [InlineData(1, 8, 6)] [InlineData(2, 8, 6)] [InlineData(3, 8, 6)] [InlineData(4, 8, 6)]
+    [InlineData(5, 6, 8)] [InlineData(6, 6, 8)] [InlineData(7, 6, 8)] [InlineData(8, 6, 8)]
+    public void G2_The_exif_orientation_is_applied_before_the_metadata_is_dropped(int orientation, int expectedW, int expectedH)
+    {
+        // the stored picture is 8x6 with its left half red; after orientation 5-8 it is shown 6x8
+        var src = JpegWithOrientation(Encode(SKEncodedImageFormat.Jpeg, 8, 6, SKColors.Red), orientation);
+        var r = AttachmentSanitizer.Process(src);
+        using var bmp = SKBitmap.Decode(r.Bytes!);
+        Assert.Equal((expectedW, expectedH), (bmp.Width, bmp.Height));
+        // where the red half ended up: orientation 1 left, 2 right, 3 right, 4 left, 5 top, 6 top, 7 bottom, 8 bottom
+        bool Red(int x, int y) { var c = bmp.GetPixel(x, y); return c.Red > 200 && c.Blue < 100; }
+        var (wx, wy) = (bmp.Width, bmp.Height);
+        switch (orientation)
+        {
+            case 1 or 4: Assert.True(Red(1, wy / 2)); Assert.False(Red(wx - 2, wy / 2)); break;
+            case 2 or 3: Assert.True(Red(wx - 2, wy / 2)); Assert.False(Red(1, wy / 2)); break;
+            case 5 or 6: Assert.True(Red(wx / 2, 1)); Assert.False(Red(wx / 2, wy - 2)); break;
+            default: Assert.True(Red(wx / 2, wy - 2)); Assert.False(Red(wx / 2, 1)); break;
+        }
+        Assert.DoesNotContain("Exif", Encoding.Latin1.GetString(r.Bytes!));                                      // and the orientation tag itself is gone: the pixels are already upright
+    }
+
+    [Fact]
+    public void G2_A_huge_picture_is_refused_from_its_header_and_a_big_one_is_scaled_down()
+    {
+        // a PNG that says it is 20000 x 20000 (400 MP): refused before any pixel is decoded
+        byte[] ihdr = [0, 0, 0x4E, 0x20, 0, 0, 0x4E, 0x20, 8, 6, 0, 0, 0];
+        Assert.Equal("image_too_large", AttachmentSanitizer.Process([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, .. Chunk("IHDR", ihdr), .. Chunk("IDAT", [1]), .. Chunk("IEND", [])]).Rejected);
+        // 5000 x 10 is under the pixel cap but over the side cap: scaled so the long side is 4096
+        using var big = SKBitmap.Decode(AttachmentSanitizer.Process(Png(false, 5000, 10)).Bytes!);
+        Assert.Equal(4096, big.Width);
+        Assert.InRange(big.Height, 1, 10);
     }
 }
