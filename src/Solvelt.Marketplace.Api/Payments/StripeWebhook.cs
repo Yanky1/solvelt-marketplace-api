@@ -71,7 +71,7 @@ public sealed record StripeEnvelope(string Id, string Type, long Created, JsonEl
 public enum StripeOutcome { Applied, Ignored, Unmatched, Duplicate }
 
 /// <summary>The event-id insert and the handler's changes commit in ONE transaction: a failure rolls both back and answers 5xx, so Stripe's retry sees a clean slate.</summary>
-public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, RefundService refunds, Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions, TimeProvider time, ILogger<StripeEventProcessor> log)
+public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, RefundService refunds, Solvelt.Marketplace.Api.Services.BookingPaymentEvents bookingEvents, Microsoft.Extensions.Options.IOptions<Infrastructure.PortalOptions> portalOptions, TimeProvider time, ILogger<StripeEventProcessor> log)
 {
     public async Task<StripeOutcome> ProcessAsync(StripeEnvelope evt, CancellationToken ct)
     {
@@ -130,6 +130,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
 
     private async Task<StripeOutcome> SucceededAsync(StripeEnvelope evt, CancellationToken ct)
     {
+        if (Solvelt.Marketplace.Api.Services.BookingPaymentEvents.IsBookingIntent(evt)) return await bookingEvents.SucceededAsync(evt, ct);   // booking intents (M4-08); the order code below is untouched
         var order = await FindOrderAsync(evt, ct);
         if (order is null) return StripeOutcome.Unmatched;
         var amount = evt.Long("amount_received") ?? evt.Long("amount");
@@ -188,6 +189,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         var intentId = evt.Str("payment_intent");
         var refunded = evt.Long("amount_refunded");
         if (intentId is null || refunded is null) return StripeOutcome.Unmatched;
+        if (await bookingEvents.OwnsIntentAsync(intentId, ct)) return await bookingEvents.ChargeRefundedAsync(evt, ct);
         var order = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.PaymentIntentId == intentId, ct);
         if (order is null) return StripeOutcome.Unmatched;
         // The order's row lock (a no-op write) serialises parallel charge.refunded events: each then reads the counter the one before it left, so the recorded amounts add up to Stripe's
@@ -262,6 +264,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
     /// <summary>A failed attempt on an intent is not final (the buyer may try another card): only the decline code is kept for the page, and never on an order that is already paid.</summary>
     private async Task<StripeOutcome> FailedAsync(StripeEnvelope evt, CancellationToken ct)
     {
+        if (Solvelt.Marketplace.Api.Services.BookingPaymentEvents.IsBookingIntent(evt)) return await bookingEvents.FailedAsync(evt, ct);
         var order = await FindOrderAsync(evt, ct);
         if (order is null) return StripeOutcome.Unmatched;
         var code = evt.Object.TryGetProperty("last_payment_error", out var e) && e.ValueKind == JsonValueKind.Object && e.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.String

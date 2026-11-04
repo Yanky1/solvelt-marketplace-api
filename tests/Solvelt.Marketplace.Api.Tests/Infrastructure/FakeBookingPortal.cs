@@ -1,0 +1,121 @@
+using System.Net;
+using System.Text.Json;
+
+namespace Solvelt.Marketplace.Api.Tests.Infrastructure;
+
+/// <summary>
+/// The portal's booking endpoints as far as M4 needs them, with the one property the contract promises: a slot is held by exactly one booking (the first writer wins,
+/// SERVICES.md §3) and a repeated <c>marketplaceBookingId</c> returns the same booking with <c>created:false</c>. State is a plain dictionary under a lock.
+/// </summary>
+public sealed class FakeBookingPortal
+{
+    public sealed class Hold
+    {
+        public Guid BookingId { get; init; } = Guid.NewGuid();
+        public string Mid { get; init; } = "";
+        public Guid ServiceId { get; init; }
+        public DateTimeOffset Start { get; init; }
+        public string Status { get; set; } = "Hold";
+        public string Location { get; init; } = "online";
+        public int Minutes { get; init; }
+        public long Price { get; init; }
+        public DateTimeOffset ExpiresAt { get; init; }
+        public string? OnlineInstructions { get; set; }
+        public string BodyText { get; init; } = "";
+    }
+
+    private readonly object _lock = new();
+    private readonly TimeProvider _clock;
+    private readonly Dictionary<string, Hold> _byMid = new();
+    public long PriceCents { get; set; } = 24000;
+    public int DurationMinutes { get; set; } = 240;
+    public string? OnlineInstructions { get; set; }
+    /// <summary>When set, the next hold answers with this status/code (then the flag clears).</summary>
+    public (HttpStatusCode Status, string Code)? FailNext { get; set; }
+    public bool Down { get; set; }
+    /// <summary>The portal creates the hold but the answer is lost on the way (a timeout after the write): the case idempotency exists for.</summary>
+    public bool LoseAnswer { get; set; }
+    public int HoldCalls;
+    public int ConfirmCalls;
+    /// <summary>Instant booking (Confirmed) when true, request-to-book (Requested) when false.</summary>
+    public bool Instant { get; set; } = true;
+    /// <summary>The next confirm answers with this (one shot), for example 409 slot_unavailable once the hold has lapsed and someone else took the time.</summary>
+    public (HttpStatusCode Status, string Code)? ConfirmFailNext { get; set; }
+    /// <summary>Every confirm answers 503 while set (an outage between the payment and the confirmation).</summary>
+    public bool ConfirmDown { get; set; }
+    public List<string> ConfirmBodies { get; } = [];
+    public List<string> PaymentEvents { get; } = [];
+
+    public FakeBookingPortal(TimeProvider clock) => _clock = clock;
+
+    public IReadOnlyList<Hold> Holds { get { lock (_lock) return _byMid.Values.ToList(); } }
+    public Hold? Find(string mid) { lock (_lock) return _byMid.GetValueOrDefault(mid); }
+
+    public HttpResponseMessage? Handle(ReceivedCall c)
+    {
+        if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/bookings/holds") return HoldCall(c);
+        if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/payment-events")
+        {
+            lock (_lock) PaymentEvents.Add(c.BodyText);
+            return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\"}");
+        }
+        if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/confirm")) return ConfirmCall(c);
+        if (c.Method == "GET" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/"))
+        {
+            if (Down) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+            var mid = c.PathAndQuery["/api/internal/v1/bookings/".Length..];
+            lock (_lock) return _byMid.TryGetValue(mid, out var h) ? FakePortal.Json(HttpStatusCode.OK, Summary(h)) : FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
+        }
+        return null;
+    }
+
+    private HttpResponseMessage ConfirmCall(ReceivedCall c)
+    {
+        Interlocked.Increment(ref ConfirmCalls);
+        var mid = c.PathAndQuery["/api/internal/v1/bookings/".Length..^"/confirm".Length];
+        lock (_lock)
+        {
+            ConfirmBodies.Add(c.BodyText);
+            if (ConfirmDown) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+            if (ConfirmFailNext is { } f) { ConfirmFailNext = null; return FakePortal.Json(f.Status, JsonSerializer.Serialize(new { code = f.Code })); }
+            if (!_byMid.TryGetValue(mid, out var h)) return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
+            if (h.Status == "Hold") h.Status = Instant ? "Confirmed" : "Requested";
+            return FakePortal.Json(HttpStatusCode.OK, Summary(h));
+        }
+    }
+
+    private HttpResponseMessage HoldCall(ReceivedCall c)
+    {
+        Interlocked.Increment(ref HoldCalls);
+        if (Down) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+        var j = JsonDocument.Parse(c.Body).RootElement;
+        var mid = j.GetProperty("marketplaceBookingId").GetString()!;
+        var start = j.GetProperty("start").GetDateTimeOffset();
+        lock (_lock)
+        {
+            if (_byMid.TryGetValue(mid, out var existing)) return LoseAnswer ? FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}") : FakePortal.Json(HttpStatusCode.OK, Wrap(existing, false));
+            if (FailNext is { } f) { FailNext = null; return FakePortal.Json(f.Status, JsonSerializer.Serialize(new { code = f.Code })); }
+            var serviceId = j.GetProperty("serviceId").GetGuid();
+            if (_byMid.Values.Any(h => h.ServiceId == serviceId && h.Start == start && h.Status is "Hold" or "Requested" or "Confirmed"))
+                return FakePortal.Json(HttpStatusCode.Conflict, "{\"code\":\"slot_unavailable\"}");
+            var now = _clock.GetUtcNow();
+            var hold = new Hold
+            {
+                Mid = mid, ServiceId = serviceId, Start = start, Location = j.GetProperty("location").GetString()!, Minutes = DurationMinutes, Price = PriceCents,
+                ExpiresAt = now.AddMinutes(10), OnlineInstructions = OnlineInstructions, BodyText = c.BodyText,
+            };
+            _byMid[mid] = hold;
+            if (LoseAnswer) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+            return FakePortal.Json(HttpStatusCode.Created, Wrap(hold, true));
+        }
+    }
+
+    private static string Wrap(Hold h, bool created) => "{\"created\":" + (created ? "true" : "false") + ",\"booking\":" + Summary(h) + "}";
+
+    public static string Summary(Hold h) => JsonSerializer.Serialize(new
+    {
+        bookingId = h.BookingId, number = "BK-2026-0001", marketplaceBookingId = h.Mid, status = h.Status, serviceId = h.ServiceId, providerId = Guid.Parse("11111111-1111-1111-1111-111111111111"),
+        location = h.Location, startAt = h.Start, endAt = h.Start.AddMinutes(h.Minutes), durationMinutes = h.Minutes, holdExpiresAt = h.Status == "Hold" ? h.ExpiresAt : (DateTimeOffset?)null,
+        priceCents = h.Price, addOnsCents = 0, travelFeeCents = 0, totalCents = h.Price, cancellationFeeCents = 0, additionalChargeCents = 0, rescheduleCount = 0, onlineInstructions = h.OnlineInstructions,
+    });
+}
