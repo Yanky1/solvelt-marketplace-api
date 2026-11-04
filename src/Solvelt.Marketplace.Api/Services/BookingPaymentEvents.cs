@@ -13,7 +13,7 @@ namespace Solvelt.Marketplace.Api.Services;
 /// Stripe events for BOOKING intents (decision M4-08). <see cref="StripeEventProcessor"/> hands over every event whose intent metadata carries <c>marketplace_booking_id</c>; order intents
 /// (<c>marketplace_order_id</c>) never reach this class. The payment is found by the intent id WE stored, and the booking by the id in its metadata: both must agree (never adopt an id from the event).
 /// </summary>
-public sealed class BookingPaymentEvents(MarketplaceDb db, BookingRefundService refunds, OutboxWriter outbox, TimeProvider time, ILogger<BookingPaymentEvents> log)
+public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider payments, BookingRefundService refunds, OutboxWriter outbox, TimeProvider time, ILogger<BookingPaymentEvents> log)
 {
     public static bool IsBookingIntent(StripeEnvelope evt) => evt.Meta("marketplace_booking_id") is not null;
 
@@ -105,14 +105,24 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, BookingRefundService 
     public async Task<StripeOutcome> ChargeRefundedAsync(StripeEnvelope evt, CancellationToken ct)
     {
         var intentId = evt.Str("payment_intent");
-        var refunded = evt.Long("amount_refunded");
-        if (intentId is null || refunded is null) return StripeOutcome.Unmatched;
+        if (intentId is null || evt.Long("amount_refunded") is null) return StripeOutcome.Unmatched;
+        var first = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.IntentId == intentId, ct);
+        if (first is null) return StripeOutcome.Unmatched;
+        // One of our own refunds is on its way to Stripe (reserved, not yet confirmed): the cumulative amount would include it before we can tell which part is ours, so the event waits (Stripe
+        // retries). A reservation stuck for over an hour no longer blocks the reconciliation.
+        var cutoff = time.GetUtcNow().AddHours(-1);
+        if (await db.BookingRefunds.AsNoTracking().AnyAsync(r => r.PaymentId == first.Id && r.Status == RefundStatus.Reserved && r.CreatedAt > cutoff, ct)) throw new StripeOrderNotYetKnownException();
+        // The event's number is a hint, Stripe's own current answer is the truth (M3's R1/R2 approach): events arrive late and out of order. An unreachable Stripe is a retry.
+        long refunded;
+        try { refunded = await payments.GetAmountRefundedAsync(intentId, ct); }
+        catch (PaymentsUnavailableException) { throw new StripeOrderNotYetKnownException(); }
+        catch (PaymentRejectedException) { return StripeOutcome.Ignored; }
         for (var attempt = 0; attempt < 5; attempt++)
         {
             var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.IntentId == intentId, ct);
             if (pay is null) return StripeOutcome.Unmatched;
             var ours = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == pay.Id && r.Status == RefundStatus.Succeeded).SumAsync(r => (long?)r.AmountCents, ct) ?? 0;
-            var delta = refunded.Value - ours - pay.ExternalRefundedCents;
+            var delta = refunded - ours - pay.ExternalRefundedCents;
             if (delta <= 0) return StripeOutcome.Ignored;                                            // ours, or already recorded
             var seen = pay.ExternalRefundedCents;
             var won = await db.BookingPayments.Where(p => p.Id == pay.Id && p.ExternalRefundedCents == seen)
