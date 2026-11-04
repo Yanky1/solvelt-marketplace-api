@@ -9,7 +9,9 @@ public static class DevDefaults
     public const string PortalInboundSecret = "dev-only-portal-inbound-secret-not-for-production";
     public const string PortalWebhookSecret = "dev-only-portal-webhook-secret-not-for-production";
     public const string WebForwardingKey = "dev-only-web-forwarding-key-not-for-production";
+    public const string EmailLinkKey = "dev-only-email-link-key-not-for-production";
     public const string AdminApiKey = "dev-only-admin-api-key-not-for-production";
+    public const string PublicBaseUrl = "http://localhost:3000";
     public const string RelayDomain = "relay.solvelt.test";
     public const string SqliteConnection = "Data Source=marketplace-dev.db";
 }
@@ -30,8 +32,9 @@ public static class StartupValidator
             ("Portal:WebhookSecret", "Portal__WebhookSecret", config["Portal:WebhookSecret"]),
             ("Web:ForwardingKey", "Web__ForwardingKey", config["Web:ForwardingKey"]),
             ("Admin:ApiKey", "Admin__ApiKey", config["Admin:ApiKey"]),
+            ("Auth:EmailLinkKey", "Auth__EmailLinkKey", config["Auth:EmailLinkKey"]),
         };
-        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey };
+        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey, DevDefaults.EmailLinkKey };
         foreach (var (name, envName, value) in keys)
         {
             // The admin key is optional: unset disables /api/admin/*. When set it is held to the same rules as every other key.

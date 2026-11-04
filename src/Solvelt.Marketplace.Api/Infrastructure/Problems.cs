@@ -1,6 +1,7 @@
 namespace Solvelt.Marketplace.Api.Infrastructure;
 
 public sealed record ProblemBody(string Code, string Message);
+public sealed record ValidationBody(string Code, string Message, IReadOnlyDictionary<string, string> Errors);
 
 public static class Problems
 {
@@ -12,5 +13,8 @@ public static class Problems
     /// <summary>The resource existed publicly and is permanently gone (search engines drop a 410 faster than a 404).</summary>
     public static IResult Gone(string message = "Gone.") => Json(410, "gone", message);
     public static IResult BadRequest(string code, string message) => Json(400, code, message);
+    /// <summary><c>422 { code: "validation_failed", errors: { field: message } }</c>.</summary>
+    public static IResult Validation(IReadOnlyDictionary<string, string> errors) =>
+        Results.Json(new ValidationBody("validation_failed", "Some fields need attention.", errors), statusCode: 422);
     public static IResult Unprocessable(string code, string message) => Json(422, code, message);
 }

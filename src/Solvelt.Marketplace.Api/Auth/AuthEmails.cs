@@ -1,0 +1,16 @@
+using Solvelt.Marketplace.Api.Outbox;
+
+namespace Solvelt.Marketplace.Api.Auth;
+
+/// <summary>Plain-text account emails. Links open the web pages, which show a confirm button (the POST consumes the token, so mail scanners cannot burn it).</summary>
+public static class AuthEmails
+{
+    public static EmailMessage VerifyEmail(string to, string name, string baseUrl, string token, int hours) => new(to, "Confirm your email address",
+        $"Hello {name},\n\nConfirm your email address to finish creating your Solvelt account:\n\n{baseUrl}/verify-email?token={token}\n\nThe link works once and expires in {hours} hours. If you did not sign up, ignore this message.\n");
+
+    public static EmailMessage PasswordReset(string to, string baseUrl, string token, int minutes) => new(to, "Reset your password",
+        $"We received a request to reset your Solvelt password:\n\n{baseUrl}/reset-password?token={token}\n\nThe link works once and expires in {minutes} minutes. If you did not ask for this, ignore this message: your password has not changed.\n");
+
+    public static EmailMessage AlreadyRegistered(string to, string baseUrl) => new(to, "You already have a Solvelt account",
+        $"Someone (possibly you) tried to sign up with this email address, but it already has an account.\n\nSign in: {baseUrl}/sign-in\nForgot your password: {baseUrl}/forgot-password\n\nIf this was not you, you can ignore this message.\n");
+}
