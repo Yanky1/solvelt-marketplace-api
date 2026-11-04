@@ -447,4 +447,18 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         Assert.Equal(5000, pay.ExternalRefundedCents);
         Assert.Equal(5000, pay.RefundedCents);
     }
+
+    [Fact]
+    public async Task Currency_in_booking_payment_events_is_upper_case_whatever_stripe_or_the_stored_value_says()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        Assert.All(_portal.PaymentEvents.Where(e => e.Contains("payment.captured")), e => { Assert.Contains("\"currency\":\"USD\"", e); Assert.DoesNotContain("\"currency\":\"usd\"", e); });
+        await _k.Db(async db => await db.BookingPayments.Where(p => p.BookingId == b.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.Currency, "usd")));
+        await StripeObject("charge.dispute.created", new { id = "dp_cur", payment_intent = intent.Id, amount = 24000, currency = "usd", status = "needs_response" }, Now.ToUnixTimeSeconds() + 10);
+        await Drain();
+        var sent = Assert.Single(_portal.PaymentEvents, e => e.Contains("dispute.created"));
+        Assert.Contains("\"currency\":\"USD\"", sent); Assert.DoesNotContain("\"currency\":\"usd\"", sent);
+    }
 }
