@@ -39,6 +39,8 @@ public interface ISignedPortalClient
     Task<PortalResult<BookingResponse>> CreateBookingHoldAsync(BookingRequestBody request, CancellationToken ct = default);
     /// <summary><c>POST /bookings/{mid}/confirm</c>: turns a hold into Confirmed (instant) or Requested (request mode). The portal re-checks an expired hold and may answer 409.</summary>
     Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string marketplaceBookingId, BookingConfirmBody body, CancellationToken ct = default);
+    /// <summary><c>GET /services/{id}/options</c>: add-ons, intake questions, providers, policy (portal contract request; 404 until it ships).</summary>
+    Task<PortalResult<ServiceOptionsDocument>> GetServiceOptionsAsync(Guid serviceId, CancellationToken ct = default);
     /// <summary><c>POST /bookings/{mid}/cancellations</c> (idempotent on the booking and <c>requestId</c>): the portal decides the fee by policy.</summary>
     Task<PortalResult<PortalBookingSummary>> CancelBookingAsync(string marketplaceBookingId, BookingCancelBody body, CancellationToken ct = default);
     /// <summary><c>POST /bookings/{mid}/reschedule-requests</c>: applied at once (instant services) or pending (request mode); idempotent on <c>requestId</c>.</summary>
@@ -159,6 +161,9 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string mid, BookingConfirmBody b, CancellationToken ct = default)
         => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/confirm", b, Retry.Standard, ct);
+
+    public Task<PortalResult<ServiceOptionsDocument>> GetServiceOptionsAsync(Guid serviceId, CancellationToken ct = default)
+        => Call<ServiceOptionsDocument>(HttpMethod.Get, $"{ApiBase}/services/{serviceId:D}/options", null, Retry.Standard, ct);
 
     public Task<PortalResult<PortalBookingSummary>> CancelBookingAsync(string mid, BookingCancelBody b, CancellationToken ct = default)
         => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/cancellations", b, Retry.Standard, ct);
