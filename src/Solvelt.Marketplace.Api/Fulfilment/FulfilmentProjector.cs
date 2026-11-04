@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Notifications;
 using Solvelt.Marketplace.Api.Outbox;
+using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
 
 namespace Solvelt.Marketplace.Api.Fulfilment;
@@ -33,6 +34,7 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
         var tx = c.Db.Database.CurrentTransaction;
         if (tx is null || !tx.SupportsSavepoints) { await ApplyAsync(c, ct, refundMoneyMoved); return; }
         await c.Db.SaveChangesAsync(ct);   // the money part is flushed first: nothing after this point can undo it
+        var tracked = c.Db.ChangeTracker.Entries().Select(e => e.Entity).ToHashSet(ReferenceEqualityComparer.Instance);   // what the money part (and the caller) hold
         const string name = "m5_projection";
         await tx.CreateSavepointAsync(name, ct);
         try
@@ -44,9 +46,17 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             await tx.RollbackToSavepointAsync(name, CancellationToken.None);
-            foreach (var e in c.Db.ChangeTracker.Entries().Where(e => e.State != Microsoft.EntityFrameworkCore.EntityState.Unchanged).ToList())
-                e.State = Microsoft.EntityFrameworkCore.EntityState.Detached;
-            log.LogError("The order projection of a {Type} event failed ({ExceptionType}); the money part was kept", c.Event.Type, ex.GetType().FullName);
+            // The database is back at the money part, but the change tracker is not: entities the projection added, or changed and SAVED before it failed, still look current. Everything the
+            // projection created is dropped; what was tracked before is re-read, so nothing stale is carried into the caller's own later SaveChanges (review P5).
+            foreach (var e in c.Db.ChangeTracker.Entries().ToList())
+            {
+                if (!tracked.Contains(e.Entity)) { e.State = Microsoft.EntityFrameworkCore.EntityState.Detached; continue; }
+                try { e.State = Microsoft.EntityFrameworkCore.EntityState.Unchanged; await e.ReloadAsync(CancellationToken.None); }
+                catch (Exception) { e.State = Microsoft.EntityFrameworkCore.EntityState.Detached; }
+            }
+            // and the projection is retried later from the stored event (the money part is not touched): one message per event
+            await new OutboxWriter(c.Db, c.Time).TryEnqueueAsync(ReprojectHandler.Type, new { eventId = c.Event.Id, refundMoneyMoved }, "m5.reproject:" + c.Event.Id, TimeSpan.FromMinutes(1), CancellationToken.None);
+            log.LogError("The order projection of a {Type} event failed ({ExceptionType}); the money part was kept and the projection is queued again", c.Event.Type, ex.GetType().FullName);
         }
     }
 
@@ -444,5 +454,33 @@ public static class FulfilmentLines
                     .SetProperty(f => f.ReturnPendingQty, f => f.ReturnPendingQty >= q ? f.ReturnPendingQty - q : 0), ct);
             rl.Reserved = false;
         }
+    }
+}
+
+/// <summary>
+/// Re-runs the projection of a stored portal event whose first attempt failed inside the savepoint of <see cref="FulfilmentProjector.ApplyIsolatedAsync"/> (the money part had committed). The
+/// event is read from the inbox (its raw body is kept until retention), applied in its own transaction through the same ordering rules, so an event that is now out of date is skipped, never
+/// forced. A failure retries with the outbox's backoff (review P5).
+/// </summary>
+public sealed class ReprojectHandler(MarketplaceDb db, FulfilmentProjector projector, ProjectionStore store, TimeProvider time) : IOutboxHandler
+{
+    public const string Type = "m5.reproject";
+    public IReadOnlyCollection<string> Types { get; } = [Type];
+    private sealed record Payload(string? EventId, bool RefundMoneyMoved = true);
+
+    public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
+    {
+        Payload? p;
+        try { p = message.Payload is null ? null : JsonSerializer.Deserialize<Payload>(message.Payload, PortalJson.Options); }
+        catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
+        if (p?.EventId is null) return OutboxResult.Dead("invalid_payload");
+        var row = await db.PortalInboundEvents.AsNoTracking().FirstOrDefaultAsync(e => e.Id == p.EventId, ct);
+        if (row?.PayloadJson is null) return OutboxResult.Dead("event_gone");   // the raw body was purged: nothing to replay
+        if (!PortalEvent.TryParse(System.Text.Encoding.UTF8.GetBytes(row.PayloadJson), out var evt, out _) || evt is null) return OutboxResult.Dead("invalid_event");
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var outcome = await projector.ApplyAsync(new ProjectionContext(db, evt with { CreatedAt = row.OrderingAt }, store, time), ct, p.RefundMoneyMoved);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(CancellationToken.None);
+        return OutboxResult.Delivered();   // applied, skipped (older/terminal) or parked: all are final answers for this message
     }
 }

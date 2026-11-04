@@ -110,6 +110,7 @@ builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Fulfilment.ProofFetcher>(
 }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });   // a redirect would leave the portal origin
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Outbox.IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.ReprojectHandler>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Messaging.MessageService>();
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Messaging.ContentReportDecidedHandler>();
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Messaging.MessageSentHandler>();

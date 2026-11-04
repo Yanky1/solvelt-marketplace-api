@@ -148,6 +148,35 @@ public sealed class M5ReviewTests : OrderFlowBase
         finally { await _k.Db(async db => await db.Database.ExecuteSqlRawAsync("ALTER TABLE order_line_fulfilment_x RENAME TO order_line_fulfilment")); }
     }
 
+    [Fact]
+    public async Task P5_A_projection_that_fails_after_it_wrote_leaves_nothing_behind_and_is_replayed_from_the_stored_event()
+    {
+        var (o, g) = await Placed();
+        await Ship(o, g, 2);
+        var lid = o.Lines.Single().MarketplaceLineId;
+        // the notification insert is the LAST thing the projection does, so the projection fails with a database error after it changed the counts and the state.
+        // On PostgreSQL a failed statement aborts the whole transaction until it is rolled back to the savepoint: without RollbackToSavepointAsync the replay's enqueue below fails there (CI runs this on PG).
+        await _k.Db(async db => await db.Database.ExecuteSqlRawAsync("ALTER TABLE notifications RENAME TO notifications_x"));
+        try
+        {
+            Assert.Equal("applied", await Evt("refund.issued", o, g, new { refundId = "rf-p5", amountCents = o.TotalCents, shippingCents = 0, full = true, lines = new[] { new { marketplaceLineId = lid, quantity = 2, amountCents = o.TotalCents } } }, id: "re-p5"));
+            await Drain();
+            Assert.Equal(1, await _k.Db(db => db.OrderRefunds.CountAsync()));                          // the money part committed
+            Assert.Equal(0, (await Counters(o)).RefundedQty);                                         // the projection's counts did not
+            Assert.Equal("shipped", await Status(g));
+            var queued = await _k.Db(db => db.OutboxMessages.Where(m => m.Type == "m5.reproject").Select(m => m.Payload).ToListAsync());
+            Assert.Single(queued);
+            Assert.DoesNotContain("@", queued[0]);                                                   // an event id, no personal data
+        }
+        finally { await _k.Db(async db => await db.Database.ExecuteSqlRawAsync("ALTER TABLE notifications_x RENAME TO notifications")); }
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(5));
+        await Drain();
+        Assert.Equal(2, (await Counters(o)).RefundedQty);                                              // replayed: the ordering row had been rolled back, so it applies
+        Assert.Equal("refunded", await Status(g));
+        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == "refund_issued")));
+        Assert.Single(Stripe.Refunds);                                                                // and the money was not moved twice
+    }
+
     // ---------------------------------------------------------------- M1
 
     [Fact]
