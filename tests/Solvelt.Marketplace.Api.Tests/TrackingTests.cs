@@ -106,6 +106,39 @@ public sealed class TrackingTests : OrderFlowBase
         Assert.Null(await _k.Db(db => db.OrderShipments.Select(s => s.PositionLat).SingleAsync()));
     }
 
+    [Theory]
+    [InlineData("order.delivered")]
+    [InlineData("shipment.voided")]
+    public async Task A_seller_order_that_is_over_or_a_voided_parcel_keeps_no_driver_position(string ending)
+    {
+        var (o, g) = await Shipped();
+        await Evt("order.tracking_updated", o, g, new { shipmentId = "sh-1", method = "local", status = "out_for_delivery", position = new { lat = 40.693, lng = -73.99 } });
+        Assert.NotNull(await _k.Db(db => db.OrderShipments.Select(s => s.PositionLat).SingleAsync()));
+        Assert.Equal("applied", await Evt(ending, o, g, new { shipmentId = "sh-1", reason = "x", deliveredAt = DateTimeOffset.UtcNow }));
+        Assert.Null(await _k.Db(db => db.OrderShipments.Select(s => s.PositionLat).SingleAsync()));       // erased, not only hidden
+        Assert.Equal(JsonValueKind.Null, (await Shipment(o.Number)).GetProperty("position").ValueKind);
+    }
+
+    [Fact]
+    public async Task A_late_position_after_the_seller_order_ended_is_not_stored_and_a_stored_one_is_drawn_only_while_out_for_delivery()
+    {
+        var (o, g) = await Shipped();
+        await Evt("order.tracking_updated", o, g, new { shipmentId = "sh-1", method = "local", status = "out_for_delivery", position = new { lat = 40.693, lng = -73.99 } });
+        // a stored position next to another tracking status is never drawn (belt and braces over the clearing)
+        await _k.Db(async db => { await db.OrderShipments.ExecuteUpdateAsync(s => s.SetProperty(x => x.TrackingStatus, "in_transit")); return 0; });
+        Assert.Equal(JsonValueKind.Null, (await Shipment(o.Number)).GetProperty("position").ValueKind);
+        var t = _k.F.Clock.GetUtcNow();
+        Assert.Equal("applied", await Evt("order.delivered", o, g, new { deliveredAt = t }, at: t.AddMinutes(1)));
+        Assert.Null(await _k.Db(db => db.OrderShipments.Select(s => s.PositionLat).SingleAsync()));
+        // even a position that somehow sits next to a finished seller order is not drawn
+        var now = _k.F.Clock.GetUtcNow();
+        await _k.Db(async db => { await db.OrderShipments.ExecuteUpdateAsync(s => s.SetProperty(x => x.TrackingStatus, "out_for_delivery").SetProperty(x => x.PositionLat, 40.7).SetProperty(x => x.PositionLng, -73.9).SetProperty(x => x.PositionAt, now)); return 0; });
+        Assert.Equal(JsonValueKind.Null, (await Shipment(o.Number)).GetProperty("position").ValueKind);
+        await _k.Db(async db => { await db.OrderShipments.ExecuteUpdateAsync(s => s.SetProperty(x => x.PositionLat, (double?)null).SetProperty(x => x.PositionLng, (double?)null).SetProperty(x => x.PositionAt, (DateTimeOffset?)null)); return 0; });
+        Assert.Equal("applied", await Evt("order.tracking_updated", o, g, new { shipmentId = "sh-1", method = "local", status = "out_for_delivery", position = new { lat = 40.7, lng = -73.9 } }, at: t.AddMinutes(2)));
+        Assert.Null(await _k.Db(db => db.OrderShipments.Select(s => s.PositionLat).SingleAsync()));
+    }
+
     // ------------------------------------------------------------------ proofs
 
     private object Proof(params string[] photos) => new { shipmentId = "sh-1", method = "local", deliveredAt = DateTimeOffset.UtcNow, placement = "front_door", recipientName = "Jane Brown",

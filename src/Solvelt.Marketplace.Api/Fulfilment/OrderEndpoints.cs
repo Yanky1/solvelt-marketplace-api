@@ -94,6 +94,7 @@ public static class OrderEndpoints
                 states.TryGetValue(g.Id, out var st);
                 var status = g.SellerOrderId is null ? "processing" : st?.Status ?? FulfilmentStatus.New;
                 var glines = o.Lines.Where(l => l.GroupId == g.Id).ToList();
+                var terminal = status is FulfilmentStatus.Delivered or FulfilmentStatus.Cancelled or FulfilmentStatus.Refunded;   // no live position once the seller order is over (M5 review P2)
                 var open = cancels.FirstOrDefault(r => r.GroupId == g.Id && r.OpenKey != null);
                 var lastCancel = open ?? cancels.FirstOrDefault(r => r.GroupId == g.Id);
                 var canReturn = g.SellerOrderId is not null && status is FulfilmentStatus.Shipped or FulfilmentStatus.PartiallyShipped or FulfilmentStatus.Delivered
@@ -127,7 +128,7 @@ public static class OrderEndpoints
                         etaWindowStart = s.EtaWindowStart, etaWindowEnd = s.EtaWindowEnd, driverFirstName = s.DriverFirstName, placement = s.Placement,
                         timeline = s.TrackingEventsJson is null ? (System.Text.Json.JsonElement?)null : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(s.TrackingEventsJson),
                         // live position: only while the stop is next, at most 24 h old (the job clears it too), and only a recent one is drawn
-                        position = s.TrackingStatus == "out_for_delivery" && s.DeliveredAt == null && s.PositionLat != null && s.PositionAt > now.AddMinutes(-PositionFreshMinutes) ? new { lat = s.PositionLat, lng = s.PositionLng, at = s.PositionAt } : null,
+                        position = !terminal && s.TrackingStatus == "out_for_delivery" && s.DeliveredAt == null && s.VoidedAt == null && s.PositionLat != null && s.PositionAt > now.AddMinutes(-PositionFreshMinutes) ? new { lat = s.PositionLat, lng = s.PositionLng, at = s.PositionAt } : null,
                         proofCount = s.ProofExpiresAt > now && s.ProofJson != null ? System.Text.Json.JsonSerializer.Deserialize<List<string>>(s.ProofJson)!.Count : 0,
                         lines = shipLines.Where(l => l.ShipmentId == s.Id).Select(l => new { lineId = l.MarketplaceLineId, quantity = l.Quantity }),
                     }),
