@@ -7,6 +7,7 @@ using Solvelt.Marketplace.Api.Outbox;
 namespace Solvelt.Marketplace.Api.Auth;
 
 public sealed record BuyerPrincipal(Guid AccountId, Guid SessionId, string DisplayName, string Email, DateTimeOffset AuthenticatedAt);
+public sealed record ResetOutcome(bool Ok, string? PasswordProblem = null);
 public enum SignInStatus { Ok, InvalidCredentials, EmailNotVerified, TooManyAttempts }
 public sealed record SignInResult(SignInStatus Status, string? Token = null, BuyerAccount? Account = null, int? RetryAfterSeconds = null);
 
@@ -15,7 +16,7 @@ public sealed record SignInResult(SignInStatus Status, string? Token = null, Buy
 /// difference is only in what we email. Unknown and known accounts share rate limits and the same time cost.
 /// </summary>
 public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<AuthOptions> authOptions, IOptions<MarketplaceOptions> marketplace,
-    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links)
+    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links, SignInGate gate, GateKeys gateKeys, GuestClaims guestClaims)
 {
     private AuthOptions O => authOptions.Value;
     private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
@@ -41,27 +42,27 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
             return;
         }
 
-        var hash = passwords.Hash(password);
-        BuyerAccount account;
         if (existing is not null)
         {
-            // An unverified address: the latest sign-up wins (name and password are replaced), so someone who registered an address they do not
-            // own cannot leave their own password on the real owner's account. See decision M1-52.
-            account = existing;
-            account.PasswordHash = hash; account.DisplayName = name; account.UpdatedAt = now;
+            // An address that is still waiting for verification: NOTHING about the account changes, neither the password nor the name (decision O-16 a).
+            // It only gets a fresh link (older ones die). Whoever registered it first keeps the password they chose, and verifying needs that password (M1-64),
+            // so nobody can take over an address by signing up for it twice; the real owner who does not know the password uses "forgot password".
+            passwords.BurnTime(password);   // the same time cost as hashing a new password
+            await QueueVerificationAsync(existing, ct);
+            await db.SaveChangesAsync(ct);
+            return;
         }
-        else
+
+        var hash = passwords.Hash(password);
+        var account = new BuyerAccount
         {
-            account = new BuyerAccount
-            {
-                Id = Guid.NewGuid(), Email = normal, DisplayName = name, PasswordHash = hash, CreatedAt = now, UpdatedAt = now,
-                RelayEmail = RelayIdentity.NewRelayEmail(marketplace.Value.RelayDomain ?? DevDefaults.RelayDomain),
-            };
-            db.BuyerAccounts.Add(account);
-        }
+            Id = Guid.NewGuid(), Email = normal, DisplayName = name, PasswordHash = hash, CreatedAt = now, UpdatedAt = now,
+            RelayEmail = RelayIdentity.NewRelayEmail(marketplace.Value.RelayDomain ?? DevDefaults.RelayDomain),
+        };
+        db.BuyerAccounts.Add(account);
         await QueueVerificationAsync(account, ct);
         try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException) when (existing is null)
+        catch (DbUpdateException)
         {
             // Two sign-ups for one new address at the same moment: the other one won. Nothing to do; the caller sees the same answer.
             db.ChangeTracker.Clear();
@@ -70,65 +71,113 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
 
     // ---------- email verification ----------
 
-    public async Task<bool> VerifyEmailAsync(string token, CancellationToken ct)
+    /// <summary>
+    /// Verifies the address. Needs the link AND the account's current password (decision O-16 b): a wrong password is a generic failure and the link is not used up.
+    /// The password check goes through the sign-in gate like every other password check.
+    /// </summary>
+    public async Task<bool> VerifyEmailAsync(string token, string password, string clientIp, CancellationToken ct)
     {
         var now = Now;
-        var accountId = await ConsumeTokenAsync(EmailTokenPurpose.Verify, token, ct);
+        if (links.Parse(EmailTokenPurpose.Verify, token) is not { } tokenId) { passwords.BurnTime(password); return false; }
+        var row = await (from t in db.EmailTokens.AsNoTracking()
+                         join a in db.BuyerAccounts.AsNoTracking() on t.AccountId equals a.Id
+                         where t.Id == tokenId && t.Purpose == EmailTokenPurpose.Verify && t.UsedAt == null && t.ExpiresAt > now && a.DeletedAt == null && a.Email != null
+                         select new { a.Id, a.Email, a.PasswordHash }).FirstOrDefaultAsync(ct);
+        if (row is null) { passwords.BurnTime(password); return false; }
+        var addressKey = gateKeys.Address(row.Email!);
+        var ipKey = gateKeys.Ip(clientIp);
+        if (!(await gate.ClaimAsync(addressKey, ipKey, ct)).Allowed) return false;   // generic: a delay is not told apart from a wrong password here
+        if (!passwords.Verify(row.PasswordHash, password).Ok) return false;
+        var accountId = await ConsumeTokenAsync(EmailTokenPurpose.Verify, token, ct);   // the atomic claim: two clicks use it once
         if (accountId is null) return false;
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.EmailVerifiedAt == null && a.DeletedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.EmailVerifiedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
+        await gate.SucceededAsync(addressKey, ipKey, ct);
+        await guestClaims.ClaimAsync(row.Id, row.Email!, ct);   // the address is now proven: guest orders placed with it become this account's
         return true;
     }
 
-    /// <summary>Always silent. A fresh link replaces older ones.</summary>
+    /// <summary>Always silent. A fresh link replaces older ones. An address with no waiting account does the same writes as one that has (decision M1-65).</summary>
     public async Task ResendVerificationAsync(string email, CancellationToken ct)
     {
         var normal = AuthValidation.NormaliseEmail(email);
         if (!limiter.TryAcquire("resend-email", normal, 3, Hour)) return;
         var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Email == normal && a.EmailVerifiedAt == null && a.DeletedAt == null, ct);
-        if (account is null) return;
-        await QueueVerificationAsync(account, ct);
-        await db.SaveChangesAsync(ct);
+        await IssueLinkOrDecoyAsync(account, EmailTokenPurpose.Verify, ct);
     }
 
     // ---------- sign-in / sessions ----------
 
-    public async Task<SignInResult> SignInAsync(string email, string password, CancellationToken ct)
+    /// <summary>
+    /// Claims an attempt at the gate FIRST (atomically, known and unknown address alike), then checks the password only if the claim was granted. A right
+    /// password clears the address; a wrong one has already been counted.
+    /// </summary>
+    public async Task<SignInResult> SignInAsync(string email, string password, string clientIp, CancellationToken ct)
     {
         var normal = AuthValidation.NormaliseEmail(email);
-        var window = TimeSpan.FromMinutes(Math.Max(1, O.LockoutMinutes));
-        // Unknown and known addresses are limited alike (hashed in the limiter), so a locked answer proves nothing about the address.
-        if (!limiter.TryAcquire("signin-email", normal, Math.Max(3, O.LockoutThreshold * 2), window))
-            return new SignInResult(SignInStatus.TooManyAttempts, RetryAfterSeconds: (int)window.TotalSeconds);
+        var addressKey = gateKeys.Address(normal);
+        var ipKey = gateKeys.Ip(clientIp);
+        var claim = await gate.ClaimAsync(addressKey, ipKey, ct);
+        if (!claim.Allowed) return new SignInResult(SignInStatus.TooManyAttempts, RetryAfterSeconds: claim.RetryAfterSeconds);
 
         var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Email == normal && a.DeletedAt == null, ct);
-        var now = Now;
         if (account is null) { passwords.BurnTime(password); return new SignInResult(SignInStatus.InvalidCredentials); }
-        if (account.LockedUntil is { } until && until > now)
-        {
-            passwords.BurnTime(password);
-            return new SignInResult(SignInStatus.TooManyAttempts, RetryAfterSeconds: Math.Max(1, (int)Math.Ceiling((until - now).TotalSeconds)));
-        }
-
         var (ok, rehash) = passwords.Verify(account.PasswordHash, password);
-        if (!ok)
-        {
-            // Atomic count, then lock when the threshold is reached.
-            await db.BuyerAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.FailedSignIns, a => a.FailedSignIns + 1), ct);
-            var lockUntil = now.AddMinutes(Math.Max(1, O.LockoutMinutes));
-            await db.BuyerAccounts.Where(a => a.Id == account.Id && a.FailedSignIns >= O.LockoutThreshold)
-                .ExecuteUpdateAsync(s => s.SetProperty(a => a.LockedUntil, (DateTimeOffset?)lockUntil).SetProperty(a => a.FailedSignIns, 0), ct);
-            return new SignInResult(SignInStatus.InvalidCredentials);
-        }
+        if (!ok) return new SignInResult(SignInStatus.InvalidCredentials);   // already counted by the claim
+        await gate.SucceededAsync(addressKey, ipKey, ct);
         // The password was right: only now is it safe to say the address is not verified.
         if (account.EmailVerifiedAt is null) return new SignInResult(SignInStatus.EmailNotVerified);
 
-        var newHash = rehash ? passwords.Hash(password) : null;
-        await db.BuyerAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s
-            .SetProperty(a => a.FailedSignIns, 0).SetProperty(a => a.LockedUntil, (DateTimeOffset?)null)
-            .SetProperty(a => a.PasswordHash, a => newHash ?? a.PasswordHash), ct);
+        if (rehash)
+        {
+            var newHash = passwords.Hash(password);
+            await db.BuyerAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, newHash), ct);
+        }
         var token = await CreateSessionAsync(account.Id, ct);
+        await guestClaims.ClaimAsync(account.Id, normal, ct);   // orders placed as a guest since the last sign-in
         return new SignInResult(SignInStatus.Ok, token, account);
+    }
+
+    /// <summary>
+    /// Step-up (decision O-11): the signed-in buyer proves the password again, which stamps <c>authenticated_at</c> on THIS session. The check passes through the
+    /// same gate as sign-in (same per-address delay, same per-IP budget), so a stolen or replayed session cannot be used to guess the password for free.
+    /// </summary>
+    public async Task<SignInResult> ReauthenticateAsync(BuyerPrincipal who, string password, string clientIp, CancellationToken ct)
+    {
+        var addressKey = gateKeys.Address(AuthValidation.NormaliseEmail(who.Email));
+        var ipKey = gateKeys.Ip(clientIp);
+        var claim = await gate.ClaimAsync(addressKey, ipKey, ct);
+        if (!claim.Allowed) return new SignInResult(SignInStatus.TooManyAttempts, RetryAfterSeconds: claim.RetryAfterSeconds);
+        var hash = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null).Select(a => a.PasswordHash).FirstOrDefaultAsync(ct);
+        if (hash is null) { passwords.BurnTime(password); return new SignInResult(SignInStatus.InvalidCredentials); }
+        if (!passwords.Verify(hash, password).Ok) return new SignInResult(SignInStatus.InvalidCredentials);
+        await gate.SucceededAsync(addressKey, ipKey, ct);
+        var now = Now;
+        await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.AuthenticatedAt, now), ct);
+        return new SignInResult(SignInStatus.Ok);
+    }
+
+    /// <summary>
+    /// Swaps the session token for a new one and revokes the old, so the web server can rotate after failures and a replayed old cookie dies. The new session keeps
+    /// the old one's absolute expiry and its <c>authenticated_at</c>: rotating neither lengthens a session nor counts as proving the password. The revoke is the
+    /// claim (one UPDATE), so two parallel rotations of one token give one new session. Null when the session is already gone.
+    /// </summary>
+    public async Task<string?> RotateSessionAsync(BuyerPrincipal who, CancellationToken ct)
+    {
+        var now = Now;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var claimed = await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        if (claimed != 1) return null;
+        var old = await db.BuyerSessions.AsNoTracking().Where(s => s.Id == who.SessionId).Select(s => new { s.AbsoluteExpiresAt, s.AuthenticatedAt }).FirstAsync(ct);
+        var token = Tokens.New();
+        db.BuyerSessions.Add(new BuyerSession
+        {
+            Id = Guid.NewGuid(), AccountId = who.AccountId, TokenHash = Tokens.Hash(token), CreatedAt = now, LastSeenAt = now, AuthenticatedAt = old.AuthenticatedAt,
+            ExpiresAt = Min(now.AddDays(Math.Max(1, O.SessionIdleDays)), old.AbsoluteExpiresAt), AbsoluteExpiresAt = old.AbsoluteExpiresAt,
+        });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return token;
     }
 
     public async Task<string> CreateSessionAsync(Guid accountId, CancellationToken ct)
@@ -179,37 +228,47 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
 
     // ---------- password reset ----------
 
-    /// <summary>Always silent. Only a verified account gets a link (an unverified one uses "resend verification").</summary>
+    /// <summary>
+    /// Always silent. Any existing account gets a link, verified or not (decision O-16 c): the owner of an address someone else registered first has no other way in,
+    /// and a reset proves the mailbox. An address with no account does the same writes (decision M1-65).
+    /// </summary>
     public async Task ForgotPasswordAsync(string email, CancellationToken ct)
     {
         var normal = AuthValidation.NormaliseEmail(email);
         if (!limiter.TryAcquire("forgot-email", normal, 3, Hour)) return;
-        var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Email == normal && a.EmailVerifiedAt != null && a.DeletedAt == null, ct);
-        if (account is null) return;
-        await InvalidateTokensAsync(account.Id, EmailTokenPurpose.Reset, ct);
-        var now = Now;
-        var id = Guid.NewGuid();
-        db.EmailTokens.Add(new EmailToken { Id = id, AccountId = account.Id, Purpose = EmailTokenPurpose.Reset, CreatedAt = now, ExpiresAt = now.AddMinutes(Math.Max(5, O.ResetTokenMinutes)) });
-        outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Reset, account.Id, id));
-        await db.SaveChangesAsync(ct);
+        var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Email == normal && a.DeletedAt == null, ct);
+        await IssueLinkOrDecoyAsync(account, EmailTokenPurpose.Reset, ct);
     }
 
-    /// <summary>Sets the password and signs the account out everywhere. Returns false for an unknown, used or expired token.</summary>
-    public async Task<bool> ResetPasswordAsync(string token, string newPassword, CancellationToken ct)
+    /// <summary>
+    /// Sets the password and signs the account out everywhere, in ONE transaction: if any step fails nothing changed and the link still works. The password
+    /// is checked against the address first, without using the link up. Returns the problem to show for a weak password, or not-ok for an unknown, used or expired link.
+    /// </summary>
+    public async Task<ResetOutcome> ResetPasswordAsync(string token, string newPassword, CancellationToken ct)
     {
+        var now = Now;
+        if (links.Parse(EmailTokenPurpose.Reset, token) is not { } tokenId) return new ResetOutcome(false);
+        var peek = await (from t in db.EmailTokens.AsNoTracking()
+                          join a in db.BuyerAccounts.AsNoTracking() on t.AccountId equals a.Id
+                          where t.Id == tokenId && t.Purpose == EmailTokenPurpose.Reset && t.UsedAt == null && t.ExpiresAt > now && a.DeletedAt == null && a.Email != null
+                          select new { a.Id, a.Email }).FirstOrDefaultAsync(ct);
+        if (peek is null) return new ResetOutcome(false);
+        if (AuthValidation.PasswordProblem(newPassword, peek.Email, O.PasswordMinLength) is { } problem) return new ResetOutcome(false, problem);   // the link is not used up
+
+        var hash = passwords.Hash(newPassword);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var accountId = await ConsumeTokenAsync(EmailTokenPurpose.Reset, token, ct);
-        if (accountId is null) return false;
-        var hash = passwords.Hash(newPassword);
-        var now = Now;
-        // The mailbox is proven by the link, so the address counts as verified too. Lockout is cleared.
+        if (accountId is null) return new ResetOutcome(false);
+        // The mailbox is proven by the link, so the address counts as verified too, and the sign-in gate forgets the address (a person who can read the mailbox is not an attacker).
         var changed = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s
-            .SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.FailedSignIns, 0).SetProperty(a => a.LockedUntil, (DateTimeOffset?)null)
+            .SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now)
             .SetProperty(a => a.EmailVerifiedAt, a => a.EmailVerifiedAt ?? now), ct);
-        if (changed == 0) return false;
+        if (changed == 0) return new ResetOutcome(false);
         await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        await gate.ClearAddressAsync(gateKeys.Address(peek.Email!), ct);
         await tx.CommitAsync(ct);
-        return true;
+        await guestClaims.ClaimAsync(peek.Id, peek.Email!, ct);   // a reset proves the mailbox too
+        return new ResetOutcome(true);
     }
 
     // ---------- internals ----------
@@ -222,6 +281,33 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var id = Guid.NewGuid();
         db.EmailTokens.Add(new EmailToken { Id = id, AccountId = account.Id, Purpose = EmailTokenPurpose.Verify, CreatedAt = now, ExpiresAt = now.AddHours(Math.Max(1, O.VerificationTokenHours)) });
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Verify, account.Id, id));
+    }
+
+    /// <summary>
+    /// Issues a link for a real account, or - for an address with no matching account - performs exactly the same database work with placeholder rows: one UPDATE
+    /// that matches nothing, one token row (already used and expired, purged within the hour) and one outbox row (already delivered, never dispatched). So the
+    /// response time of "forgot password" and "resend verification" does not tell an existing address from an unknown one (decision M1-65).
+    /// </summary>
+    private async Task IssueLinkOrDecoyAsync(BuyerAccount? account, string purpose, CancellationToken ct)
+    {
+        var now = Now;
+        var id = Guid.NewGuid();
+        var kind = purpose == EmailTokenPurpose.Reset ? AuthMailKinds.Reset : AuthMailKinds.Verify;
+        var lifetime = purpose == EmailTokenPurpose.Reset ? TimeSpan.FromMinutes(Math.Max(5, O.ResetTokenMinutes)) : TimeSpan.FromHours(Math.Max(1, O.VerificationTokenHours));
+        if (account is not null)
+        {
+            await InvalidateTokensAsync(account.Id, purpose, ct);
+            db.EmailTokens.Add(new EmailToken { Id = id, AccountId = account.Id, Purpose = purpose, CreatedAt = now, ExpiresAt = now + lifetime });
+            outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(kind, account.Id, id));
+        }
+        else
+        {
+            await InvalidateTokensAsync(Guid.NewGuid(), purpose, ct);
+            db.EmailTokens.Add(new EmailToken { Id = id, AccountId = Guid.NewGuid(), Purpose = EmailTokenPurpose.Decoy, CreatedAt = now, ExpiresAt = now, UsedAt = now });
+            var m = outbox.Enqueue(AuthMailHandler.DecoyType, new AuthMailPayload(kind, Guid.NewGuid(), id));
+            m.Status = OutboxStatus.Delivered; m.DeliveredAt = now; m.Attempts = 1; m.Payload = null; m.PayloadPurgedAt = now;
+        }
+        await db.SaveChangesAsync(ct);
     }
 
     /// <summary>A fresh link invalidates the older ones.</summary>

@@ -17,7 +17,7 @@ Rate limited endpoints answer `429 { code: "rate_limited" }` with `Retry-After`.
 | GET | `/api/v1/catalog/listings/{slugOrId}` | none | One listing in full |
 | POST | `/api/v1/auth/sign-up` | none | Create an account; `204` always for a valid body; see Auth |
 | POST | `/api/v1/auth/resend-verification` | none | `204` always |
-| POST | `/api/v1/auth/verify-email` | none | `204` or `400 invalid_token` |
+| POST | `/api/v1/auth/verify-email` | none | Body `{ token, password }`; `204` or `400 invalid_token` |
 | POST | `/api/v1/auth/sign-in` | none | `200 { token, user }`; see Auth |
 | POST | `/api/v1/auth/sign-out` | Bearer | `204`; ends this session |
 | POST | `/api/v1/auth/sign-out-all` | Bearer | `204`; ends every session of this buyer |
@@ -193,16 +193,18 @@ All bodies are JSON. The web server holds the session token in its own HttpOnly 
 | Endpoint | Body | Answers |
 |---|---|---|
 | `POST /api/v1/auth/sign-up` | `{ email, password, displayName }` | `204` for a new, an unverified and an already registered address (same empty body); `422 { code: "validation_failed", errors: { email?, password?, displayName? } }` |
-| `POST /api/v1/auth/verify-email` | `{ token }` | `204`, or `400 { code: "invalid_token" }` (unknown, used, expired, wrong kind) |
+| `POST /api/v1/auth/verify-email` | `{ token, password }` | `204`, or `400 { code: "invalid_token" }` (unknown, used, expired, wrong kind, **or a wrong password**: the link is then not used up); `422` on `password` when it is missing. The password is the one chosen at sign-up (decision O-16). Someone who does not know it uses forgot-password |
 | `POST /api/v1/auth/resend-verification` | `{ email }` | `204` always; a new link replaces older ones; at most 3 mails an hour per address |
-| `POST /api/v1/auth/sign-in` | `{ email, password }` | `200 { token, user: { id, displayName } }`; `401 invalid_credentials` (wrong password and unknown address are identical); `403 email_not_verified` (only after the correct password); `429 rate_limited` with `Retry-After` (locked, or too many attempts) |
+| `POST /api/v1/auth/sign-in` | `{ email, password }` | `200 { token, user: { id, displayName } }`; `401 invalid_credentials` (wrong password and unknown address are identical); `403 email_not_verified` (only after the correct password); `429 rate_limited` with `Retry-After` (the address is delayed or the client's hourly failure budget is spent; the same for a known and an unknown address) |
 | `POST /api/v1/auth/sign-out` | none | `204`; `401` without a valid token |
 | `POST /api/v1/auth/sign-out-all` | none | `204`; `401` without a valid token |
-| `POST /api/v1/auth/forgot-password` | `{ email }` | `204` always; mail only for a verified account |
-| `POST /api/v1/auth/reset-password` | `{ token, password }` | `204`, or `400 invalid_token`, or `422` for a weak password (the link is not used up); every session of the account ends |
+| `POST /api/v1/auth/forgot-password` | `{ email }` | `204` always; mail for any existing account, verified or not; the same database work for an unknown address |
+| `POST /api/v1/auth/reset-password` | `{ token, password }` | `204`, or `400 invalid_token`, or `422` for a weak password or one equal to the address (the link is not used up); every session of the account ends; the address is marked verified and its sign-in delay is cleared |
+| `POST /api/v1/auth/reauthenticate` | `{ password }` (Bearer) | Step-up: `204` and the session's `authenticated_at` is now; `401 invalid_credentials`; `429` with `Retry-After`; `422` when the password is missing. Same gate as sign-in |
+| `POST /api/v1/auth/session/rotate` | none (Bearer) | `200 { token }`; the old token is revoked; the absolute expiry and `authenticated_at` carry over; `401` when the session is gone |
 | `GET /api/v1/account/me` | none | `200 { id, displayName, email }`, or `401 { code: "unauthorized" }` |
 
-Rules: email is trimmed and lower-cased; password 10 to 128 characters and not the email address; display name 1 to 60 characters. The token returned by sign-in is 43 characters of base64url, shown once. Sessions end after 7 idle days (sliding) or 30 days in all. Five wrong passwords lock the account for 15 minutes. Links in mails open `<Marketplace:PublicBaseUrl>/verify-email?token=...` and `/reset-password?token=...` (24 h and 60 min; the token is `<32 hex>.<43 base64url>` and is opaque to the web: pass it through unchanged); the pages must POST the token (a mail scanner opening the link then cannot use it up). The buyer is known to the portal only as a relay address and a name like "Jane B." (decision M1-55 and the PII table).
+Rules: email is trimmed and lower-cased; password 10 to 128 characters and not the email address; display name 1 to 60 characters. The token returned by sign-in is 43 characters of base64url, shown once. Sessions end after 7 idle days (sliding) or 30 days in all. Sign-in is **delayed, not locked** (decision M1-63): six failures per address with no delay, then the next attempt must wait 1 s, 2 s, 4 s ... up to 15 minutes, the same for a known and an unknown address; a right password or a password reset clears it; each client IP may fail 20 times an hour across all addresses. Auth request bodies are limited to 16 KB (`413`). Links in mails open `<Marketplace:PublicBaseUrl>/verify-email?token=...` and `/reset-password?token=...` (24 h and 60 min; the token is `<32 hex>.<43 base64url>` and is opaque to the web: pass it through unchanged); the pages must POST the token (a mail scanner opening the link then cannot use it up). The buyer is known to the portal only as a relay address and a name like "Jane B." (decision M1-55 and the PII table).
 
 ## Cart (M3)
 `/api/v1/cart`, public rate limit. The owner is the signed-in buyer (`Authorization: Bearer`) or a guest (`X-Solvelt-Cart-Token`). A guest cart is created by the first add; the answer carries `cartToken` **once** (43 base64url characters; the web server keeps it in its own HttpOnly cookie). An unknown guest token never becomes a cart id: it gets a fresh cart and a fresh token. A present but invalid Bearer is `401` (never a silent guest cart).
@@ -252,3 +254,10 @@ All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Contr
 * `POST /api/v1/orders/{number}/return-requests` `{ sellerOrderNumber, reason, comment?, lines: [{ lineId, quantity }] }` (+ optional `Idempotency-Key` header) → `202 { returnId, status }` or `422 quantity_exceeded`. `reason`: `damaged | not_as_described | wrong_item | no_longer_needed | other`.
 * `POST /api/v1/orders/{number}/delivery-confirmations` `{ sellerOrderNumber }` → `202`/`200`; time is the server's, any time field is ignored.
 * `POST /api/v1/orders/{number}/returns/{returnId}/label-link` → `{ labelUrl, labelUrlExpiresAt }` for an approved return.
+
+## Guest order links (for M3 and M5)
+Not endpoints of their own: services other modules call (decision M1-70).
+
+- `GuestLinks.Make(Guid orderId, DateTimeOffset? expiresAt = null)` returns `(token, expiresAt)`: `g1.<32 hex order id>.<expiry unix seconds>.<43 base64url MAC>`, valid for `Auth:GuestLinkDays` (30). `GuestLinks.Parse(token)` returns the order id, or null when the token is forged, edited, from another key or expired. The web server passes the token through unchanged (a path segment or header, never logged).
+- `IGuestOrderClaimer.ClaimAsync(accountId, normalisedEmail, ct)` is implemented by whoever stores guest orders and registered in DI (`AddScoped<IGuestOrderClaimer, ...>`). It runs after a successful verify-email, password reset or sign-in of a verified account, with the account's address trimmed and lower-cased, and attaches the guest orders placed with that address to the account (one conditional UPDATE, idempotent).
+- Configuration: `Auth__GuestLinkKey` (required in production, at least 32 characters, its own key), `Auth__GuestLinkDays`.

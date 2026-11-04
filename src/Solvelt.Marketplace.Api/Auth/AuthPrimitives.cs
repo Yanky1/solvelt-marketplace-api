@@ -40,16 +40,17 @@ public sealed class LinkTokens(IOptions<AuthOptions> options)
 }
 
 /// <summary>Password hashing with ASP.NET Core Identity's V3 hasher (PBKDF2, HMAC-SHA512, random salt, self-describing format).</summary>
-public sealed class PasswordService(IOptions<AuthOptions> options)
+public class PasswordService(IOptions<AuthOptions> options)
 {
     private readonly PasswordHasher<BuyerAccount> _hasher = new(Options.Create(new PasswordHasherOptions { IterationCount = Math.Max(1000, options.Value.PasswordIterations) }));
     private static readonly BuyerAccount Nobody = new();
-    private string? _dummy;
+    // Made once, here, so that every BurnTime is exactly one verification (a lazily made one would make the first unknown address slower than the rest).
+    private readonly string _dummy = new PasswordHasher<BuyerAccount>(Options.Create(new PasswordHasherOptions { IterationCount = Math.Max(1000, options.Value.PasswordIterations) })).HashPassword(Nobody, "dummy-password-for-timing");
 
-    public string Hash(string password) => _hasher.HashPassword(Nobody, password);
+    public virtual string Hash(string password) => _hasher.HashPassword(Nobody, password);
 
     /// <summary>Verifies and tells whether the stored hash should be upgraded (more iterations since).</summary>
-    public (bool Ok, bool Rehash) Verify(string? hash, string password)
+    public virtual (bool Ok, bool Rehash) Verify(string? hash, string password)
     {
         if (string.IsNullOrEmpty(hash)) return (false, false);
         var r = _hasher.VerifyHashedPassword(Nobody, hash, password);
@@ -57,11 +58,7 @@ public sealed class PasswordService(IOptions<AuthOptions> options)
     }
 
     /// <summary>Spends the same time as a real check, so an unknown email is not faster than a wrong password.</summary>
-    public void BurnTime(string password)
-    {
-        _dummy ??= Hash("dummy-password-for-timing");
-        _hasher.VerifyHashedPassword(Nobody, _dummy, password);
-    }
+    public virtual void BurnTime(string password) => _hasher.VerifyHashedPassword(Nobody, _dummy, password);
 }
 
 /// <summary>The buyer as the portal and sellers see them: a relay address and "Jane B.". Never the real email or full name.</summary>

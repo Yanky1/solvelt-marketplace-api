@@ -35,6 +35,11 @@ builder.Services.Configure<AuthOptions>(o => OptionsSetup.Auth(o, builder.Config
 builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();
 builder.Services.AddSingleton<PasswordService>();
+builder.Services.AddSingleton<GateKeys>();
+builder.Services.AddSingleton<GuestLinks>();
+builder.Services.AddScoped<GuestClaims>();
+builder.Services.AddScoped<SignInGate>();
+builder.Services.AddScoped<AuthMaintenance>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
@@ -128,6 +133,7 @@ var app = builder.Build();
 app.UseMiddleware<SafeRequestLoggingMiddleware>();
 app.UseMiddleware<ProblemExceptionMiddleware>();
 app.UseMiddleware<StatusProblemMiddleware>();
+app.UseMiddleware<AuthBodyLimitMiddleware>();
 app.UseRateLimiter();
 
 if (devLike)

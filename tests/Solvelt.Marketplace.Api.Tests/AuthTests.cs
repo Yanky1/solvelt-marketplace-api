@@ -94,22 +94,6 @@ public class AuthTests
         Assert.Single(subjects, s => s.StartsWith("Confirm"));              // only the original verification mail
     }
 
-    [Fact]
-    public async Task Signing_up_again_before_verifying_replaces_the_password_and_invalidates_the_old_link()
-    {
-        using var k = new AuthKit();
-        await k.SignUp(Email, "attackers password", "Mallory");
-        var first = TokenOf(await k.Mail(Email), 0);
-        await k.SignUp(Email, "the owners password", "Jane Brown");
-        var mails = await k.Mail(Email);
-        Assert.Equal(2, mails.Count);
-        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = first })).StatusCode);   // older link is dead
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = TokenOf(mails, 1) })).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "attackers password" })).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "the owners password" })).StatusCode);
-        Assert.Equal("Jane Brown", (await k.Account(Email)).DisplayName);
-    }
-
     private static string TokenOf(List<Solvelt.Marketplace.Api.Outbox.EmailMessage> mails, int i) => AuthKit.TokenIn(mails[i], "/verify-email");
 
     [Fact]
@@ -140,16 +124,16 @@ public class AuthTests
         using var k = new AuthKit();
         await k.SignUp(Email);
         var token = TokenOf(await k.Mail(Email), 0);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token, password = Pw })).StatusCode);
         Assert.NotNull((await k.Account(Email)).EmailVerifiedAt);
-        var again = await k.Post("/api/v1/auth/verify-email", new { token });
+        var again = await k.Post("/api/v1/auth/verify-email", new { token, password = Pw });
         Assert.Equal(HttpStatusCode.BadRequest, again.StatusCode);
         Assert.Equal("invalid_token", (await Json(again)).GetProperty("code").GetString());
 
         await k.SignUp("late@example.com");
         var late = TokenOf(await k.Mail("late@example.com"), 0);
         k.F.Clock.Advance(TimeSpan.FromHours(24) + TimeSpan.FromSeconds(1));
-        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = late })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = late, password = Pw })).StatusCode);
         Assert.Null((await k.Account("late@example.com")).EmailVerifiedAt);
     }
 
@@ -160,7 +144,7 @@ public class AuthTests
         await k.SignUp(Email);
         var token = TokenOf(await k.Mail(Email), 0);
         k.F.Clock.Advance(TimeSpan.FromHours(24) - TimeSpan.FromSeconds(1));
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token, password = Pw })).StatusCode);
     }
 
     [Theory]
@@ -170,7 +154,7 @@ public class AuthTests
     public async Task Unknown_verification_tokens_are_invalid(string? token)
     {
         using var k = new AuthKit();
-        var r = await k.Post("/api/v1/auth/verify-email", new { token });
+        var r = await k.Post("/api/v1/auth/verify-email", new { token, password = Pw });
         Assert.Equal(HttpStatusCode.BadRequest, r.StatusCode);
         Assert.Equal("invalid_token", (await Json(r)).GetProperty("code").GetString());
     }
@@ -181,7 +165,7 @@ public class AuthTests
         using var k = new AuthKit();
         await k.SignUp(Email);
         var token = TokenOf(await k.Mail(Email), 0);
-        var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Task.Run(() => k.Post("/api/v1/auth/verify-email", new { token }))));
+        var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Task.Run(() => k.Post("/api/v1/auth/verify-email", new { token, password = Pw }))));
         Assert.Equal(1, results.Count(r => r.StatusCode == HttpStatusCode.NoContent));
         Assert.Equal(5, results.Count(r => r.StatusCode == HttpStatusCode.BadRequest));
     }
@@ -198,8 +182,8 @@ public class AuthTests
         Assert.Empty(await k.Mail("nobody@example.com"));
         var mails = await k.Mail(Email);
         Assert.Equal(2, mails.Count);
-        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = old })).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = TokenOf(mails, 1) })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = old, password = Pw })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = TokenOf(mails, 1), password = Pw })).StatusCode);
         // verified now: nothing more is sent
         await k.Post("/api/v1/auth/resend-verification", new { email = Email });
         Assert.Equal(2, (await k.Mail(Email)).Count);
@@ -261,46 +245,6 @@ public class AuthTests
         Assert.Equal("invalid_credentials", (await Json(wrong)).GetProperty("code").GetString());
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = (string?)null })).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = new string('x', 129) })).StatusCode);
-    }
-
-    [Fact]
-    public async Task Five_wrong_passwords_lock_the_account_for_15_minutes_even_for_the_right_password()
-    {
-        using var k = new AuthKit();
-        await k.VerifiedSession(Email);
-        for (var i = 0; i < 5; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "wrong password!!" })).StatusCode);
-        var locked = await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw });
-        Assert.Equal(HttpStatusCode.TooManyRequests, locked.StatusCode);
-        Assert.Equal("rate_limited", (await Json(locked)).GetProperty("code").GetString());
-        var retry = int.Parse(locked.Headers.GetValues("Retry-After").Single());
-        Assert.InRange(retry, 890, 900);
-        k.F.Clock.Advance(TimeSpan.FromMinutes(15) - TimeSpan.FromSeconds(1));
-        Assert.Equal(HttpStatusCode.TooManyRequests, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);
-        k.F.Clock.Advance(TimeSpan.FromSeconds(2));
-        Assert.Equal(HttpStatusCode.OK, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);
-        Assert.Equal(0, (await k.Account(Email)).FailedSignIns);
-    }
-
-    [Fact]
-    public async Task Four_wrong_passwords_do_not_lock_and_a_success_resets_the_count()
-    {
-        using var k = new AuthKit();
-        await k.VerifiedSession(Email);
-        for (var i = 0; i < 4; i++) await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "wrong password!!" });
-        Assert.Equal(HttpStatusCode.OK, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);
-        k.F.Clock.Advance(TimeSpan.FromMinutes(16));   // a new per-address attempt window; the failure count must not have carried over
-        for (var i = 0; i < 4; i++) await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "wrong password!!" });
-        Assert.Equal(HttpStatusCode.OK, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);
-    }
-
-    [Fact]
-    public async Task An_unknown_address_is_limited_like_a_known_one_so_a_lock_proves_nothing()
-    {
-        using var k = new AuthKit();
-        var statuses = new List<HttpStatusCode>();
-        for (var i = 0; i < 12; i++) statuses.Add((await k.Post("/api/v1/auth/sign-in", new { email = "ghost@example.com", password = "wrong password!!" })).StatusCode);
-        Assert.Equal(10, statuses.Count(s => s == HttpStatusCode.Unauthorized));
-        Assert.Equal(2, statuses.Count(s => s == HttpStatusCode.TooManyRequests));
     }
 
     [Fact]
@@ -413,7 +357,7 @@ public class AuthTests
     // ---------- password reset ----------
 
     [Fact]
-    public async Task Forgot_password_mails_only_a_verified_account_and_always_answers_204()
+    public async Task Forgot_password_mails_an_existing_account_verified_or_not_and_always_answers_204()
     {
         using var k = new AuthKit();
         await k.VerifiedSession(Email);
@@ -421,7 +365,7 @@ public class AuthTests
         foreach (var e in new[] { Email, "unverified@example.com", "nobody@example.com", "not an email" })
             Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/forgot-password", new { email = e })).StatusCode);
         Assert.Contains((await k.Mail(Email)), m => m.Subject == "Reset your password");
-        Assert.DoesNotContain((await k.Mail("unverified@example.com")), m => m.Subject == "Reset your password");
+        Assert.Contains((await k.Mail("unverified@example.com")), m => m.Subject == "Reset your password");     // decision O-16 c: the way in for the owner of an address someone else registered
         Assert.Empty(await k.Mail("nobody@example.com"));
     }
 
@@ -457,11 +401,12 @@ public class AuthTests
     }
 
     [Fact]
-    public async Task A_weak_new_password_is_refused_without_burning_the_link_and_a_reset_clears_a_lockout()
+    public async Task A_weak_new_password_is_refused_without_burning_the_link_and_a_reset_clears_the_sign_in_delay()
     {
         using var k = new AuthKit();
         await k.VerifiedSession(Email);
-        for (var i = 0; i < 5; i++) await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "wrong password!!" });
+        for (var i = 0; i < 7; i++) await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "wrong password!!" });
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);   // delayed, even for the right password
         await k.Post("/api/v1/auth/forgot-password", new { email = Email });
         var token = AuthKit.TokenIn((await k.Mail(Email)).Last(m => m.Subject == "Reset your password"), "/reset-password");
         var weak = await k.Post("/api/v1/auth/reset-password", new { token, password = "short" });
@@ -487,10 +432,10 @@ public class AuthTests
         var verify = AuthKit.TokenIn((await k.Mail(Email)).Single(), "/verify-email");
         Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/reset-password", new { token = verify, password = "a brand new password" })).StatusCode);
         Assert.Null((await k.Account(Email)).EmailVerifiedAt == null ? null : "verified");
-        await k.Post("/api/v1/auth/verify-email", new { token = verify });
+        await k.Post("/api/v1/auth/verify-email", new { token = verify, password = Pw });
         await k.Post("/api/v1/auth/forgot-password", new { email = Email });
         var reset = AuthKit.TokenIn((await k.Mail(Email)).Last(m => m.Subject == "Reset your password"), "/reset-password");
-        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = reset })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = reset, password = Pw })).StatusCode);
     }
 
     // ---------- storage and logs ----------
@@ -539,9 +484,9 @@ public class AuthTests
             $"{Guid.NewGuid():N}.{good[33..]}",                      // another id, copied MAC
         };
         foreach (var f in forgeries)
-            Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = f })).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = f, password = Pw })).StatusCode);
         Assert.Null((await k.Account(Email)).EmailVerifiedAt);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = good })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = good, password = Pw })).StatusCode);
     }
 
     [Fact]
@@ -615,7 +560,7 @@ public class AuthTests
     private static Dictionary<string, string?> GoodProd() => new()
     {
         ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40),
-        ["Auth:EmailLinkKey"] = new string('e', 40),
+        ["Auth:EmailLinkKey"] = new string('e', 40), ["Auth:GuestLinkKey"] = new string('G', 40),
         ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example", ["Email:From"] = "no-reply@shop.example",
         ["Portal:BaseUrl"] = "https://portal.example", ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
         ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",
@@ -713,9 +658,9 @@ public class AuthTests
         var a = AuthKit.TokenIn((await k.Mail("a@example.com")).Single(), "/verify-email");
         var b = AuthKit.TokenIn((await k.Mail("b@example.com")).Single(), "/verify-email");
         var crossed = b[..32] + "." + a[33..];                       // B's id with A's MAC
-        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = crossed })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = crossed, password = Pw })).StatusCode);
         Assert.Null((await k.Account("b@example.com")).EmailVerifiedAt);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = b })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = b, password = Pw })).StatusCode);
     }
 
     [Theory]
