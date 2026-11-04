@@ -21,11 +21,8 @@ public static class RateLimitPolicies
             o.RejectionStatusCode = 429;
             o.AddPolicy(Auth, ctx => Fixed(ctx, "auth", authPerMinute));
             o.AddPolicy(Public, ctx => Fixed(ctx, "public", publicPerMinute));
-            o.OnRejected = async (c, _) =>
-            {
-                c.HttpContext.Response.Headers.RetryAfter = "60";
-                await ProblemExceptionMiddleware.Write(c.HttpContext, 429, "rate_limited", "Too many requests. Try again shortly.");
-            };
+            o.OnRejected = async (c, _) => await ProblemExceptionMiddleware.Write(c.HttpContext, 429, "rate_limited", "Too many requests. Try again shortly.",
+                headers: r => { r.Headers.RetryAfter = "60"; r.Headers.CacheControl = "no-store"; });     // set after Write's Clear(), which would otherwise drop them
         });
         return services;
     }

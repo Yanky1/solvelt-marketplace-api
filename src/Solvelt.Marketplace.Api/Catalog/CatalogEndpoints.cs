@@ -36,6 +36,17 @@ public static class CatalogEndpoints
     public static IEndpointRouteBuilder MapCatalog(this IEndpointRouteBuilder app)
     {
         var g = app.MapGroup("/api/v1/catalog").RequireRateLimiting(RateLimitPolicies.Public);
+        g.AddEndpointFilter(async (ctx, next) =>
+        {
+            // 200 answers may be cached for a few seconds (an unlist must reach buyers at once: docs/API.md); anything else never
+            ctx.HttpContext.Response.OnStarting(static state =>
+            {
+                var res = (HttpResponse)state;
+                if (!res.Headers.ContainsKey("Cache-Control")) res.Headers.CacheControl = res.StatusCode == 200 ? "public, max-age=5" : "no-store";
+                return Task.CompletedTask;
+            }, ctx.HttpContext.Response);
+            return await next(ctx);
+        });
         g.MapGet("/categories", Categories);
         g.MapGet("/brands", Brands);
         g.MapGet("/listings", Listings);
@@ -49,9 +60,9 @@ public static class CatalogEndpoints
     internal static IQueryable<CatalogListing> Visible(MarketplaceDb db)
         => db.CatalogListings.AsNoTracking().Where(l => l.Visible && db.CatalogSellers.Any(s => s.Id == l.SellerId && s.Active));
 
-    private static async Task<IResult> Categories(MarketplaceDb db, CancellationToken ct)
+    private static async Task<IResult> Categories(MarketplaceDb db, CategoryMap map, CancellationToken ct)
     {
-        var categories = await db.CatalogCategories.AsNoTracking().OrderBy(c => c.SortOrder).ThenBy(c => c.Name).ToListAsync(ct);
+        var categories = await map.AllAsync(ct);
         var direct = await Visible(db).GroupBy(l => l.CategoryId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
         return Results.Json(BuildTree(categories, direct));
     }
@@ -62,7 +73,7 @@ public static class CatalogEndpoints
         var byParent = categories.ToLookup(c => c.ParentId);
         CategoryNode? Build(CatalogCategory c, HashSet<Guid> path)
         {
-            if (!path.Add(c.Id)) return null;   // a cycle in portal data must not loop forever
+            if (!path.Add(c.Id) || path.Count > CategoryRules.MaxDepth + 2) return null;   // a cycle in portal data must not loop forever, and a tree deeper than the sync allows is not walked (JSON has a depth limit too)
             var kids = byParent[c.Id].Select(k => Build(k, path)).Where(k => k is not null).Cast<CategoryNode>().Where(k => k.ListingCount > 0).ToList();
             path.Remove(c.Id);
             return new CategoryNode(c.Id, c.Slug, c.Name, direct.GetValueOrDefault(c.Id) + kids.Sum(k => k.ListingCount), kids);
@@ -83,16 +94,16 @@ public static class CatalogEndpoints
             new SellerCard(b.SellerId, sellers.GetValueOrDefault(b.SellerId)?.DisplayName ?? ""), b.LogoImageId, counts[b.Id])));
     }
 
-    private static async Task<IResult> Listings(HttpRequest request, MarketplaceDb db, ISearchIndex index, CancellationToken ct)
+    private static async Task<IResult> Listings(HttpRequest request, MarketplaceDb db, ISearchIndex index, CategoryMap map, CancellationToken ct)
     {
-        var (query, error) = await ListingQuery.ParseAsync(request.Query, db, index, ct);
+        var (query, error) = await ListingQuery.ParseAsync(request.Query, db, index, map, ct);
         if (query is null) return error!;
         var visible = Visible(db);
         var filtered = query.Apply(db, visible);
         var total = await filtered.CountAsync(ct);
         var (rows, next) = query.Sort == "relevance" && query.Searching ? await RelevanceSlice(filtered, query, ct) : await Slice(filtered, query, ct);
-        var items = await ToCards(db, rows, ct);
-        var facets = query.WantFacets ? await query.FacetsAsync(db, visible, ct) : null;
+        var items = await ToCards(db, rows, map, ct);
+        var facets = query.WantFacets ? await query.FacetsAsync(db, visible, map, ct) : null;
         return Results.Json(new ListingsPage(items, query.Cursor is null ? query.Page : 0, query.PageSize, total, (int)Math.Ceiling(total / (double)query.PageSize), next, facets));
     }
 
@@ -156,17 +167,14 @@ public static class CatalogEndpoints
         return await q.AnyAsync(l => (l.UnlistedVersion != null && l.UnlistedVersion >= l.Version) || l.Status == "Archived" || l.Status == "Removed", ct);
     }
 
-    private static async Task<IResult> Listing(MarketplaceDb db, string slugOrId, CancellationToken ct)
+    private static async Task<IResult> Listing(MarketplaceDb db, CategoryMap map, string slugOrId, CancellationToken ct)
     {
         var q = Visible(db).Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).AsSplitQuery();
         var l = Guid.TryParse(slugOrId, out var id) ? await q.FirstOrDefaultAsync(x => x.Id == id, ct) : await q.FirstOrDefaultAsync(x => x.Slug == slugOrId, ct);
         if (l is null) return await IsGone(db, slugOrId, ct) ? Problems.Gone("This listing is no longer available.") : Problems.NotFound("Listing not found.");
         var brand = await db.CatalogBrands.AsNoTracking().FirstAsync(b => b.Id == l.BrandId, ct);
         var seller = await db.CatalogSellers.AsNoTracking().FirstAsync(s => s.Id == l.SellerId, ct);
-        var categories = await db.CatalogCategories.AsNoTracking().ToDictionaryAsync(c => c.Id, ct);
-        var path = new List<CategoryCard>();
-        for (var c = categories.GetValueOrDefault(l.CategoryId); c is not null && path.Count < 10 && path.All(p => p.Id != c.Id); c = c.ParentId is { } p ? categories.GetValueOrDefault(p) : null)
-            path.Insert(0, new CategoryCard(c.Id, c.Slug, c.Name));
+        var path = (await map.PathAsync(l.CategoryId, ct)).Select(c => new CategoryCard(c.Id, c.Slug, c.Name)).ToList();
         return Results.Json(new ListingDetailDto(l.Id, l.Slug, l.Type, l.Title, l.Summary, l.Description, l.PriceFromCents, l.PriceToCents, l.CompareAtFromCents, l.Currency, l.Available,
             new BrandCard(brand.Id, brand.Slug, brand.Name), new SellerCard(seller.Id, seller.DisplayName), path,
             l.Variants.OrderBy(v => v.SortOrder).Select(v => new VariantItem(v.Id, v.Name, v.PriceCents, v.CompareAtCents, v.Available)).ToList(),
@@ -176,12 +184,12 @@ public static class CatalogEndpoints
     }
 
     /// <summary>Autocomplete: listing titles from the search index, plus brands and categories whose name starts with the text. Nothing below two characters.</summary>
-    private static async Task<IResult> Suggest([FromQuery(Name = "q")] string? search, string? limit, ISearchIndex index, MarketplaceDb db, CancellationToken ct)
+    private static async Task<IResult> Suggest([FromQuery(Name = "q")] string? search, string? limit, ISearchIndex index, MarketplaceDb db, CategoryMap map, CancellationToken ct)
     {
         if (search is { Length: > SearchTerms.MaxQueryLength }) return Problems.BadRequest("invalid_query", $"q must be at most {SearchTerms.MaxQueryLength} characters.");
         if (!TryInt(limit, DefaultSuggestions, 1, MaxSuggestions, out var max)) return Problems.BadRequest("invalid_query", $"limit must be a whole number from 1 to {MaxSuggestions}.");
         var terms = SearchTerms.From(search);
-        var words = Slug.Words(search);
+        var words = SearchText.Normalize(search);
         if (words.Length < MinSuggestChars) return Results.Json(new SuggestResponse(search ?? "", []));
 
         var matches = await index.SearchAsync(db, terms, max, ct);
@@ -190,11 +198,11 @@ public static class CatalogEndpoints
         var result = matches.Where(m => titles.ContainsKey(m.ListingId)).Select(m => new Suggestion("listing", titles[m.ListingId].Title, titles[m.ListingId].Slug)).ToList();
 
         var last = terms[^1];
-        bool StartsAWord(string name) => Slug.Words(name).Split(' ').Any(w => w.StartsWith(last, StringComparison.Ordinal));
+        bool StartsAWord(string name) => SearchText.Normalize(name).Split(' ').Any(w => w.StartsWith(last, StringComparison.Ordinal));
         var visibleBrandIds = await Visible(db).Select(l => l.BrandId).Distinct().ToListAsync(ct);
         var brands = (await db.CatalogBrands.AsNoTracking().Where(b => visibleBrandIds.Contains(b.Id)).OrderBy(b => b.Name).ToListAsync(ct)).Where(b => StartsAWord(b.Name)).Take(3).ToList();
         var visibleCategoryIds = (await Visible(db).Select(l => l.CategoryId).Distinct().ToListAsync(ct)).ToHashSet();
-        var allCategories = await db.CatalogCategories.AsNoTracking().OrderBy(c => c.SortOrder).ToListAsync(ct);
+        var allCategories = await map.AllAsync(ct);
         var shown = new HashSet<Guid>();    // a category is worth suggesting when it, or something below it, has a visible listing
         var byId = allCategories.ToDictionary(c => c.Id);
         foreach (var id in visibleCategoryIds)
@@ -205,12 +213,12 @@ public static class CatalogEndpoints
         return Results.Json(new SuggestResponse(search!, result.Take(max).ToList()));
     }
 
-    private static async Task<List<ListingCardDto>> ToCards(MarketplaceDb db, List<CatalogListing> rows, CancellationToken ct)
+    private static async Task<List<ListingCardDto>> ToCards(MarketplaceDb db, List<CatalogListing> rows, CategoryMap map, CancellationToken ct)
     {
         var ids = rows.Select(r => r.Id).ToList();
         var brands = await db.CatalogBrands.AsNoTracking().Where(b => rows.Select(r => r.BrandId).Contains(b.Id)).ToDictionaryAsync(b => b.Id, ct);
         var sellers = await db.CatalogSellers.AsNoTracking().Where(s => rows.Select(r => r.SellerId).Contains(s.Id)).ToDictionaryAsync(s => s.Id, ct);
-        var categories = await db.CatalogCategories.AsNoTracking().Where(c => rows.Select(r => r.CategoryId).Contains(c.Id)).ToDictionaryAsync(c => c.Id, ct);
+        var categories = await map.ByIdAsync(ct);
         var firstImages = (await db.CatalogImages.AsNoTracking().Where(i => ids.Contains(i.ListingId) && i.SortOrder == 0).ToListAsync(ct)).ToDictionary(i => i.ListingId);
         return rows.Select(l =>
         {
@@ -220,14 +228,6 @@ public static class CatalogEndpoints
                 new BrandCard(l.BrandId, b?.Slug ?? "", b?.Name ?? ""), new SellerCard(l.SellerId, s?.DisplayName ?? ""), new CategoryCard(l.CategoryId, c?.Slug ?? "", c?.Name ?? ""),
                 img is null ? null : new ImageCard(img.Id, img.Width, img.Height, img.Alt));
         }).ToList();
-    }
-
-    internal static List<Guid> Descendants(List<CatalogCategory> all, Guid root)
-    {
-        var result = new List<Guid> { root };
-        for (var i = 0; i < result.Count && result.Count <= all.Count; i++)
-            foreach (var child in all.Where(c => c.ParentId == result[i] && !result.Contains(c.Id))) result.Add(child.Id);
-        return result;
     }
 
     internal static bool TryInt(string? raw, int fallback, int min, int max, out int value)

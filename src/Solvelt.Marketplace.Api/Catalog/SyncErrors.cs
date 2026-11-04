@@ -20,7 +20,7 @@ public static class SyncErrors
             switch (e)
             {
                 case TimeoutException or OperationCanceledException or IOException or System.Net.Sockets.SocketException: return false;
-                case PostgresException p: return p.SqlState.StartsWith("22", StringComparison.Ordinal) || p.SqlState.StartsWith("23", StringComparison.Ordinal);   // data exception, integrity violation
+                case PostgresException p: return p.SqlState.StartsWith("22", StringComparison.Ordinal) || p.SqlState.StartsWith("23", StringComparison.Ordinal) || p.SqlState.StartsWith("54", StringComparison.Ordinal);   // data exception, integrity violation, program limit exceeded (a value too big for an index or tsvector)
                 case NpgsqlException: return false;                // connection level
                 case SqliteException s: return s.SqliteErrorCode == 19;    // SQLITE_CONSTRAINT; busy, locked, I/O are transient
             }

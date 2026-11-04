@@ -44,10 +44,12 @@ public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<Pro
         }
     }
 
-    internal static Task Write(HttpContext ctx, int status, string code, string message, string? correlationId = null)
+    /// <summary><paramref name="headers"/> runs after the response is cleared (<c>Clear</c> drops every header set before it) and before the body is written.</summary>
+    internal static Task Write(HttpContext ctx, int status, string code, string message, string? correlationId = null, Action<HttpResponse>? headers = null)
     {
         ctx.Response.Clear();
         if (correlationId is not null) ctx.Response.Headers["X-Correlation-Id"] = correlationId;
+        headers?.Invoke(ctx.Response);
         ctx.Response.StatusCode = status;
         ctx.Response.ContentType = "application/json";
         return ctx.Response.WriteAsync(JsonSerializer.Serialize(new ProblemBody(code, message), new JsonSerializerOptions(JsonSerializerDefaults.Web)));

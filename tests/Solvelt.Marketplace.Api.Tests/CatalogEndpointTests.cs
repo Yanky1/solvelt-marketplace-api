@@ -289,8 +289,13 @@ public class CatalogConfigurationTests
     [InlineData(null)]
     [InlineData("None")]
     [InlineData("none")]
+    public void Production_accepts_no_catalog(string? source) => Assert.Empty(Validate(source));      // was "no catalog or the portal feed": Http is refused until it exists (M2-15)
+
+    [Theory]
     [InlineData("Http")]
-    public void Production_accepts_no_catalog_or_the_portal_feed(string? source) => Assert.Empty(Validate(source));
+    [InlineData("http")]
+    public void Production_refuses_the_portal_feed_until_it_is_built(string source)
+        => Assert.Contains(Validate(source), p => p.Contains("Http") && p.Contains("not available"));
 
     [Theory]
     [InlineData("Fixture")]
