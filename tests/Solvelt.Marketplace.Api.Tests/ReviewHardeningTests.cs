@@ -233,6 +233,21 @@ public class ReviewHardeningTests
         return ctx;
     }
 
+    /// <summary>Cross-repo vector shared with the web server (W1, web b9faea5): both sides must produce exactly this signature.</summary>
+    [Fact]
+    public void Client_ip_forwarding_cross_repo_vector()
+    {
+        const string key = DevDefaults.WebForwardingKey;
+        Assert.Equal("dev-only-web-forwarding-key-not-for-production", key);
+        Assert.Equal("v1=eaf9dade01862226a6cb91574596e068996969fe53eb32f05d4ec102df81a4e8", Sig(key, "1700000000", "203.0.113.9"));   // independent test-side HMAC
+        // ... and the production resolver accepts exactly that signature at that timestamp, and rejects it for another ip
+        var clock = new FakeTimeProvider(DateTimeOffset.FromUnixTimeSeconds(1700000000));
+        var r = new ClientIpResolver(Options.Create(new WebOptions { ForwardingKey = key }), clock);
+        const string sig = "v1=eaf9dade01862226a6cb91574596e068996969fe53eb32f05d4ec102df81a4e8";
+        Assert.Equal("fwd:203.0.113.9", r.Resolve(Ctx(r, "10.0.0.1", (ClientIpResolver.IpHeader, "203.0.113.9"), (ClientIpResolver.TimestampHeader, "1700000000"), (ClientIpResolver.SignatureHeader, sig))));
+        Assert.Equal("peer:10.0.0.1", r.Resolve(Ctx(r, "10.0.0.1", (ClientIpResolver.IpHeader, "203.0.113.10"), (ClientIpResolver.TimestampHeader, "1700000000"), (ClientIpResolver.SignatureHeader, sig))));
+    }
+
     [Fact]
     public void A_null_remote_address_is_handled_and_partitions_do_not_share_between_policies()
     {
