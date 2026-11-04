@@ -27,6 +27,8 @@ public abstract class OrderFlowBase : IDisposable
 
     /// <summary>How the fake portal answers <c>POST /orders</c>; null means "create it and answer 201".</summary>
     protected Func<ReceivedCall, HttpResponseMessage>? _onOrder;
+    /// <summary>A test's own portal routes (buyer events, messages ...): asked before the default 404.</summary>
+    protected Func<ReceivedCall, HttpResponseMessage?>? _onOther;
     protected int _orderCalls;
     protected readonly Dictionary<string, (Guid Id, string Number)> _sellerOrders = new();
     protected bool _oversold;
@@ -52,6 +54,7 @@ public abstract class OrderFlowBase : IDisposable
                 return _onOrder is not null ? _onOrder(c) : Created(c, 201, true);
             }
             if (path == "/api/internal/v1/payment-events") return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\"}");
+            if (_onOther?.Invoke(c) is { } other) return other;
             return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
         });
     }

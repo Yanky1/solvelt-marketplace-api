@@ -88,7 +88,13 @@ if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedSer
 builder.Services.AddScoped<StripeEventProcessor>();
 builder.Services.AddScoped<IOutboxHandler, OrderIngestHandler>();
 builder.Services.AddSingleton<IProjectionHandler, PortalRefundHandler>();
+builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Fulfilment.FulfilmentHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeRefundHandler>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.CancelRequestOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.ReturnRequestOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.DeliveryConfirmationOutboxHandler>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();
@@ -137,6 +143,7 @@ app.MapOutboxAdmin();
 app.MapAuth();
 app.MapCart();
 app.MapCheckout();
+Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
 app.MapStripeWebhooks();
 
 app.Run();

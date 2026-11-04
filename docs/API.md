@@ -243,3 +243,12 @@ Order lifecycle seen by the web: `pending_payment` -> `paid` (webhook) -> `place
 * `charge.refunded`: a refund made outside this system (the Stripe dashboard) is recorded against the order's refund cap and logged; refunds we made are recognised and ignored.
 * `charge.dispute.*`: forwarded to the portal as `dispute.created|updated|closed`, one per seller order of the payment (amount = the seller share of the dispute, split exactly).
 Portal webhooks (`/api/portal/webhooks`) now also act on `refund.issued` and `order.cancelled` (with `refundDueCents`): the buyer is refunded through Stripe (items + shipping + the tax on them) and the portal is told with `refund.processed`.
+
+## Buyer orders (M5)
+All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Control: private, no-store`, and answer 404 for another buyer's order.
+* `GET /api/v1/orders?limit=1..50&before=<createdAt>` → `{ orders: [{ number, createdAt, totalCents, refundedCents, groups: [{ sellerOrderNumber, sellerName, status, itemCount, firstItem }] }], next }`.
+* `GET /api/v1/orders/{number}` → the order, per seller order: `status` (`processing | new | accepted | on_hold | partially_shipped | shipped | delivered | cancelled | refunded`), lines with `shippedQty/returnableQty/...`, `shipments`, `returns` (with a live `label` only), `cancelRequest`, `refunds` (shown, never moved here), and `canCancel / canReturn / canConfirmDelivery`.
+* `POST /api/v1/orders/{number}/cancel-requests` `{ sellerOrderNumber, reason, note? }` → `202 { requestId, status }`; idempotent (one open request per seller order). `reason`: `changed_mind | ordered_by_mistake | found_better_price | delivery_too_slow | other`.
+* `POST /api/v1/orders/{number}/return-requests` `{ sellerOrderNumber, reason, comment?, lines: [{ lineId, quantity }] }` (+ optional `Idempotency-Key` header) → `202 { returnId, status }` or `422 quantity_exceeded`. `reason`: `damaged | not_as_described | wrong_item | no_longer_needed | other`.
+* `POST /api/v1/orders/{number}/delivery-confirmations` `{ sellerOrderNumber }` → `202`/`200`; time is the server's, any time field is ignored.
+* `POST /api/v1/orders/{number}/returns/{returnId}/label-link` → `{ labelUrl, labelUrlExpiresAt }` for an approved return.

@@ -124,6 +124,9 @@ public class WebhookReceiverTests
         // The scripted stand-in replaces any production handler for the same event types (the framework tests exercise the framework, not the M3 order handlers).
         var f = new TestFactory(config, handler is null ? null : s =>
         {
+            // M5's fulfilment handler owns order.accepted/held/shipped/...: the stand-in replaces it for the same types as well
+            foreach (var d in s.Where(d => d.ServiceType == typeof(IProjectionHandler) && d.ImplementationType == typeof(Solvelt.Marketplace.Api.Fulfilment.FulfilmentHandler) && handler.EventTypes.Intersect(Solvelt.Marketplace.Api.Fulfilment.FulfilmentProjector.OwnTypes).Any()).ToList())
+                s.Remove(d);
             foreach (var d in s.Where(d => d.ServiceType == typeof(IProjectionHandler) && d.ImplementationType is { } t && t != typeof(ScriptedHandler)
                          && (t == typeof(Solvelt.Marketplace.Api.Checkout.PortalRefundHandler)) && handler.EventTypes.Intersect(new Solvelt.Marketplace.Api.Checkout.PortalRefundHandler(Microsoft.Extensions.Logging.Abstractions.NullLogger<Solvelt.Marketplace.Api.Checkout.PortalRefundHandler>.Instance).EventTypes).Any()).ToList())
                 s.Remove(d);

@@ -53,6 +53,7 @@ public sealed class OrderWorker(IServiceScopeFactory scopes, ILogger<OrderWorker
                 var m = scope.ServiceProvider.GetRequiredService<OrderMaintenance>();
                 await m.ExpirePendingAsync(stoppingToken);
                 await m.PurgeAbandonedAsync(stoppingToken);
+                await scope.ServiceProvider.GetRequiredService<Fulfilment.FulfilmentMaintenance>().RunAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
             catch (Exception ex) { log.LogError("Order maintenance failed: {ExceptionType}", ex.GetType().FullName); }

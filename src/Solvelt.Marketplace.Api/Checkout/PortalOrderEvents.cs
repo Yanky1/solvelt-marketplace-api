@@ -17,7 +17,19 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IPro
     public const string Issued = "refund.issued", Cancelled = "order.cancelled";
     public IReadOnlyCollection<string> EventTypes { get; } = [Issued, Cancelled];
 
+    /// <summary>
+    /// One handler per event type (the registry enforces it), so the buyer-facing projection of these two types (M5, decision M5-02) runs from here, AFTER the money part:
+    /// a parked event is parked untouched (the projection must not run twice), anything else is projected exactly once (the event id is unique).
+    /// The outcome stays the money part's, so M3's behaviour is unchanged.
+    /// </summary>
     public async Task<HandlerOutcome> HandleAsync(ProjectionContext c, CancellationToken ct)
+    {
+        var money = await MoneyAsync(c, ct);
+        if (money.Status != Data.InboundStatus.Parked) await Fulfilment.FulfilmentProjector.ApplyAsync(c, ct);
+        return money;
+    }
+
+    private async Task<HandlerOutcome> MoneyAsync(ProjectionContext c, CancellationToken ct)
     {
         // Handlers are singletons; the request's own scoped context (the webhook transaction) is what the reservation must run in.
         var refunds = new RefundService(c.Db, new Outbox.OutboxWriter(c.Db, c.Time), c.Time);

@@ -35,6 +35,9 @@ public sealed record ReturnRequestBody(string ReturnId, string Reason, string? C
 /// <summary>Deliberately has no <c>deliveredAt</c>: the portal stamps its own server time (never a client value).</summary>
 public sealed record DeliveryConfirmationBody(string? SellerOrderNumber = null, string? TrackingNumber = null);
 
+/// <summary>The answer to <c>POST /returns/{id}/label-link</c>: a signed link valid about 24 h, bound to that one label.</summary>
+public sealed record ReturnLabelLink(string? LabelUrl, DateTimeOffset? LabelUrlExpiresAt, string? TrackingNumber, string? Carrier);
+
 // ---- GET /shipping/settings (SHIPPING.md §4) ----
 public sealed record ShipsFrom(string? Country, string? Region);
 public sealed record ShippingSpeedSetting(string Speed, bool Enabled, string Method, long? FlatCents, long? BaseCents, long? PerKgCents);

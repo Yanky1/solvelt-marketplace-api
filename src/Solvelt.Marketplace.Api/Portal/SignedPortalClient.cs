@@ -19,6 +19,8 @@ public interface ISignedPortalClient
     Task<PortalResult<JsonElement>> RequestCancellationAsync(string marketplaceOrderId, CancelRequestBody body, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> RequestReturnAsync(string marketplaceOrderId, ReturnRequestBody body, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> ConfirmDeliveryAsync(string marketplaceOrderId, DeliveryConfirmationBody body, CancellationToken ct = default);
+    /// <summary>A fresh short-lived link to a return label (<c>POST /returns/{marketplaceReturnId}/label-link</c>, SHIPPING.md §4).</summary>
+    Task<PortalResult<ReturnLabelLink>> GetReturnLabelLinkAsync(string marketplaceReturnId, CancellationToken ct = default);
     Task<PortalResult<ShippingSettings>> GetShippingSettingsAsync(Guid sellerId, Guid brandId, CancellationToken ct = default);
     Task<PortalResult<LocalDeliveryEligibility>> CheckLocalDeliveryEligibilityAsync(LocalDeliveryEligibilityRequest request, CancellationToken ct = default);
     Task<PortalResult<ServiceAvailability>> GetServiceAvailabilityAsync(ServiceAvailabilityQuery query, CancellationToken ct = default);
@@ -51,6 +53,9 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<JsonElement>> ConfirmDeliveryAsync(string mid, DeliveryConfirmationBody b, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/orders/{Id(mid)}/delivery-confirmations", b, Retry.Standard, ct);
+
+    public Task<PortalResult<ReturnLabelLink>> GetReturnLabelLinkAsync(string mid, CancellationToken ct = default)
+        => Call<ReturnLabelLink>(HttpMethod.Post, $"{ApiBase}/returns/{Id(mid)}/label-link", new { }, Retry.Standard, ct);
 
     public Task<PortalResult<ShippingSettings>> GetShippingSettingsAsync(Guid sellerId, Guid brandId, CancellationToken ct = default)
         => Call<ShippingSettings>(HttpMethod.Get, $"{ApiBase}/shipping/settings?sellerId={sellerId:D}&brandId={brandId:D}", null, Retry.Standard, ct);
