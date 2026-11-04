@@ -12,7 +12,7 @@ namespace Solvelt.Marketplace.Api.Checkout;
 /// under its unique key (the portal refund id, or the cancelling event) inside the webhook transaction; Stripe is called from the outbox, then <c>refund.processed</c> goes back.
 /// An event for an order whose ingest has not stored the seller orders yet is parked and re-applied when it does.
 /// </summary>
-public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IProjectionHandler
+public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Fulfilment.FulfilmentProjector? projector = null) : IProjectionHandler
 {
     public const string Issued = "refund.issued", Cancelled = "order.cancelled";
     public IReadOnlyCollection<string> EventTypes { get; } = [Issued, Cancelled];
@@ -24,12 +24,23 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IPro
     /// </summary>
     public async Task<HandlerOutcome> HandleAsync(ProjectionContext c, CancellationToken ct)
     {
-        var money = await MoneyAsync(c, ct);
-        if (money.Status != Data.InboundStatus.Parked) await Fulfilment.FulfilmentProjector.ApplyAsync(c, ct, refundMoneyMoved: money.Status == Data.InboundStatus.Applied);
+        var (money, reserved) = await MoneyAsync(c, ct);
+        // The projection is ISOLATED (a savepoint): whatever it does, even fail, the money part above commits (M5 review H2).
+        // A refund is projected only when WE reserved it now: a duplicate refund id, or one the money side refused, changes nothing the buyer sees (review M1).
+        if (projector is not null && money.Status != Data.InboundStatus.Parked) await projector.ApplyIsolatedAsync(c, refundMoneyMoved: reserved, ct);
         return money;
     }
 
-    private async Task<HandlerOutcome> MoneyAsync(ProjectionContext c, CancellationToken ct)
+    private async Task<(HandlerOutcome Outcome, bool Reserved)> MoneyAsync(ProjectionContext c, CancellationToken ct)
+    {
+        var reserved = new ReservedFlag();
+        var outcome = await MoneyCoreAsync(c, reserved, ct);
+        return (outcome, reserved.Value);
+    }
+
+    private sealed class ReservedFlag { public bool Value; }
+
+    private async Task<HandlerOutcome> MoneyCoreAsync(ProjectionContext c, ReservedFlag reserved, CancellationToken ct)
     {
         // Handlers are singletons; the request's own scoped context (the webhook transaction) is what the reservation must run in.
         var refunds = new RefundService(c.Db, new Outbox.OutboxWriter(c.Db, c.Time), c.Time);
@@ -63,7 +74,8 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log) : IPro
         }
         switch (await refunds.ReserveGroupAsync(order.Id, group.Id, items, shipping, clamp, key, reason, portalRefundId, ct))
         {
-            case ReserveOutcome.Reserved or ReserveOutcome.Duplicate: return HandlerOutcome.Applied();
+            case ReserveOutcome.Reserved: reserved.Value = true; return HandlerOutcome.Applied();
+            case ReserveOutcome.Duplicate: return HandlerOutcome.Applied();
             case ReserveOutcome.ExceedsPaid:
                 // The portal asks for more than the seller order still holds. Money never moves beyond what was paid: this is a bug alarm for a person, not a retry.
                 log.LogError("Portal {Type} for order {Number} exceeds what is left to refund on that seller order; nothing was reserved", c.Event.Type, order.Number);

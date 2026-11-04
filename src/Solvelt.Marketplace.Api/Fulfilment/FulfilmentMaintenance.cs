@@ -32,23 +32,32 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
         var deleted = await db.Notifications.Where(n => n.CreatedAt < notifCut).ExecuteDeleteAsync(ct);
 
         var cutoff = now.AddDays(-RedactAfterDays);
-        var candidates = await db.Orders.AsNoTracking().Where(o => o.Status == OrderStatus.Placed && o.ShipName != Redacted).Select(o => o.Id).Take(500).ToListAsync(ct);
+        // CLOSED orders are chosen in SQL: every seller order is delivered/cancelled/refunded since before the cut-off, and no return is still open (its address is still needed). Oldest first,
+        // in batches, so a backlog drains instead of stalling behind open orders.
+        string[] closedStates = [FulfilmentStatus.Delivered, FulfilmentStatus.Cancelled, FulfilmentStatus.Refunded];
+        string[] openReturns = [ReturnStatus.Pending, ReturnStatus.Requested, ReturnStatus.Approved];
         var redacted = 0;
-        foreach (var id in candidates)
+        List<Guid> batch;
+        do
         {
-            var states = await db.SellerOrderStates.AsNoTracking().Where(s => s.OrderId == id).ToListAsync(ct);
-            var groups = await db.OrderGroups.AsNoTracking().CountAsync(g => g.OrderId == id, ct);
-            var closed = states.Count == groups && states.All(s => s.Status is FulfilmentStatus.Delivered or FulfilmentStatus.Cancelled or FulfilmentStatus.Refunded);
-            if (!closed || states.Max(s => s.UpdatedAt) > cutoff) continue;
-            await db.Orders.Where(o => o.Id == id).ExecuteUpdateAsync(s => s
-                .SetProperty(o => o.ShipName, Redacted).SetProperty(o => o.ShipLine1, Redacted).SetProperty(o => o.ShipLine2, (string?)null).SetProperty(o => o.ShipCity, Redacted)
-                .SetProperty(o => o.ShipRegion, (string?)null).SetProperty(o => o.ShipPostalCode, "").SetProperty(o => o.ShipLat, (double?)null).SetProperty(o => o.ShipLng, (double?)null)
-                .SetProperty(o => o.Phone, (string?)null).SetProperty(o => o.GiftMessage, (string?)null).SetProperty(o => o.BuyerName, Redacted).SetProperty(o => o.RelayEmail, Redacted), ct);
-            await db.OrderCancelRequests.Where(r => r.OrderId == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Note, (string?)null).SetProperty(r => r.DecisionNote, (string?)null), ct);
-            await db.OrderReturns.Where(r => r.OrderId == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Comment, (string?)null).SetProperty(r => r.DecisionNote, (string?)null)
-                .SetProperty(r => r.LabelUrl, (string?)null).SetProperty(r => r.LabelTrackingUrl, (string?)null), ct);
-            redacted++;
-        }
+            batch = await db.Orders.AsNoTracking()
+                .Where(o => o.Status == OrderStatus.Placed && o.ShipName != Redacted
+                    && db.OrderGroups.Any(g => g.OrderId == o.Id)
+                    && db.OrderGroups.Where(g => g.OrderId == o.Id).All(g => db.SellerOrderStates.Any(s => s.GroupId == g.Id && closedStates.Contains(s.Status) && s.UpdatedAt <= cutoff))
+                    && !db.OrderReturns.Any(r => r.OrderId == o.Id && openReturns.Contains(r.Status)))
+                .OrderBy(o => o.CreatedAt).Select(o => o.Id).Take(200).ToListAsync(ct);
+            foreach (var id in batch)
+            {
+                await db.Orders.Where(o => o.Id == id).ExecuteUpdateAsync(s => s
+                    .SetProperty(o => o.ShipName, Redacted).SetProperty(o => o.ShipLine1, Redacted).SetProperty(o => o.ShipLine2, (string?)null).SetProperty(o => o.ShipCity, Redacted)
+                    .SetProperty(o => o.ShipRegion, (string?)null).SetProperty(o => o.ShipPostalCode, "").SetProperty(o => o.ShipLat, (double?)null).SetProperty(o => o.ShipLng, (double?)null)
+                    .SetProperty(o => o.Phone, (string?)null).SetProperty(o => o.GiftMessage, (string?)null).SetProperty(o => o.BuyerName, Redacted).SetProperty(o => o.RelayEmail, Redacted), ct);
+                await db.OrderCancelRequests.Where(r => r.OrderId == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Note, (string?)null).SetProperty(r => r.DecisionNote, (string?)null), ct);
+                await db.OrderReturns.Where(r => r.OrderId == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Comment, (string?)null).SetProperty(r => r.DecisionNote, (string?)null)
+                    .SetProperty(r => r.LabelUrl, (string?)null).SetProperty(r => r.LabelTrackingUrl, (string?)null), ct);
+                redacted++;
+            }
+        } while (batch.Count == 200 && !ct.IsCancellationRequested);
         return new Result(labels, redacted, positions, proofs, deleted);
     }
 }

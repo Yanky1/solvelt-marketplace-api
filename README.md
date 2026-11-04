@@ -30,6 +30,7 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | Key | Required in Production | Notes |
 |---|---|---|
 | `Portal__BaseUrl` | yes | Seller portal base URL |
+| `Portal__PublicBaseUrl` | no (defaults to `Portal__BaseUrl`) | The portal's public API origin: the only origin a return-label link may have (decision M5-10) |
 | `Portal__InboundSecret` | yes, >= 32 chars | Signs our calls to the portal |
 | `Portal__WebhookSecret` | yes, >= 32 chars, must differ from the above | Verifies portal webhooks |
 | `Web__ForwardingKey` | yes, >= 32 chars, must differ from both portal secrets | Verifies the end-user IP the web server forwards (see docs/API.md) |
