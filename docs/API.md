@@ -291,3 +291,11 @@ Not endpoints of their own: services other modules call (decision M1-70).
 - `GuestLinks.Make(Guid orderId, DateTimeOffset? expiresAt = null)` returns `(token, expiresAt)`: `g1.<32 hex order id>.<expiry unix seconds>.<43 base64url MAC>`, valid for `Auth:GuestLinkDays` (30). `GuestLinks.Parse(token)` returns the order id, or null when the token is forged, edited, from another key or expired. The web server passes the token through unchanged (a path segment or header, never logged).
 - `IGuestOrderClaimer.ClaimAsync(accountId, normalisedEmail, ct)` is implemented by whoever stores guest orders and registered in DI (`AddScoped<IGuestOrderClaimer, ...>`). It runs after a successful verify-email, password reset or sign-in of a verified account, with the account's address trimmed and lower-cased, and attaches the guest orders placed with that address to the account (one conditional UPDATE, idempotent).
 - Configuration: `Auth__GuestLinkKey` (required in production, at least 32 characters, its own key), `Auth__GuestLinkDays`.
+
+## Messages (M5)
+Buyer routes need the session and answer `private, no-store`; another buyer's thread or message is 404.
+* `GET /api/v1/messages/threads?limit=&before=&beforeId=` → `{ unreadCount, threads: [{ id, kind, subject, sellerName, orderNumber, listingId, lastMessageAt, unreadCount, preview }], next }`.
+* `GET /api/v1/messages/threads/{id}?limit=&before=` → `{ thread, messages: [{ id, direction, status, sentAt, read, reported, hidden, text, attachments }], older }` (oldest first; a hidden message has no text).
+* `POST /api/v1/messages` `{ threadId | orderNumber (+ sellerOrderNumber) | listingId, text, acknowledgeWarning? }` → `202 { threadId, messageId, status }`; `409 contact_details_warning` (kinds in `errors`) until acknowledged; `422` for empty or over-long text.
+* `POST /api/v1/messages/threads/{id}/read` → 204 (sends the portal read receipts once).
+* `POST /api/v1/messages/{messageId}/report` `{ reason, note? }` → 202, idempotent.

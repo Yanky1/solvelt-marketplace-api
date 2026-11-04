@@ -31,7 +31,7 @@ public static class OrderEndpoints
 
     private static IResult Private(IResult r, HttpContext ctx) { ctx.Response.Headers.CacheControl = "private, no-store"; return r; }
 
-    private static IResult Respond(ActionResult r, HttpContext ctx)
+    internal static IResult Respond(ActionResult r, HttpContext ctx)
     {
         ctx.Response.Headers.CacheControl = "private, no-store";
         if (r.Errors is not null) return r.Code is null ? Problems.Validation(r.Errors) : Results.Json(new ValidationBody(r.Code, r.Message ?? "", r.Errors), statusCode: r.Status);
