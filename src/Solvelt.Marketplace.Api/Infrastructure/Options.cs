@@ -169,6 +169,8 @@ public sealed class NotificationOptions
     public string? UnsubscribeKey { get; set; }
     /// <summary>In-app notifications are deleted after this many days.</summary>
     public int RetentionDays { get; set; } = 180;
+    /// <summary>The origin the one-click unsubscribe URL in a mail's <c>List-Unsubscribe</c> header points at (the public origin that reaches this API). Defaults to Marketplace:PublicBaseUrl.</summary>
+    public string? PublicApiBaseUrl { get; set; }
 }
 
 public sealed class AuthOptions

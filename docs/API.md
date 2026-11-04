@@ -284,7 +284,7 @@ Buyer routes need the session and answer `private, no-store`.
 * `GET /api/v1/notifications?limit=1..50&before=&beforeId=` → `{ unreadCount, notifications: [{ id, kind, category, orderNumber, sellerOrderNumber, parameters, createdAt, read }], next }`.
 * `POST /api/v1/notifications/{id}/read`, `POST /api/v1/notifications/read-all` → 204, idempotent; another buyer's id is 404.
 * `GET|PUT /api/v1/notifications/preferences` → `{ email: { order_updates, shipped, out_for_delivery, delivered, refunds, messages, bookings } }`; PUT sends the categories to change; unknown categories are 422.
-* `POST /api/v1/notifications/unsubscribe { token }` (anonymous; the signed token from a mail link) → 204, or 400 `invalid_token`. Switches that category (or all) off, never on.
+* `POST /api/v1/notifications/unsubscribe` (anonymous; the signed token from a mail link; the token is `<id>.<category|all>.<expiry>.<mac>` and lives 90 days) → 204, or 400 `invalid_token`, or 400 `expired_token` (the website then points to the signed-in preferences page). The token comes in the JSON body `{ token }`, or in the `?token=` query with the RFC 8058 form body `List-Unsubscribe=One-Click` (what a mail client's unsubscribe button sends; a form POST without the marker is a 400, a GET is 405). Switches that category (or all) off, never on. Every notification mail carries `List-Unsubscribe: <{origin}/api/v1/notifications/unsubscribe?token=…>` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`.
 ## Guest order links (for M3 and M5)
 Not endpoints of their own: services other modules call (decision M1-70).
 

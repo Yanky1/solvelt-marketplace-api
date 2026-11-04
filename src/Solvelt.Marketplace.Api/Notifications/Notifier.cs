@@ -46,33 +46,45 @@ public static class Notifier
 }
 
 /// <summary>
-/// Unsubscribe links: <c>&lt;account id&gt;.&lt;category&gt;.&lt;base64url HMAC-SHA256(Notifications:UnsubscribeKey, "unsub|id|category")&gt;</c>. Its own key (M5-08): a leaked unsubscribe link can switch
-/// mail off for one category (or all) of one account and does nothing else; it is never a session or an email-verification link.
+/// Unsubscribe links: <c>&lt;account id N&gt;.&lt;category|all&gt;.&lt;expiry, unix seconds&gt;.&lt;base64url HMAC-SHA256(Notifications:UnsubscribeKey, "unsub|id|category|exp")&gt;</c>. Its own key
+/// (M5-08): a leaked unsubscribe link can switch mail off for one category (or all) of one account and does nothing else; it is never a session or an email-verification link. It
+/// expires after <see cref="Lifetime"/> (M5-17), so an old mail forwarded or leaked years later does nothing; the signed-in preferences page is always there.
 /// </summary>
-public sealed class UnsubscribeTokens(IOptions<NotificationOptions> options)
+public sealed class UnsubscribeTokens(IOptions<NotificationOptions> options, TimeProvider time)
 {
+    public static readonly TimeSpan Lifetime = TimeSpan.FromDays(90);
+    public enum State { Invalid, Expired, Ok }
+
     private byte[] Key => Encoding.UTF8.GetBytes(options.Value.UnsubscribeKey ?? throw new InvalidOperationException("Notifications:UnsubscribeKey is not configured."));
 
-    public string Make(Guid accountId, string category) => $"{accountId:N}.{category}.{Mac(accountId, category)}";
-
-    public (Guid AccountId, string Category)? Parse(string? token)
+    public string Make(Guid accountId, string category)
     {
-        if (string.IsNullOrEmpty(token) || token.Length > 200) return null;
-        var parts = token.Split('.');
-        if (parts.Length != 3 || !Guid.TryParseExact(parts[0], "N", out var id)) return null;
-        if (parts[1] != NotificationCategories.All && !NotificationCategories.Switchable.Contains(parts[1])) return null;
-        return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(Mac(id, parts[1])), Encoding.ASCII.GetBytes(parts[2])) ? (id, parts[1]) : null;
+        var exp = time.GetUtcNow().Add(Lifetime).ToUnixTimeSeconds();
+        return $"{accountId:N}.{category}.{exp}.{Mac(accountId, category, exp)}";
     }
 
-    private string Mac(Guid id, string category)
-        => Convert.ToBase64String(HMACSHA256.HashData(Key, Encoding.UTF8.GetBytes($"unsub|{id:N}|{category}"))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    /// <summary>Expired is reported only for a token whose signature is right, so the answer reveals nothing about accounts.</summary>
+    public (State State, Guid AccountId, string Category) Parse(string? token)
+    {
+        var bad = (State.Invalid, Guid.Empty, "");
+        if (string.IsNullOrEmpty(token) || token.Length > 200) return bad;
+        var parts = token.Split('.');
+        if (parts.Length != 4 || !Guid.TryParseExact(parts[0], "N", out var id) || parts[0] != id.ToString("N")) return bad;   // the canonical (lower-case) id only, M5 review P4
+        if (parts[1] != NotificationCategories.All && !NotificationCategories.Switchable.Contains(parts[1])) return bad;
+        if (!long.TryParse(parts[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var exp) || parts[2] != exp.ToString(System.Globalization.CultureInfo.InvariantCulture)) return bad;
+        if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(Mac(id, parts[1], exp)), Encoding.ASCII.GetBytes(parts[3]))) return bad;
+        return time.GetUtcNow().ToUnixTimeSeconds() >= exp ? (State.Expired, id, parts[1]) : (State.Ok, id, parts[1]);
+    }
+
+    private string Mac(Guid id, string category, long exp)
+        => Convert.ToBase64String(HMACSHA256.HashData(Key, Encoding.UTF8.GetBytes($"unsub|{id:N}|{category}|{exp}"))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
 
 /// <summary>
 /// Sends one notification mail. The outbox payload is the notification id only; the address, the text and the unsubscribe link are produced here, when it goes out. Nothing is sent
 /// to a deleted or unverified account, for a category the buyer switched off, or twice.
 /// </summary>
-public sealed class NotificationMailHandler(MarketplaceDb db, IEmailSender sender, UnsubscribeTokens tokens, IOptions<MarketplaceOptions> marketplace, IOptions<EmailOptions> email) : IOutboxHandler
+public sealed class NotificationMailHandler(MarketplaceDb db, IEmailSender sender, UnsubscribeTokens tokens, IOptions<MarketplaceOptions> marketplace, IOptions<EmailOptions> email, IOptions<NotificationOptions> notifications) : IOutboxHandler
 {
     public IReadOnlyCollection<string> Types { get; } = [Notifier.MailType];
 
@@ -90,7 +102,10 @@ public sealed class NotificationMailHandler(MarketplaceDb db, IEmailSender sende
         var prefs = await db.NotificationPreferences.AsNoTracking().FirstOrDefaultAsync(x => x.AccountId == n.AccountId, ct);
         if (prefs is not null && !prefs.Wants(category)) return OutboxResult.Delivered();
         var baseUrl = (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
-        var mail = NotificationEmails.Build(account.Email!, account.DisplayName, n, baseUrl, $"{baseUrl}/unsubscribe?token={tokens.Make(n.AccountId, category)}", $"{baseUrl}/unsubscribe?token={tokens.Make(n.AccountId, NotificationCategories.All)}");
+        var catToken = tokens.Make(n.AccountId, category);
+        var apiBase = (notifications.Value.PublicApiBaseUrl ?? baseUrl).TrimEnd('/');
+        var mail = NotificationEmails.Build(account.Email!, account.DisplayName, n, baseUrl, $"{baseUrl}/unsubscribe?token={catToken}", $"{baseUrl}/unsubscribe?token={tokens.Make(n.AccountId, NotificationCategories.All)}",
+            $"{apiBase}/api/v1/notifications/unsubscribe?token={catToken}");
         await EmailSending.SendAsync(sender, mail, email.Value, ct);   // a failure or timeout throws: the outbox retries with backoff
         return OutboxResult.Delivered();
     }
@@ -106,7 +121,7 @@ public static class NotificationEmails
         _ => $"Update on booking {number}",
     };
 
-    public static EmailMessage Build(string to, string name, Notification n, string baseUrl, string unsubscribeCategory, string unsubscribeAll)
+    public static EmailMessage Build(string to, string name, Notification n, string baseUrl, string unsubscribeCategory, string unsubscribeAll, string? oneClickUrl = null)
     {
         string P(string key) { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : ""; } catch (JsonException) { return ""; } }
         long Money() { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty("amountCents", out var v) && v.TryGetInt64(out var x) ? x : 0; } catch (JsonException) { return 0; } }
@@ -133,6 +148,8 @@ public static class NotificationEmails
         var link = n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? $"{baseUrl}/account/bookings" : $"{baseUrl}/account/orders/{n.OrderNumber}";
         var body = $"Hello {name},\n\n{line}\n\nSee the details: {link}\n\n" +
                    $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";
-        return new EmailMessage(to, subject, body);
+        // RFC 8058: a mail client shows its own unsubscribe button and POSTs "List-Unsubscribe=One-Click" to the URL, with no page and no cookie (review P3)
+        var headers = oneClickUrl is null ? null : new Dictionary<string, string> { ["List-Unsubscribe"] = $"<{oneClickUrl}>", ["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click" };
+        return new EmailMessage(to, subject, body, Headers: headers);
     }
 }
