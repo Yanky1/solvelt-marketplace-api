@@ -267,8 +267,10 @@ public sealed class IngestTests : OrderFlowBase
         await AddToCart("kiddush-cup-pewter");
         var (number, intent, total) = await Checkout();
         var res = await PostStripe(Event("payment_intent.succeeded", "pi_someone_elses", number, total));
-        Assert.Contains("unmatched", await res.Content.ReadAsStringAsync());
+        // the order is untouched (never fulfilled by an intent it does not store) but the money is not kept either: it is queued for a refund by intent id (decision M3-25)
+        Assert.Contains("applied", await res.Content.ReadAsStringAsync());
         Assert.Equal("pending_payment", (await Order(number)).Status);
+        Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.Type == StripeIntentRefundHandler.Type && m.DedupeKey == "refund-intent:pi_someone_elses")));
         _ = intent;
     }
 
@@ -439,6 +441,8 @@ public sealed class IngestTests : OrderFlowBase
         using var scope = _k.F.Services.CreateScope();
         Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<OrderMaintenance>().PurgeAbandonedAsync());   // it has a payment intent: kept 90 days, never purged on a guess
         _k.F.Clock.Advance(TimeSpan.FromDays(60));
+        Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<OrderMaintenance>().PurgeAbandonedAsync());   // 90 days passed but its cancel was never delivered: kept (decision M3-25)
+        await Drain();                                                                                                 // ... the cancel is delivered now
         Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<OrderMaintenance>().PurgeAbandonedAsync());
         Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));
         Assert.Equal("failed", (await Order(number)).Status);                // the refunded late payment is a financial record: never purged
@@ -548,13 +552,13 @@ public sealed class IngestTests : OrderFlowBase
         _k.F.Clock.Advance(TimeSpan.FromMinutes(11));                                                   // ... and delivered 11 minutes later
         var old = await PostStripe(oldBody);
         Assert.Equal(HttpStatusCode.OK, old.StatusCode);
-        Assert.Contains("unmatched", await old.Content.ReadAsStringAsync());
+        Assert.Contains("applied", await old.Content.ReadAsStringAsync());   // acknowledged; the money of an intent no order stores is refunded (decision M3-25), not adopted
         Assert.Null((await Order(number)).PaymentIntentId);               // nothing was adopted
         Assert.Equal("pending_payment", (await Order(number)).Status);
         // an order number we never had: same
         var ghost = await PostStripe(ghostBody);
         Assert.Equal(HttpStatusCode.OK, ghost.StatusCode);
-        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("needs a person"));
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("no matching live order"));
     }
 
     [Fact]

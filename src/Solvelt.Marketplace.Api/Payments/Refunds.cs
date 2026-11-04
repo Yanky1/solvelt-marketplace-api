@@ -257,9 +257,90 @@ public sealed class StripeCancelHandler(IPaymentProvider payments) : IOutboxHand
         try { p = message.Payload is null ? null : JsonSerializer.Deserialize<Payload>(message.Payload, PortalJson.Options); }
         catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
         if (p is null || string.IsNullOrEmpty(p.IntentId)) return OutboxResult.Dead("invalid_payload");
-        try { await payments.CancelIntentAsync(p.IntentId, "cancel:" + p.IntentId, ct); }
+        return await CancelAsync(payments, p.IntentId, ct);
+    }
+
+    /// <summary>Cancels an intent and says whether that is DONE (see the comments inside).</summary>
+    public static async Task<OutboxResult> CancelAsync(IPaymentProvider payments, string intentId, CancellationToken ct)
+    {
+        try { await payments.CancelIntentAsync(intentId, "cancel:" + intentId, ct); }
         catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
-        catch (PaymentRejectedException) { return OutboxResult.Delivered(); }
+        catch (PaymentRejectedException ex)
+        {
+            // Delivered ONLY when the intent is verifiably closed (already cancelled, or already paid: the webhook refunds a payment that landed) or does not exist at all. Anything else
+            // (a rotated key, a 400 for an intent still in flight) is NOT "done": the purge of the order waits for a Delivered cancel, so a person must see it (decision M3-25).
+            if (ex.Code == "resource_missing") return OutboxResult.Delivered();
+            if (ex.Code == "payment_intent_unexpected_state")
+            {
+                try
+                {
+                    var status = await payments.GetIntentStatusAsync(intentId, ct);
+                    if (status is "succeeded" or "canceled") return OutboxResult.Delivered();
+                    return OutboxResult.Retry("intent_" + status);   // processing / requires_capture: the money may still land; look again
+                }
+                catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
+                catch (PaymentRejectedException ex2) when (ex2.Code == "resource_missing") { return OutboxResult.Delivered(); }
+                catch (PaymentRejectedException ex2) { return OutboxResult.Dead("stripe_" + ex2.Code); }
+            }
+            return OutboxResult.Dead("stripe_" + ex.Code);
+        }
         return OutboxResult.Delivered();
+    }
+}
+
+/// <summary>
+/// Refunds a payment by INTENT id, for money that landed on an intent no live order stands behind (the order was purged, or a stray intent of an order that stores another). Idempotent on the intent
+/// (the refund key is derived from it), so a retry or a repeated webhook refunds once; Stripe refuses more than was captured.
+/// </summary>
+public sealed class StripeIntentRefundHandler(IPaymentProvider payments) : IOutboxHandler
+{
+    public const string Type = "stripe.refund-intent";
+    public sealed record Payload(string IntentId, long AmountCents, string OrderNumber);
+    public static string DedupeKey(string intentId) => "refund-intent:" + intentId;
+    public IReadOnlyCollection<string> Types { get; } = [Type];
+
+    public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
+    {
+        Payload? p;
+        try { p = message.Payload is null ? null : JsonSerializer.Deserialize<Payload>(message.Payload, PortalJson.Options); }
+        catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
+        if (p is null || string.IsNullOrEmpty(p.IntentId) || p.AmountCents <= 0) return OutboxResult.Dead("invalid_payload");
+        try { await payments.RefundAsync(p.IntentId, p.AmountCents, "refund:" + DedupeKey(p.IntentId), new Dictionary<string, string> { ["marketplace_order_id"] = p.OrderNumber, ["reason"] = "no_live_order" }, ct); }
+        catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
+        catch (PaymentRejectedException ex) when (ex.Code == "charge_already_refunded") { return OutboxResult.Delivered(); }
+        catch (PaymentRejectedException ex) { return OutboxResult.Dead("stripe_" + ex.Code); }
+        return OutboxResult.Delivered();
+    }
+}
+
+/// <summary>
+/// An order was closed while it had NO intent stored: the intent may still exist at Stripe (a crash between create and store, a timeout after Stripe created it, the intent_mismatch branch). It
+/// cannot be paid (its secret was never returned) but must not stay live. Asking Stripe again with the SAME key (<c>pi:&lt;number&gt;</c>, valid 24 hours: orders are closed within 23) returns that
+/// intent, or creates one that is cancelled at once; either way nothing is left open (decision M3-25).
+/// </summary>
+public sealed class StripeOrphanCancelHandler(MarketplaceDb db, IPaymentProvider payments) : IOutboxHandler
+{
+    public const string Type = "stripe.cancel-orphan";
+    public sealed record Payload(string OrderNumber);
+    public static string DedupeKey(string orderNumber) => "cancel-orphan:" + orderNumber;
+    public IReadOnlyCollection<string> Types { get; } = [Type];
+
+    public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
+    {
+        Payload? p;
+        try { p = message.Payload is null ? null : JsonSerializer.Deserialize<Payload>(message.Payload, PortalJson.Options); }
+        catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
+        if (p is null || string.IsNullOrEmpty(p.OrderNumber)) return OutboxResult.Dead("invalid_payload");
+        var order = await db.Orders.AsNoTracking().Where(o => o.Number == p.OrderNumber).Select(o => new { o.TotalCents, o.Currency, o.PaymentIntentId, o.Status }).FirstOrDefaultAsync(ct);
+        if (order is null) return OutboxResult.Delivered();
+        if (order.PaymentIntentId is not null) return OutboxResult.Delivered();   // an intent is stored: the normal cancel owns it
+        if (order.Status is OrderStatus.PendingPayment or OrderStatus.PaymentProcessing) return OutboxResult.Delivered();   // not closed after all
+        try
+        {
+            var intent = await payments.CreateIntentAsync(order.TotalCents, order.Currency, "pi:" + p.OrderNumber, new Dictionary<string, string> { ["marketplace_order_id"] = p.OrderNumber }, ct);
+            return await StripeCancelHandler.CancelAsync(payments, intent.Id, ct);
+        }
+        catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
+        catch (PaymentRejectedException ex) { return OutboxResult.Dead("stripe_" + ex.Code); }
     }
 }
