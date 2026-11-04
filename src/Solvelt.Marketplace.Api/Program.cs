@@ -57,6 +57,7 @@ builder.Services.AddSingleton<ISearchIndex>(_ => (builder.Configuration["Databas
     ? new PostgresSearchIndex() : new SqliteSearchIndex());
 builder.Services.AddSingleton<IProjectionHandler, CatalogEventHandler>();
 builder.Services.AddScoped<CatalogSyncService>();
+builder.Services.AddScoped<CategoryMap>();
 if (!builder.Environment.IsEnvironment("Testing") && !string.Equals(builder.Configuration["Catalog:Source"], "None", StringComparison.OrdinalIgnoreCase) && (devLike || !string.IsNullOrWhiteSpace(builder.Configuration["Catalog:Source"])))
     builder.Services.AddHostedService<CatalogSyncWorker>();
 builder.Services.AddSingleton<ProjectionRegistry>();

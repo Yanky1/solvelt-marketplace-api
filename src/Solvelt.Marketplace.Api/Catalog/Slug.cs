@@ -18,6 +18,9 @@ public static class Slug
         return map;
     }
 
+    /// <summary>The ASCII folding of a Latin letter with an accent ("é" gives "e", "ß" gives "ss"); false for any other character. Shared with the search tokenizer.</summary>
+    public static bool TryFold(char c, out string folded) => Fold.TryGetValue(c, out folded!);
+
     /// <summary>Lower-case ASCII words joined by single hyphens; common Latin accents are folded ("Zoë" becomes "zoe"); at most 100 characters; never empty.</summary>
     public static string From(string text)
     {

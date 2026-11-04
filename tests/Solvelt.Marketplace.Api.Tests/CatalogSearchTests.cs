@@ -33,7 +33,7 @@ public class SearchTermTests
 
     [Fact]
     public void Search_limits_are_the_documented_literals()
-        => Assert.Equal((100, 8, 40, 1000), (SearchTerms.MaxQueryLength, SearchTerms.MaxTerms, SearchTerms.MaxTermLength, SearchTerms.MaxMatches));
+        => Assert.Equal((100, 8, 40, 50_000), (SearchTerms.MaxQueryLength, SearchTerms.MaxTerms, SearchTerms.MaxTermLength, SearchTerms.MaxMatches));
 }
 
 public class CatalogSearchTests : IAsyncLifetime

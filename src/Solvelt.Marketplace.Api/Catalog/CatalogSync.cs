@@ -416,7 +416,10 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     private async Task UpsertSellerAndBrandAsync(ListingSnapshot s, CancellationToken ct)
     {
         var now = time.GetUtcNow().ToUniversalTime();
-        var stateAt = s.UpdatedAt.ToUniversalTime();
+        // Compared and stored at millisecond precision: SQLite keeps times as a binary long with millisecond resolution and PostgreSQL keeps microseconds, so only
+        // a coarse common precision makes "the same time" mean the same on both (a tie applies; strictly older does not).
+        var utc = s.UpdatedAt.ToUniversalTime();
+        var stateAt = new DateTimeOffset(utc.UtcTicks - utc.UtcTicks % TimeSpan.TicksPerMillisecond, TimeSpan.Zero);
         var seller = await db.CatalogSellers.FindAsync([s.Seller.Id], ct);
         if (seller is null) db.CatalogSellers.Add(new CatalogSeller { Id = s.Seller.Id, DisplayName = SnapshotLimits.Clip(s.Seller.DisplayName, SnapshotLimits.DisplayName), Active = s.Seller.Active, StateAt = stateAt, LastVisibleAt = now });
         else if (stateAt >= seller.StateAt)   // the seller's state is ordered by the portal time of the snapshot that carried it: an older page cannot reactivate a suspended seller

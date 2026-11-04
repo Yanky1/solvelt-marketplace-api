@@ -69,7 +69,7 @@ against the signed body, then the projection (one database transaction).
 ## Catalog (public, anonymous, read-only)
 All four endpoints use the `public` rate limit (headers: see "Headers the web server must send"). Money is whole **cents** (`long`), currency `USD`; times are UTC ISO 8601.
 Only **visible** listings are ever returned (CONTRACT.md §2): last known portal status `Active`, seller active, and not unlisted. A listing that is not visible, or does not exist, is a `404 not_found`, with no hint which, with one exception: **a listing that was public and has been unlisted, archived or removed answers `410 { "code": "gone" }`** (by slug or id), so search engines drop it quickly. A suspended seller's listings, drafts, listings we only heard an event about, and unknown ids stay `404`. Slugs never change (M1-32), so there is nothing to redirect except `/…/{id}` to the slug: the detail response by id carries the canonical `slug`.
-**Unlisting is immediate**: a `listing.unlisted` portal event hides a listing at once, so do not cache catalog responses for longer than a few seconds.
+**Unlisting is immediate**: a `listing.unlisted` portal event hides a listing at once, so catalog responses must not be cached for longer than a few seconds. They say so themselves: every `200` carries `Cache-Control: public, max-age=5`, every other status (including `429`) `no-store`.
 Images are an id plus dimensions: the bytes come from the portal and are served by our own CDN path (a later workstream). Data comes from the portal catalog feed (provisional request C1; it also carries optional per-listing `searchTerms`, see M2-01); until it exists the API serves a seed of about 40 listings in Development.
 
 ### `GET /api/v1/catalog/categories`
@@ -93,14 +93,14 @@ Brands with at least one visible listing, by name (at most 500). `sellerId` (an 
 | `brand` | A brand slug or id; unknown gives an empty page |
 | `seller` | A seller id (`400` when malformed) |
 | `type` | `product` or `service` |
-| `q` | Search text (at most 100 characters, else `400`). Normalised to lower-case ASCII words (accents folded, punctuation ignored), at most 8 words of 40 letters; **every** word must match and the last one matches as a prefix. Matches title, brand, the seller's search terms and the description, **weighted in that order**; an exact word beats a prefix. When nothing matches, a typo-tolerant pass runs (words of 4+ letters, about one slip in six letters; every word must be close). Combines with every other filter. Blank or missing = no search; punctuation only = no results. At most 1000 best matches are ranked, so `total` never exceeds 1000 for a search |
+| `q` | Search text (at most 100 characters, else `400`). Split into words of Unicode letters and digits, lower-cased, with accents, Hebrew niqqud and cantillation dropped (pointed and unpointed Hebrew are the same word), Latin accents folded ("Crème" is "creme"), full-width forms and ligatures folded, a maqaf (־) acting as a word break and a geresh/gershayim/apostrophe not; at most 8 words of 40 characters. **Every** word must match and the last one matches as a prefix. Matches title, brand, the seller's search terms and the description, **weighted in that order**; an exact word beats a prefix. Chinese and Japanese have no spaces, so a run of characters is one word and matches by its beginning. When nothing matches, a typo-tolerant pass runs (words of 4+ characters; PostgreSQL uses trigram word similarity, the SQLite test fallback edit distance, so borderline typos can differ between them). Combines with every other filter, facet and sort: they apply to **all** matches (at most 50 000 per query, a safety bound: a query matching more is cut to its 50 000 most relevant). Blank or missing = no search; punctuation only = no results |
 | `priceMin`, `priceMax` | Whole cents, 0 to 1000000000000; `priceMin` above `priceMax` is `400`. A listing matches when some buyable price lies in the range (its price range overlaps it) |
 | `available` | `true` leaves out sold-out listings (anything else is `400`) |
 | `kosher` | Comma separated kosher certifications (`OU,Star-K`): alternatives (OR). Shortcut for `attr=kosher-certification:<value>` |
 | `delivery` | Comma separated, each one of `ships`, `local`, `at-home`, `online`: alternatives. Shortcut for `attr=delivery:<value>`; products carry `ships` and sometimes `local`, services `at-home` and/or `online` |
 | `attr` | Repeatable `key:value` filter on any attribute (`attr=kosher-status:dairy`). Values of one key are alternatives (OR), different keys all have to hold (AND). At most 12 pairs, 10 values per key, keys up to 100 and values up to 60 characters, else `400` |
 | `facets` | `true` adds a `facets` object (see below); anything but `true`/`false` is `400` |
-| `sort` | `relevance` (default when `q` is given; without `q` it behaves as `newest`), `newest` (default otherwise), `best_selling` (placeholder: the newest order until M3 records sales), `price_asc`, `price_desc`, `title`. Ties break on id, so paging never repeats or drops an item |
+| `sort` | `relevance` (default when `q` is given; without `q` it behaves as `newest`), `newest` (default otherwise), `best_selling` (placeholder: the newest order until M3 records sales), `price_asc`, `price_desc`, `title`. Equal sort values break on id. `page` numbers are positions: if listings change between two requests, a page can repeat or skip an item. Use `cursor` for a walk that never repeats or drops one |
 | `cursor` | Opaque `nextCursor` of the previous page, for the same filters and sort. Use it instead of `page` (both is `400`; a cursor of another sort or a forged one is `400`). A cursor is a position, so new listings arriving between two requests never shift or repeat items |
 
 Every parameter except `attr` may be given once; a repeat is `400`.
@@ -118,7 +118,7 @@ A bad value is `400 { "code": "invalid_query", "message": … }`. Response:
     "image": { "id": "…", "width": 1200, "height": 1200, "alt": "Classic Braided Challah, photo 1" } } ],
   "page": 1, "pageSize": 24, "total": 40, "totalPages": 2, "nextCursor": "…" }
 ```
-`nextCursor` is `null` on the last page (the API fetches one extra row to know). With `cursor`, `page` is `0`; `total` and `totalPages` are still given. Search is capped at 1000 matches (`total` never exceeds it).
+`nextCursor` is `null` on the last page (the API fetches one extra row to know). With `cursor`, `page` is `0`; `total` and `totalPages` are still given. 
 
 With `facets=true` the response also has (disjunctive: each facet is counted with every filter **except its own**, so it shows what choosing one of its values would give):
 ```json
