@@ -18,9 +18,41 @@ public sealed record SelectedDelivery(string Kind, string? Speed, Guid? WindowId
 public sealed record QuoteLine(Guid LineId, Guid ListingId, Guid VariantId, string Title, string VariantName, int Quantity, long UnitPriceCents, long LineTotalCents, long TaxCents);
 public sealed record QuoteGroup(Guid SellerId, string SellerName, Guid BrandId, string BrandName, IReadOnlyList<QuoteLine> Lines, long ItemsCents,
     IReadOnlyList<ShippingOption> ShippingOptions, IReadOnlyList<UnavailableSpeed> UnavailableSpeeds, LocalOption? Local, SelectedDelivery? Selected, long ShippingCents, long ShippingTaxCents, long TaxCents, long TotalCents);
-public sealed record QuoteView(string Currency, IReadOnlyList<QuoteGroup> Groups, long ItemsCents, long ShippingCents, long TaxCents, long TotalCents, bool CanPay);
+public sealed record QuoteView(string Currency, IReadOnlyList<QuoteGroup> Groups, long ItemsCents, long ShippingCents, long TaxCents, long TotalCents, bool CanPay, string? QuoteHash = null, DateTimeOffset? ExpiresAt = null);
 
-public enum QuoteStatus { Ok, EmptyOrUnavailableCart, InvalidAddress, InvalidSelection, ShippingUnavailable }
+/// <summary>
+/// Binds a quote to a checkout (decision M3-22). The token is <c>{expiry}.{sha256(expiry|everything priced)}</c>: it covers every line, unit price, tax, the chosen delivery, the shipping and the
+/// destination, so any change gives another value. It is consent, not security: checkout recomputes the quote and compares; a token that differs or is past its expiry gets 409 price_changed with the fresh quote.
+/// </summary>
+public static class QuoteBinding
+{
+    public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(15);
+    private static string Digest(QuoteView v, string country, string? region, string postal, long exp)
+    {
+        var sb = new System.Text.StringBuilder().Append(exp).Append('|').Append(v.Currency).Append('|').Append(country).Append('|').Append(region).Append('|').Append(postal.Trim().ToUpperInvariant()).Append('|').Append(v.TotalCents);
+        foreach (var g in v.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId))
+        {
+            sb.Append("|G:").Append(g.SellerId).Append(':').Append(g.BrandId).Append(':').Append(g.Selected?.Kind).Append(':').Append(g.Selected?.Speed).Append(':').Append(g.Selected?.WindowId).Append(':').Append(g.Selected?.Date)
+              .Append(':').Append(g.ShippingCents).Append(':').Append(g.ShippingTaxCents).Append(':').Append(g.TaxCents);
+            foreach (var l in g.Lines.OrderBy(l => l.VariantId)) sb.Append("|L:").Append(l.VariantId).Append(':').Append(l.Quantity).Append(':').Append(l.UnitPriceCents).Append(':').Append(l.TaxCents);
+        }
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sb.ToString())));
+    }
+    public static string Make(QuoteView v, string country, string? region, string postal, DateTimeOffset now)
+    {
+        var exp = now.Add(Lifetime).ToUnixTimeSeconds();
+        return exp + "." + Digest(v, country, region, postal, exp);
+    }
+    public static bool Valid(string? token, QuoteView v, string country, string? region, string postal, DateTimeOffset now)
+    {
+        if (token is null || token.Length > 100) return false;
+        var dot = token.IndexOf('.');
+        if (dot < 1 || !long.TryParse(token[..dot], out var exp) || exp < now.ToUnixTimeSeconds()) return false;
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(System.Text.Encoding.ASCII.GetBytes(token[(dot + 1)..]), System.Text.Encoding.ASCII.GetBytes(Digest(v, country, region, postal, exp)));
+    }
+}
+
+public enum QuoteStatus { Ok, EmptyOrUnavailableCart, InvalidAddress, InvalidSelection, ShippingUnavailable, TotalTooLarge }
 
 /// <summary>
 /// The server-side price of a checkout: items from the catalog (re-read now), shipping from the portal's settings, tax from <see cref="ITaxCalculator"/>.
@@ -35,9 +67,10 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
         var a = req.Address;
         var country = a?.Country?.Trim().ToUpperInvariant();
         if (country is not { Length: 2 } || !country.All(char.IsAsciiLetterUpper) || string.IsNullOrWhiteSpace(a?.PostalCode) || a.PostalCode.Length > 20
-            || (a.Region is { } r && (r.Length is < 2 or > 3 || !r.All(char.IsAsciiLetter))))
+            || (a.Region is { } r && (r.Length is < 2 or > 3 || !r.All(char.IsAsciiLetter)))
+            || (country == "US" && !UsStates.Codes.Contains(a.Region?.Trim().ToUpperInvariant() ?? "")))
             return (QuoteStatus.InvalidAddress, null, null);
-        var region = a.Region?.ToUpperInvariant();
+        var region = a.Region?.Trim().ToUpperInvariant();
 
         var cart = await carts.GetAsync(owner, ct);
         if (!cart.CanCheckout || cart.Groups.Count == 0) return (QuoteStatus.EmptyOrUnavailableCart, null, null);
@@ -108,7 +141,18 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
             groups.Add(new QuoteGroup(g.SellerId, g.SellerName, g.BrandId, g.BrandName, lines, g.SubtotalCents, opts, unavailable, local, sel, shipping, shipTax, groupTax, g.SubtotalCents + shipping + groupTax));
         }
         var view = new QuoteView(cart.Currency, groups, groups.Sum(x => x.ItemsCents), groups.Sum(x => x.ShippingCents), groups.Sum(x => x.TaxCents), groups.Sum(x => x.TotalCents), groups.All(x => x.Selected is not null));
-        return (QuoteStatus.Ok, view, null);
+        if (view.TotalCents > CartLimits.MaxTotalCents) return (QuoteStatus.TotalTooLarge, null, null);
+        var now = time.GetUtcNow();
+        return (QuoteStatus.Ok, view with { QuoteHash = QuoteBinding.Make(view, country, region, a.PostalCode, now), ExpiresAt = now.Add(QuoteBinding.Lifetime) }, null);
     }
 
+}
+
+public static class UsStates
+{
+    public static readonly HashSet<string> Codes = new(StringComparer.Ordinal)
+    {
+        "AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY",
+        "AS","GU","MP","PR","VI","AA","AE","AP",
+    };
 }

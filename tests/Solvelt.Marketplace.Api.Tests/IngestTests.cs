@@ -455,7 +455,7 @@ public sealed class IngestTests : OrderFlowBase
         {
             var results = await Task.WhenAll(new[] { "NY", "NJ", "CA", "TX" }.Select(async region =>
             {
-                var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address(region), giftMessage = $"r{round}" }) };
+                var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = await QuoteHashes.WithHashAsync(_k.Http, _session, new { address = Address(region), giftMessage = $"r{round}" }) };
                 r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
                 return await _k.Http.SendAsync(r);
             }));
@@ -480,7 +480,7 @@ public sealed class IngestTests : OrderFlowBase
         _k.F.Services.GetRequiredService<CheckoutHooks>().AfterIntentCreated = async () => { inside.TrySetResult(); await release.Task; };
         var slow = Task.Run(async () =>
         {
-            var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address("NY") }) };
+            var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = await QuoteHashes.WithHashAsync(_k.Http, _session, new { address = Address("NY") }) };
             r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
             return await _k.Http.SendAsync(r);
         });

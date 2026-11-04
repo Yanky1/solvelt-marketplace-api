@@ -32,6 +32,7 @@ public static class CheckoutEndpoints
             QuoteStatus.InvalidAddress => Problems.Validation(new Dictionary<string, string> { ["address"] = "Enter a delivery country (2 letters), a postal code and, for the US, a state." }),
             QuoteStatus.EmptyOrUnavailableCart => Problems.Json(409, "cart_not_ready", "Your cart is empty or has items that are no longer available."),
             QuoteStatus.InvalidSelection => Problems.Unprocessable("invalid_selection", detail ?? "That delivery choice is not available."),
+            QuoteStatus.TotalTooLarge => Problems.Unprocessable("amount_too_large", "The total is above the maximum we can charge. Split the order."),
             _ => Problems.Json(503, "shipping_unavailable", "Delivery options are unavailable right now. Please try again in a moment."),
         };
     }
@@ -55,6 +56,7 @@ public static class CheckoutEndpoints
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("InvalidAddress") => Problems.Validation(new Dictionary<string, string> { ["address"] = "Enter a delivery country, postal code and, for the US, a state." }),
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("InvalidSelection") => Problems.Unprocessable("invalid_selection", "That delivery choice is not available."),
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("ShippingUnavailable") => Problems.Json(503, "shipping_unavailable", "Delivery options are unavailable right now. Please try again in a moment."),
+            CheckoutStatus.Quote when detail is not null && detail.StartsWith("TotalTooLarge") => Problems.Unprocessable("amount_too_large", "The total is above the maximum we can charge. Split the order."),
             CheckoutStatus.Quote when detail == "delivery_unavailable" => Problems.Json(409, "delivery_unavailable", "We can't deliver part of your cart to that address."),
             CheckoutStatus.Quote => Problems.Json(409, "cart_not_ready", "Your cart is empty or has items that are no longer available."),
             CheckoutStatus.PriceChanged => Results.Json(new { code = "price_changed", message = "The price changed. Review the new total and confirm to continue.", quote = result!.Quote }, statusCode: 409),

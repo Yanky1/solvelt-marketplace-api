@@ -102,7 +102,7 @@ public abstract class OrderFlowBase : IDisposable
     protected async Task<(string Number, string Intent, long Total)> Checkout(object? extra = null, string region = "NY")
     {
         var body = extra ?? new { address = Address(region) };
-        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(body) };
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = await QuoteHashes.WithHashAsync(_k.Http, _session, body) };
         r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
         var res = await _k.Http.SendAsync(r);
         var s = await res.Content.ReadAsStringAsync();
