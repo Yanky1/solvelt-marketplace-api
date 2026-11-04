@@ -90,9 +90,12 @@ public sealed class OrderGroup
     public bool Oversold { get; set; }
     /// <summary>Per seller order, the same cap as on the order (items + shipping + tax).</summary>
     public long RefundedCents { get; set; }
-    /// <summary>Items + shipping refunded so far (what the portal's ledger counts; never above <c>ItemsCents + ShippingCents</c>).</summary>
-    public long RefundedNetCents { get; set; }
-    /// <summary>Tax returned with those refunds (the portal's ledger never sees tax: the marketplace remits it).</summary>
+    /// <summary>Shipping returned so far (shipping excl. tax; never above <see cref="ShippingCents"/>).</summary>
+    public long RefundedShippingCents { get; set; }
+    /// <summary>
+    /// Tax inside what was returned so far: the portal's amounts include line tax, its ledger excludes it, so this is what we back out of every <c>refund.processed</c>
+    /// (floor proration per line, the last refund of a line takes the remainder; decision M3-16).
+    /// </summary>
     public long RefundedTaxCents { get; set; }
 }
 
@@ -113,6 +116,10 @@ public sealed class OrderLine
     public long UnitPriceCents { get; set; }
     public long LineTotalCents { get; set; }
     public long TaxCents { get; set; }
+    /// <summary>Units refunded or cancelled so far (never above <see cref="Quantity"/>).</summary>
+    public int RefundedQuantity { get; set; }
+    /// <summary>Tax backed out of the refunds of this line so far (of the tax we sent at ingest).</summary>
+    public long RefundedTaxCents { get; set; }
 }
 
 public static class RefundStatus
@@ -133,8 +140,10 @@ public sealed class OrderRefund
     public Guid? GroupId { get; set; }
     public long AmountCents { get; set; }
     public long ShippingCents { get; set; }
-    /// <summary>The tax share inside <see cref="AmountCents"/> (not reported to the portal).</summary>
+    /// <summary>The tax inside <see cref="AmountCents"/> (the portal's amounts include line tax; <c>refund.processed</c> reports the amount without it).</summary>
     public long TaxCents { get; set; }
+    /// <summary>JSON <c>[{ "lineId", "quantity", "taxCents" }]</c>: which line counters this refund moved, so a refusal by Stripe gives them back exactly.</summary>
+    public string? PartsJson { get; set; }
     public string Reason { get; set; } = "";
     public string Status { get; set; } = RefundStatus.Reserved;
     public string? StripeRefundId { get; set; }
