@@ -104,8 +104,21 @@ public static class FulfilmentProjector
                 if (data.TryGetProperty("eta", out var eta))
                 {
                     if (eta.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(eta.GetString(), out var e)) sh.Eta = e.ToUniversalTime();
-                    else if (eta.ValueKind == JsonValueKind.Object && Time(eta, "estimatedAt") is { } est) sh.Eta = est;
+                    else if (eta.ValueKind == JsonValueKind.Object)
+                    {
+                        sh.Eta = Time(eta, "estimatedAt") ?? sh.Eta;
+                        sh.EtaWindowStart = Time(eta, "windowStart") ?? sh.EtaWindowStart;
+                        sh.EtaWindowEnd = Time(eta, "windowEnd") ?? sh.EtaWindowEnd;
+                    }
                 }
+                sh.DriverFirstName = Cap(Str(data, "driverFirstName"), 60) ?? sh.DriverFirstName;
+                if (data.TryGetProperty("events", out var evs) && evs.ValueKind == JsonValueKind.Array) sh.TrackingEventsJson = TimelineJson(evs) ?? sh.TrackingEventsJson;
+                // The position exists only while the buyer's stop is next. Anything else (another status, or an event without one) clears it: it is never carried over.
+                if (Str(data, "status") == "out_for_delivery" && data.TryGetProperty("position", out var pos) && pos.ValueKind == JsonValueKind.Object
+                    && pos.TryGetProperty("lat", out var la) && la.TryGetDouble(out var lat) && pos.TryGetProperty("lng", out var ln) && ln.TryGetDouble(out var lng)
+                    && lat is >= -90 and <= 90 && lng is >= -180 and <= 180)
+                { sh.PositionLat = Math.Round(lat, 3); sh.PositionLng = Math.Round(lng, 3); sh.PositionAt = Time(data, "occurredAt") is { } oc && oc <= now ? oc : now; }
+                else { sh.PositionLat = sh.PositionLng = null; sh.PositionAt = null; }
                 sh.UpdatedAt = now;
                 return HandlerOutcome.Applied();
             }
@@ -114,6 +127,15 @@ public static class FulfilmentProjector
                 var sh = await ShipmentAsync(c, group, Str(data, "shipmentId"));
                 if (sh is null) return HandlerOutcome.Skipped("shipment id missing");
                 sh.DeliveredAt ??= Time(data, "deliveredAt") ?? now;
+                sh.PositionLat = sh.PositionLng = null; sh.PositionAt = null;   // delivered: no more live position
+                sh.Placement = Cap(Str(data, "placement"), 40) ?? sh.Placement;
+                if (data.TryGetProperty("proof", out var proof) && proof.ValueKind == JsonValueKind.Object && ProofPaths(proof) is { Count: > 0 } paths)
+                {
+                    // links are short-lived (the portal says expiresInMinutes, 60 by default): kept no longer than that, counted from now (our clock, never the event's)
+                    var minutes = proof.TryGetProperty("expiresInMinutes", out var em) && em.TryGetInt32(out var m) ? Math.Clamp(m, 1, 120) : 60;
+                    sh.ProofJson = JsonSerializer.Serialize(paths);
+                    sh.ProofExpiresAt = now.AddMinutes(minutes);
+                }
                 sh.UpdatedAt = now;
                 return HandlerOutcome.Applied();
             }
@@ -264,6 +286,36 @@ public static class FulfilmentProjector
             var f = await db.OrderLineFulfilments.FindAsync([line.Id], ct);
             if (f is not null) add(f, Math.Min(qty, line.Quantity));
         }
+    }
+
+    public const string ProofPrefix = "/api/public/delivery-proof/";
+
+    /// <summary>The portal-relative path+query of each proof link (photos, then the signature). Anything that is not under the proof path of the portal is dropped.</summary>
+    internal static List<string> ProofPaths(JsonElement proof)
+    {
+        var raw = new List<string>();
+        if (proof.TryGetProperty("photoUrls", out var ph) && ph.ValueKind == JsonValueKind.Array) raw.AddRange(ph.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).Take(6));
+        if (Str(proof, "signatureUrl") is { } sig) raw.Add(sig);
+        var paths = new List<string>();
+        foreach (var u in raw)
+        {
+            var pq = Uri.TryCreate(u, UriKind.Absolute, out var abs) ? abs.PathAndQuery : u;
+            if (pq.StartsWith(ProofPrefix, StringComparison.Ordinal) && pq.Length <= 600 && !pq.Contains("..") && !pq.Contains('#')) paths.Add(pq);
+        }
+        return paths;
+    }
+
+    /// <summary>The carrier timeline, bounded: at most 30 entries, texts capped, times parsed; null when nothing usable.</summary>
+    internal static string? TimelineJson(JsonElement events)
+    {
+        var list = new List<object>();
+        foreach (var e in events.EnumerateArray().Take(30))
+        {
+            if (e.ValueKind != JsonValueKind.Object) continue;
+            list.Add(new { status = Cap(Str(e, "status"), 40), detail = Cap(Str(e, "detail"), 200), location = Cap(Str(e, "location"), 100), at = Time(e, "at") });
+        }
+        var json = JsonSerializer.Serialize(list);
+        return list.Count == 0 || json.Length > 8000 ? null : json;
     }
 
     internal static string? Str(JsonElement d, string n) => d.ValueKind == JsonValueKind.Object && d.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
