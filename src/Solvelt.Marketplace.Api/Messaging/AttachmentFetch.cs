@@ -12,7 +12,21 @@ namespace Solvelt.Marketplace.Api.Messaging;
 /// Fetches one seller attachment with a signed GET (<c>portal.attachment-fetch</c>), runs it through <see cref="AttachmentSanitizer"/> and stores the result. A file that fails the checks is marked
 /// <c>rejected</c> (the buyer sees it was removed for safety); a busy portal is retried; a 404 means the portal no longer has it (rejected). The portal's declared type and size are never trusted.
 /// </summary>
-public sealed class AttachmentFetchOutboxHandler(MarketplaceDb db, ISignedPortalClient portal) : IOutboxHandler
+/// <summary>
+/// Decision M5-22 (review G6): there is no virus scanner for now. Every file that passed the sanitizer is offered to this seam before it is stored; the default allows it. Files are still
+/// served only as downloads with <c>nosniff</c> and a sandboxing CSP. A real scanner (ClamAV...) replaces <see cref="AllowAllAttachmentScanner"/> in DI. An exception retries the fetch.
+/// </summary>
+public interface IAttachmentScanner
+{
+    Task<bool> AllowsAsync(byte[] bytes, string contentType, CancellationToken ct);
+}
+
+public sealed class AllowAllAttachmentScanner : IAttachmentScanner
+{
+    public Task<bool> AllowsAsync(byte[] bytes, string contentType, CancellationToken ct) => Task.FromResult(true);
+}
+
+public sealed class AttachmentFetchOutboxHandler(MarketplaceDb db, ISignedPortalClient portal, IAttachmentScanner scanner) : IOutboxHandler
 {
     public const string Type = "portal.attachment-fetch";
     public IReadOnlyCollection<string> Types { get; } = [Type];
@@ -35,6 +49,8 @@ public sealed class AttachmentFetchOutboxHandler(MarketplaceDb db, ISignedPortal
             return res.Retryable ? OutboxResult.Retry($"portal_{res.Status}") : res.Status == 404 ? await Reject(a, "gone", ct) : OutboxResult.Dead($"portal_{res.Status}");
         var r = AttachmentSanitizer.Process(res.Body!);
         if (r.Rejected is not null) return await Reject(a, r.Rejected, ct);
+        // the seam for a virus scanner (decision M5-22): nothing is Stored before it has said yes
+        if (!await scanner.AllowsAsync(r.Bytes!, r.ContentType!, ct)) return await Reject(a, "scanner_refused", ct);
 
         a.SniffedType = r.ContentType; a.Size = r.Bytes!.Length; a.Status = AttachmentStatuses.Stored;
         db.MessageAttachmentData.Add(new MessageAttachmentData { AttachmentId = a.Id, Bytes = r.Bytes });
