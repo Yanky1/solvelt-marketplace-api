@@ -108,21 +108,25 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
         if (intentId is null || evt.Long("amount_refunded") is null) return StripeOutcome.Unmatched;
         var first = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.IntentId == intentId, ct);
         if (first is null) return StripeOutcome.Unmatched;
-        // One of our own refunds is on its way to Stripe (reserved, not yet confirmed): the cumulative amount would include it before we can tell which part is ours, so the event waits (Stripe
-        // retries). A reservation stuck for over an hour no longer blocks the reconciliation.
-        var cutoff = time.GetUtcNow().AddHours(-1);
-        if (await db.BookingRefunds.AsNoTracking().AnyAsync(r => r.PaymentId == first.Id && r.Status == RefundStatus.Reserved && r.CreatedAt > cutoff, ct)) throw new StripeOrderNotYetKnownException();
         // The event's number is a hint, Stripe's own current answer is the truth (M3's R1/R2 approach): events arrive late and out of order. An unreachable Stripe is a retry.
         long refunded;
-        try { refunded = await payments.GetAmountRefundedAsync(intentId, ct); }
+        IReadOnlyList<ProviderRefund> listed;
+        try { refunded = await payments.GetAmountRefundedAsync(intentId, ct); listed = await payments.ListRefundsAsync(intentId, ct); }
         catch (PaymentsUnavailableException) { throw new StripeOrderNotYetKnownException(); }
         catch (PaymentRejectedException) { return StripeOutcome.Ignored; }
+        // A reserved refund of OURS that Stripe already executed (our call timed out, its retry is queued) is matched by the refund_key in Stripe's list (M3's approach): it is money that left and is ours, never
+        // a dashboard refund. A reserved refund Stripe does not list may still be on its way, so for a recent one the event waits (Stripe retries); one stuck for over an hour no longer blocks.
+        var executed = listed.Where(l => l.RefundKey is not null && l.Status is not ("failed" or "canceled")).Select(l => l.RefundKey!).ToHashSet();
+        var cutoff = time.GetUtcNow().AddHours(-1);
+        var reserved = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == first.Id && r.Status == RefundStatus.Reserved).Select(r => new { r.Key, r.AmountCents, r.CreatedAt }).ToListAsync(ct);
+        if (reserved.Any(r => !executed.Contains(r.Key) && r.CreatedAt > cutoff)) throw new StripeOrderNotYetKnownException();
+        var inFlightOurs = reserved.Where(r => executed.Contains(r.Key)).Sum(r => r.AmountCents);
         for (var attempt = 0; attempt < 5; attempt++)
         {
             var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.IntentId == intentId, ct);
             if (pay is null) return StripeOutcome.Unmatched;
             var ours = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == pay.Id && r.Status == RefundStatus.Succeeded).SumAsync(r => (long?)r.AmountCents, ct) ?? 0;
-            var delta = refunded - ours - pay.ExternalRefundedCents;
+            var delta = refunded - ours - inFlightOurs - pay.ExternalRefundedCents;
             if (delta <= 0) return StripeOutcome.Ignored;                                            // ours, or already recorded
             var seen = pay.ExternalRefundedCents;
             var won = await db.BookingPayments.Where(p => p.Id == pay.Id && p.ExternalRefundedCents == seen)

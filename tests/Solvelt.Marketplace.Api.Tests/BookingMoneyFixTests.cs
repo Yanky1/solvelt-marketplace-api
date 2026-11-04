@@ -461,4 +461,20 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         var sent = Assert.Single(_portal.PaymentEvents, e => e.Contains("dispute.created"));
         Assert.Contains("\"currency\":\"USD\"", sent); Assert.DoesNotContain("\"currency\":\"usd\"", sent);
     }
+
+    [Fact]
+    public async Task A_refund_of_ours_that_stripe_executed_before_our_call_timed_out_is_matched_by_refund_key_and_not_recorded_as_external()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        Stripe.TimeoutAfterExecuteNext = true;                                       // Stripe makes the refund, our call times out: the row stays Reserved
+        await PortalEvent("booking.cancelled", Now.AddMinutes(1), b, new { cancelledBy = "buyer", cancellationFeeCents = 6000, refundDueCents = 18000 });
+        await _k.Dispatch();
+        Assert.Equal(18000, Stripe.Refunds.Sum(r => r.AmountCents));
+        Assert.True((await StripeObject("charge.refunded", new { payment_intent = intent.Id, amount_refunded = 18000 })).IsSuccessStatusCode);   // answered, not left waiting
+        var pay = await Pay(b.Id);
+        Assert.Equal(0, pay.ExternalRefundedCents);                                  // it is OUR money that left, not a dashboard refund
+        Assert.Equal(18000, pay.RefundedCents);
+    }
 }
