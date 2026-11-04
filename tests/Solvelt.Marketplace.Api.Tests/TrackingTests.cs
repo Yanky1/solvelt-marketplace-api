@@ -140,6 +140,33 @@ public sealed class TrackingTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task A_portal_relative_proof_link_is_fetched_with_exactly_its_path_and_query()
+    {
+        var (o, g) = await Shipped();
+        _k.F.PublicResponder = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Png) };
+        // the portal sends links relative to its own origin (M5 review P1); the absolute one is only the signature
+        await Evt("shipment.delivered", o, g, new { shipmentId = "sh-1", proof = new { photoUrls = new[] { "/api/public/delivery-proof/rel1?exp=9&sig=a%2Bb" }, expiresInMinutes = 60 } });
+        var s = await Shipment(o.Number);
+        Assert.Equal(1, s.GetProperty("proofCount").GetInt32());
+        var res = await Get($"/api/v1/orders/{o.Number}/shipments/{s.GetProperty("id").GetGuid()}/proof/0");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var call = _k.F.PublicCalls.Single();
+        Assert.Equal(("portal.test", "/api/public/delivery-proof/rel1?exp=9&sig=a%2Bb"), (call.Host, call.PathAndQuery));
+    }
+
+    [Theory]
+    [InlineData("file:///api/public/delivery-proof/x")]
+    [InlineData("ftp://portal.test/api/public/delivery-proof/x")]
+    [InlineData("//evil.example/api/public/delivery-proof/x")]
+    [InlineData("api/public/delivery-proof/x")]
+    public async Task Links_that_are_neither_portal_relative_nor_http_are_dropped(string link)
+    {
+        var (o, g) = await Shipped();
+        await Evt("shipment.delivered", o, g, new { shipmentId = "sh-1", proof = new { photoUrls = new[] { link }, expiresInMinutes = 60 } });
+        Assert.Equal(0, (await Shipment(o.Number)).GetProperty("proofCount").GetInt32());
+    }
+
+    [Fact]
     public async Task Only_links_under_the_portals_proof_path_are_kept_the_host_in_a_link_is_never_contacted_and_other_buyers_get_404()
     {
         var (o, g) = await Shipped();

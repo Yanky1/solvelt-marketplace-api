@@ -345,7 +345,12 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
         var paths = new List<string>();
         foreach (var u in raw)
         {
-            var pq = Uri.TryCreate(u, UriKind.Absolute, out var abs) ? abs.PathAndQuery : u;
+            // A portal-relative link ("/api/...") is kept as it is: on Linux Uri.TryCreate parses it as an absolute file URI and PathAndQuery
+            // would mangle it. Anything else must be an absolute http(s) URL, of which only the path and query are kept (M5 review P1).
+            string pq;
+            if (u.StartsWith('/') && !u.StartsWith("//", StringComparison.Ordinal)) pq = u;
+            else if (Uri.TryCreate(u, UriKind.Absolute, out var abs) && (abs.Scheme == Uri.UriSchemeHttps || abs.Scheme == Uri.UriSchemeHttp)) pq = abs.PathAndQuery;
+            else continue;
             if (pq.StartsWith(ProofPrefix, StringComparison.Ordinal) && pq.Length <= 600 && !pq.Contains("..") && !pq.Contains('#')) paths.Add(pq);
         }
         return paths;
