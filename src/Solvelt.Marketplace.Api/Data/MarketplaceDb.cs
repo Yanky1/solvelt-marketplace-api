@@ -27,6 +27,8 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<MarketplaceOrder> Orders => Set<MarketplaceOrder>();
     public DbSet<OrderGroup> OrderGroups => Set<OrderGroup>();
     public DbSet<OrderLine> OrderLines => Set<OrderLine>();
+    public DbSet<OrderRefund> OrderRefunds => Set<OrderRefund>();
+    public DbSet<StripeEvent> StripeEvents => Set<StripeEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

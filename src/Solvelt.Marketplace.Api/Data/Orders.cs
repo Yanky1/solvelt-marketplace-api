@@ -53,7 +53,13 @@ public sealed class MarketplaceOrder
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? PaidAt { get; set; }
+    /// <summary>When the portal accepted the order (seller orders stored).</summary>
+    public DateTimeOffset? PlacedAt { get; set; }
     public string? FailureCode { get; set; }
+    /// <summary>What Stripe actually took (set when the payment succeeds; equals <see cref="TotalCents"/> unless the amounts disagreed, which fails the order).</summary>
+    public long PaidCents { get; set; }
+    /// <summary>Cents reserved for refunds so far. Raised only by a conditional UPDATE that keeps it at or below <see cref="PaidCents"/>: refunds can never exceed what was paid.</summary>
+    public long RefundedCents { get; set; }
 
     public List<OrderGroup> Groups { get; set; } = [];
     public List<OrderLine> Lines { get; set; } = [];
@@ -80,6 +86,10 @@ public sealed class OrderGroup
     /// <summary>The portal's seller order, stored when the order is ingested.</summary>
     public Guid? SellerOrderId { get; set; }
     public string? SellerOrderNumber { get; set; }
+    /// <summary>The portal could not cover every unit from stock; the seller will sort it out (shown to the buyer).</summary>
+    public bool Oversold { get; set; }
+    /// <summary>Per seller order, the same cap as on the order.</summary>
+    public long RefundedCents { get; set; }
 }
 
 public sealed class OrderLine
@@ -99,6 +109,75 @@ public sealed class OrderLine
     public long UnitPriceCents { get; set; }
     public long LineTotalCents { get; set; }
     public long TaxCents { get; set; }
+}
+
+public static class RefundStatus
+{
+    /// <summary>The amount is reserved against the cap and a Stripe refund is queued.</summary>
+    public const string Reserved = "reserved", Succeeded = "succeeded", Rejected = "rejected";
+}
+
+/// <summary>
+/// One refund we owe the buyer. <see cref="Key"/> is our idempotency id (<c>fail:&lt;order&gt;</c>, <c>portal:&lt;portal refund id&gt;</c>, ...), unique: a replayed webhook or retried
+/// outbox message cannot create a second refund. The same key is Stripe's <c>Idempotency-Key</c>.
+/// </summary>
+public sealed class OrderRefund
+{
+    public Guid Id { get; set; }
+    public string Key { get; set; } = "";
+    public Guid OrderId { get; set; }
+    public Guid? GroupId { get; set; }
+    public long AmountCents { get; set; }
+    public long ShippingCents { get; set; }
+    public string Reason { get; set; } = "";
+    public string Status { get; set; } = RefundStatus.Reserved;
+    public string? StripeRefundId { get; set; }
+    /// <summary>Send <c>refund.processed</c> to the portal once Stripe confirms (refunds the portal asked for).</summary>
+    public bool ReportToPortal { get; set; }
+    public string? PortalRefundId { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>Idempotency and audit of Stripe webhooks: the event id is the primary key. No payload is stored (it can hold card details).</summary>
+public sealed class StripeEvent
+{
+    public string Id { get; set; } = "";
+    public string Type { get; set; } = "";
+    public long StripeCreated { get; set; }
+    public DateTimeOffset ReceivedAt { get; set; }
+    /// <summary>applied, ignored (a type we do not handle), unmatched (not ours).</summary>
+    public string Outcome { get; set; } = "";
+    public string? ObjectId { get; set; }
+}
+
+internal sealed class OrderExtrasConfiguration : IEntityTypeConfiguration<OrderRefund>, IEntityTypeConfiguration<StripeEvent>
+{
+    public void Configure(EntityTypeBuilder<OrderRefund> b)
+    {
+        b.ToTable("order_refunds");
+        b.HasKey(r => r.Id);
+        b.Property(r => r.Id).ValueGeneratedNever();
+        b.Property(r => r.Key).HasMaxLength(100).IsRequired();
+        b.Property(r => r.Reason).HasMaxLength(60);
+        b.Property(r => r.Status).HasMaxLength(20).IsRequired();
+        b.Property(r => r.StripeRefundId).HasMaxLength(100);
+        b.Property(r => r.PortalRefundId).HasMaxLength(100);
+        b.HasIndex(r => r.Key).IsUnique();
+        b.HasIndex(r => r.OrderId);
+        b.HasIndex(r => r.PortalRefundId);
+    }
+
+    public void Configure(EntityTypeBuilder<StripeEvent> b)
+    {
+        b.ToTable("stripe_events");
+        b.HasKey(e => e.Id);
+        b.Property(e => e.Id).HasMaxLength(100);
+        b.Property(e => e.Type).HasMaxLength(100).IsRequired();
+        b.Property(e => e.Outcome).HasMaxLength(20).IsRequired();
+        b.Property(e => e.ObjectId).HasMaxLength(100);
+        b.HasIndex(e => e.ReceivedAt);
+    }
 }
 
 internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceOrder>, IEntityTypeConfiguration<OrderGroup>, IEntityTypeConfiguration<OrderLine>

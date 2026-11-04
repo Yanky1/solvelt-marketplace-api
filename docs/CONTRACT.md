@@ -118,3 +118,4 @@ optional phone. Retention and redaction rules for every field are in DECISIONS (
 | C4 | Webhook signature v2 over ts.id.type.body | Portal ROADMAP; until then consumers use the signed body id/type (we do) |
 | C5 | Explicit derived `delivery {ships, localDelivery, serviceLocations[]}` on listings | Accepted, after C1; M2 falls back to the `delivery` attribute |
 | C6 | Key /products/{id}/questions and /content/reports rate limits on the verified caller + target, not per IP (one marketplace caller for all shoppers) | Requested 2026-11-04 |
+| C7 | Ingest gaps found by M3: (1) per-group speed in `shipping[]` (the order has one `shippingSpeed`; our groups can differ), (2) explicit `weightGrams` per variant in the catalog feed (weight-priced shipping), (3) a field for tax charged on shipping (M3 folds it into line `taxCents` for now) | Requested 2026-11-04 (M3 worker, via the orchestrator) |

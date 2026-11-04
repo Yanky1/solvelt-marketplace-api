@@ -81,6 +81,12 @@ builder.Services.AddScoped<IPaymentProvider>(sp =>
     !string.IsNullOrWhiteSpace(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<StripeOptions>>().Value.SecretKey) ? sp.GetRequiredService<StripeHttpProvider>()
     : devLike ? sp.GetRequiredService<FakePaymentProvider>() : new UnconfiguredPaymentProvider());
 builder.Services.AddScoped<CheckoutService>();
+builder.Services.AddScoped<RefundService>();
+builder.Services.AddScoped<OrderMaintenance>();
+if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<OrderWorker>();
+builder.Services.AddScoped<StripeEventProcessor>();
+builder.Services.AddScoped<IOutboxHandler, OrderIngestHandler>();
+builder.Services.AddScoped<IOutboxHandler, StripeRefundHandler>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();
@@ -127,6 +133,7 @@ app.MapOutboxAdmin();
 app.MapAuth();
 app.MapCart();
 app.MapCheckout();
+app.MapStripeWebhooks();
 
 app.Run();
 
