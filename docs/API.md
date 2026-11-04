@@ -80,7 +80,16 @@ Brands with at least one visible listing, by name (at most 500). `sellerId` (an 
 | `seller` | A seller id (`400` when malformed) |
 | `type` | `product` or `service` |
 | `q` | Search text (at most 100 characters, else `400`). Normalised to lower-case ASCII words (accents folded, punctuation ignored), at most 8 words of 40 letters; **every** word must match and the last one matches as a prefix. Matches title, brand, the seller's search terms and the description, **weighted in that order**; an exact word beats a prefix. When nothing matches, a typo-tolerant pass runs (words of 4+ letters, about one slip in six letters; every word must be close). Combines with every other filter. Blank or missing = no search; punctuation only = no results. At most 1000 best matches are ranked, so `total` never exceeds 1000 for a search |
-| `sort` | `relevance` (default when `q` is given; without `q` it behaves as `newest`), `newest` (default otherwise), `price_asc`, `price_desc`, `title`. Ties break on id, so paging never repeats or drops an item |
+| `priceMin`, `priceMax` | Whole cents, 0 to 1000000000000; `priceMin` above `priceMax` is `400`. A listing matches when some buyable price lies in the range (its price range overlaps it) |
+| `available` | `true` leaves out sold-out listings (anything else is `400`) |
+| `kosher` | Comma separated kosher certifications (`OU,Star-K`): alternatives (OR). Shortcut for `attr=kosher-certification:<value>` |
+| `delivery` | Comma separated, each one of `ships`, `local`, `at-home`, `online`: alternatives. Shortcut for `attr=delivery:<value>`; products carry `ships` and sometimes `local`, services `at-home` and/or `online` |
+| `attr` | Repeatable `key:value` filter on any attribute (`attr=kosher-status:dairy`). Values of one key are alternatives (OR), different keys all have to hold (AND). At most 12 pairs, 10 values per key, keys up to 100 and values up to 60 characters, else `400` |
+| `facets` | `true` adds a `facets` object (see below); anything but `true`/`false` is `400` |
+| `sort` | `relevance` (default when `q` is given; without `q` it behaves as `newest`), `newest` (default otherwise), `best_selling` (placeholder: the newest order until M3 records sales), `price_asc`, `price_desc`, `title`. Ties break on id, so paging never repeats or drops an item |
+| `cursor` | Opaque `nextCursor` of the previous page, for the same filters and sort. Use it instead of `page` (both is `400`; a cursor of another sort or a forged one is `400`). A cursor is a position, so new listings arriving between two requests never shift or repeat items |
+
+Every parameter except `attr` may be given once; a repeat is `400`.
 | `page` | 1-based, default 1 (at most 100000) |
 | `pageSize` | Default 24, at most 100 |
 
@@ -93,8 +102,20 @@ A bad value is `400 { "code": "invalid_query", "message": … }`. Response:
     "seller": { "id": "…", "displayName": "Mazel Bakery" },
     "category": { "id": "…", "slug": "bakery", "name": "Bakery" },
     "image": { "id": "…", "width": 1200, "height": 1200, "alt": "Classic Braided Challah, photo 1" } } ],
-  "page": 1, "pageSize": 24, "total": 40, "totalPages": 2 }
+  "page": 1, "pageSize": 24, "total": 40, "totalPages": 2, "nextCursor": "…" }
 ```
+`nextCursor` is `null` on the last page (the API fetches one extra row to know). With `cursor`, `page` is `0`; `total` and `totalPages` are still given. Search is capped at 1000 matches (`total` never exceeds it).
+
+With `facets=true` the response also has (disjunctive: each facet is counted with every filter **except its own**, so it shows what choosing one of its values would give):
+```json
+"facets": { "categories": [ { "id": "…", "slug": "food-drink", "name": "Food & Drink", "listingCount": 21, "children": [ … ] } ],
+  "brands": [ { "id": "…", "slug": "challah-corner", "name": "Challah Corner", "count": 3 } ],
+  "sellers": [ { "id": "…", "displayName": "Mazel Bakery", "count": 8 } ],
+  "types": [ { "value": "product", "count": 28 } ], "available": 38,
+  "price": { "minCents": 600, "maxCents": 48000 },
+  "attributes": { "kosher-certification": [ { "value": "OU", "count": 20 } ], "kosher-status": [ … ], "kosher-for-passover": [ … ], "delivery": [ … ] } }
+```
+`price` is `null`/`null` when nothing matches; counts are listings (a listing with two values of an attribute counts once for each). Rating facets arrive with M6.
 `priceFromCents`/`priceToCents` are the range over the variants that can be bought now (over all variants when everything is sold out); `compareAtFromCents` is the lowest struck-through price above the price, or `null`; `available` is false when every variant is sold out (the listing is still shown); `image` is `null` when there is none.
 
 ### `GET /api/v1/catalog/suggest?q=&limit=`

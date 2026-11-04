@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
@@ -16,7 +17,8 @@ public sealed record ListingCardDto(Guid Id, string Slug, string Type, string Ti
     long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, CategoryCard Category, ImageCard? Image);
 public sealed record Suggestion(string Kind, string Text, string Slug);
 public sealed record SuggestResponse(string Query, IReadOnlyList<Suggestion> Suggestions);
-public sealed record ListingsPage(IReadOnlyList<ListingCardDto> Items, int Page, int PageSize, int Total, int TotalPages);
+public sealed record ListingsPage(IReadOnlyList<ListingCardDto> Items, int Page, int PageSize, int Total, int TotalPages, string? NextCursor,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ListingFacets? Facets);
 public sealed record VariantItem(Guid Id, string Name, long PriceCents, long? CompareAtCents, bool Available);
 public sealed record AttributeItem(string Key, string Value);
 public sealed record FaqItem(string Question, string Answer);
@@ -29,7 +31,6 @@ public sealed record ListingDetailDto(Guid Id, string Slug, string Type, string 
 public static class CatalogEndpoints
 {
     public const int DefaultPageSize = 24, MaxPageSize = 100, MaxBrands = 500;
-    private static readonly string[] Sorts = ["relevance", "newest", "price_asc", "price_desc", "title"];
     public const int MaxSuggestions = 10, DefaultSuggestions = 8, MinSuggestChars = 2;
 
     public static IEndpointRouteBuilder MapCatalog(this IEndpointRouteBuilder app)
@@ -51,6 +52,12 @@ public static class CatalogEndpoints
     {
         var categories = await db.CatalogCategories.AsNoTracking().OrderBy(c => c.SortOrder).ThenBy(c => c.Name).ToListAsync(ct);
         var direct = await Visible(db).GroupBy(l => l.CategoryId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
+        return Results.Json(BuildTree(categories, direct));
+    }
+
+    /// <summary>The tree, roots first, with the counts of the given direct counts rolled up; categories whose subtree has none are left out.</summary>
+    internal static List<CategoryNode> BuildTree(List<CatalogCategory> categories, Dictionary<Guid, int> direct)
+    {
         var byParent = categories.ToLookup(c => c.ParentId);
         CategoryNode? Build(CatalogCategory c, HashSet<Guid> path)
         {
@@ -60,8 +67,7 @@ public static class CatalogEndpoints
             return new CategoryNode(c.Id, c.Slug, c.Name, direct.GetValueOrDefault(c.Id) + kids.Sum(k => k.ListingCount), kids);
         }
         var ids = categories.Select(c => c.Id).ToHashSet();
-        var roots = categories.Where(c => c.ParentId is null || !ids.Contains(c.ParentId.Value)).Select(c => Build(c, [])).Where(n => n is not null && n.ListingCount > 0).ToList();
-        return Results.Json(roots);
+        return categories.Where(c => c.ParentId is null || !ids.Contains(c.ParentId.Value)).Select(c => Build(c, [])).Where(n => n is not null && n.ListingCount > 0).Cast<CategoryNode>().ToList();
     }
 
     private static async Task<IResult> Brands(MarketplaceDb db, string? sellerId, CancellationToken ct)
@@ -76,53 +82,66 @@ public static class CatalogEndpoints
             new SellerCard(b.SellerId, sellers.GetValueOrDefault(b.SellerId)?.DisplayName ?? ""), b.LogoImageId, counts[b.Id])));
     }
 
-    private static async Task<IResult> Listings(MarketplaceDb db, string? category, string? brand, string? seller, string? type, string? sort, string? page, string? pageSize, [FromQuery(Name = "q")] string? search, ISearchIndex index, CancellationToken ct)
+    private static async Task<IResult> Listings(HttpRequest request, MarketplaceDb db, ISearchIndex index, CancellationToken ct)
     {
-        if (type is not null && !ListingTypes.IsValid(type)) return Problems.BadRequest("invalid_query", "type must be 'product' or 'service'.");
-        if (search is { Length: > SearchTerms.MaxQueryLength }) return Problems.BadRequest("invalid_query", $"q must be at most {SearchTerms.MaxQueryLength} characters.");
-        var terms = SearchTerms.From(search);
-        var searching = !string.IsNullOrWhiteSpace(search);
-        sort ??= searching ? "relevance" : "newest";
-        if (!Sorts.Contains(sort)) return Problems.BadRequest("invalid_query", $"sort must be one of {string.Join(", ", Sorts)}.");
-        if (!TryInt(page, 1, 1, 100_000, out var pageNo)) return Problems.BadRequest("invalid_query", "page must be a whole number from 1.");
-        if (!TryInt(pageSize, DefaultPageSize, 1, MaxPageSize, out var size)) return Problems.BadRequest("invalid_query", $"pageSize must be a whole number from 1 to {MaxPageSize}.");
+        var (query, error) = await ListingQuery.ParseAsync(request.Query, db, index, ct);
+        if (query is null) return error!;
+        var visible = Visible(db);
+        var filtered = query.Apply(db, visible);
+        var total = await filtered.CountAsync(ct);
+        var (rows, next) = query.Sort == "relevance" && query.Searching ? await RelevanceSlice(filtered, query, ct) : await Slice(filtered, query, ct);
+        var items = await ToCards(db, rows, ct);
+        var facets = query.WantFacets ? await query.FacetsAsync(db, visible, ct) : null;
+        return Results.Json(new ListingsPage(items, query.Cursor is null ? query.Page : 0, query.PageSize, total, (int)Math.Ceiling(total / (double)query.PageSize), next, facets));
+    }
 
-        Guid? sellerId = null;
-        if (seller is not null) { if (!Guid.TryParse(seller, out var sg)) return Problems.BadRequest("invalid_query", "seller must be an id."); sellerId = sg; }
-
-        var q = Visible(db);
-        if (type is not null) q = q.Where(l => l.Type == type);
-        if (sellerId is not null) q = q.Where(l => l.SellerId == sellerId);
-        if (!string.IsNullOrWhiteSpace(brand))
-        {
-            var brandId = Guid.TryParse(brand, out var bg) ? bg : await db.CatalogBrands.Where(b => b.Slug == brand).Select(b => (Guid?)b.Id).FirstOrDefaultAsync(ct);
-            q = q.Where(l => l.BrandId == brandId);
-        }
-        if (!string.IsNullOrWhiteSpace(category))
-        {
-            var all = await db.CatalogCategories.AsNoTracking().ToListAsync(ct);
-            var root = Guid.TryParse(category, out var cg) ? all.FirstOrDefault(c => c.Id == cg) : all.FirstOrDefault(c => c.Slug == category);
-            var ids = root is null ? [] : Descendants(all, root.Id);
-            q = q.Where(l => ids.Contains(l.CategoryId));
-        }
-        if (searching)
-        {
-            var matches = terms.Count == 0 ? [] : await index.SearchAsync(db, terms, SearchTerms.MaxMatches, ct);
-            var ids = matches.Select(m => m.ListingId).ToList();
-            q = q.Where(l => ids.Contains(l.Id));
-            if (sort == "relevance") return await RelevancePage(db, q, matches, pageNo, size, ct);
-        }
+    /// <summary>One page in a database order, plus the cursor of the next one. Fetches one extra row to know whether there is a next page.</summary>
+    private static async Task<(List<CatalogListing> Rows, string? Next)> Slice(IQueryable<CatalogListing> q, ListingQuery o, CancellationToken ct)
+    {
+        var sort = o.Sort == "relevance" ? "newest" : o.Sort;      // relevance without a query is the newest order
+        if (o.Cursor is { } c) q = After(q, sort, c);
         q = sort switch
         {
             "price_asc" => q.OrderBy(l => l.PriceFromCents).ThenBy(l => l.Id),
             "price_desc" => q.OrderByDescending(l => l.PriceFromCents).ThenBy(l => l.Id),
             "title" => q.OrderBy(l => l.TitleSort).ThenBy(l => l.Id),
-            _ => q.OrderByDescending(l => l.CreatedAt).ThenBy(l => l.Id),
+            _ => q.OrderByDescending(l => l.CreatedAt).ThenBy(l => l.Id),    // newest; best_selling is a placeholder for it until M3 records sales
         };
-        var total = await q.CountAsync(ct);
-        var rows = await q.Skip((pageNo - 1) * size).Take(size).ToListAsync(ct);
-        var items = await ToCards(db, rows, ct);
-        return Results.Json(new ListingsPage(items, pageNo, size, total, (int)Math.Ceiling(total / (double)size)));
+        var skip = o.Cursor is null ? (o.Page - 1) * o.PageSize : 0;
+        var rows = await q.Skip(skip).Take(o.PageSize + 1).ToListAsync(ct);
+        var more = rows.Count > o.PageSize;
+        if (more) rows.RemoveAt(rows.Count - 1);
+        return (rows, more ? new ListingCursor(o.Sort, ListingCursor.KeyOf(sort, rows[^1]), rows[^1].Id).Encode() : null);
+    }
+
+    private static IQueryable<CatalogListing> After(IQueryable<CatalogListing> q, string sort, ListingCursor c)
+    {
+        var id = c.Id;
+        switch (sort)
+        {
+            case "price_asc": { var p = long.Parse(c.Key, CultureInfo.InvariantCulture); return q.Where(l => l.PriceFromCents > p || (l.PriceFromCents == p && l.Id.CompareTo(id) > 0)); }
+            case "price_desc": { var p = long.Parse(c.Key, CultureInfo.InvariantCulture); return q.Where(l => l.PriceFromCents < p || (l.PriceFromCents == p && l.Id.CompareTo(id) > 0)); }
+            case "title": { var t = c.Key; return q.Where(l => l.TitleSort.CompareTo(t) > 0 || (l.TitleSort == t && l.Id.CompareTo(id) > 0)); }
+            default: { var t = new DateTimeOffset(long.Parse(c.Key, CultureInfo.InvariantCulture), TimeSpan.Zero); return q.Where(l => l.CreatedAt < t || (l.CreatedAt == t && l.Id.CompareTo(id) > 0)); }
+        }
+    }
+
+    /// <summary>Relevance order lives in memory (at most <see cref="SearchTerms.MaxMatches"/> ids): rank the filtered ids, cut at the cursor or page, then load only that page.</summary>
+    private static async Task<(List<CatalogListing> Rows, string? Next)> RelevanceSlice(IQueryable<CatalogListing> filtered, ListingQuery o, CancellationToken ct)
+    {
+        var score = o.Matches.ToDictionary(m => m.ListingId, m => m.Score);
+        IEnumerable<Guid> ranked = (await filtered.Select(l => l.Id).ToListAsync(ct)).OrderByDescending(id => score[id]).ThenBy(id => id);
+        if (o.Cursor is { } c)
+        {
+            var cs = double.Parse(c.Key, CultureInfo.InvariantCulture);
+            ranked = ranked.Where(id => score[id] < cs || (score[id] == cs && id.CompareTo(c.Id) > 0));
+        }
+        else ranked = ranked.Skip((o.Page - 1) * o.PageSize);
+        var window = ranked.Take(o.PageSize + 1).ToList();
+        var more = window.Count > o.PageSize;
+        var pageIds = window.Take(o.PageSize).ToList();
+        var rows = (await filtered.Where(l => pageIds.Contains(l.Id)).ToListAsync(ct)).OrderBy(l => pageIds.IndexOf(l.Id)).ToList();
+        return (rows, more && rows.Count > 0 ? new ListingCursor("relevance", ListingCursor.KeyOf("relevance", rows[^1], score[rows[^1].Id]), rows[^1].Id).Encode() : null);
     }
 
     private static async Task<IResult> Listing(MarketplaceDb db, string slugOrId, CancellationToken ct)
@@ -142,16 +161,6 @@ public static class CatalogEndpoints
             l.Images.OrderBy(i => i.SortOrder).Select(i => new ImageCard(i.Id, i.Width, i.Height, i.Alt)).ToList(),
             l.Attributes.OrderBy(a => a.SortOrder).Select(a => new AttributeItem(a.Key, a.Value)).ToList(),
             l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt));
-    }
-
-    /// <summary>Relevance order lives in memory (at most <see cref="SearchTerms.MaxMatches"/> ids): rank the filtered ids, page them, then load only that page.</summary>
-    private static async Task<IResult> RelevancePage(MarketplaceDb db, IQueryable<CatalogListing> filtered, IReadOnlyList<SearchMatch> matches, int pageNo, int size, CancellationToken ct)
-    {
-        var score = matches.ToDictionary(m => m.ListingId, m => m.Score);
-        var ranked = (await filtered.Select(l => l.Id).ToListAsync(ct)).OrderByDescending(id => score[id]).ThenBy(id => id).ToList();
-        var pageIds = ranked.Skip((pageNo - 1) * size).Take(size).ToList();
-        var rows = (await filtered.Where(l => pageIds.Contains(l.Id)).ToListAsync(ct)).OrderBy(l => pageIds.IndexOf(l.Id)).ToList();
-        return Results.Json(new ListingsPage(await ToCards(db, rows, ct), pageNo, size, ranked.Count, (int)Math.Ceiling(ranked.Count / (double)size)));
     }
 
     /// <summary>Autocomplete: listing titles from the search index, plus brands and categories whose name starts with the text. Nothing below two characters.</summary>
@@ -201,7 +210,7 @@ public static class CatalogEndpoints
         }).ToList();
     }
 
-    private static List<Guid> Descendants(List<CatalogCategory> all, Guid root)
+    internal static List<Guid> Descendants(List<CatalogCategory> all, Guid root)
     {
         var result = new List<Guid> { root };
         for (var i = 0; i < result.Count && result.Count <= all.Count; i++)
@@ -209,7 +218,7 @@ public static class CatalogEndpoints
         return result;
     }
 
-    private static bool TryInt(string? raw, int fallback, int min, int max, out int value)
+    internal static bool TryInt(string? raw, int fallback, int min, int max, out int value)
     {
         value = fallback;
         if (raw is null) return true;
