@@ -16,6 +16,8 @@ public sealed class LeaseLostException : Exception;
 public static class SnapshotLimits
 {
     public const int MaxVariants = 200, MaxImages = 50, MaxAttributes = 100, MaxFaqs = 50;
+    /// <summary>The most a unit may cost and still be bought (M3-22: checkout treats a larger unit price as unavailable). A variant above it is stored as not available.</summary>
+    public const long MaxUnitPriceCents = 99_999_999;
     public const int Title = 300, Summary = 600, Name = 300, Alt = 300, AttributeKey = 100, AttributeValue = 500, Question = 500, DisplayName = 200, Slug = 120;
     public static string Clip(string? s, int max) => SearchText.Clip(s ?? "", max);   // never cuts inside a surrogate pair (a lone surrogate is invalid UTF-8 and a deterministic error on PostgreSQL)
 }
@@ -483,11 +485,13 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     {
         var incoming = s.Variants.Select((v, i) => (v, i)).ToList();
         foreach (var gone in listing.Variants.Where(e => incoming.All(x => x.v.Id != e.Id)).ToList()) { listing.Variants.Remove(gone); db.CatalogVariants.Remove(gone); }
+        if (incoming.Any(x => x.v.PriceCents > SnapshotLimits.MaxUnitPriceCents))
+            log.LogWarning("Listing {ListingId} has a variant priced above {Max} cents: it is stored as not purchasable", s.Id, SnapshotLimits.MaxUnitPriceCents);
         foreach (var (v, i) in incoming)
         {
             var row = listing.Variants.FirstOrDefault(e => e.Id == v.Id);
             if (row is null) { row = new CatalogVariant { Id = v.Id, ListingId = s.Id }; listing.Variants.Add(row); }
-            row.Name = SnapshotLimits.Clip(v.Name, SnapshotLimits.Name); row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available; row.IsDefault = v.IsDefault; row.SortOrder = i;
+            row.Name = SnapshotLimits.Clip(v.Name, SnapshotLimits.Name); row.PriceCents = v.PriceCents; row.CompareAtCents = v.CompareAtCents; row.Available = v.Available && v.PriceCents <= SnapshotLimits.MaxUnitPriceCents; row.IsDefault = v.IsDefault; row.SortOrder = i;
         }
     }
 
