@@ -45,7 +45,7 @@ Envelope: `{ id, type, createdAt, data }`; `data.order = {sellerOrderId, sellerO
 **Matching rule (review hotspot):** an event is matched to our records by the marketplace id we sent (`marketplaceOrderId`, `marketplaceBookingId`,
 `marketplaceReturnId`, `requestId`) **and** the portal id it carries, never by tracking number, SKU or any other external id alone.
 
-## 2. Catalog (PRODUCTS.md) — **GAP, requested**
+## 2. Catalog — portal docs/CATALOG.md (C1, merged 73845da); the section below was our proposal, CATALOG.md wins
 The portal has no buyer-facing catalog feed yet (ROADMAP: "public read API over Active products", "outbox of product change events, `Version` is the cursor").
 Requested from the seller-portal orchestrator (§9, request C1):
 * signed `GET /api/internal/v1/catalog/listings?since=<cursor>&limit=` (Active products **and** services, variants, prices, stock availability,
@@ -112,6 +112,9 @@ optional phone. Retention and redaction rules for every field are in DECISIONS (
 ## 9. Contract change requests to the seller portal
 | Id | Request | Status |
 |---|---|---|
-| C1 | Catalog feed: signed listings/categories/brands/images endpoints, `listing.upserted`/`listing.unlisted` outbox events, signed product-question submission | Requested 2026-11-04 |
-| C2 | Review reports into the moderation queue + decision event | Requested 2026-11-04 |
-| C3 | Confirm webhook URL routing: one `Orders:WebhookUrl` for all event families (orders, bookings, shipping, delivery) | Requested 2026-11-04 |
+| C1 | Catalog feed: signed listings/categories/brands/images endpoints, `listing.upserted`/`listing.unlisted` outbox events, signed product-question submission, `searchTerms[]` | **Merged** in portal main 73845da (docs/CATALOG.md); consumer slice: M2 |
+| C2 | Content reports (`POST /content/reports`, kind review/listing/message) + `content.report_decided` | **Merged** in portal main 73845da (docs/CATALOG.md); consumer: M6 |
+| C3 | Confirm webhook URL routing: one `Orders:WebhookUrl` for all event families | **Confirmed** 2026-11-04 |
+| C4 | Webhook signature v2 over ts.id.type.body | Portal ROADMAP; until then consumers use the signed body id/type (we do) |
+| C5 | Explicit derived `delivery {ships, localDelivery, serviceLocations[]}` on listings | Accepted, after C1; M2 falls back to the `delivery` attribute |
+| C6 | Key /products/{id}/questions and /content/reports rate limits on the verified caller + target, not per IP (one marketplace caller for all shoppers) | Requested 2026-11-04 |
