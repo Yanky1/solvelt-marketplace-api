@@ -9,6 +9,8 @@ public sealed record CartOwner(Guid? AccountId, string? GuestToken);
 public static class CartLimits
 {
     public const int MaxQuantityPerLine = 20, MaxLines = 50;
+    /// <summary>A unit price above this is treated as unavailable and an order total above <see cref="MaxTotalCents"/> is refused (decision M3-22): keeps every sum far from overflow and inside Stripe's limit.</summary>
+    public const long MaxUnitPriceCents = 99_999_999, MaxTotalCents = 99_999_999;
     /// <summary>The marketplace sells in one currency (decision M3-16). A line whose listing is priced in anything else is unavailable.</summary>
     public const string Currency = "USD";
 }
@@ -224,7 +226,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
             var views = new List<CartLineView>();
             foreach (var r in g)
             {
-                var ok = r.VName is not null && r.LVisible && r.SellerActive && r.VAvail && r.LType == ListingTypes.Product && r.Currency == CartLimits.Currency;
+                var ok = r.VName is not null && r.LVisible && r.SellerActive && r.VAvail && r.LType == ListingTypes.Product && r.Currency == CartLimits.Currency && r.PriceCents is >= 0 and <= CartLimits.MaxUnitPriceCents;
                 if (!ok) canCheckout = false;
                 var unit = ok ? r.PriceCents : 0;
                 views.Add(new CartLineView(r.Id, r.ListingId, r.VariantId, r.LSlug ?? "", r.LTitle ?? "", r.VName ?? "",

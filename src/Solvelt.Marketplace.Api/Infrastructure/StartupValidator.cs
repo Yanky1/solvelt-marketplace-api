@@ -69,7 +69,10 @@ public static class StartupValidator
             // Any dev default in any slot is rejected, so swapped defaults cannot pass.
             if (devDefaults.Contains(value)) problems.Add($"{name}: Development default secrets must not be used outside Development/Testing.");
         }
+        // The Stripe keys are optional here (checked above) but must also differ from every other key and from each other: a Stripe key must never double as one of ours.
         var present = keys.Where(k => !string.IsNullOrWhiteSpace(k.Value)).ToList();
+        foreach (var (name, envName) in new[] { ("Stripe:SecretKey", "Stripe__SecretKey"), ("Stripe:PublishableKey", "Stripe__PublishableKey") })
+            if (config[name] is { Length: > 0 } sv && !string.IsNullOrWhiteSpace(sv)) present.Add((name, envName, sv));
         for (var i = 0; i < present.Count; i++)
             for (var j = i + 1; j < present.Count; j++)
                 if (present[i].Value == present[j].Value)
