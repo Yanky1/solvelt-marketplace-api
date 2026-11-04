@@ -1,0 +1,7 @@
+# Brief M6: reviews and ratings, wishlists, recently viewed, moderation hooks (API + web)
+**Depends on:** M2 (PDP), M5 (delivered orders / completed bookings for verified reviews). Wishlists and recently viewed can start after M2.
+**Reviews:** only for a delivered order line or a completed booking, one per buyer per line/booking, editable for 30 days; 1–5 stars + text + up to 5 photos (sniffed, metadata stripped, resized); seller reply relay; helpful votes (one per buyer, parallel-safe); aggregate rating per listing, seller and brand kept consistent under parallel writes; profanity/contact-detail checks; buyers report reviews and the portal's moderation queue receives them through the portal's `POST /content/reports {kind:"review", …}` (C2; until it lands, behind an interface with a fake). `content.report_decided` hides or restores the review. JSON-LD `AggregateRating`/`Review` on the PDP.
+**Wishlists:** multiple named lists, private by default, shareable read-only via an unguessable link (own key); price-drop and back-in-stock notifications (via M5 notifications).
+**Recently viewed:** server-side for signed-in buyers, local storage for guests (cleared on sign-out, merged on sign-in, capped, no PII).
+**Product questions:** submit via the portal's signed `POST /products/{id}/questions` (C1), show published Q&A.
+**Listing reports:** `POST /listings/{id}/reports` (portal, existing).
