@@ -38,7 +38,7 @@ public sealed class ProofFetcher(HttpClient http)
             // The type comes from the bytes, never from the portal's header: only JPEG, PNG and WebP are served.
             return Sniff(bytes) is { } type ? new Proof(bytes, type) : null;
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException && !ct.IsCancellationRequested) { return null; }
+        catch (Exception ex) when ((ex is HttpRequestException or IOException || ex is OperationCanceledException && !ct.IsCancellationRequested)) { return null; }   // a reset or truncated body (HttpIOException is an IOException) is "unavailable" (502), not a 500 (review P7)
     }
 
     public static string? Sniff(byte[] b)
@@ -70,7 +70,7 @@ public static class ProofEndpoints
         var sh = await (from s in db.OrderShipments.AsNoTracking()
                         join g in db.OrderGroups.AsNoTracking() on s.GroupId equals g.Id
                         join o in db.Orders.AsNoTracking() on g.OrderId equals o.Id
-                        where s.Id == shipmentId && o.Number == number && o.AccountId == buyer.AccountId select s).FirstOrDefaultAsync(ct);
+                        where s.Id == shipmentId && s.VoidedAt == null && o.Number == number && o.AccountId == buyer.AccountId && (o.Status == OrderStatus.Placed || o.Status == OrderStatus.Paid) select s).FirstOrDefaultAsync(ct);
         if (sh?.ProofJson is null || sh.ProofExpiresAt is not { } exp || exp <= time.GetUtcNow()) return Problems.NotFound();
         var paths = System.Text.Json.JsonSerializer.Deserialize<List<string>>(sh.ProofJson) ?? [];
         if (index < 0 || index >= paths.Count) return Problems.NotFound();

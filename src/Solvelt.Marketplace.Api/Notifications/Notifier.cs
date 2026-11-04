@@ -145,6 +145,8 @@ public static class NotificationEmails
             var k when k.StartsWith("booking_") => (BookingSubject(k, P("bookingNumber")), $"There is an update on your booking {P("bookingNumber")}: {BookingSubject(k, P("bookingNumber")).ToLowerInvariant()}."),
             _ => ($"Update on order {order}", $"There is an update on your order {order}."),
         };
+        subject = System.Text.RegularExpressions.Regex.Replace(subject, @"[\p{Cc}\u2028\u2029]+", " ").Trim();   // a seller/listing name can never add a header line (review P7)
+        if (subject.Length > 200) subject = subject[..200];
         var link = n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? $"{baseUrl}/account/bookings" : $"{baseUrl}/account/orders/{n.OrderNumber}";
         var body = $"Hello {name},\n\n{line}\n\nSee the details: {link}\n\n" +
                    $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";

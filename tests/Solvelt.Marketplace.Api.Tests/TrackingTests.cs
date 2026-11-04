@@ -216,6 +216,44 @@ public sealed class TrackingTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task A_connection_dropped_while_fetching_a_proof_is_a_502_not_a_500()
+    {
+        var (o, g) = await Shipped();
+        await Evt("shipment.delivered", o, g, new { shipmentId = "sh-1", proof = new { photoUrls = new[] { "/api/public/delivery-proof/p1?x=1" } } });
+        var id = (await Shipment(o.Number)).GetProperty("id").GetGuid();
+        _k.F.PublicResponder = _ => throw new System.IO.IOException("connection reset");
+        Assert.Equal(HttpStatusCode.BadGateway, (await Get($"/api/v1/orders/{o.Number}/shipments/{id}/proof/0")).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_voided_parcel_or_an_order_that_is_not_placed_gives_no_proof()
+    {
+        var (o, g) = await Shipped();
+        _k.F.PublicResponder = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Png) };
+        await Evt("shipment.delivered", o, g, new { shipmentId = "sh-1", proof = new { photoUrls = new[] { "/api/public/delivery-proof/p1?x=1" } } });
+        var id = (await Shipment(o.Number)).GetProperty("id").GetGuid();
+        var path = $"/api/v1/orders/{o.Number}/shipments/{id}/proof/0";
+        Assert.Equal(HttpStatusCode.OK, (await Get(path)).StatusCode);
+        await _k.Db(async db => { await db.Orders.Where(x => x.Number == o.Number).ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, OrderStatus.Expired)); return 0; });
+        Assert.Equal(HttpStatusCode.NotFound, (await Get(path)).StatusCode);
+        await _k.Db(async db => { await db.Orders.Where(x => x.Number == o.Number).ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, OrderStatus.Placed)); return 0; });
+        Assert.Equal(HttpStatusCode.OK, (await Get(path)).StatusCode);
+        await _k.Db(async db => { await db.OrderShipments.ExecuteUpdateAsync(u => u.SetProperty(x => x.VoidedAt, (DateTimeOffset?)DateTimeOffset.UtcNow)); return 0; });
+        Assert.Equal(HttpStatusCode.NotFound, (await Get(path)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Position_retention_runs_on_its_own()
+    {
+        var (o, g) = await Shipped();
+        await Evt("order.tracking_updated", o, g, new { shipmentId = "sh-1", method = "local", status = "out_for_delivery", position = new { lat = 40.693, lng = -73.99 } });
+        _k.F.Clock.Advance(TimeSpan.FromHours(25));
+        using var s = _k.F.Services.CreateScope();
+        Assert.Equal(1, await s.ServiceProvider.GetRequiredService<FulfilmentMaintenance>().ClearPositionsAsync());
+        Assert.Null(await _k.Db(db => db.OrderShipments.Select(x => x.PositionLat).SingleAsync()));
+    }
+
+    [Fact]
     public async Task A_proof_that_is_not_an_image_or_too_big_is_refused()
     {
         var (o, g) = await Shipped();

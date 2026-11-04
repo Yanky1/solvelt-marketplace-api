@@ -15,6 +15,14 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
     public const int PositionRetentionHours = 24;
     public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0, int NotificationsDeleted = 0, int ThreadsRedacted = 0);
 
+    /// <summary>Stored driver positions older than 24 h. Also run on its own by the worker, so a failure of any other retention step never leaves a position behind (review P7).</summary>
+    public async Task<int> ClearPositionsAsync(CancellationToken ct = default)
+    {
+        var posCut = time.GetUtcNow().ToUniversalTime().AddHours(-PositionRetentionHours);
+        return await db.OrderShipments.Where(x => x.PositionAt != null && x.PositionAt <= posCut)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.PositionLat, (double?)null).SetProperty(x => x.PositionLng, (double?)null).SetProperty(x => x.PositionAt, (DateTimeOffset?)null), ct);
+    }
+
     public async Task<Result> RunAsync(CancellationToken ct = default)
     {
         var now = time.GetUtcNow().ToUniversalTime();
@@ -22,9 +30,7 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.LabelUrl, (string?)null).SetProperty(r => r.LabelTrackingUrl, (string?)null), ct);
 
         // live positions: at most 24 h; proof links: at their expiry (the images themselves are never stored)
-        var posCut = now.AddHours(-PositionRetentionHours);
-        var positions = await db.OrderShipments.Where(x => x.PositionAt != null && x.PositionAt <= posCut)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.PositionLat, (double?)null).SetProperty(x => x.PositionLng, (double?)null).SetProperty(x => x.PositionAt, (DateTimeOffset?)null), ct);
+        var positions = await ClearPositionsAsync(ct);
         var proofs = await db.OrderShipments.Where(x => x.ProofJson != null && x.ProofExpiresAt != null && x.ProofExpiresAt <= now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.ProofJson, (string?)null), ct);
 

@@ -235,6 +235,15 @@ public sealed class NotificationTests : OrderFlowBase
     }
 
     [Fact]
+    public void A_seller_name_with_line_breaks_cannot_add_a_header_line_to_the_subject()
+    {
+        var n = new Notification { Kind = NotificationKinds.OrderAccepted, OrderNumber = "O-1", ParamsJson = JsonSerializer.Serialize(new { sellerName = "Evil\r\nBcc: victim@example.com\u2028x" }) };
+        var mail = Solvelt.Marketplace.Api.Notifications.NotificationEmails.Build("a@example.com", "A", n, "https://shop.test", "https://shop.test/u", "https://shop.test/u2");
+        Assert.DoesNotContain('\r', mail.Subject); Assert.DoesNotContain('\n', mail.Subject); Assert.DoesNotContain('\u2028', mail.Subject);
+        Assert.Contains("Evil", mail.Subject);
+    }
+
+    [Fact]
     public async Task No_mail_goes_to_a_deleted_account_and_old_notifications_are_deleted_by_the_job()
     {
         var (o, g) = await Placed();

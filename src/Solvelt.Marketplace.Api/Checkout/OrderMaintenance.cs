@@ -72,11 +72,15 @@ public sealed class OrderWorker(IServiceScopeFactory scopes, ILogger<OrderWorker
             try
             {
                 using var scope = scopes.CreateScope();
+                var fulfilment = scope.ServiceProvider.GetRequiredService<Fulfilment.FulfilmentMaintenance>();
+                // the privacy-critical retention first and on its own: nothing that fails below can stop it (M5 review P7)
+                try { await fulfilment.ClearPositionsAsync(stoppingToken); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { log.LogError("Position retention failed: {ExceptionType}", ex.GetType().FullName); }
                 var m = scope.ServiceProvider.GetRequiredService<OrderMaintenance>();
                 await m.ExpirePendingAsync(stoppingToken);
                 await m.ReleaseHeldDisputesAsync(stoppingToken);
                 await m.PurgeAbandonedAsync(stoppingToken);
-                await scope.ServiceProvider.GetRequiredService<Fulfilment.FulfilmentMaintenance>().RunAsync(stoppingToken);
+                await fulfilment.RunAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
             catch (Exception ex) { log.LogError("Order maintenance failed: {ExceptionType}", ex.GetType().FullName); }
