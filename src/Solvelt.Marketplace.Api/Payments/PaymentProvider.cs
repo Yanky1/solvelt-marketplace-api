@@ -150,6 +150,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
     public int FailNext { get; set; }
     /// <summary>Test hook: the next cancel is refused by the processor with this error code (for example <c>api_key_expired</c>).</summary>
     public string? RejectCancelWith { get; set; }
+    /// <summary>Test hook: the next refund is refused by the processor with this error code (one that moved no money, for example <c>api_key_expired</c>).</summary>
+    public string? RejectRefundWith { get; set; }
 
     public Task<PaymentIntentResult> CreateIntentAsync(long amountCents, string currency, string idempotencyKey, IReadOnlyDictionary<string, string> metadata, CancellationToken ct)
     {
@@ -200,6 +202,7 @@ public sealed class FakePaymentProvider : IPaymentProvider
         lock (_lock)
         {
             MaybeFail();
+            if (RejectRefundWith is { } refusal) { RejectRefundWith = null; throw new PaymentRejectedException(refusal); }
             var fp = $"refund|{intentId}|{amountCents}";
             if (_byKey.TryGetValue(idempotencyKey, out var prior))
                 return prior.Fingerprint == fp ? Task.FromResult((RefundResult)prior.Result) : throw new PaymentRejectedException("idempotency_key_in_use");

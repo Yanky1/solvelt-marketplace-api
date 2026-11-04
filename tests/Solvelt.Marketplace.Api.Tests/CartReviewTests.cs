@@ -96,6 +96,43 @@ public sealed class CartReviewTests : IDisposable
     }
 
     [Fact]
+    public async Task A_removal_and_a_quantity_change_hold_the_carts_lock_so_a_merge_waits_for_them_and_never_resurrects_a_removed_line()
+    {
+        var first = await Body(await Add(Variant("challah-classic"), 2));
+        var token = first.GetProperty("cartToken").GetString()!;
+        await Add(Variant("kiddush-cup-pewter"), 1, guest: token);
+        var view = await View(guest: token);
+        var lineId = view.GetProperty("groups").EnumerateArray().SelectMany(g => g.GetProperty("lines").EnumerateArray()).Single(l => l.GetProperty("quantity").GetInt32() == 2).GetProperty("id").GetGuid();
+        var buyer = await _k.VerifiedSession("race2@example.com");
+        var inside = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        Hooks.AfterLineRead = async () => { inside.TrySetResult(); await release.Task; };
+        var delete = Send(HttpMethod.Delete, "/api/v1/cart/lines/" + lineId, guest: token);
+        await inside.Task.WaitAsync(TimeSpan.FromSeconds(20));                    // the removal has read the line and holds the cart's lock
+        Hooks.AfterLineRead = null;
+        var merge = Send(HttpMethod.Post, "/api/v1/cart/merge", new { guestToken = token }, bearer: buyer);
+        await Task.Delay(300);
+        Assert.False(merge.IsCompleted);                                           // the merge waits (before the fix the lock was gone at once and it ran straight through)
+        release.SetResult();
+        Assert.Equal(HttpStatusCode.OK, (await delete).StatusCode);
+        await merge;
+        Assert.Equal(1, Items(await View(bearer: buyer)));                         // only the pewter cup: the removed challah did not come back
+    }
+
+    [Fact]
+    public async Task A_removal_or_a_quantity_change_on_a_cart_that_was_merged_away_is_a_404_not_an_empty_200()
+    {
+        var first = await Body(await Add(Variant("challah-classic"), 2));
+        var token = first.GetProperty("cartToken").GetString()!;
+        var lineId = OnlyLine(await View(guest: token)).GetProperty("id").GetGuid();
+        var buyer = await _k.VerifiedSession("race3@example.com");
+        await Send(HttpMethod.Post, "/api/v1/cart/merge", new { guestToken = token }, bearer: buyer);
+        Assert.Equal(HttpStatusCode.NotFound, (await Send(HttpMethod.Delete, "/api/v1/cart/lines/" + lineId, guest: token)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Send(HttpMethod.Patch, "/api/v1/cart/lines/" + lineId, new { quantity = 5 }, guest: token)).StatusCode);
+        Assert.Equal(2, Items(await View(bearer: buyer)));                         // the buyer's cart is untouched
+    }
+
+    [Fact]
     public async Task Repeated_adds_against_repeated_merges_lose_nothing_and_never_fail()
     {
         await Ready();

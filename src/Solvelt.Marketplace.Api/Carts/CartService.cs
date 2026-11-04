@@ -38,6 +38,8 @@ public sealed class CartHooks
     public Func<Task>? BeforeCartInsert { get; set; }
     /// <summary>Awaited by a merge after it took its locks and before it reads the guest lines.</summary>
     public Func<Task>? InsideMerge { get; set; }
+    /// <summary>Awaited by a quantity change or a removal right after it took the cart's lock, inside its transaction (the lock is held until the write is done).</summary>
+    public Func<Task>? AfterLineRead { get; set; }
 }
 
 public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks hooks)
@@ -131,17 +133,24 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
     {
         var cart = await Find(o).AsNoTracking().FirstOrDefaultAsync(ct);
         if (cart is null) return null;
-        if (!await LockAsync(cart.Id, ct)) return null;   // the cart is gone (merged, purged)
-        var line = await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id).FirstOrDefaultAsync(ct);
-        if (line is null) return null;
-        if (quantity <= 0) await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id).ExecuteDeleteAsync(ct);
+        // One transaction under the cart's lock (the lock is only held until the transaction ends): a sign-in merge or a purge waits for this write, or has already finished, in which case
+        // the lock finds no cart and the answer is 404 instead of a 200 for a change that was lost (review C1).
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (!await LockAsync(cart.Id, ct)) { await tx.RollbackAsync(ct); return null; }   // the cart is gone (merged, purged)
+        if (hooks.AfterLineRead is { } hook) await hook();
+        var line = await db.CartLines.AsNoTracking().Where(l => l.Id == lineId && l.CartId == cart.Id).FirstOrDefaultAsync(ct);
+        if (line is null) { await tx.RollbackAsync(ct); return null; }
+        int touched;
+        if (quantity <= 0) touched = await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id).ExecuteDeleteAsync(ct);
         else
         {
             var price = await db.CatalogVariants.Where(v => v.Id == line.VariantId).Select(v => (long?)v.PriceCents).FirstOrDefaultAsync(ct);
             var q = Math.Min(quantity, CartLimits.MaxQuantityPerLine);
-            await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id)
+            touched = await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id)
                 .ExecuteUpdateAsync(s => s.SetProperty(l => l.Quantity, q).SetProperty(l => l.SeenUnitPriceCents, price ?? line.SeenUnitPriceCents), ct);   // seeing the cart again accepts the current price
         }
+        if (touched != 1) { await tx.RollbackAsync(ct); return null; }   // never a 200 for a change that was not stored
+        await tx.CommitAsync(ct);
         return await BuildAsync(cart.Id, null, true, ct);
     }
 

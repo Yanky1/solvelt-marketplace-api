@@ -15,7 +15,7 @@ public sealed record PortalRefundLine(string MarketplaceLineId, int Quantity);
 /// A refund the portal asked for. <see cref="TotalCents"/> is the FULL amount to give the buyer (it already includes line tax and <see cref="ShippingCents"/>). <see cref="FullCancel"/>:
 /// everything not yet returned on the seller order; <see cref="Clamp"/>: cut to what is left instead of refusing. <see cref="TaxCents"/> is the portal's own figure once it sends it.
 /// </summary>
-public sealed record PortalRefund(Guid OrderId, Guid GroupId, long TotalCents, long ShippingCents, IReadOnlyList<PortalRefundLine> Lines, long? TaxCents, bool FullCancel, bool Clamp, string Key, string Reason, string? PortalRefundId);
+public sealed record PortalRefund(Guid OrderId, Guid GroupId, long TotalCents, long ShippingCents, IReadOnlyList<PortalRefundLine> Lines, long? TaxCents, bool FullCancel, bool Clamp, string Key, string Reason, string? PortalRefundId, long? ShippingTaxCents = null);
 
 /// <summary>The tax we sent per line at ingest (the line's own tax plus its share of tax charged on shipping while that is folded in, C8): the base of every back-out, so a reversal is exact.</summary>
 public static class OrderTaxSent
@@ -120,23 +120,40 @@ public sealed class RefundService(MarketplaceDb db, OutboxWriter outbox, TimePro
                 parts.Add((lines[i], q, last ? sentTax[i] - lines[i].RefundedTaxCents : sentTax[i] * q / lines[i].Quantity));   // floor, the last refund of a line takes the remainder
             }
         var remainingTax = g.TaxCents - g.RefundedTaxCents;
+        // C8 mode (shipping tax is the portal's own field, not folded into line tax; brief N8): the amount INCLUDES the shipping tax. The portal's explicit shippingTaxCents is used as sent; only when it is
+        // missing (an older portal) is it inferred, in proportion to the shipping refunded, the last shipping refund (or a full cancel) taking the remainder. Never more than is left of it.
+        long shippingTaxBack = 0;
+        var shippingTaxLeft = perGroupShipping ? Math.Max(0, g.ShippingTaxCents - g.RefundedShippingTaxCents) : 0;
+        if (perGroupShipping)
+        {
+            if (r.ShippingTaxCents is { } sentShippingTax) shippingTaxBack = sentShippingTax;
+            else if (r.FullCancel) shippingTaxBack = shippingTaxLeft;
+            else if (shipping > 0 && g.ShippingCents > 0)
+                shippingTaxBack = g.RefundedShippingCents + shipping >= g.ShippingCents ? shippingTaxLeft : g.ShippingTaxCents * shipping / g.ShippingCents;
+            shippingTaxBack = Math.Clamp(shippingTaxBack, 0, shippingTaxLeft);
+        }
         long tax;
-        if (r.TaxCents is { } explicitTax) tax = explicitTax;                                                       // the portal will send it (additive): then we only read it
-        else if (parts.Count > 0) tax = parts.Sum(p => p.Tax);
+        if (r.TaxCents is { } explicitTax)
+        {
+            tax = Math.Clamp(explicitTax, 0, Math.Min(remainingTax, total - shipping));                              // the portal sends it (it includes the shipping tax): then we only read it
+            shippingTaxBack = Math.Min(shippingTaxBack, tax);                                                         // the shipping tax is part of the tax, never more
+        }
         else
         {
-            // no lines (a goodwill refund of an amount): the same floor proration on the whole seller order's remaining tax
-            var itemsGross = total - shipping;
-            var remainingGross = g.ItemsCents + g.TaxCents - (g.RefundedCents - g.RefundedShippingCents);
-            tax = itemsGross <= 0 || remainingGross <= 0 ? 0 : itemsGross >= remainingGross ? remainingTax : remainingTax * itemsGross / remainingGross;
+            long linesTax;
+            if (parts.Count > 0) linesTax = parts.Sum(p => p.Tax);
+            else
+            {
+                // no lines (a goodwill refund of an amount): the same floor proration on the seller order's remaining LINE tax and gross (in C8 mode the shipping tax is in neither)
+                var itemsGross = total - shipping - shippingTaxBack;
+                var remainingGross = g.ItemsCents + (g.TaxCents - (perGroupShipping ? g.ShippingTaxCents : 0)) - (g.RefundedCents - g.RefundedShippingCents - (perGroupShipping ? g.RefundedShippingTaxCents : 0));
+                var remainingLineTax = remainingTax - shippingTaxLeft;
+                linesTax = itemsGross <= 0 || remainingGross <= 0 || remainingLineTax <= 0 ? 0 : itemsGross >= remainingGross ? remainingLineTax : remainingLineTax * itemsGross / remainingGross;
+            }
+            linesTax = Math.Clamp(linesTax, 0, Math.Max(0, Math.Min(remainingTax - shippingTaxLeft, total - shipping - shippingTaxBack)));
+            shippingTaxBack = Math.Min(shippingTaxBack, Math.Max(0, total - shipping - linesTax));                   // review C2: the shipping tax must fit inside what is left of the amount, or it is not refunded (and not counted)
+            tax = linesTax + shippingTaxBack;
         }
-        // C8 mode (shipping tax is the portal's own field, not folded into line tax): the tax on the shipping refunded comes back in proportion, the last shipping refund taking the remainder
-        long shippingTaxBack = 0;
-        if (perGroupShipping && shipping > 0 && g.ShippingCents > 0)
-            shippingTaxBack = g.RefundedShippingCents + shipping >= g.ShippingCents ? g.ShippingTaxCents - g.RefundedShippingTaxCents : g.ShippingTaxCents * shipping / g.ShippingCents;
-        shippingTaxBack = Math.Clamp(shippingTaxBack, 0, g.ShippingTaxCents - g.RefundedShippingTaxCents);
-        if (r.TaxCents is null) tax += shippingTaxBack;
-        tax = Math.Clamp(tax, 0, Math.Min(remainingTax, total - shipping));
 
         if (await db.Orders.Where(o => o.Id == r.OrderId && o.PaidAt != null && o.RefundedCents + total <= o.PaidCents).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + total), ct) == 0)
             return ReserveOutcome.ExceedsPaid;
