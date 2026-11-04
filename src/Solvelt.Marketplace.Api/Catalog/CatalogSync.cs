@@ -17,7 +17,7 @@ public static class SnapshotLimits
 {
     public const int MaxVariants = 200, MaxImages = 50, MaxAttributes = 100, MaxFaqs = 50;
     public const int Title = 300, Summary = 600, Name = 300, Alt = 300, AttributeKey = 100, AttributeValue = 500, Question = 500, DisplayName = 200, Slug = 120;
-    public static string Clip(string? s, int max) { s ??= ""; return s.Length <= max ? s : s[..max].TrimEnd(); }
+    public static string Clip(string? s, int max) => SearchText.Clip(s ?? "", max);   // never cuts inside a surrogate pair (a lone surrogate is invalid UTF-8 and a deterministic error on PostgreSQL)
 }
 
 /// <summary>
@@ -244,8 +244,8 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             foreach (var snapshot in page.Items)
                 if (await ApplySnapshotAsync(snapshot, ct)) applied++; else skipped++;
-            (await db.CatalogSyncStates.SingleAsync(s => s.Key == StateKey, ct)).Cursor = next;
             await db.SaveChangesAsync(ct);
+            await WriteCursorAsync(next, ct);       // inside the transaction: a lost lease rolls the whole page back
             await tx.CommitAsync(ct);
             counts.Applied += applied; counts.Skipped += skipped;
             db.ChangeTracker.Clear();
@@ -274,9 +274,17 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             }
             db.ChangeTracker.Clear();
         }
-        (await db.CatalogSyncStates.SingleAsync(s => s.Key == StateKey, ct)).Cursor = next;
-        await db.SaveChangesAsync(ct);
+        await WriteCursorAsync(next, ct);
         db.ChangeTracker.Clear();
+    }
+
+    /// <summary>Moves the cursor only while we still own the lease: a run whose lease was taken over must not overwrite the new owner's progress.</summary>
+    private async Task WriteCursorAsync(string? next, CancellationToken ct)
+    {
+        var owner = _owner;
+        var rows = await db.CatalogSyncStates.Where(s => s.Key == StateKey && s.LeaseOwner == owner)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Cursor, next), ct);
+        if (rows != 1) throw new LeaseLostException();
     }
 
     // ---------- listings an event announced but we have not fetched ----------
