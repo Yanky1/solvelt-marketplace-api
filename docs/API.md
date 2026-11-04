@@ -10,6 +10,7 @@ Rate limited endpoints answer `429 { code: "rate_limited" }` with `Retry-After`.
 | GET | `/api/v1/catalog/categories` | none | Category tree with visible-listing counts; see Catalog |
 | GET | `/api/v1/catalog/brands` | none | Brands that have visible listings |
 | GET | `/api/v1/catalog/listings` | none | Paged, filterable, sortable listing cards |
+| GET | `/api/v1/catalog/suggest` | none | Autocomplete: listing, brand and category suggestions |
 | GET | `/api/v1/catalog/listings/{slugOrId}` | none | One listing in full |
 | GET | `/api/v1/ping` | none | Public rate limit bucket smoke endpoint (removed when the catalog endpoints land) |
 
@@ -55,7 +56,7 @@ against the signed body, then the projection (one database transaction).
 All four endpoints use the `public` rate limit (headers: see "Headers the web server must send"). Money is whole **cents** (`long`), currency `USD`; times are UTC ISO 8601.
 Only **visible** listings are ever returned (CONTRACT.md §2): last known portal status `Active`, seller active, and not unlisted. A listing that is not visible, or does not exist, is a `404 not_found`, with no hint which.
 **Unlisting is immediate**: a `listing.unlisted` portal event hides a listing at once, so do not cache catalog responses for longer than a few seconds.
-Images are an id plus dimensions: the bytes come from the portal and are served by our own CDN path (a later workstream). Data comes from the portal catalog feed (provisional request C1); until it exists the API serves a seed of about 40 listings in Development.
+Images are an id plus dimensions: the bytes come from the portal and are served by our own CDN path (a later workstream). Data comes from the portal catalog feed (provisional request C1; it also carries optional per-listing `searchTerms`, see M2-01); until it exists the API serves a seed of about 40 listings in Development.
 
 ### `GET /api/v1/catalog/categories`
 The tree, roots first, ordered by the portal's order. Categories with no visible listing (in their subtree) are left out.
@@ -78,7 +79,8 @@ Brands with at least one visible listing, by name (at most 500). `sellerId` (an 
 | `brand` | A brand slug or id; unknown gives an empty page |
 | `seller` | A seller id (`400` when malformed) |
 | `type` | `product` or `service` |
-| `sort` | `newest` (default), `price_asc`, `price_desc`, `title`. Ties break on id, so paging never repeats or drops an item |
+| `q` | Search text (at most 100 characters, else `400`). Normalised to lower-case ASCII words (accents folded, punctuation ignored), at most 8 words of 40 letters; **every** word must match and the last one matches as a prefix. Matches title, brand, the seller's search terms and the description, **weighted in that order**; an exact word beats a prefix. When nothing matches, a typo-tolerant pass runs (words of 4+ letters, about one slip in six letters; every word must be close). Combines with every other filter. Blank or missing = no search; punctuation only = no results. At most 1000 best matches are ranked, so `total` never exceeds 1000 for a search |
+| `sort` | `relevance` (default when `q` is given; without `q` it behaves as `newest`), `newest` (default otherwise), `price_asc`, `price_desc`, `title`. Ties break on id, so paging never repeats or drops an item |
 | `page` | 1-based, default 1 (at most 100000) |
 | `pageSize` | Default 24, at most 100 |
 
@@ -94,6 +96,16 @@ A bad value is `400 { "code": "invalid_query", "message": … }`. Response:
   "page": 1, "pageSize": 24, "total": 40, "totalPages": 2 }
 ```
 `priceFromCents`/`priceToCents` are the range over the variants that can be bought now (over all variants when everything is sold out); `compareAtFromCents` is the lowest struck-through price above the price, or `null`; `available` is false when every variant is sold out (the listing is still shown); `image` is `null` when there is none.
+
+### `GET /api/v1/catalog/suggest?q=&limit=`
+Autocomplete for the header search box. Below two characters (after normalising) the answer is an empty list. `limit` is 1 to 10 (default 8, else `400`); `q` at most 100 characters.
+```json
+{ "query": "chal", "suggestions": [
+  { "kind": "listing", "text": "Classic Braided Challah", "slug": "classic-braided-challah" },
+  { "kind": "brand", "text": "Challah Corner", "slug": "challah-corner" },
+  { "kind": "category", "text": "Bakery", "slug": "bakery" } ] }
+```
+Listings come first (best matches, visible only), then at most three brands and three categories whose name has a word starting with the last typed word (brands and categories with at least one visible listing in them or below). It uses the `public` limit like every catalog call, so the web tier should debounce (about 150 ms). Search text is never logged.
 
 ### `GET /api/v1/catalog/listings/{slugOrId}`
 `slugOrId` is the listing's slug (stable: it does not change when the title does) or its id.

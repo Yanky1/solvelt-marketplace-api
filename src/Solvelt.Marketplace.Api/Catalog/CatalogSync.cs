@@ -30,6 +30,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             await SyncReferenceDataAsync(ct);
             await PollAsync(counts, ct);
             await FetchPendingAsync(counts, ct);
+            await SearchIndexer.BackfillAsync(db, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -81,7 +82,9 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         {
             if (string.IsNullOrWhiteSpace(b.Slug) || string.IsNullOrWhiteSpace(b.Name)) continue;
             if (!existingBrands.TryGetValue(b.Id, out var row)) { row = new CatalogBrand { Id = b.Id }; db.CatalogBrands.Add(row); existingBrands[b.Id] = row; }
+            var renamed = row.Name != b.Name && !string.IsNullOrEmpty(row.Name);
             row.SellerId = b.SellerId; row.Slug = b.Slug; row.Name = b.Name; row.LogoImageId = b.LogoImageId;
+            if (renamed) await SearchIndexer.RenameBrandAsync(db, b.Id, b.Name, ct);
         }
         await db.SaveChangesAsync(ct);
     }
@@ -234,6 +237,8 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.Available = s.Variants.Any(v => v.Available);
         listing.RecomputeVisibility();
 
+        var brandName = (await db.CatalogBrands.FindAsync([s.Brand.Id], ct))?.Name ?? s.Brand.Name;
+        SearchIndexer.Upsert(db, s.Id, s.Brand.Id, s.Title, brandName, s.SearchTerms, s.Description);
         SyncVariants(listing, s);
         SyncImages(listing, s);
         db.CatalogAttributes.RemoveRange(listing.Attributes);

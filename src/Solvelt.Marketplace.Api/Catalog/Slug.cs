@@ -34,4 +34,23 @@ public static class Slug
         if (slug.Length > 100) slug = slug[..100].TrimEnd('-');
         return slug.Length == 0 ? "listing" : slug;
     }
+
+    /// <summary>
+    /// Lower-case ASCII words (letters and digits, accents folded as in <see cref="From"/>), separated by single spaces; empty when there are none.
+    /// This is the one normalisation used by the search index and by query terms, so both sides always agree.
+    /// </summary>
+    public static string Words(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        var sb = new StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            if (c is >= 'a' and <= 'z' or >= '0' and <= '9') sb.Append(c);
+            else if (c is >= 'A' and <= 'Z') sb.Append(char.ToLowerInvariant(c));
+            else if (Fold.TryGetValue(c, out var folded)) sb.Append(folded);
+            else if (c is '\'' or '\u2019') continue;
+            else if (sb.Length > 0 && sb[^1] != ' ') sb.Append(' ');
+        }
+        return sb.ToString().Trim();
+    }
 }

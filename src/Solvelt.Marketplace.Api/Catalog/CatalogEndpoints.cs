@@ -1,4 +1,5 @@
 using System.Globalization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Infrastructure;
@@ -13,6 +14,8 @@ public sealed record CategoryNode(Guid Id, string Slug, string Name, int Listing
 public sealed record BrandItem(Guid Id, string Slug, string Name, SellerCard Seller, Guid? LogoImageId, int ListingCount);
 public sealed record ListingCardDto(Guid Id, string Slug, string Type, string Title, string Summary, long PriceFromCents, long PriceToCents,
     long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, CategoryCard Category, ImageCard? Image);
+public sealed record Suggestion(string Kind, string Text, string Slug);
+public sealed record SuggestResponse(string Query, IReadOnlyList<Suggestion> Suggestions);
 public sealed record ListingsPage(IReadOnlyList<ListingCardDto> Items, int Page, int PageSize, int Total, int TotalPages);
 public sealed record VariantItem(Guid Id, string Name, long PriceCents, long? CompareAtCents, bool Available);
 public sealed record AttributeItem(string Key, string Value);
@@ -26,7 +29,8 @@ public sealed record ListingDetailDto(Guid Id, string Slug, string Type, string 
 public static class CatalogEndpoints
 {
     public const int DefaultPageSize = 24, MaxPageSize = 100, MaxBrands = 500;
-    private static readonly string[] Sorts = ["newest", "price_asc", "price_desc", "title"];
+    private static readonly string[] Sorts = ["relevance", "newest", "price_asc", "price_desc", "title"];
+    public const int MaxSuggestions = 10, DefaultSuggestions = 8, MinSuggestChars = 2;
 
     public static IEndpointRouteBuilder MapCatalog(this IEndpointRouteBuilder app)
     {
@@ -34,6 +38,7 @@ public static class CatalogEndpoints
         g.MapGet("/categories", Categories);
         g.MapGet("/brands", Brands);
         g.MapGet("/listings", Listings);
+        g.MapGet("/suggest", Suggest);
         g.MapGet("/listings/{slugOrId}", Listing);
         return app;
     }
@@ -71,10 +76,13 @@ public static class CatalogEndpoints
             new SellerCard(b.SellerId, sellers.GetValueOrDefault(b.SellerId)?.DisplayName ?? ""), b.LogoImageId, counts[b.Id])));
     }
 
-    private static async Task<IResult> Listings(MarketplaceDb db, string? category, string? brand, string? seller, string? type, string? sort, string? page, string? pageSize, CancellationToken ct)
+    private static async Task<IResult> Listings(MarketplaceDb db, string? category, string? brand, string? seller, string? type, string? sort, string? page, string? pageSize, [FromQuery(Name = "q")] string? search, ISearchIndex index, CancellationToken ct)
     {
         if (type is not null && !ListingTypes.IsValid(type)) return Problems.BadRequest("invalid_query", "type must be 'product' or 'service'.");
-        sort ??= "newest";
+        if (search is { Length: > SearchTerms.MaxQueryLength }) return Problems.BadRequest("invalid_query", $"q must be at most {SearchTerms.MaxQueryLength} characters.");
+        var terms = SearchTerms.From(search);
+        var searching = !string.IsNullOrWhiteSpace(search);
+        sort ??= searching ? "relevance" : "newest";
         if (!Sorts.Contains(sort)) return Problems.BadRequest("invalid_query", $"sort must be one of {string.Join(", ", Sorts)}.");
         if (!TryInt(page, 1, 1, 100_000, out var pageNo)) return Problems.BadRequest("invalid_query", "page must be a whole number from 1.");
         if (!TryInt(pageSize, DefaultPageSize, 1, MaxPageSize, out var size)) return Problems.BadRequest("invalid_query", $"pageSize must be a whole number from 1 to {MaxPageSize}.");
@@ -96,6 +104,13 @@ public static class CatalogEndpoints
             var root = Guid.TryParse(category, out var cg) ? all.FirstOrDefault(c => c.Id == cg) : all.FirstOrDefault(c => c.Slug == category);
             var ids = root is null ? [] : Descendants(all, root.Id);
             q = q.Where(l => ids.Contains(l.CategoryId));
+        }
+        if (searching)
+        {
+            var matches = terms.Count == 0 ? [] : await index.SearchAsync(db, terms, SearchTerms.MaxMatches, ct);
+            var ids = matches.Select(m => m.ListingId).ToList();
+            q = q.Where(l => ids.Contains(l.Id));
+            if (sort == "relevance") return await RelevancePage(db, q, matches, pageNo, size, ct);
         }
         q = sort switch
         {
@@ -127,6 +142,46 @@ public static class CatalogEndpoints
             l.Images.OrderBy(i => i.SortOrder).Select(i => new ImageCard(i.Id, i.Width, i.Height, i.Alt)).ToList(),
             l.Attributes.OrderBy(a => a.SortOrder).Select(a => new AttributeItem(a.Key, a.Value)).ToList(),
             l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt));
+    }
+
+    /// <summary>Relevance order lives in memory (at most <see cref="SearchTerms.MaxMatches"/> ids): rank the filtered ids, page them, then load only that page.</summary>
+    private static async Task<IResult> RelevancePage(MarketplaceDb db, IQueryable<CatalogListing> filtered, IReadOnlyList<SearchMatch> matches, int pageNo, int size, CancellationToken ct)
+    {
+        var score = matches.ToDictionary(m => m.ListingId, m => m.Score);
+        var ranked = (await filtered.Select(l => l.Id).ToListAsync(ct)).OrderByDescending(id => score[id]).ThenBy(id => id).ToList();
+        var pageIds = ranked.Skip((pageNo - 1) * size).Take(size).ToList();
+        var rows = (await filtered.Where(l => pageIds.Contains(l.Id)).ToListAsync(ct)).OrderBy(l => pageIds.IndexOf(l.Id)).ToList();
+        return Results.Json(new ListingsPage(await ToCards(db, rows, ct), pageNo, size, ranked.Count, (int)Math.Ceiling(ranked.Count / (double)size)));
+    }
+
+    /// <summary>Autocomplete: listing titles from the search index, plus brands and categories whose name starts with the text. Nothing below two characters.</summary>
+    private static async Task<IResult> Suggest([FromQuery(Name = "q")] string? search, string? limit, ISearchIndex index, MarketplaceDb db, CancellationToken ct)
+    {
+        if (search is { Length: > SearchTerms.MaxQueryLength }) return Problems.BadRequest("invalid_query", $"q must be at most {SearchTerms.MaxQueryLength} characters.");
+        if (!TryInt(limit, DefaultSuggestions, 1, MaxSuggestions, out var max)) return Problems.BadRequest("invalid_query", $"limit must be a whole number from 1 to {MaxSuggestions}.");
+        var terms = SearchTerms.From(search);
+        var words = Slug.Words(search);
+        if (words.Length < MinSuggestChars) return Results.Json(new SuggestResponse(search ?? "", []));
+
+        var matches = await index.SearchAsync(db, terms, max, ct);
+        var ids = matches.Select(m => m.ListingId).ToList();
+        var titles = (await Visible(db).Where(l => ids.Contains(l.Id)).Select(l => new { l.Id, l.Title, l.Slug }).ToListAsync(ct)).ToDictionary(l => l.Id);
+        var result = matches.Where(m => titles.ContainsKey(m.ListingId)).Select(m => new Suggestion("listing", titles[m.ListingId].Title, titles[m.ListingId].Slug)).ToList();
+
+        var last = terms[^1];
+        bool StartsAWord(string name) => Slug.Words(name).Split(' ').Any(w => w.StartsWith(last, StringComparison.Ordinal));
+        var visibleBrandIds = await Visible(db).Select(l => l.BrandId).Distinct().ToListAsync(ct);
+        var brands = (await db.CatalogBrands.AsNoTracking().Where(b => visibleBrandIds.Contains(b.Id)).OrderBy(b => b.Name).ToListAsync(ct)).Where(b => StartsAWord(b.Name)).Take(3).ToList();
+        var visibleCategoryIds = (await Visible(db).Select(l => l.CategoryId).Distinct().ToListAsync(ct)).ToHashSet();
+        var allCategories = await db.CatalogCategories.AsNoTracking().OrderBy(c => c.SortOrder).ToListAsync(ct);
+        var shown = new HashSet<Guid>();    // a category is worth suggesting when it, or something below it, has a visible listing
+        var byId = allCategories.ToDictionary(c => c.Id);
+        foreach (var id in visibleCategoryIds)
+            for (var c = byId.GetValueOrDefault(id); c is not null && shown.Add(c.Id); c = c.ParentId is { } p ? byId.GetValueOrDefault(p) : null) { }
+        var categories = allCategories.Where(c => shown.Contains(c.Id) && StartsAWord(c.Name)).Take(3).ToList();
+        result.AddRange(brands.Select(b => new Suggestion("brand", b.Name, b.Slug)));
+        result.AddRange(categories.Select(c => new Suggestion("category", c.Name, c.Slug)));
+        return Results.Json(new SuggestResponse(search!, result.Take(max).ToList()));
     }
 
     private static async Task<List<ListingCardDto>> ToCards(MarketplaceDb db, List<CatalogListing> rows, CancellationToken ct)

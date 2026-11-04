@@ -53,6 +53,9 @@ public sealed class FixtureCatalogSource : ICatalogSource
     /// <summary>The portal no longer has it: <see cref="GetListingAsync"/> answers null and it leaves the feed.</summary>
     public void Remove(Guid id) { lock (_lock) _listings.Remove(id); }
 
+    /// <summary>A reference-data change (the brand feed): the next sync sees the new name.</summary>
+    public void RenameBrand(Guid id, string name) { lock (_lock) { var i = _brands.FindIndex(b => b.Id == id); _brands[i] = _brands[i] with { Name = name }; } }
+
     public IReadOnlyList<ListingSnapshot> All() { lock (_lock) return _listings.Values.OrderBy(l => l.Version).ThenBy(l => l.Id).ToList(); }
 
     public Task<ListingPage> GetListingsAsync(string? since, int limit, CancellationToken ct)
@@ -170,6 +173,13 @@ public sealed record FixtureCatalogData(IReadOnlyList<ListingSnapshot> Listings,
         ["challah-classic"] = 100, ["shabbat-candlesticks-silver"] = 1100, ["kiddush-cup-pewter"] = 800, ["deep-house-cleaning"] = 2000,
     };
 
+    // seller search keywords (ListingSnapshot.SearchTerms): slug -> terms; they rank below the title and the brand
+    private static readonly Dictionary<string, string[]> Keywords = new()
+    {
+        ["challah-classic"] = ["hallah", "shabbat bread"], ["babka-chocolate"] = ["yeast cake"], ["deep-house-cleaning"] = ["maid service"],
+        ["kiddush-cup-pewter"] = ["becher"], ["cabernet-mevushal"] = ["red wine"],
+    };
+
     public static FixtureCatalogData Build()
     {
         var categories = CategoryRows.Select((c, i) => new CategoryDto(Id("category:" + c.Key), c.Parent is null ? null : Id("category:" + c.Parent), c.Key, c.Name, i)).ToList();
@@ -199,7 +209,7 @@ public sealed record FixtureCatalogData(IReadOnlyList<ListingSnapshot> Listings,
                               (type == "service" ? " Book a time that suits you; the seller confirms the details after your request." : " Ships from the seller; see delivery options at checkout.");
             var at = created.AddDays(index);
             listings.Add(new ListingSnapshot(Id("listing:" + slug), index + 1, type, status, title, summary, description, sellers[seller],
-                new BrandRef(Id("brand:" + brand), brandNames[brand]), Id("category:" + category), "USD", vs, imgs, attributes, faqs, at, at.AddDays(3)));
+                new BrandRef(Id("brand:" + brand), brandNames[brand]), Id("category:" + category), "USD", vs, imgs, attributes, faqs, at, at.AddDays(3), Keywords.GetValueOrDefault(slug)));
         }
         return new FixtureCatalogData(listings, categories, brands);
     }

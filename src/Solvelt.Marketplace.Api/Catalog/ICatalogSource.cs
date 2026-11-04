@@ -10,12 +10,13 @@ public sealed record ImageDto(Guid Id, int Width, int Height, string Alt);
 public sealed record AttributeDto(string Key, string Value);
 public sealed record FaqDto(string Question, string Answer);
 
-/// <summary>One listing (product or service) with everything the read model stores. <see cref="Version"/> is the portal's cursor.</summary>
+/// <summary>One listing (product or service) with everything the read model stores. <c>SearchTerms</c> (seller keywords, optional; M2-01) feed the search index. <see cref="Version"/> is the portal's cursor.</summary>
 public sealed record ListingSnapshot(
     Guid Id, long Version, string Type, string Status, string Title, string Summary, string Description,
     SellerRef Seller, BrandRef Brand, Guid CategoryId, string Currency,
     IReadOnlyList<VariantDto> Variants, IReadOnlyList<ImageDto> Images, IReadOnlyList<AttributeDto> Attributes, IReadOnlyList<FaqDto> Faqs,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt,
+    IReadOnlyList<string>? SearchTerms = null);
 
 public sealed record CategoryDto(Guid Id, Guid? ParentId, string Slug, string Name, int SortOrder);
 public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, Guid? LogoImageId);

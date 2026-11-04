@@ -44,6 +44,8 @@ builder.Services.AddSingleton<ICatalogSource>(sp =>
         _ => throw new InvalidOperationException($"Unknown Catalog:Source '{source}'."),
     };
 });
+builder.Services.AddSingleton<ISearchIndex>(_ => (builder.Configuration["Database:Provider"] ?? "Sqlite").Equals("Postgres", StringComparison.OrdinalIgnoreCase)
+    ? new PostgresSearchIndex() : new SqliteSearchIndex());
 builder.Services.AddSingleton<IProjectionHandler, CatalogEventHandler>();
 builder.Services.AddScoped<CatalogSyncService>();
 if (!builder.Environment.IsEnvironment("Testing") && !string.Equals(builder.Configuration["Catalog:Source"], "None", StringComparison.OrdinalIgnoreCase) && (devLike || !string.IsNullOrWhiteSpace(builder.Configuration["Catalog:Source"])))
@@ -74,7 +76,9 @@ app.UseRateLimiter();
 if (devLike)
 {
     using var scope = app.Services.CreateScope();
-    scope.ServiceProvider.GetRequiredService<MarketplaceDb>().Database.EnsureCreated();
+    var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+    db.Database.EnsureCreated();
+    SearchSchema.Ensure(db);
 }
 
 app.MapGet("/health", (ClientIpResolver forwarding) => Results.Json(new { status = "ok", forwarding = new { invalid = forwarding.InvalidCount } }));
