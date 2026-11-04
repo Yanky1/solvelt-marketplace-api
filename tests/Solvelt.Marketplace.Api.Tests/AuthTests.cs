@@ -44,6 +44,10 @@ public class AuthTests
     [InlineData("not-an-email", "correct horse battery", "Jane", "email")]
     [InlineData("a@b", "correct horse battery", "Jane", "email")]
     [InlineData("a b@example.com", "correct horse battery", "Jane", "email")]
+    [InlineData("a@b@example.com", "correct horse battery", "Jane", "email")]
+    [InlineData("@example.com", "correct horse battery", "Jane", "email")]
+    [InlineData("jane@.example.com", "correct horse battery", "Jane", "email")]
+    [InlineData("jane@example..com", "correct horse battery", "Jane", "email")]
     [InlineData("jane@example.com", "123456789", "Jane", "password")]
     [InlineData("jane@example.com", "", "Jane", "password")]
     [InlineData("jane@example.com", "jane@example.com", "Jane", "password")]
@@ -544,5 +548,24 @@ public class AuthTests
         Assert.NotEqual(a.RelayEmail, b.RelayEmail);
         await k.Post("/api/v1/auth/sign-in", new { email = "a@example.com", password = Pw });
         Assert.Equal(a.RelayEmail, (await k.Account("a@example.com")).RelayEmail);
+    }
+
+    // ---------- rate limits ----------
+
+    [Theory]
+    [InlineData("/api/v1/auth/sign-up")]
+    [InlineData("/api/v1/auth/sign-in")]
+    [InlineData("/api/v1/auth/verify-email")]
+    [InlineData("/api/v1/auth/resend-verification")]
+    [InlineData("/api/v1/auth/forgot-password")]
+    [InlineData("/api/v1/auth/reset-password")]
+    public async Task Every_public_auth_endpoint_is_limited_per_client_address(string path)
+    {
+        using var k = new AuthKit(new() { ["RateLimits:AuthPerMinute"] = "2" });
+        var body = new { email = "x@example.com", password = Pw, displayName = "X Y", token = "t" };
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 3; i++) statuses.Add((await k.Post(path, body)).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, statuses[2]);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, statuses[1]);
     }
 }
