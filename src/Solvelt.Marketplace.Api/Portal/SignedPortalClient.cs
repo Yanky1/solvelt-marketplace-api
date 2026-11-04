@@ -15,6 +15,8 @@ public class PortalNotConfiguredException(string what) : InvalidOperationExcepti
 
 public interface ISignedPortalClient
 {
+    /// <summary>The portal's attachment limit is 5 MB; a little more is read so an over-size file is recognised, never stored.</summary>
+    public const int MaxAttachmentBytes = 5 * 1024 * 1024 + 1024;
     Task<PortalResult<CreateOrderResponse>> CreateOrderAsync(CreateOrderRequest request, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> RequestCancellationAsync(string marketplaceOrderId, CancelRequestBody body, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> RequestReturnAsync(string marketplaceOrderId, ReturnRequestBody body, CancellationToken ct = default);
@@ -25,6 +27,8 @@ public interface ISignedPortalClient
     Task<PortalResult<JsonElement>> SendMessageAsync(BuyerMessageBody body, CancellationToken ct = default);
     /// <summary><c>POST /messages/{id}/receipts</c>: <c>delivered | read | failed</c> for a seller message (the id from <c>message.sent</c>); the status only moves forward.</summary>
     Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string portalMessageId, string status, CancellationToken ct = default);
+    /// <summary><c>GET /attachments/{id}</c>: a seller attachment's bytes (signed GET, empty body). One attempt inside the 30 s deadline, at most <see cref="MaxAttachmentBytes"/>; the outbox retries.</summary>
+    Task<PortalBytes> GetAttachmentAsync(Guid attachmentId, CancellationToken ct = default);
     /// <summary><c>POST /content/reports</c> (CATALOG.md §6): idempotent on <c>reportId</c>.</summary>
     Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody body, CancellationToken ct = default);
     Task<PortalResult<ShippingSettings>> GetShippingSettingsAsync(Guid sellerId, Guid brandId, CancellationToken ct = default);
@@ -77,6 +81,41 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string id, string status, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/messages/{Id(id)}/receipts", new { status }, Retry.Standard, ct);
+
+    public async Task<PortalBytes> GetAttachmentAsync(Guid id, CancellationToken ct = default)
+    {
+        var o = options.Value;
+        if (string.IsNullOrEmpty(o.InboundSecret)) throw new PortalNotConfiguredException("Portal:InboundSecret");
+        if (http.BaseAddress is null) throw new PortalNotConfiguredException("Portal:BaseUrl");
+        var path = $"{ApiBase}/attachments/{id:D}";
+        var timestamp = time.GetUtcNow().ToUnixTimeSeconds().ToString();
+        var nonce = PortalSigning.NewNonce();
+        using var req = new HttpRequestMessage(HttpMethod.Get, path);
+        req.Headers.TryAddWithoutValidation(PortalSigning.TimestampHeader, timestamp);
+        req.Headers.TryAddWithoutValidation(PortalSigning.NonceHeader, nonce);
+        req.Headers.TryAddWithoutValidation(PortalSigning.SignatureHeader, PortalSigning.Sign(o.InboundSecret, PortalSigning.Canonical(timestamp, nonce, "GET", path, [])));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Clamp(o.AttemptTimeoutSeconds, 1, 30)), time);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+        try
+        {
+            using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            var status = (int)res.StatusCode;
+            if (status is < 200 or >= 300) return new PortalBytes(status, null, null, status is 503 or 429 or 408 or 401 || status >= 500);
+            if (res.Content.Headers.ContentLength > ISignedPortalClient.MaxAttachmentBytes) throw new PortalResponseTooLargeException();
+            await using var s = await res.Content.ReadAsStreamAsync(cts.Token);
+            using var ms = new MemoryStream();
+            var buf = new byte[16 * 1024];
+            int n;
+            while ((n = await s.ReadAsync(buf, cts.Token)) > 0)
+            {
+                ms.Write(buf, 0, n);
+                if (ms.Length > ISignedPortalClient.MaxAttachmentBytes) throw new PortalResponseTooLargeException();
+            }
+            return new PortalBytes(status, ms.ToArray(), res.Content.Headers.ContentType?.MediaType, false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+        { throw new PortalUnavailableException("Portal unreachable (attachment).", ex); }
+    }
 
     public Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody b, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/content/reports", b, Retry.Standard, ct);

@@ -13,7 +13,7 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
     public const int RedactAfterDays = 90;
     public const string Redacted = "Redacted";
     public const int PositionRetentionHours = 24;
-    public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0, int NotificationsDeleted = 0);
+    public sealed record Result(int LabelsCleared, int OrdersRedacted, int PositionsCleared = 0, int ProofsCleared = 0, int NotificationsDeleted = 0, int ThreadsRedacted = 0);
 
     public async Task<Result> RunAsync(CancellationToken ct = default)
     {
@@ -58,6 +58,27 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
                 redacted++;
             }
         } while (batch.Count == 200 && !ct.IsCancellationRequested);
-        return new Result(labels, redacted, positions, proofs, deleted);
+        // Messages (PII table, M5-13): an order thread 90 days after its seller order closed, a product question 90 days after its last message (the portal's own policy). Texts are emptied,
+        // the files and their names deleted, the thread closed. Oldest first, in batches.
+        var threads = 0;
+        List<Guid> due;
+        do
+        {
+            due = await db.MessageThreads.Where(t => t.RedactedAt == null
+                    && ((t.Kind == ThreadKinds.Order && db.SellerOrderStates.Any(s => s.GroupId == t.GroupId && closedStates.Contains(s.Status) && s.UpdatedAt <= cutoff))
+                        || (t.Kind == ThreadKinds.Product && t.LastMessageAt <= cutoff)))
+                .OrderBy(t => t.LastMessageAt).Select(t => t.Id).Take(200).ToListAsync(ct);
+            foreach (var tid in due)
+            {
+                var msgIds = db.ThreadMessages.Where(m => m.ThreadId == tid).Select(m => m.Id);
+                await db.MessageAttachmentData.Where(d => db.MessageAttachments.Any(a => a.Id == d.AttachmentId && msgIds.Contains(a.MessageId))).ExecuteDeleteAsync(ct);
+                await db.MessageAttachments.Where(a => msgIds.Contains(a.MessageId)).ExecuteDeleteAsync(ct);
+                await db.ThreadMessages.Where(m => m.ThreadId == tid).ExecuteUpdateAsync(s => s.SetProperty(m => m.Text, "").SetProperty(m => m.RedactedAt, (DateTimeOffset?)now).SetProperty(m => m.ModerationNote, (string?)null), ct);
+                await db.MessageThreads.Where(t => t.Id == tid).ExecuteUpdateAsync(s => s.SetProperty(t => t.RedactedAt, (DateTimeOffset?)now), ct);
+                threads++;
+            }
+        } while (due.Count == 200 && !ct.IsCancellationRequested);
+
+        return new Result(labels, redacted, positions, proofs, deleted, threads);
     }
 }

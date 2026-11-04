@@ -39,6 +39,12 @@ public sealed record ReturnRequestBody(string ReturnId, string Reason, string? C
 /// <summary>Deliberately has no <c>deliveredAt</c>: the portal stamps its own server time (never a client value).</summary>
 public sealed record DeliveryConfirmationBody(string? SellerOrderNumber = null, string? TrackingNumber = null);
 
+/// <summary>A binary answer (an attachment). <see cref="Body"/> is null unless the status is 2xx; <see cref="Retryable"/> says the portal answered something the contract says to try again later.</summary>
+public sealed record PortalBytes(int Status, byte[]? Body, string? ContentType, bool Retryable)
+{
+    public bool IsSuccess => Status is >= 200 and < 300;
+}
+
 // ---- messaging (ORDERS.md §3.3, §6) and content reports (CATALOG.md §6) ----
 /// <summary><c>kind</c> is <c>order</c> or <c>product</c>; the buyer is shown to the seller by display name only.</summary>
 public sealed record BuyerMessageBody(string MessageId, string ConversationId, string Kind, string? MarketplaceOrderId, string? SellerOrderNumber, Guid? ProductId,
