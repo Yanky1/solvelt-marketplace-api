@@ -57,14 +57,15 @@ public static class MessageEndpoints
         }), ctx);
     }
 
-    private static async Task<IResult> Thread(Guid id, HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, CancellationToken ct)
+    private static async Task<IResult> Thread(Guid id, HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, Guid? beforeId, CancellationToken ct)
     {
         var buyer = ctx.Buyer();
         var t = await db.MessageThreads.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id && x.AccountId == buyer.AccountId && x.RedactedAt == null, ct);
         if (t is null) return Private(Problems.NotFound(), ctx);
         var take = Math.Clamp(limit ?? 50, 1, 100);
         var q = db.ThreadMessages.AsNoTracking().Include(m => m.Attachments).Where(m => m.ThreadId == id && m.RedactedAt == null);
-        if (before is { } b) q = q.Where(m => m.SentAt < b);
+        // keyset on (SentAt, Id): messages with the same time are neither skipped nor repeated between pages (M5 review, info)
+        if (before is { } b) q = beforeId is { } bi ? q.Where(m => m.SentAt < b || (m.SentAt == b && m.Id.CompareTo(bi) < 0)) : q.Where(m => m.SentAt < b);
         var rows = await q.OrderByDescending(m => m.SentAt).ThenByDescending(m => m.Id).Take(take + 1).ToListAsync(ct);
         var page = rows.Take(take).Reverse().ToList();
         return Private(Results.Json(new
@@ -77,6 +78,7 @@ public static class MessageEndpoints
                 attachments = m.HiddenAt != null ? [] : m.Attachments.Select(a => new { id = a.Id, fileName = a.FileName, size = a.Size, type = a.SniffedType, available = a.Status == AttachmentStatuses.Stored }).ToArray<object>(),
             }),
             older = rows.Count > take ? (DateTimeOffset?)page[0].SentAt : null,
+            olderId = rows.Count > take ? (Guid?)page[0].Id : null,
         }), ctx);
     }
 

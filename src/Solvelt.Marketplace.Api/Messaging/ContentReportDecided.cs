@@ -44,6 +44,7 @@ public sealed class ContentReportDecidedHandler : IProjectionHandler
         {
             var now = c.Time.GetUtcNow().ToUniversalTime();
             m.HiddenAt ??= now;
+            m.Text = "";   // hidden is not only "not shown": the text is gone
             m.ModerationNote = FulfilmentProjector.Cap(FulfilmentProjector.Str(d, "reasonShownToUser"), 300) ?? m.ModerationNote;
             var ids = m.Attachments.Select(a => a.Id).ToList();
             await c.Db.MessageAttachmentData.Where(x => ids.Contains(x.AttachmentId)).ExecuteDeleteAsync(ct);   // the files go with it

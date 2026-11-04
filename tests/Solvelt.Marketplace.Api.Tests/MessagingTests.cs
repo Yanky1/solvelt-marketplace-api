@@ -172,6 +172,26 @@ public sealed class MessagingTests : OrderFlowBase
     // ------------------------------------------------------------------ seller -> buyer
 
     [Fact]
+    public async Task Paging_a_thread_uses_time_and_id_so_messages_with_the_same_time_are_neither_skipped_nor_repeated()
+    {
+        var (o, g) = await Placed();
+        await Call(HttpMethod.Post, "/api/v1/messages", new { orderNumber = o.Number, text = "Hi" });
+        await Drain();
+        for (var i = 0; i < 4; i++) Assert.Equal("applied", await SellerMessage(o, g, $"reply {i}"));      // the helper gives all of them the same sentAt
+        var thread = await _k.Db(db => db.MessageThreads.Select(t => t.Id).SingleAsync());
+        var seen = new List<Guid>();
+        string? q = "limit=2";
+        for (var page = 0; page < 5 && q is not null; page++)
+        {
+            var v = await Json(await Call(HttpMethod.Get, $"/api/v1/messages/threads/{thread}?{q}"));
+            seen.AddRange(v.GetProperty("messages").EnumerateArray().Select(m => m.GetProperty("id").GetGuid()));
+            q = v.GetProperty("older").ValueKind == JsonValueKind.Null ? null : $"limit=2&before={Uri.EscapeDataString(v.GetProperty("older").GetString()!)}&beforeId={v.GetProperty("olderId").GetGuid()}";
+        }
+        Assert.Equal(5, seen.Count);                                                                          // the buyer's own message and four replies
+        Assert.Equal(5, seen.Distinct().Count());
+    }
+
+    [Fact]
     public async Task G3_An_order_message_without_the_sellers_order_number_is_skipped_even_for_a_single_seller_order()
     {
         var (o, g) = await Placed();
