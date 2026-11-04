@@ -102,10 +102,16 @@ public sealed class NotificationMailHandler(MarketplaceDb db, IEmailSender sende
         var prefs = await db.NotificationPreferences.AsNoTracking().FirstOrDefaultAsync(x => x.AccountId == n.AccountId, ct);
         if (category != NotificationCategories.Transactional && prefs is not null && !prefs.Wants(category)) return OutboxResult.Delivered();   // transactional mail ignores the preferences (O-21)
         var baseUrl = (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
-        var catToken = tokens.Make(n.AccountId, category);
-        var apiBase = (notifications.Value.PublicApiBaseUrl ?? baseUrl).TrimEnd('/');
-        var mail = NotificationEmails.Build(account.Email!, account.DisplayName, n, baseUrl, $"{baseUrl}/unsubscribe?token={catToken}", $"{baseUrl}/unsubscribe?token={tokens.Make(n.AccountId, NotificationCategories.All)}",
-            $"{apiBase}/api/v1/notifications/unsubscribe?token={catToken}");
+        EmailMessage mail;
+        if (category == NotificationCategories.Transactional)
+            mail = NotificationEmails.Build(account.Email!, account.DisplayName, n, baseUrl, null, null);   // required mail has nothing to unsubscribe from: no link, no List-Unsubscribe header (M5-25, review X3)
+        else
+        {
+            var catToken = tokens.Make(n.AccountId, category);
+            var apiBase = (notifications.Value.PublicApiBaseUrl ?? baseUrl).TrimEnd('/');
+            mail = NotificationEmails.Build(account.Email!, account.DisplayName, n, baseUrl, $"{baseUrl}/unsubscribe?token={catToken}", $"{baseUrl}/unsubscribe?token={tokens.Make(n.AccountId, NotificationCategories.All)}",
+                $"{apiBase}/api/v1/notifications/unsubscribe?token={catToken}");
+        }
         await EmailSending.SendAsync(sender, mail, email.Value, ct);   // a failure or timeout throws: the outbox retries with backoff
         return OutboxResult.Delivered();
     }
@@ -121,7 +127,7 @@ public static class NotificationEmails
         _ => $"Update on booking {number}",
     };
 
-    public static EmailMessage Build(string to, string name, Notification n, string baseUrl, string unsubscribeCategory, string unsubscribeAll, string? oneClickUrl = null)
+    public static EmailMessage Build(string to, string name, Notification n, string baseUrl, string? unsubscribeCategory, string? unsubscribeAll, string? oneClickUrl = null)
     {
         string P(string key) { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : ""; } catch (JsonException) { return ""; } }
         long Money() { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty("amountCents", out var v) && v.TryGetInt64(out var x) ? x : 0; } catch (JsonException) { return 0; } }
@@ -146,10 +152,12 @@ public static class NotificationEmails
             _ => ($"Update on order {order}", $"There is an update on your order {order}."),
         };
         subject = System.Text.RegularExpressions.Regex.Replace(subject, @"[\p{Cc}\u2028\u2029]+", " ").Trim();   // a seller/listing name can never add a header line (review P7)
-        if (subject.Length > 200) subject = subject[..200];
+        if (subject.Length > 200) subject = subject[..(char.IsHighSurrogate(subject[199]) ? 199 : 200)];   // never cut a surrogate pair in half (review X7)
         var link = n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? $"{baseUrl}/account/bookings" : $"{baseUrl}/account/orders/{n.OrderNumber}";
-        var body = $"Hello {name},\n\n{line}\n\nSee the details: {link}\n\n" +
-                   $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";
+        var footer = unsubscribeCategory is null || unsubscribeAll is null
+            ? $"This email is required for your orders and account, so it cannot be switched off. You can choose which other emails you get at {baseUrl}/account/notifications/preferences.\n"
+            : $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";
+        var body = $"Hello {name},\n\n{line}\n\nSee the details: {link}\n\n" + footer;
         // RFC 8058: a mail client shows its own unsubscribe button and POSTs "List-Unsubscribe=One-Click" to the URL, with no page and no cookie (review P3)
         var headers = oneClickUrl is null ? null : new Dictionary<string, string> { ["List-Unsubscribe"] = $"<{oneClickUrl}>", ["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click" };
         return new EmailMessage(to, subject, body, Headers: headers);

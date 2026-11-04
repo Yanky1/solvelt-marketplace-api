@@ -477,10 +477,23 @@ public sealed class ReprojectHandler(MarketplaceDb db, FulfilmentProjector proje
         var row = await db.PortalInboundEvents.AsNoTracking().FirstOrDefaultAsync(e => e.Id == p.EventId, ct);
         if (row?.PayloadJson is null) return OutboxResult.Dead("event_gone");   // the raw body was purged: nothing to replay
         if (!PortalEvent.TryParse(System.Text.Encoding.UTF8.GetBytes(row.PayloadJson), out var evt, out _) || evt is null) return OutboxResult.Dead("invalid_event");
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var outcome = await projector.ApplyAsync(new ProjectionContext(db, evt with { CreatedAt = row.OrderingAt }, store, time), ct, p.RefundMoneyMoved);
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(CancellationToken.None);
-        return OutboxResult.Delivered();   // applied, skipped (older/terminal) or parked: all are final answers for this message
+        // At-least-once delivery: the same message can run twice (an expired lease, a failed finish after the commit). A marker row written in the SAME transaction as the projection makes the
+        // second run a no-op, whatever the event type (a partial cancel adds counts and has no ordering guard of its own). Review X2.
+        if (await db.ProjectionStates.AsNoTracking().AnyAsync(x => x.AggregateType == "reproject" && x.AggregateKey == p.EventId && x.FieldGroup == "done", ct)) return OutboxResult.Delivered();
+        try
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            db.ProjectionStates.Add(new ProjectionState { AggregateType = "reproject", AggregateKey = p.EventId, FieldGroup = "done", LastAppliedAt = time.GetUtcNow().ToUniversalTime(), LastEventId = p.EventId });
+            await projector.ApplyAsync(new ProjectionContext(db, evt with { CreatedAt = row.OrderingAt }, store, time), ct, p.RefundMoneyMoved);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(CancellationToken.None);
+            return OutboxResult.Delivered();   // applied, skipped (older/terminal) or parked: all are final answers for this message
+        }
+        catch
+        {
+            // the transaction is rolled back; the change tracker must be too, or the next handler of the same drain (one DbContext) would save this half-applied state (review X1)
+            db.ChangeTracker.Clear();
+            throw;
+        }
     }
 }
