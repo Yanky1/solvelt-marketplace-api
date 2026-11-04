@@ -119,6 +119,22 @@ public sealed class AdminOptions
 {
     /// <summary>Key for the operations endpoints (<c>/api/admin/*</c>). Its own key. Unset means the endpoints answer 404 (disabled).</summary>
     public string? ApiKey { get; set; }
+    /// <summary>The host (and port) the operations endpoints answer on, e.g. <c>admin.internal:8443</c>. Requests for any other host get 404 (O-12). Required outside Development/Testing when a key is set.</summary>
+    public string? Host { get; set; }
+}
+
+public sealed class EmailOptions
+{
+    /// <summary><c>Smtp</c> is the only provider. Development/Testing use an in-memory sink unless this is set.</summary>
+    public string? Provider { get; set; }
+    public string? SmtpHost { get; set; }
+    public int SmtpPort { get; set; } = 587;
+    public string? SmtpUserName { get; set; }
+    public string? SmtpPassword { get; set; }
+    public string? From { get; set; }
+    public bool SmtpUseTls { get; set; } = true;
+    /// <summary>A send is cut off after this long, always well inside the outbox lease.</summary>
+    public int SendTimeoutSeconds { get; set; } = 20;
 }
 
 public sealed class AuthOptions

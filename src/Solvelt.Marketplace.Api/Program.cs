@@ -71,8 +71,12 @@ builder.Services.AddScoped<OutboxMaintenance>();
 builder.Services.AddScoped<OutboxHandlerRegistry>();
 builder.Services.AddScoped<IOutboxHandler, EmailOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, PaymentEventOutboxHandler>();
-if (devLike) builder.Services.AddSingleton<IEmailSender, DevEmailSink>();
-else builder.Services.AddSingleton<IEmailSender, UnconfiguredEmailSender>();
+builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
+builder.Services.AddSingleton<OpsCounters>();
+// Smtp wherever it is configured (production requires it, see the validator); otherwise the in-memory sink in Development/Testing.
+if (string.Equals(builder.Configuration["Email:Provider"], "Smtp", StringComparison.OrdinalIgnoreCase)) builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+else if (devLike) builder.Services.AddSingleton<IEmailSender, DevEmailSink>();
+else throw new InvalidOperationException("Email:Provider is not configured.");
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<OutboxWorker>();
 builder.Services.AddSingleton(sp => new AttemptLimiter(sp.GetRequiredService<TimeProvider>()));
 builder.Services.AddMarketplaceRateLimiting();
@@ -99,7 +103,14 @@ if (devLike)
     SearchSchema.Ensure(db);
 }
 
-app.MapGet("/health", (ClientIpResolver forwarding) => Results.Json(new { status = "ok", forwarding = new { invalid = forwarding.InvalidCount } }));
+app.MapGet("/health", (ClientIpResolver forwarding, OpsCounters ops) => Results.Json(new
+{
+    status = "ok",
+    forwarding = new { invalid = forwarding.InvalidCount },
+    // Counts since start-up: alert when either rises.
+    outbox = new { deadLettered = ops.DeadLettered },
+    admin = new { refused = ops.AdminDenied },
+}));
 app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateLimiting(RateLimitPolicies.Public);
 
 app.MapPortalWebhooks();

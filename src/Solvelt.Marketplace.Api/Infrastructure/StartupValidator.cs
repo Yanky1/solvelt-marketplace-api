@@ -1,3 +1,5 @@
+using Solvelt.Marketplace.Api.Auth;
+
 namespace Solvelt.Marketplace.Api.Infrastructure;
 
 /// <summary>
@@ -20,10 +22,22 @@ public static class StartupValidator
 {
     public static bool IsDevLike(IHostEnvironment env) => env.IsDevelopment() || env.IsEnvironment("Testing");
 
+    public const int LeaseMarginSeconds = 30;
+
+    private static int IntOr(string? value, int fallback) => int.TryParse(value, out var n) ? n : fallback;
+
     /// <summary>Returns every configuration problem; empty means the configuration is acceptable.</summary>
     public static IReadOnlyList<string> Validate(IConfiguration config, IHostEnvironment env)
     {
         var problems = new List<string>();
+        // In every environment: a handler (a portal call, a mail) must always finish well inside the lease that protects its message,
+        // otherwise a second dispatcher takes the message over while the first is still sending it (review of af8d339, item 7).
+        var lease = IntOr(config["Outbox:LeaseSeconds"], 120);
+        var portalDeadline = Math.Clamp(IntOr(config["Portal:TotalDeadlineSeconds"], 30), 1, 60);
+        var emailTimeout = IntOr(config["Email:SendTimeoutSeconds"], 20);
+        if (lease < portalDeadline + LeaseMarginSeconds) problems.Add($"Outbox:LeaseSeconds ({lease}) must be at least Portal:TotalDeadlineSeconds ({portalDeadline}) + {LeaseMarginSeconds}.");
+        if (lease < emailTimeout + LeaseMarginSeconds) problems.Add($"Outbox:LeaseSeconds ({lease}) must be at least Email:SendTimeoutSeconds ({emailTimeout}) + {LeaseMarginSeconds}.");
+        if (emailTimeout < 1) problems.Add("Email:SendTimeoutSeconds must be at least 1.");
         if (IsDevLike(env)) return problems;
 
         var keys = new (string Name, string Env, string? Value)[]
@@ -54,6 +68,24 @@ public static class StartupValidator
         if (string.Equals(catalogSource, "Fixture", StringComparison.OrdinalIgnoreCase)) problems.Add("Catalog:Source=Fixture (seed data) must not be used outside Development/Testing.");
         else if (!string.IsNullOrWhiteSpace(catalogSource) && !string.Equals(catalogSource, "None", StringComparison.OrdinalIgnoreCase) && !string.Equals(catalogSource, "Http", StringComparison.OrdinalIgnoreCase))
             problems.Add($"Catalog:Source '{catalogSource}' is not valid (None or Http).");
+        // Mail: without a provider no buyer could verify an address or reset a password, so start-up fails instead of letting mail die in the outbox (M1-50).
+        var provider = config["Email:Provider"];
+        if (string.IsNullOrWhiteSpace(provider)) problems.Add("Email:Provider (env Email__Provider) is required: Smtp.");
+        else if (!string.Equals(provider, "Smtp", StringComparison.OrdinalIgnoreCase)) problems.Add($"Email:Provider '{provider}' is not valid (Smtp).");
+        else
+        {
+            if (string.IsNullOrWhiteSpace(config["Email:SmtpHost"])) problems.Add("Email:SmtpHost (env Email__SmtpHost) is required for the Smtp provider.");
+            if (string.IsNullOrWhiteSpace(config["Email:From"])) problems.Add("Email:From (env Email__From) is required for the Smtp provider.");
+            else if (AuthValidation.EmailProblem(config["Email:From"]) is not null) problems.Add("Email:From must be an email address.");
+        }
+        // The operations endpoints are not for the public host (O-12): with a key they also need their own host.
+        if (!string.IsNullOrWhiteSpace(config["Admin:ApiKey"]))
+        {
+            var adminHost = config["Admin:Host"];
+            if (string.IsNullOrWhiteSpace(adminHost)) problems.Add("Admin:Host (env Admin__Host) is required when Admin:ApiKey is set: /api/admin must not be reachable through the public host.");
+            else if (Uri.TryCreate(config["Marketplace:PublicBaseUrl"], UriKind.Absolute, out var pub) && string.Equals(adminHost.Trim(), pub.Authority, StringComparison.OrdinalIgnoreCase))
+                problems.Add("Admin:Host must not be the public host (Marketplace:PublicBaseUrl).");
+        }
         if (string.IsNullOrWhiteSpace(config["Marketplace:RelayDomain"])) problems.Add("Marketplace:RelayDomain (env Marketplace__RelayDomain) is required.");
         if (string.IsNullOrWhiteSpace(config["Marketplace:PublicBaseUrl"])) problems.Add("Marketplace:PublicBaseUrl (env Marketplace__PublicBaseUrl) is required.");
         if (!string.Equals(config["Database:Provider"], "Postgres", StringComparison.OrdinalIgnoreCase))
