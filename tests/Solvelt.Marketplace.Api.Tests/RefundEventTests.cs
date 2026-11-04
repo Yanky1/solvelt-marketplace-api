@@ -870,4 +870,125 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.True(rows.Single(r => r.DedupeKey == "payment:dispute:soon").NextAttemptAt > now.AddMinutes(4));
         Assert.True(rows.Single(r => r.DedupeKey == "payment:refund-processed:far").NextAttemptAt > now.AddDays(3000));
     }
+
+    // ---- independent review of 820b369..49a7006 (Q1-Q5, decision M3-34) ----
+
+    private async Task<OutboxResult> RunRefundHandler(string key, int attempt)
+    {
+        using var scope = _k.F.Services.CreateScope();
+        var handler = scope.ServiceProvider.GetServices<IOutboxHandler>().OfType<StripeRefundHandler>().Single();
+        return await handler.HandleAsync(new OutboxMessage { Type = RefundService.StripeRefundType, Payload = JsonSerializer.Serialize(new RefundService.RefundPayload(key, attempt)) }, default);
+    }
+
+    [Fact]
+    public async Task Q1_a_refusal_while_one_of_our_refunds_is_in_flight_finishes_that_refund_and_counts_nothing_twice()
+    {
+        var (o, g, line) = await Three();                                                    // paid 14262
+        Stripe.TimeoutAfterExecuteNext = true;                                               // refund A reaches Stripe and is executed, but the answer is lost
+        Assert.Equal("applied", await RefundLines(o, g, "rf-A", line, 1, 4587));
+        await Drain();
+        Assert.Equal("reserved", (await Refund("portal:rf-A")).Status);                      // our side still thinks it is waiting for a retry
+        Assert.Equal(4587, Stripe.Intents.Single().RefundedCents);                           // ... but the money has left
+        Stripe.RejectRefundWith = "charge_disputed";                                         // refund B is refused for an unrelated reason
+        Assert.Equal("applied", await RefundLines(o, g, "rf-B", line, 1, 4587));
+        await Drain();
+        Assert.Equal("succeeded", (await Refund("portal:rf-A")).Status);                     // A is finished by its refund_key (it used to be released, or counted again as a dashboard refund)
+        Assert.Equal("rejected", (await Refund("portal:rf-B")).Status);
+        Assert.Equal(0, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external")));   // nothing was booked twice
+        var after = await Order(o.Number);
+        Assert.Equal((4587L, 4587L, 1), (after.RefundedCents, after.Groups.Single().RefundedCents, after.Lines.Single().RefundedQuantity));   // exactly A's unit and money; B's are back
+        Assert.Single(await Sent("refund.processed"));                                       // the portal is told about A once
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(5));
+        await Drain();                                                                       // A's own retry finds it done
+        Assert.Single(await Sent("refund.processed"));
+        Assert.Equal(4587, Stripe.Intents.Single().RefundedCents);
+    }
+
+    [Fact]
+    public async Task Q2_an_older_message_of_a_cut_refund_does_nothing_and_an_idempotency_error_is_looked_at_again_never_a_rejection()
+    {
+        var (o, g, line) = await Three();
+        await Stripe.RefundAsync(o.PaymentIntentId!, 6000, "dashboard", new Dictionary<string, string>(), default);        // a dashboard refund our webhook has not seen
+        Assert.Equal("applied", await RefundLines(o, g, "rf-big", line, 2, 9174));
+        Assert.Equal(OutboxOutcome.Delivered, (await RunRefundHandler("portal:rf-big", 0)).Outcome);       // attempt 0 is refused and CUT to 8262; attempt 1 is queued
+        var cut = await Refund("portal:rf-big");
+        Assert.Equal((8262L, 1, "reserved"), (cut.AmountCents, cut.Attempt, cut.Status));
+        var sentBefore = Stripe.Refunds.Count;
+        // the outbox redelivers attempt 0 (at-least-once): it must not send the NEW amount under the OLD key, nor reject anything
+        Assert.Equal(OutboxOutcome.Delivered, (await RunRefundHandler("portal:rf-big", 0)).Outcome);
+        Assert.Equal(sentBefore, Stripe.Refunds.Count);
+        Assert.Equal("reserved", (await Refund("portal:rf-big")).Status);
+        await Drain();                                                                       // attempt 1 goes out
+        Assert.Equal(("succeeded", 8262L), ((await Refund("portal:rf-big")).Status, (await Refund("portal:rf-big")).AmountCents));
+        Assert.Equal(14262, Stripe.Intents.Single().RefundedCents);
+        // an idempotency error says "same key, other call": retried later, the reservation stays
+        var (o2, g2, line2) = await SecondThree();
+        Stripe.RejectRefundWith = "idempotency_key_in_use";
+        Assert.Equal("applied", await RefundLines(o2, g2, "rf-idem", line2, 1, 4587));
+        var r = await RunRefundHandler("portal:rf-idem", 0);
+        Assert.Equal(OutboxOutcome.Retry, r.Outcome);
+        Assert.Equal("reserved", (await Refund("portal:rf-idem")).Status);
+        await Drain();
+        Assert.Equal("succeeded", (await Refund("portal:rf-idem")).Status);                 // and it goes through on the next try
+    }
+
+    [Fact]
+    public async Task Q3_a_cut_refund_books_a_plain_amount_with_its_tax_prorated_and_gives_the_units_back_so_a_later_release_is_exact()
+    {
+        var (o, g, line) = await Three();                                                    // 3 units, tax 1162; 2 units = 9174 with tax 774
+        await Stripe.RefundAsync(o.PaymentIntentId!, 6000, "dashboard", new Dictionary<string, string>(), default);
+        Assert.Equal("applied", await RefundLines(o, g, "rf-big", line, 2, 9174, shipping: 0));
+        Assert.Equal(OutboxOutcome.Delivered, (await RunRefundHandler("portal:rf-big", 0)).Outcome);      // cut to 8262
+        var row = await Refund("portal:rf-big");
+        var group = await GroupOf(g.Id);
+        var l = (await Order(o.Number)).Lines.Single();
+        var newTax = 774L * 8262 / 9174;                                                     // floor, the same proration as a goodwill amount
+        Assert.Equal((8262L, newTax, 0L, 0L, null), (row.AmountCents, row.TaxCents, row.ShippingCents, row.ShippingTaxCents, row.PartsJson));
+        Assert.Equal((8262L, newTax, 0L, 0L), (group.RefundedCents, group.RefundedTaxCents, group.RefundedShippingCents, group.RefundedShippingTaxCents));   // the group's books equal the row: nothing left over from the old reservation
+        Assert.Equal((0, 0L), (l.RefundedQuantity, l.RefundedTaxCents));                     // the units are given back
+        await Drain();
+        var processed = Assert.Single(await Sent("refund.processed")).GetProperty("data");
+        Assert.Equal(8262 - newTax, processed.GetProperty("amountCents").GetInt64());        // the portal's net amount is the cut amount without ITS tax
+    }
+
+    [Fact]
+    public async Task Q4_the_external_row_of_a_refusal_is_keyed_by_the_refund_and_its_send_not_by_the_cumulative_figure()
+    {
+        var (o, g, line) = await Three();
+        await Stripe.RefundAsync(o.PaymentIntentId!, 14262, "dashboard", new Dictionary<string, string>(), default);       // everything refunded outside
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
+        await Drain();
+        var external = await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Reason == "external"));
+        Assert.Equal("external:portal:rf-1:0", external.Key);
+        Assert.DoesNotContain("14262", external.Key);
+    }
+
+    [Fact]
+    public async Task Q5_the_mail_of_a_failed_order_whose_money_was_already_returned_says_so_only_when_nothing_could_go_back()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        _onOrder = _ => FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"invalid_order\",\"errors\":[{\"index\":0,\"code\":\"product_inactive\",\"message\":\"x\"}]}");
+        await Pay(number, intent, total);
+        await Stripe.RefundAsync(intent, total, "dashboard", new Dictionary<string, string>(), default);                  // all of it was refunded in the dashboard before our refund ran
+        await Drain();
+        var mail = Assert.Single(_k.Sink.Sent, m => m.Subject.Contains("couldn't place"));
+        Assert.Contains("already been returned", mail.TextBody);
+    }
+
+    [Fact]
+    public async Task Q5b_a_failed_orders_refund_refused_for_an_unrelated_reason_while_money_can_still_go_back_does_not_claim_it_was_already_returned()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        _onOrder = _ => FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"invalid_order\",\"errors\":[{\"index\":0,\"code\":\"product_inactive\",\"message\":\"x\"}]}");
+        Stripe.RejectRefundWith = "charge_disputed";                                         // our refund is refused, but nothing was refunded anywhere: all of it can still go back
+        await Pay(number, intent, total);
+        await Drain();
+        Assert.DoesNotContain(_k.Sink.Sent, m => m.Subject.Contains("couldn't place"));      // no "already been returned" (it was not), and no "is being refunded" (it is not)
+        Assert.Equal("rejected", (await _k.Db(db => db.OrderRefunds.AsNoTracking().SingleAsync(r => r.Reason == "order_failed"))).Status);
+        Assert.Equal(0, (await Order(number)).RefundedCents);                                // given back: a person can reserve it again
+    }
 }

@@ -156,6 +156,8 @@ public sealed class OrderRefund
     /// <summary>JSON <c>[{ "lineId", "quantity", "taxCents" }]</c>: which line counters this refund moved, so a refusal by Stripe gives them back exactly.</summary>
     public string? PartsJson { get; set; }
     public string Reason { get; set; } = "";
+    /// <summary>Which send of this refund is current (it goes up when the amount is cut and re-sent under a new idempotency key): an older queued message does nothing (decision M3-34).</summary>
+    public int Attempt { get; set; }
     public string Status { get; set; } = RefundStatus.Reserved;
     public string? StripeRefundId { get; set; }
     /// <summary>Send <c>refund.processed</c> to the portal once Stripe confirms (refunds the portal asked for).</summary>

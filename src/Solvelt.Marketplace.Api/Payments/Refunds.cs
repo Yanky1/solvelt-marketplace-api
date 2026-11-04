@@ -222,6 +222,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         var refund = await db.OrderRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.Key == p.Key, ct);
         if (refund is null) return OutboxResult.Dead("refund_missing");
         if (refund.Status != RefundStatus.Reserved) return OutboxResult.Delivered();   // already done (a retry after the result was recorded)
+        if (p.Attempt < refund.Attempt) return OutboxResult.Delivered();                // a message of an older send (the amount was cut and re-sent since): it must not send the new amount under the old key (review Q2)
         var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstAsync(o => o.Id == refund.OrderId, ct);
         if (order.PaymentIntentId is null) return OutboxResult.Dead("no_payment_intent");
 
@@ -236,28 +237,41 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
 
         await using (var tx = await db.Database.BeginTransactionAsync(ct))
         {
-            var now = time.GetUtcNow().ToUniversalTime();
-            var changed = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved)
-                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Succeeded).SetProperty(r => r.StripeRefundId, result.Id).SetProperty(r => r.UpdatedAt, now), ct);
-            if (changed == 1)
-            {
-                var group = refund.GroupId is { } gid ? order.Groups.FirstOrDefault(g => g.Id == gid) : null;
-                if (refund.ReportToPortal && group?.SellerOrderNumber is { } sellerOrderNumber)
-                    outbox.EnqueuePaymentEvent($"refund-processed:{refund.Key}", PaymentEventTypes.RefundProcessed,
-                        new RefundProcessedData(result.Id, order.Number, sellerOrderNumber, null, refund.AmountCents - refund.ShippingCents - refund.TaxCents, refund.ShippingCents, order.Currency, refund.Reason));
-                // The buyer is told only now that Stripe has really returned the money (never on reservation: a refund Stripe refuses must not have been announced as done)
-                if (refund.Reason == "order_failed") await MailFailedOrderAsync(order, refund.AmountCents, ct);
-                await db.SaveChangesAsync(ct);
-            }
+            await FinalizeSucceededAsync(refund, order, result.Id, ct);
+            await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
         return OutboxResult.Delivered();
     }
 
+    /// <summary>A refund of ours that Stripe has executed: marks it done and queues what follows (the portal's <c>refund.processed</c>, the buyer's mail). The caller saves and commits.</summary>
+    private async Task<bool> FinalizeSucceededAsync(OrderRefund refund, MarketplaceOrder order, string stripeRefundId, CancellationToken ct)
+    {
+        var now = time.GetUtcNow().ToUniversalTime();
+        var changed = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Succeeded).SetProperty(r => r.StripeRefundId, stripeRefundId).SetProperty(r => r.UpdatedAt, now), ct);
+        if (changed == 0) return false;
+        var group = refund.GroupId is { } gid ? order.Groups.FirstOrDefault(g => g.Id == gid) : null;
+        if (refund.ReportToPortal && group?.SellerOrderNumber is { } sellerOrderNumber)
+            outbox.EnqueuePaymentEvent($"refund-processed:{refund.Key}", PaymentEventTypes.RefundProcessed,
+                new RefundProcessedData(stripeRefundId, order.Number, sellerOrderNumber, null, refund.AmountCents - refund.ShippingCents - refund.TaxCents, refund.ShippingCents, order.Currency, refund.Reason));
+        // The buyer is told only now that Stripe has really returned the money (never on reservation: a refund Stripe refuses must not have been announced as done)
+        if (refund.Reason == "order_failed") await MailFailedOrderAsync(order, refund.AmountCents, ct);
+        return true;
+    }
+
     private async Task<OutboxResult> RefusedAsync(OrderRefund refund, MarketplaceOrder order, RefundService.RefundPayload p, string code, CancellationToken ct)
     {
+        // An idempotency error means the SAME key reached Stripe with another amount, or while the first request was still running: never a reason to give anything back. Look again later with a fresh read (review Q2).
+        if (code.StartsWith("idempotency", StringComparison.Ordinal)) return OutboxResult.Retry("stripe_" + code);
+
         long? read = null;   // null: Stripe does not know the intent (or the charge), so no money can have left through it
-        try { read = await payments.GetAmountRefundedAsync(order.PaymentIntentId!, ct); }
+        IReadOnlyList<ProviderRefund> listed = [];
+        try
+        {
+            read = await payments.GetAmountRefundedAsync(order.PaymentIntentId!, ct);
+            listed = await payments.ListRefundsAsync(order.PaymentIntentId!, ct);
+        }
         catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
         catch (PaymentRejectedException ex) when (ex.Code == "resource_missing") { }
         catch (PaymentRejectedException ex) { return OutboxResult.Dead("stripe_" + ex.Code); }
@@ -266,30 +280,45 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         var now = time.GetUtcNow().ToUniversalTime();
         // the order's row lock (a no-op write), like every other writer of its refund counters
         await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents), ct);
-        var rows = await db.OrderRefunds.AsNoTracking().Where(r => r.OrderId == order.Id).Select(r => new { r.Id, r.Reason, r.Status, r.AmountCents }).ToListAsync(ct);
-        var current = rows.FirstOrDefault(r => r.Id == refund.Id);
+        var all = await db.OrderRefunds.AsNoTracking().Where(r => r.OrderId == order.Id).ToListAsync(ct);
+        var current = all.FirstOrDefault(r => r.Id == refund.Id);
         if (current is null || current.Status != RefundStatus.Reserved) { await tx.RollbackAsync(CancellationToken.None); return OutboxResult.Delivered(); }   // settled meanwhile
-        var ours = rows.Where(r => r.Reason != "external" && r.Status == RefundStatus.Succeeded).Sum(r => r.AmountCents);
-        var known = rows.Where(r => r.Reason == "external" && r.Status == RefundStatus.Succeeded).Sum(r => r.AmountCents);
+
+        // A reserved refund of OURS that Stripe has already executed (our call timed out and waits for its retry) is MONEY THAT LEFT: it is matched by our refund_key metadata and finished, never counted as a
+        // dashboard refund and never released (review Q1). A refund Stripe lists as failed or canceled is not money.
+        var executed = listed.Where(l => l.RefundKey is not null && l.Status is not ("failed" or "canceled")).GroupBy(l => l.RefundKey!).ToDictionary(g => g.Key, g => g.First());
+        var finished = false;
+        foreach (var row in all.Where(r => r.Status == RefundStatus.Reserved && r.Reason != "external" && executed.ContainsKey(r.Key)).ToList())
+            if (await FinalizeSucceededAsync(row, order, executed[row.Key].Id, ct))
+            {
+                if (row.Id == refund.Id) finished = true;
+                all[all.FindIndex(r => r.Id == row.Id)] = Copy(row, RefundStatus.Succeeded);
+            }
+        if (finished) { await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return OutboxResult.Delivered(); }   // it went through after all
+
+        var ours = all.Where(r => r.Reason != "external" && r.Status == RefundStatus.Succeeded).Sum(r => r.AmountCents);
+        var known = all.Where(r => r.Reason == "external" && r.Status == RefundStatus.Succeeded).Sum(r => r.AmountCents);
         var confirmed = read ?? ours + known;
         var unknown = confirmed - ours - known;
         if (unknown > 0)
         {
-            // money that left through Stripe's dashboard and we had not heard of: it is real, so it takes its place in the counters now
-            db.OrderRefunds.Add(new OrderRefund { Id = Guid.NewGuid(), Key = $"external:{order.Number}:{confirmed}", OrderId = order.Id, AmountCents = unknown, Reason = "external", Status = RefundStatus.Succeeded, CreatedAt = now, UpdatedAt = now });
+            // money that left through Stripe's dashboard and we had not heard of: it is real, so it takes its place in the counters now (keyed by this refund and send, never by a cumulative figure that can come back)
+            db.OrderRefunds.Add(new OrderRefund { Id = Guid.NewGuid(), Key = $"external:{refund.Key}:{p.Attempt}", OrderId = order.Id, AmountCents = unknown, Reason = "external", Status = RefundStatus.Succeeded, CreatedAt = now, UpdatedAt = now });
             await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + unknown), ct);
             log?.LogError("Order {Number}: Stripe has refunded {Confirmed} cents, {Unknown} of them outside this system (dashboard); recorded as external money", order.Number, confirmed, unknown);
         }
-        var others = rows.Where(r => r.Id != refund.Id && r.Reason != "external" && r.Status == RefundStatus.Reserved).Sum(r => r.AmountCents);
+        var others = all.Where(r => r.Id != refund.Id && r.Reason != "external" && r.Status == RefundStatus.Reserved).Sum(r => r.AmountCents);
         var usable = Math.Max(0, order.PaidCents - confirmed - others);          // what can still go back to the card, after the refunds already queued ahead of this one
         if (refund.AmountCents > usable && usable > 0)
         {
-            // The money is partly gone: send what is left, under a new idempotency attempt (the old key belongs to the old amount). The counters shrink by what can never be returned.
-            var overflow = refund.AmountCents - usable;
-            await db.OrderRefunds.Where(r => r.Id == refund.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.AmountCents, usable).SetProperty(r => r.ShippingCents, Math.Min(refund.ShippingCents, usable))
-                .SetProperty(r => r.TaxCents, Math.Min(refund.TaxCents, usable)).SetProperty(r => r.UpdatedAt, now), ct);
-            await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - overflow), ct);
-            if (refund.GroupId is { } g) await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - overflow), ct);
+            // The money is partly gone: send what is left, under a new idempotency attempt (the old key belongs to the old amount). The refund becomes a plain AMOUNT (decision M3-34): everything the
+            // original reservation took from the counters (units, tax, shipping) is given back, and the cut amount is booked on its own with its tax prorated, so a later release gives back exactly what is booked.
+            var newTax = refund.AmountCents == 0 ? 0 : refund.TaxCents * usable / refund.AmountCents;
+            await RefundService.ReleaseCountersAsync(db, refund, ct);
+            await db.OrderRefunds.Where(r => r.Id == refund.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.AmountCents, usable).SetProperty(r => r.ShippingCents, 0L).SetProperty(r => r.TaxCents, newTax)
+                .SetProperty(r => r.ShippingTaxCents, 0L).SetProperty(r => r.PartsJson, (string?)null).SetProperty(r => r.Attempt, p.Attempt + 1).SetProperty(r => r.UpdatedAt, now), ct);
+            await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + usable), ct);
+            if (refund.GroupId is { } g) await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents + usable).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents + newTax), ct);
             outbox.Enqueue(RefundService.StripeRefundType, new RefundService.RefundPayload(refund.Key, p.Attempt + 1), $"refund:{refund.Key}:{p.Attempt + 1}");
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -311,6 +340,12 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         if (usable == 0 && refund.AmountCents > 0) log?.LogError("Refund {Key} of order {Number} ({Amount} cents) was refused and nothing is left to return: Stripe has refunded {Confirmed} of {Paid}; a person should check", refund.Key, order.Number, refund.AmountCents, confirmed, order.PaidCents);
         return OutboxResult.Dead("stripe_" + code);
     }
+
+    private static OrderRefund Copy(OrderRefund r, string status) => new()
+    {
+        Id = r.Id, Key = r.Key, OrderId = r.OrderId, GroupId = r.GroupId, AmountCents = r.AmountCents, ShippingCents = r.ShippingCents, TaxCents = r.TaxCents, ShippingTaxCents = r.ShippingTaxCents, PartsJson = r.PartsJson,
+        Reason = r.Reason, Attempt = r.Attempt, Status = status, ReportToPortal = r.ReportToPortal, PortalRefundId = r.PortalRefundId, CreatedAt = r.CreatedAt, UpdatedAt = r.UpdatedAt,
+    };
 
     private async Task MailFailedOrderAsync(MarketplaceOrder order, long refunded, CancellationToken ct)
     {
