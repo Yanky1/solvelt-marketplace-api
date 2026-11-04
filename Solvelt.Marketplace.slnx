@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Solvelt.Marketplace.Api/Solvelt.Marketplace.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Solvelt.Marketplace.Api.Tests/Solvelt.Marketplace.Api.Tests.csproj" />
+  </Folder>
+</Solution>
