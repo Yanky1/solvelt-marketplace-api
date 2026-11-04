@@ -86,6 +86,12 @@ public static class OptionsSetup
         if (devLike) { o.EmailLinkKey ??= DevDefaults.EmailLinkKey; o.GuestLinkKey ??= DevDefaults.GuestLinkKey; }
     }
 
+    public static void Checkout(CheckoutOptions o, IConfiguration config, bool devLike)
+    {
+        config.GetSection("Checkout").Bind(o);
+        if (devLike) o.QuoteKey ??= DevDefaults.QuoteKey;
+    }
+
     public static void Notifications(NotificationOptions o, IConfiguration config, bool devLike)
     {
         config.GetSection("Notifications").Bind(o);
@@ -193,4 +199,10 @@ public sealed class AuthOptions
     public int SignInIpFailuresPerHour { get; set; } = 20;
     /// <summary>Largest request body the auth endpoints read. A password is at most 128 characters.</summary>
     public int MaxBodyBytes { get; set; } = 16 * 1024;
+}
+
+/// <summary>Checkout settings. <see cref="QuoteKey"/> keys the HMAC that binds a quote to a checkout (its own key, required in production, never the dev default, distinct from every other key).</summary>
+public sealed class CheckoutOptions
+{
+    public string? QuoteKey { get; set; }
 }
