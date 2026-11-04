@@ -42,6 +42,7 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<OrderReturn> OrderReturns => Set<OrderReturn>();
     public DbSet<OrderReturnLine> OrderReturnLines => Set<OrderReturnLine>();
     public DbSet<Booking> Bookings => Set<Booking>();
+    public DbSet<BuyerQuote> Quotes => Set<BuyerQuote>();
     public DbSet<BookingPayment> BookingPayments => Set<BookingPayment>();
     public DbSet<BookingRefund> BookingRefunds => Set<BookingRefund>();
 

@@ -17,6 +17,8 @@ public static class ServicesModule
         services.AddScoped<BookingService>();
         services.AddScoped<BookingMaintenance>();
         services.AddScoped<BookingActions>();
+        services.AddScoped<BuyerQuoteService>();
+        services.AddSingleton<IProjectionHandler, QuoteEventHandler>();
         if (!env.IsEnvironment("Testing")) services.AddHostedService<BookingWorker>();
         services.AddSingleton<IProjectionHandler, BookingEventHandler>();
         services.AddScoped<BookingPaymentService>();
@@ -32,6 +34,7 @@ public static class ServicesModule
     {
         app.MapServices();
         app.MapBookings();
+        app.MapQuotes();
         return app;
     }
 }

@@ -137,6 +137,21 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         var addr = b.AddrLine1 is null ? null : new PortalAddress(b.AddrName ?? "", b.AddrLine1, b.AddrLine2, b.AddrCity ?? "", b.AddrRegion, b.AddrPostalCode ?? "", b.AddrCountry ?? "", b.AddrLat, b.AddrLng);
         IReadOnlyList<IntakeAnswerBody>? intake = null;
         if (b.IntakeJson is { } ij) { try { intake = JsonSerializer.Deserialize<List<IntakeAnswerBody>>(ij, PortalJson.Options); } catch (JsonException) { } }
+        if (b.PaymentDueAt is not null)
+        {
+            // Created from a quote: the portal confirmed it when the quote was accepted, so there is nothing to confirm; the payment only needs to be reported (and stops the unpaid-booking timer).
+            await using var qtx = await db.Database.BeginTransactionAsync(ct);
+            var qnow = time.GetUtcNow().ToUniversalTime();
+            var qmarked = await db.BookingPayments.Where(x => x.Id == pay.Id && !x.ReportedToPortal).ExecuteUpdateAsync(x => x.SetProperty(y => y.ReportedToPortal, true).SetProperty(y => y.UpdatedAt, qnow), ct);
+            await db.Bookings.Where(x => x.Id == b.Id).ExecuteUpdateAsync(x => x.SetProperty(y => y.PaymentDueAt, (DateTimeOffset?)null).SetProperty(y => y.UpdatedAt, qnow).SetProperty(y => y.Version, y => y.Version + 1), ct);
+            if (qmarked == 1)
+            {
+                outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency, null, pay.CapturedAt));
+                await db.SaveChangesAsync(ct);
+            }
+            await qtx.CommitAsync(ct);
+            return OutboxResult.Delivered();
+        }
         PortalResult<PortalBookingSummary> r;
         try { r = await portal.ConfirmBookingAsync(b.MarketplaceBookingId, new BookingConfirmBody(new PortalBuyer(RelayIdentity.PublicName(account.DisplayName), account.RelayEmail, b.Phone), addr, intake), ct); }
         catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException or PortalResponseTooLargeException or HttpRequestException or JsonException) { return OutboxResult.Retry("portal_unavailable"); }

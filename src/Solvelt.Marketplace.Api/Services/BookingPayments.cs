@@ -44,14 +44,17 @@ public sealed class BookingPaymentService(MarketplaceDb db, IPaymentProvider pay
         var key = PaymentKey(b.MarketplaceBookingId);
         var existing = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.Key == key, ct);
         if (existing is { Status: BookingPaymentStatus.Captured }) return (BookingCheckoutStatus.AlreadyPaid, null, null);
-        if (b.Status != BookingStatus.Hold || b.PortalBookingId is null) return (BookingCheckoutStatus.NotPayable, null, null);
-        if (b.HoldExpiresAt is not { } until || until <= now) return (BookingCheckoutStatus.Expired, null, null);
+        if (b.PortalBookingId is null) return (BookingCheckoutStatus.NotPayable, null, null);
+        // Two ways to be payable: a HOLD (pay, then we confirm it at the portal) and a booking created by accepting a QUOTE, which the portal confirmed at once and which must be paid by PaymentDueAt.
+        var fromQuote = b.PaymentDueAt is not null;
+        if (fromQuote ? b.Status is not (BookingStatus.Confirmed or BookingStatus.Requested or BookingStatus.Rescheduled) : b.Status != BookingStatus.Hold) return (BookingCheckoutStatus.NotPayable, null, null);
+        if ((fromQuote ? b.PaymentDueAt : b.HoldExpiresAt) is not { } until || until <= now) return (BookingCheckoutStatus.Expired, null, null);
         if (b.TotalCents < 50) return (BookingCheckoutStatus.AmountTooSmall, null, null);   // Stripe's minimum charge
 
-        // The intake answers and the phone are what the portal receives at confirmation; they are stored before any money moves.
+        // The intake answers and the phone are what the portal receives at confirmation (a quote booking sent them when it was accepted); they are stored before any money moves.
         var phone = body?.Phone is { } ph && ph.Trim().Length > 0 ? ph.Trim() : b.Phone;
-        var intake = body?.Intake is { Count: > 0 } ? JsonSerializer.Serialize(body.Intake, PortalJson.Options) : b.IntakeJson;
-        var stored = await db.Bookings.Where(x => x.Id == b.Id && x.Status == BookingStatus.Hold)
+        var intake = !fromQuote && body?.Intake is { Count: > 0 } ? JsonSerializer.Serialize(body.Intake, PortalJson.Options) : b.IntakeJson;
+        var stored = await db.Bookings.Where(x => x.Id == b.Id && x.Status == b.Status)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Phone, phone).SetProperty(x => x.IntakeJson, intake).SetProperty(x => x.UpdatedAt, now), ct);
         if (stored == 0) return (BookingCheckoutStatus.NotPayable, null, null);
 

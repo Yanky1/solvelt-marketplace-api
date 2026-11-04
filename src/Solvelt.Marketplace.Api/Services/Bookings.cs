@@ -30,6 +30,8 @@ public sealed class BookingOptions
     public int PendingResolveAfterSeconds { get; set; } = 60;
     /// <summary>Personal data of a finished booking is wiped this long after it ended (the portal does the same, SERVICES.md §9).</summary>
     public int RedactAfterDays { get; set; } = 30;
+    /// <summary>A booking made by accepting a quote is confirmed at once by the portal, so it must be paid within this long or it is cancelled.</summary>
+    public int QuotePaymentMinutes { get; set; } = 30;
 }
 
 public static class BookingStatuses
@@ -64,15 +66,17 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         if (r.DurationMinutes is { } d && (d <= 0 || d > 24 * 60)) e["durationMinutes"] = "Invalid duration.";
         if (r.AddOnIds is { } ids && (ids.Count > 20 || ids.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 100 || x.Any(c => !(char.IsLetterOrDigit(c) || c is '-' or '_'))))) e["addOnIds"] = "Invalid add-ons.";
         if (r.Phone is { Length: > 40 }) e["phone"] = "Phone number is too long.";
-        if (loc == "customer")
-        {
-            var a = r.Address;
-            if (a is null || Clean(a.Line1).Length is 0 or > 200 || Clean(a.City).Length is 0 or > 100 || Clean(a.PostalCode).Length is 0 or > 20 || Clean(a.Country).Length != 2 || Clean(a.Name).Length > 200
-                || Clean(a.Line2).Length > 200 || Clean(a.Region).Length > 100)
-                e["address"] = "Enter the address where the service takes place.";
-            else if ((a.Lat is null) != (a.Lng is null) || a.Lat is < -90 or > 90 || a.Lng is < -180 or > 180) e["address"] = "The map position is not valid.";
-        }
+        if (loc == "customer") ValidateAddress(r.Address, e);
         return e;
+    }
+
+    /// <summary>The place an at-customer service happens: required fields, lengths, a plausible map position.</summary>
+    public static void ValidateAddress(HoldAddress? a, Dictionary<string, string> e)
+    {
+        if (a is null || Clean(a.Line1).Length is 0 or > 200 || Clean(a.City).Length is 0 or > 100 || Clean(a.PostalCode).Length is 0 or > 20 || Clean(a.Country).Length != 2 || Clean(a.Name).Length > 200
+            || Clean(a.Line2).Length > 200 || Clean(a.Region).Length > 100)
+            e["address"] = "Enter the address where the service takes place.";
+        else if ((a.Lat is null) != (a.Lng is null) || a.Lat is < -90 or > 90 || a.Lng is < -180 or > 180) e["address"] = "The map position is not valid.";
     }
 
     /// <summary>Everything the key stands for. The same key for a different slot, service, place or add-on set is a client bug and is refused (never answered with the old hold).</summary>
