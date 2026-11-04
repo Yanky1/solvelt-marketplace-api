@@ -39,39 +39,50 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         // placeholder token (already used and expired) and its "you already have an account" mail instead of a verification link.
         var hash = existing is null ? passwords.Hash(password) : null;
         if (existing is not null) passwords.BurnTime(password);
-        await InvalidateTokensAsync(existing?.Id ?? Guid.NewGuid(), EmailTokenPurpose.Verify, ct);
-
-        if (existing is null)
+        // The same transaction and the same number of round trips for every kind (E3): the account's own write (the INSERT for a new address, an UPDATE that matches
+        // nothing for a known one), then one batch with the token row and the outbox row.
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        try
         {
-            // Two sign-ups for one new address at the same moment: the other one won. Nothing to do; the caller sees the same answer.
-            var account = new BuyerAccount
+            await InvalidateTokensAsync(existing?.Id ?? Guid.NewGuid(), EmailTokenPurpose.Verify, ct);
+            if (existing is null)
             {
-                Id = Guid.NewGuid(), Email = normal, DisplayName = name, PasswordHash = hash, CreatedAt = now, UpdatedAt = now,
-                RelayEmail = RelayIdentity.NewRelayEmail(marketplace.Value.RelayDomain ?? DevDefaults.RelayDomain),
-            };
-            db.BuyerAccounts.Add(account);
-            AddVerificationLink(account);
-            try { await db.SaveChangesAsync(ct); }
-            catch (DbUpdateException) { db.ChangeTracker.Clear(); }
-            return;
-        }
-
-        var nobody = Guid.NewGuid();
-        await db.BuyerAccounts.Where(a => a.Id == nobody).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, now), ct);   // matches nothing: keeps the shape
-        if (existing.EmailVerifiedAt is null)
-        {
-            // An address that is still waiting for verification: NOTHING about the account changes, neither the password nor the name (decision O-16 a).
-            // It only gets a fresh link (older ones die). Whoever registered it first keeps the password they chose, and verifying needs that password (M1-64),
-            // so nobody can take over an address by signing up for it twice; the real owner who does not know the password uses "forgot password".
-            AddVerificationLink(existing);
+                var account = new BuyerAccount
+                {
+                    Id = Guid.NewGuid(), Email = normal, DisplayName = name, PasswordHash = hash, CreatedAt = now, UpdatedAt = now,
+                    RelayEmail = RelayIdentity.NewRelayEmail(marketplace.Value.RelayDomain ?? DevDefaults.RelayDomain),
+                };
+                db.BuyerAccounts.Add(account);
+                await db.SaveChangesAsync(ct);
+                AddVerificationLink(account);
+            }
+            else
+            {
+                var nobody = Guid.NewGuid();
+                await db.BuyerAccounts.Where(a => a.Id == nobody).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, now), ct);   // matches nothing: keeps the shape
+                if (existing.EmailVerifiedAt is null)
+                {
+                    // An address that is still waiting for verification: NOTHING about the account changes, neither the password nor the name (decision O-16 a).
+                    // It only gets a fresh link (older ones die). Whoever registered it first keeps the password they chose, and verifying needs that password (M1-64),
+                    // so nobody can take over an address by signing up for it twice; the real owner who does not know the password uses "forgot password".
+                    AddVerificationLink(existing);
+                }
+                else
+                {
+                    // A verified address: a placeholder token and the "you already have an account" notice, at most one a hour (the dedupe key). A second sign-up in the
+                    // same hour hits that key; it used to be a 500 for verified addresses only (H1). Now the whole batch is refused by the unique index and ignored below.
+                    db.EmailTokens.Add(new EmailToken { Id = Guid.NewGuid(), AccountId = Guid.NewGuid(), Purpose = EmailTokenPurpose.Decoy, CreatedAt = now, ExpiresAt = now, UsedAt = now });
+                    outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Exists, existing.Id), $"signup-exists:{existing.Id:N}:{now.ToUnixTimeSeconds() / 3600}");
+                }
+            }
             await db.SaveChangesAsync(ct);
-            return;
+            await tx.CommitAsync(ct);
         }
-
-        db.EmailTokens.Add(new EmailToken { Id = Guid.NewGuid(), AccountId = Guid.NewGuid(), Purpose = EmailTokenPurpose.Decoy, CreatedAt = now, ExpiresAt = now, UsedAt = now });
-        await db.SaveChangesAsync(ct);
-        // Insert-if-absent: a second sign-up in the same hour finds the key taken and does nothing (it used to be a unique violation, a 500 only for verified addresses: H1).
-        await outbox.TryEnqueueAsync(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Exists, existing.Id), $"signup-exists:{existing.Id:N}:{now.ToUnixTimeSeconds() / 3600}", ct: ct);
+        catch (DbUpdateException ex) when (Solvelt.Marketplace.Api.Account.AccountService.IsUniqueViolation(ex))
+        {
+            // Two sign-ups for one new address at the same moment, or a second sign-up for a verified one within the hour: the other one won. Nothing to do; the caller sees the same answer.
+            db.ChangeTracker.Clear();
+        }
     }
 
     // ---------- email verification ----------
@@ -91,7 +102,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         if (row is null) { passwords.BurnTime(password); return false; }
         var addressKey = gateKeys.Address(row.Email!);
         var ipKey = gateKeys.Ip(clientIp);
-        if (!(await gate.ClaimAsync(addressKey, ipKey, ct)).Allowed) return false;   // generic: a delay is not told apart from a wrong password here
+        if (!(await gate.ClaimAsync(addressKey, ipKey, ct)).Allowed) { passwords.BurnTime(password); return false; }   // generic: the same hashing time as a wrong password (E4): a delay is not told apart from a wrong password here
         if (!passwords.Verify(row.PasswordHash, password).Ok) return false;
         var accountId = await ConsumeTokenAsync(EmailTokenPurpose.Verify, token, ct);   // the atomic claim: two clicks use it once
         if (accountId is null) return false;
@@ -138,7 +149,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
             var newHash = passwords.Hash(password);
             await db.BuyerAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, newHash), ct);
         }
-        var token = await CreateSessionAsync(account.Id, ct);
+        var token = await CreateSessionAsync(account.Id, ct, account.SessionEpoch);   // the epoch of the row whose password was just checked (E1)
         await guestClaims.ClaimAsync(account.Id, normal, ct);   // orders placed as a guest since the last sign-in
         return new SignInResult(SignInStatus.Ok, token, account);
     }
@@ -185,12 +196,16 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         return token;
     }
 
-    public async Task<string> CreateSessionAsync(Guid accountId, CancellationToken ct)
+    /// <summary>
+    /// Makes a session. A caller that has just checked a credential against an account row passes that row's epoch: reading it again here would let a reset that
+    /// landed in between give a session made with the OLD password the NEW epoch (E1).
+    /// </summary>
+    public async Task<string> CreateSessionAsync(Guid accountId, CancellationToken ct, long? knownEpoch = null)
     {
         var now = Now;
         var token = Tokens.New();
         var absolute = now.AddDays(Math.Max(1, O.SessionAbsoluteDays));
-        var epoch = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId).Select(a => a.SessionEpoch).FirstOrDefaultAsync(ct);
+        var epoch = knownEpoch ?? await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId).Select(a => a.SessionEpoch).FirstOrDefaultAsync(ct);
         db.BuyerSessions.Add(new BuyerSession
         {
             Id = Guid.NewGuid(), AccountId = accountId, TokenHash = Tokens.Hash(token), CreatedAt = now, LastSeenAt = now, AuthenticatedAt = now, Epoch = epoch,

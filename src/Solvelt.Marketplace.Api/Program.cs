@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Infrastructure;
+using Solvelt.Marketplace.Api.Account;
 using Solvelt.Marketplace.Api.Auth;
 using Solvelt.Marketplace.Api.Carts;
 using Solvelt.Marketplace.Api.Checkout;
@@ -43,6 +44,8 @@ builder.Services.AddSingleton<GuestLinks>();
 builder.Services.AddScoped<GuestClaims>();
 builder.Services.AddScoped<SignInGate>();
 builder.Services.AddScoped<AuthMaintenance>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.AccountService>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Account.AccountRedactionHandler>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
@@ -157,10 +160,11 @@ builder.Services.AddDbContext<MarketplaceDb>(o =>
 
 var app = builder.Build();
 
-// Carts and checkouts are personal: never stored by a shared cache or the browser (also on 401 and 429, which is why this runs before the rate limiter).
+// Carts, checkouts, sign-in and the account are personal: never stored by a shared cache or the browser (also on 401 and 429, which is why this runs before the rate limiter).
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.StartsWithSegments("/api/v1/cart") || ctx.Request.Path.StartsWithSegments("/api/v1/checkout"))
+    var p = ctx.Request.Path;
+    if (p.StartsWithSegments("/api/v1/cart") || p.StartsWithSegments("/api/v1/checkout") || p.StartsWithSegments("/api/v1/auth") || p.StartsWithSegments("/api/v1/account"))
         ctx.Response.OnStarting(() => { ctx.Response.Headers.CacheControl = "private, no-store"; return Task.CompletedTask; });
     await next();
 });
@@ -201,6 +205,7 @@ app.MapPortalWebhooks();
 app.MapCatalog();
 app.MapOutboxAdmin();
 app.MapAuth();
+app.MapAccount();
 app.MapCart();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);

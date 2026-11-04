@@ -56,14 +56,16 @@ public class Review7Tests
         using var k = new AuthKit(new() { ["Auth:SignInIpFailuresPerHour"] = "100000" }, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(log)));
         await k.VerifiedSession(Email);
         await k.SignUp("unverified@example.com");
-        var shapes = new List<List<string>>();
+        var shapes = new List<List<string>>(); var commands = new List<int>();
         foreach (var a in new[] { "brand.new@example.com", "unverified@example.com", Email })
         {
             log.Clear(); log.Recording = true;
             Assert.Equal(HttpStatusCode.NoContent, (await k.SignUp(a)).StatusCode);
             log.Recording = false;
             shapes.Add(Tables(log));
+            commands.Add(log.Seen.Count);
         }
+        Assert.All(commands, c => Assert.Equal(commands[0], c));            // the same number of round trips (E3), not only the same tables
         Assert.Equal(5, shapes[0].Count);                                   // read the account, retire old links, write the account, write a token, write the outbox row
         Assert.Contains("outbox_messages", shapes[0]);
         Assert.All(shapes, s => Assert.Equal(shapes[0], s));
@@ -85,7 +87,7 @@ public class Review7Tests
 
     // ---------- M3: a session born at the moment of a reset or sign-out-all never lives ----------
 
-    private static async Task<string> PlantSession(AuthKit k, Guid accountId, int epoch)
+    private static async Task<string> PlantSession(AuthKit k, Guid accountId, long epoch)
     {
         var token = Tokens.New();
         var now = k.F.Clock.GetUtcNow();
@@ -151,6 +153,86 @@ public class Review7Tests
         var next = (await r.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("token").GetString()!;
         Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", next)).StatusCode);
         Assert.Equal(3, (await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync(s => s.TokenHash == Tokens.Hash(next)))).Epoch);
+    }
+
+    [Fact]
+    public async Task A_rotation_copies_the_old_sessions_epoch_not_the_accounts_current_one()
+    {
+        using var k = new AuthKit();
+        var token = await k.VerifiedSession(Email);
+        var account = await k.Account(Email);
+        var old = await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync());
+        // a reset lands between authenticating the old session and rotating it: the account is at 4, the old session still carries 3
+        await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.SessionEpoch, 4L)); await db.BuyerSessions.ExecuteUpdateAsync(s => s.SetProperty(x => x.Epoch, 3L)); return 0; });
+        string? next;
+        using (var scope = k.F.Services.CreateScope())
+            next = await scope.ServiceProvider.GetRequiredService<AuthService>().RotateSessionAsync(new BuyerPrincipal(account.Id, old.Id, "Jane", Email, old.AuthenticatedAt), CancellationToken.None);
+        Assert.NotNull(next);
+        Assert.Equal(3, (await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync(s => s.TokenHash == Tokens.Hash(next!)))).Epoch);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", next)).StatusCode);   // made under the old epoch: dead
+    }
+
+    // ---------- E1: a sign-in racing a reset ----------
+
+    private sealed class Racer : DbCommandInterceptor
+    {
+        public Func<Task>? Once;
+        private bool _busy;
+        private async Task Fire(string sql, bool reader)
+        {
+            if (_busy || Once is not { } go) return;
+            // before the separate epoch read an older build made (a reader on buyer_accounts that does not read the password hash), or, in the fixed code, just before the session INSERT
+            var epochRead = sql.Contains("SessionEpoch") && !sql.Contains("PasswordHash") && sql.Contains("buyer_accounts") && !sql.TrimStart().StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase);
+            var sessionInsert = sql.TrimStart().StartsWith("INSERT", StringComparison.OrdinalIgnoreCase) && sql.Contains("buyer_sessions");   // a reader or a non-query, depending on the provider
+            var hit = epochRead || sessionInsert;
+            if (!hit) return;
+            Once = null; _busy = true;
+            try { await go(); } finally { _busy = false; }
+        }
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        { await Fire(command.CommandText, true); return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken); }
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        { await Fire(command.CommandText, false); return await base.NonQueryExecutingAsync(command, eventData, result, cancellationToken); }
+    }
+
+    [Fact]
+    public async Task A_session_made_with_the_old_password_does_not_survive_a_reset_that_lands_during_the_sign_in()
+    {
+        var racer = new Racer();
+        using var k = new AuthKit(new() { ["Auth:SignInIpFailuresPerHour"] = "100000" }, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(racer)));
+        await k.VerifiedSession(Email);
+        racer.Once = async () =>
+        {
+            // the reset's writes: a new password and the next epoch
+            using var scope = k.F.Services.CreateScope();
+            var hash = scope.ServiceProvider.GetRequiredService<PasswordService>().Hash("a brand new password");
+            await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().BuyerAccounts
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.SessionEpoch, a => a.SessionEpoch + 1));
+        };
+        var r = await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw });
+        Assert.Null(racer.Once);                                                     // the reset did land in the middle of the sign-in
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);                              // the password was right when it was checked
+        var token = (await r.Content.ReadFromJsonAsync<AuthKit.SignInResponse>())!.Token;
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);
+    }
+
+    // ---------- E4: a token held back by the gate costs the same hashing time ----------
+
+    [Fact]
+    public async Task A_valid_verification_token_held_back_by_the_gate_costs_the_same_hashing_as_a_wrong_password()
+    {
+        CountingPasswordService? counting = null;
+        using var k = new AuthKit(new() { ["Auth:SignInIpFailuresPerHour"] = "100000" }, s => s.AddSingleton<PasswordService>(sp => counting = new CountingPasswordService(sp.GetRequiredService<IOptions<AuthOptions>>())));
+        await k.SignUp(Email);
+        var token = AuthKit.TokenIn((await k.Mail(Email)).Single(), "/verify-email");
+        counting!.Reset();
+        await k.Post("/api/v1/auth/verify-email", new { token, password = "wrong password!!" });
+        var wrong = counting.HashWork;
+        for (var i = 0; i < 6; i++) await k.Post("/api/v1/auth/verify-email", new { token, password = "wrong password!!" });   // now the address is in its delay
+        counting.Reset();
+        await k.Post("/api/v1/auth/verify-email", new { token, password = Pw });                                              // held back at the gate
+        Assert.Equal(wrong, counting.HashWork);
+        Assert.True(wrong > 0);
     }
 
     [Fact]

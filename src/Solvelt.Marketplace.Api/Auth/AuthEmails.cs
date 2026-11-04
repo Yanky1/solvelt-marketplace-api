@@ -11,6 +11,9 @@ public static class AuthEmails
     public static EmailMessage PasswordReset(string to, string baseUrl, string token, int minutes) => new(to, "Reset your password",
         $"We received a request to reset your Solvelt password:\n\n{baseUrl}/reset-password?token={token}\n\nThe link works once and expires in {minutes} minutes. If you did not ask for this, ignore this message: your password has not changed.\n");
 
+    public static EmailMessage PasswordChanged(string to, string baseUrl) => new(to, "Your password was changed",
+        $"The password of your Solvelt account was just changed, and every other device was signed out.\n\nIf this was you, there is nothing to do. If it was not, reset your password now: {baseUrl}/forgot-password\n");
+
     public static EmailMessage AlreadyRegistered(string to, string baseUrl) => new(to, "You already have a Solvelt account",
         $"Someone (possibly you) tried to sign up with this email address, but it already has an account.\n\nSign in: {baseUrl}/sign-in\nForgot your password: {baseUrl}/forgot-password\n\nIf this was not you, you can ignore this message.\n");
 }
