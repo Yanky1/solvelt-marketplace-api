@@ -199,7 +199,7 @@ All bodies are JSON. The web server holds the session token in its own HttpOnly 
 | Endpoint | Body | Answers |
 |---|---|---|
 | `POST /api/v1/auth/sign-up` | `{ email, password, displayName }` | `204` for a new, an unverified and an already registered address (same empty body); `422 { code: "validation_failed", errors: { email?, password?, displayName? } }` |
-| `POST /api/v1/auth/verify-email` | `{ token, password }` | `204`, or `400 { code: "invalid_token" }` (unknown, used, expired, wrong kind, **or a wrong password**: the link is then not used up); `422` on `password` when it is missing. The password is the one chosen at sign-up (decision O-16). Someone who does not know it uses forgot-password |
+| `POST /api/v1/auth/verify-email` | `{ token, password }` | `204`, or `400 { code: "invalid_token" }` (unknown, used, expired, wrong kind, **or a wrong password**: the link is then not used up); never `429` (a delayed valid token, a wrong password and an invalid token are the identical `400`); `422` on `password` when it is missing. The password is the one chosen at sign-up (decision O-16). Someone who does not know it uses forgot-password |
 | `POST /api/v1/auth/resend-verification` | `{ email }` | `204` always; a new link replaces older ones; at most 3 mails an hour per address |
 | `POST /api/v1/auth/sign-in` | `{ email, password }` | `200 { token, user: { id, displayName } }`; `401 invalid_credentials` (wrong password and unknown address are identical); `403 email_not_verified` (only after the correct password); `429 rate_limited` with `Retry-After` (the address is delayed or the client's hourly failure budget is spent; the same for a known and an unknown address) |
 | `POST /api/v1/auth/sign-out` | none | `204`; `401` without a valid token |
