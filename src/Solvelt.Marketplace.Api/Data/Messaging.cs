@@ -61,6 +61,8 @@ public sealed class ThreadMessage
     public DateTimeOffset? ReportedAt { get; set; }
     /// <summary>Staff hid or removed it (<c>content.report_decided</c>): the text is no longer shown.</summary>
     public DateTimeOffset? HiddenAt { get; set; }
+    /// <summary>What staff wrote for the reporter (<c>reasonShownToUser</c>), shown instead of the hidden text. The internal staff reason never reaches us.</summary>
+    public string? ModerationNote { get; set; }
     public DateTimeOffset? RedactedAt { get; set; }
     public List<MessageAttachment> Attachments { get; set; } = [];
 }
@@ -87,7 +89,14 @@ public sealed class MessageAttachment
     public DateTimeOffset CreatedAt { get; set; }
 }
 
-internal sealed class MessagingConfiguration : IEntityTypeConfiguration<MessageThread>, IEntityTypeConfiguration<ThreadMessage>, IEntityTypeConfiguration<MessageAttachment>
+/// <summary>The checked, metadata-stripped bytes of a stored attachment. A separate table, so listing a thread never loads files. Deleted with the text (retention) or when staff hide the message.</summary>
+public sealed class MessageAttachmentData
+{
+    public Guid AttachmentId { get; set; }
+    public byte[] Bytes { get; set; } = [];
+}
+
+internal sealed class MessagingConfiguration : IEntityTypeConfiguration<MessageThread>, IEntityTypeConfiguration<ThreadMessage>, IEntityTypeConfiguration<MessageAttachment>, IEntityTypeConfiguration<MessageAttachmentData>
 {
     public void Configure(EntityTypeBuilder<MessageThread> b)
     {
@@ -114,6 +123,7 @@ internal sealed class MessagingConfiguration : IEntityTypeConfiguration<MessageT
         b.Property(m => m.Direction).HasMaxLength(10).IsRequired();
         b.Property(m => m.Text).HasMaxLength(4000).IsRequired();
         b.Property(m => m.Status).HasMaxLength(10).IsRequired();
+        b.Property(m => m.ModerationNote).HasMaxLength(300);
         b.HasIndex(m => m.MessageKey).IsUnique();
         b.HasIndex(m => m.PortalMessageId).IsUnique();
         b.HasIndex(m => new { m.ThreadId, m.SentAt });
@@ -131,5 +141,12 @@ internal sealed class MessagingConfiguration : IEntityTypeConfiguration<MessageT
         b.Property(a => a.Status).HasMaxLength(10).IsRequired();
         b.HasIndex(a => a.PortalAttachmentId).IsUnique();
         b.HasIndex(a => a.Status);
+    }
+
+    public void Configure(EntityTypeBuilder<MessageAttachmentData> b)
+    {
+        b.ToTable("message_attachment_data");
+        b.HasKey(d => d.AttachmentId);
+        b.Property(d => d.AttachmentId).ValueGeneratedNever();
     }
 }

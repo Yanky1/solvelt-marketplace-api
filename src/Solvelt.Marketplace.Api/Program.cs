@@ -111,10 +111,12 @@ builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Fulfilment.ProofFetcher>(
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Messaging.MessageService>();
+builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Messaging.ContentReportDecidedHandler>();
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Messaging.MessageSentHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.MessageSendOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.MessageReceiptOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.ContentReportOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.AttachmentFetchOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.CancelRequestOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.ReturnRequestOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.DeliveryConfirmationOutboxHandler>();
@@ -199,6 +201,7 @@ Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
 Solvelt.Marketplace.Api.Fulfilment.ProofEndpoints.MapProofs(app);
 Solvelt.Marketplace.Api.Notifications.NotificationEndpoints.MapNotifications(app);
 Solvelt.Marketplace.Api.Messaging.MessageEndpoints.MapMessages(app);
+Solvelt.Marketplace.Api.Messaging.AttachmentEndpoints.MapAttachments(app);
 app.MapStripeWebhooks();
 
 app.Run();

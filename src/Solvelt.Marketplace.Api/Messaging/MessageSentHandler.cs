@@ -73,6 +73,8 @@ public sealed class MessageSentHandler : IProjectionHandler
                     DeclaredType = FulfilmentProjector.Cap(FulfilmentProjector.Str(a, "contentType"), 100), Size = FulfilmentProjector.Long(a, "size") is { } sz and >= 0 ? sz : 0, Status = AttachmentStatuses.Pending, CreatedAt = now });
             }
         c.Db.ThreadMessages.Add(msg);
+        var queue = new OutboxWriter(c.Db, c.Time);
+        foreach (var att in msg.Attachments) queue.Enqueue(AttachmentFetchOutboxHandler.Type, new MessageService.IdPayload(att.Id.ToString()), "attachment-fetch:" + att.Id);
         if (sent > thread.LastMessageAt) thread.LastMessageAt = sent;
 
         var outbox = new OutboxWriter(c.Db, c.Time);

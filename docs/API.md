@@ -299,3 +299,4 @@ Buyer routes need the session and answer `private, no-store`; another buyer's th
 * `POST /api/v1/messages` `{ threadId | orderNumber (+ sellerOrderNumber) | listingId, text, acknowledgeWarning? }` → `202 { threadId, messageId, status }`; `409 contact_details_warning` (kinds in `errors`) until acknowledged; `422` for empty or over-long text.
 * `POST /api/v1/messages/threads/{id}/read` → 204 (sends the portal read receipts once).
 * `POST /api/v1/messages/{messageId}/report` `{ reason, note? }` → 202, idempotent.
+* `GET /api/v1/messages/attachments/{id}` → the file as `Content-Disposition: attachment` (sniffed type, `nosniff`, CSP `default-src 'none'`, `private, no-store`); 404 unless it is the buyer's own, stored and not hidden.
