@@ -189,8 +189,13 @@ public sealed class BuyerQuoteService(MarketplaceDb db, ISignedPortalClient port
         {
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             await bookings.ApplySummaryAsync(booking, sb, now, ct);
-            var due = now.AddMinutes(Math.Clamp(options.Value.QuotePaymentMinutes, 5, 24 * 60));
-            await db.Bookings.Where(b => b.Id == booking.Id && b.PaymentDueAt == null).ExecuteUpdateAsync(s => s.SetProperty(b => b.PaymentDueAt, due), ct);
+            // Two portal behaviours, told apart by the answer itself (no flag): a HOLD (portal N8) is the normal hold, pay, confirm flow with the hold's own expiry; a booking that is already
+            // Confirmed or Requested (older portal) must be paid within the payment window or it is cancelled (decision M4-13).
+            if (booking.Status != BookingStatus.Hold)
+            {
+                var due = now.AddMinutes(Math.Clamp(options.Value.QuotePaymentMinutes, 5, 24 * 60));
+                await db.Bookings.Where(b => b.Id == booking.Id && b.PaymentDueAt == null).ExecuteUpdateAsync(s => s.SetProperty(b => b.PaymentDueAt, due), ct);
+            }
             await db.Quotes.Where(x => x.Id == q.Id && x.Status == QuoteStatus.Quoted).ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, QuoteStatus.Accepted).SetProperty(x => x.BookingId, booking.Id).SetProperty(x => x.UpdatedAt, now).SetProperty(x => x.Version, x => x.Version + 1), ct);
             await tx.CommitAsync(ct);
             db.ChangeTracker.Clear();

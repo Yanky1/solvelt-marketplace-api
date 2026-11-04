@@ -238,6 +238,9 @@ public sealed class FakePaymentProvider : IPaymentProvider
         }
     }
 
+    /// <summary>Test hook: somebody refunded in the Stripe dashboard (Stripe's cumulative amount_refunded grows without one of our refunds).</summary>
+    public void RefundInDashboard(string intentId, long cents) { lock (_lock) _intents[intentId].RefundedCents += cents; }
+
     /// <summary>Test hook: the buyer chose a delayed method; the money is in flight.</summary>
     public void SetProcessing(string intentId) { lock (_lock) _intents[intentId].Processing = true; }
 

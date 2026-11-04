@@ -213,7 +213,9 @@ public sealed class BookingActionTests : BookingFlowBase
         await Drain();
         var mails = await _k.Mail("jane@example.com");
         Assert.Equal(before + 1, mails.Count);
-        Assert.Contains("Reminder", mails.Last().Subject); Assert.Contains($"/account/bookings/{b.Id}", mails.Last().TextBody);
+        Assert.Contains("Reminder", mails.Last().Subject); Assert.Contains("/account/bookings", mails.Last().TextBody);
+        Assert.Contains("/account/notifications", mails.Last().TextBody);                       // M5's notifier: preferences and unsubscribe come with the mail
+        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == "booking_reminder")));   // and the in-app entry
         Assert.DoesNotContain("meet.example", mails.Last().TextBody);
         await PortalEvent("booking.reminder", Now.AddMinutes(1), b, new { kind = "day_before", startAt = b.StartAt }, "rem-1");          // the same event again
         Assert.Equal("skipped", StatusOf((await PortalEvent("booking.reminder", Now.AddMinutes(2), b, new { kind = "hour_before", startAt = b.StartAt!.Value.AddHours(3) })).Json));   // an old time
@@ -221,5 +223,22 @@ public sealed class BookingActionTests : BookingFlowBase
         Assert.Equal(before + 1, (await _k.Mail("jane@example.com")).Count);
         await PortalEvent("booking.cancelled", Now.AddMinutes(3), b, new { cancelledBy = "buyer", refundDueCents = 24000 });
         Assert.Equal("skipped", StatusOf((await PortalEvent("booking.reminder", Now.AddMinutes(4), b, new { kind = "hour_before", startAt = b.StartAt })).Json));   // a cancelled booking is not reminded
+    }
+
+    [Fact]
+    public async Task The_buyer_is_notified_of_what_happened_to_them_not_of_what_they_just_did()
+    {
+        await Ready();
+        var b = await PaidBooking();                                                           // booking.confirmed is not emitted by the fake portal here: send it
+        await PortalEvent("booking.confirmed", Now.AddMinutes(1), b, new { totalCents = 24000 });
+        await PortalEvent("booking.rescheduled", Now.AddMinutes(2), b, new { initiatedBy = "buyer", startAt = Slot(3), endAt = Slot(7) });       // the buyer's own move: no news
+        await PortalEvent("booking.rescheduled", Now.AddMinutes(3), b, new { initiatedBy = "seller", requiresBuyerConsent = true, startAt = Slot(4), endAt = Slot(8) });
+        await PortalEvent("booking.cancelled", Now.AddMinutes(4), b, new { cancelledBy = "seller", refundDueCents = 24000 });
+        var kinds = (await _k.Db(db => db.Notifications.Select(n => n.Kind).ToListAsync())).Order().ToArray();
+        Assert.Equal(new[] { "booking_cancelled", "booking_confirmed", "booking_rescheduled" }, kinds);
+        // a repeated event id notifies once
+        await PortalEvent("booking.confirmed", Now.AddMinutes(1), b, new { totalCents = 24000 }, "dup-notify");
+        await PortalEvent("booking.confirmed", Now.AddMinutes(1), b, new { totalCents = 24000 }, "dup-notify");
+        Assert.Equal(3, await _k.Db(db => db.Notifications.CountAsync()));
     }
 }
