@@ -248,6 +248,8 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         var groups = order.Groups.OrderByDescending(g => g.TotalCents).ThenBy(g => g.Id).ToList();
         var sales = groups.Select(g => g.ItemsCents + g.ShippingCents).ToList();   // what each seller order SOLD: the portal's cap per share (items + shipping, no tax)
         var share = AllocateDispute(amount.Value, groups.Select(g => g.TotalCents).ToList(), sales);
+        if (share.Sum() < amount.Value)
+            log.LogInformation("Dispute {DisputeId} on order {Number}: {Placed} of {Amount} cents placed on seller orders; the {Rest} cents left (tax, which no seller sold) stay with the portal's unallocated-dispute flag", disputeId, order.Number, share.Sum(), amount.Value, amount.Value - share.Sum());
         // The dispute fee, when Stripe tells us (the balance transactions of the dispute), is split the same way; otherwise the portal's default applies once (first seller order says nothing, the others 0).
         var fee = 0L;
         if (evt.Object.TryGetProperty("balance_transactions", out var bts) && bts.ValueKind == JsonValueKind.Array)
