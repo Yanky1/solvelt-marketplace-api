@@ -79,6 +79,8 @@ builder.Services.AddScoped<PortalEventProcessor>();
 builder.Services.AddScoped<PortalEventMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<PortalEventWorker>();
 builder.Services.Configure<TaxOptions>(builder.Configuration.GetSection("Tax"));
+builder.Services.Configure<CheckoutOptions>(o => OptionsSetup.Checkout(o, builder.Configuration, devLike));
+builder.Services.AddSingleton<QuoteSigner>();
 builder.Services.Configure<ShippingOptions>(builder.Configuration.GetSection("Shipping"));
 builder.Services.AddSingleton<ITaxCalculator, SimpleTaxCalculator>();
 builder.Services.AddSingleton<ShippingSettingsCache>();

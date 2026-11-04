@@ -227,6 +227,53 @@ public sealed class CheckoutTests : IDisposable
         Assert.Equal(fresh.GetProperty("totalCents").GetInt64(), Stripe.Intents.Single(i => i.Metadata["marketplace_order_id"] == ok.GetProperty("orderNumber").GetString()).AmountCents);
     }
 
+    private async Task<string> QuoteHashFor(string session, object address)
+    {
+        var q = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout/quote") { Content = JsonContent.Create(new { address }) };
+        q.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session);
+        return (await Ok(await _k.Http.SendAsync(q))).GetProperty("quoteHash").GetString()!;
+    }
+
+    [Fact]
+    public async Task A_quote_that_went_stale_because_the_cart_changed_is_refused_end_to_end_without_the_test_helper_and_a_forged_expiry_is_refused()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        var hash = await QuoteHashFor(s, Address());
+        await AddToCart(s, "challah-classic");                                                    // the cart changed after the buyer looked
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address(), quoteHash = hash }) };
+        r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s);
+        Assert.Equal("price_changed", (await Ok(await _k.Http.SendAsync(r), HttpStatusCode.Conflict)).GetProperty("code").GetString());
+        // review K1: the real hash of the NEW cart, with its expiry moved five years out and the digest kept, is refused; so is one moved past the clock
+        var fresh = await QuoteHashFor(s, Address());
+        var parts = fresh.Split('.');
+        var forged = (long.Parse(parts[0]) + 5L * 365 * 24 * 3600) + "." + parts[1];
+        _k.F.Clock.Advance(TimeSpan.FromHours(6));                                                // the real one has expired by now
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address(), quoteHash = forged })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(s, new { address = Address(), quoteHash = fresh })).StatusCode);
+        Assert.Equal(0, await _k.Db(db => db.Orders.CountAsync()));
+        Assert.Empty(Stripe.Intents);
+    }
+
+    [Fact]
+    public async Task A_total_of_exactly_99999999_cents_can_be_paid_and_one_cent_more_cannot()
+    {
+        var one = await Buyer("cap1@example.com");
+        await AddToCart(one, "kiddush-cup-pewter");
+        // the price is the cap itself and the group ships free (over the threshold) with no tax in Oregon: the total is exactly 99,999,999
+        CatalogKit.Fixture(_k.F).Upsert(CatalogKit.ListingId("kiddush-cup-pewter"), l => l with { Variants = l.Variants.Select(v => v with { PriceCents = 99_999_999 }).ToList() });
+        await CatalogKit.Sync(_k.F);
+        var ok = await Ok(await Checkout(one, new { address = Address("OR") }));
+        Assert.Equal(99_999_999, ok.GetProperty("quote").GetProperty("totalCents").GetInt64());
+        Assert.Equal(99_999_999, Stripe.Intents.Single().AmountCents);
+        // another buyer adds anything more (a challah): the total is above the cap by its price and is refused
+        var two = await Buyer("cap2@example.com");
+        await AddToCart(two, "kiddush-cup-pewter");
+        await AddToCart(two, "challah-classic");
+        Assert.Equal("amount_too_large", (await Ok(await Checkout(two, new { address = Address("OR") }), HttpStatusCode.UnprocessableEntity)).GetProperty("code").GetString());
+        Assert.Single(Stripe.Intents);
+    }
+
     [Fact]
     public async Task A_checkout_without_any_quote_hash_is_refused_with_the_fresh_quote_and_creates_nothing()
     {
@@ -434,7 +481,7 @@ public sealed class CheckoutTests : IDisposable
     {
         var d = new Dictionary<string, string?>
         {
-            ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40), ["Auth:EmailLinkKey"] = new string('d', 40), ["Notifications:UnsubscribeKey"] = new string('n', 40), ["Auth:GuestLinkKey"] = new string('G', 40),
+            ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40), ["Auth:EmailLinkKey"] = new string('d', 40), ["Notifications:UnsubscribeKey"] = new string('n', 40), ["Auth:GuestLinkKey"] = new string('G', 40), ["Checkout:QuoteKey"] = new string('Q', 40),
             ["Email:Provider"] = "Smtp", ["Email:SmtpHost"] = "smtp.example.com", ["Email:From"] = "no-reply@shop.example.com",
             ["Portal:BaseUrl"] = "https://portal.example.com", ["Marketplace:RelayDomain"] = "relay.example.com", ["Marketplace:PublicBaseUrl"] = "https://shop.example.com",
             ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=x",
@@ -453,6 +500,23 @@ public sealed class CheckoutTests : IDisposable
             Assert.Contains(Validate(env == "Production" ? Production(("Stripe:SecretKey", live), ("Stripe:WebhookSecret", new string('w', 40))) : new() { ["Stripe:SecretKey"] = live }, env), p => p.Contains("LIVE key") || p.Contains("test key"));
         Assert.Contains(Validate(new() { ["Stripe:PublishableKey"] = "pk_live_abc" }, env), p => p.Contains("LIVE key"));
         Assert.Contains(Validate(new() { ["Stripe:SecretKey"] = "whatever" }, env), p => p.Contains("test key"));
+    }
+
+    [Fact]
+    public void The_quote_key_is_required_long_distinct_and_never_the_dev_default_in_production()
+    {
+        Assert.Empty(Validate(Production(), "Production"));
+        var missing = Production(); missing.Remove("Checkout:QuoteKey");
+        Assert.Contains(Validate(missing, "Production"), p => p.Contains("Checkout:QuoteKey") && p.Contains("required"));
+        var shortKey = Production(); shortKey["Checkout:QuoteKey"] = "short";
+        Assert.Contains(Validate(shortKey, "Production"), p => p.Contains("Checkout:QuoteKey") && p.Contains("32"));
+        var dev = Production(); dev["Checkout:QuoteKey"] = DevDefaults.QuoteKey;
+        Assert.Contains(Validate(dev, "Production"), p => p.Contains("Checkout:QuoteKey") && p.Contains("Development default"));
+        var reused = Production(); reused["Checkout:QuoteKey"] = reused["Auth:GuestLinkKey"]!;
+        Assert.Contains(Validate(reused, "Production"), p => p.Contains("must differ"));
+        // Development and Testing fall back to the dev default, so a missing key never stops them
+        Assert.Equal(DevDefaults.QuoteKey, Ok(devLike: true));
+        static string? Ok(bool devLike) { var o = new Solvelt.Marketplace.Api.Infrastructure.CheckoutOptions(); OptionsSetup.Checkout(o, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(), devLike); return o.QuoteKey; }
     }
 
     [Fact]
