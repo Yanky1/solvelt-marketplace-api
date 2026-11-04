@@ -15,7 +15,10 @@ public static class NotificationKinds
 {
     public const string OrderAccepted = "order_accepted", OrderShipped = "order_shipped", OutForDelivery = "out_for_delivery", OrderDelivered = "order_delivered",
         OrderCancelled = "order_cancelled", CancellationRejected = "cancellation_rejected", ReturnApproved = "return_approved", ReturnRejected = "return_rejected",
-        ReturnReceived = "return_received", ReturnLabelReady = "return_label_ready", DeliveryAttemptFailed = "delivery_attempt_failed", RefundIssued = "refund_issued";
+        ReturnReceived = "return_received", ReturnLabelReady = "return_label_ready", DeliveryAttemptFailed = "delivery_attempt_failed", RefundIssued = "refund_issued",
+        MessageReceived = "message_received",
+        BookingConfirmed = "booking_confirmed", BookingDeclined = "booking_declined", BookingTimeProposed = "booking_time_proposed", BookingRescheduled = "booking_rescheduled",
+        BookingCancelled = "booking_cancelled", BookingCompleted = "booking_completed", BookingReminder = "booking_reminder", BookingExtraChargeRequested = "booking_extra_charge_requested", BookingNoShow = "booking_no_show";
 
     public static string CategoryOf(string kind) => kind switch
     {
@@ -23,6 +26,8 @@ public static class NotificationKinds
         OutForDelivery => NotificationCategories.OutForDelivery,
         OrderDelivered => NotificationCategories.Delivered,
         RefundIssued => NotificationCategories.Refunds,
+        MessageReceived => NotificationCategories.Messages,
+        var k when k.StartsWith("booking_") => NotificationCategories.Bookings,
         _ => NotificationCategories.OrderUpdates,
     };
 }

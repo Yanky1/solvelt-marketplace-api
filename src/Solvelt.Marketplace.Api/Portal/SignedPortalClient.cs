@@ -21,6 +21,12 @@ public interface ISignedPortalClient
     Task<PortalResult<JsonElement>> ConfirmDeliveryAsync(string marketplaceOrderId, DeliveryConfirmationBody body, CancellationToken ct = default);
     /// <summary>A fresh short-lived link to a return label (<c>POST /returns/{marketplaceReturnId}/label-link</c>, SHIPPING.md §4).</summary>
     Task<PortalResult<ReturnLabelLink>> GetReturnLabelLinkAsync(string marketplaceReturnId, CancellationToken ct = default);
+    /// <summary><c>POST /messages</c>: a buyer message, idempotent on <c>messageId</c> (ORDERS.md §3.3).</summary>
+    Task<PortalResult<JsonElement>> SendMessageAsync(BuyerMessageBody body, CancellationToken ct = default);
+    /// <summary><c>POST /messages/{id}/receipts</c>: <c>delivered | read | failed</c> for a seller message (the id from <c>message.sent</c>); the status only moves forward.</summary>
+    Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string portalMessageId, string status, CancellationToken ct = default);
+    /// <summary><c>POST /content/reports</c> (CATALOG.md §6): idempotent on <c>reportId</c>.</summary>
+    Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody body, CancellationToken ct = default);
     Task<PortalResult<ShippingSettings>> GetShippingSettingsAsync(Guid sellerId, Guid brandId, CancellationToken ct = default);
     Task<PortalResult<LocalDeliveryEligibility>> CheckLocalDeliveryEligibilityAsync(LocalDeliveryEligibilityRequest request, CancellationToken ct = default);
     Task<PortalResult<ServiceAvailability>> GetServiceAvailabilityAsync(ServiceAvailabilityQuery query, CancellationToken ct = default);
@@ -53,6 +59,15 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<JsonElement>> ConfirmDeliveryAsync(string mid, DeliveryConfirmationBody b, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/orders/{Id(mid)}/delivery-confirmations", b, Retry.Standard, ct);
+
+    public Task<PortalResult<JsonElement>> SendMessageAsync(BuyerMessageBody b, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/messages", b, Retry.Standard, ct);
+
+    public Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string id, string status, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/messages/{Id(id)}/receipts", new { status }, Retry.Standard, ct);
+
+    public Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody b, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/content/reports", b, Retry.Standard, ct);
 
     public Task<PortalResult<ReturnLabelLink>> GetReturnLabelLinkAsync(string mid, CancellationToken ct = default)
         => Call<ReturnLabelLink>(HttpMethod.Post, $"{ApiBase}/returns/{Id(mid)}/label-link", new { }, Retry.Standard, ct);
