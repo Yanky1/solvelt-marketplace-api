@@ -72,6 +72,20 @@ public sealed class PortalRefundHandler(ILogger<PortalRefundHandler> log, Micros
             var partial = data.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
             var lines = ParseLines(data, out _);
             if (lines is null) return HandlerOutcome.Skipped("invalid cancellation lines");
+            // R3: events can arrive out of order. A full cancel's due amount is TotalCents minus what the portal has already returned (its own figure, `previouslyRefundedCents`, once it sends it): if
+            // that is more than we have applied for this seller order, an earlier refund.issued is still on its way and the cancel must NOT run first (it would refund everything left and the
+            // earlier refund would then be refused: the buyer short, the units wrong). It is parked and replayed by the maintenance loop; a log error says so once it has waited too long.
+            if (!partial)
+            {
+                var portalReturned = Num(data, "previouslyRefundedCents") ?? group.TotalCents - due;
+                var applied = await c.Db.OrderGroups.AsNoTracking().Where(x => x.Id == group.Id).Select(x => x.RefundedCents).FirstAsync(ct);
+                if (portalReturned > applied)
+                {
+                    if (c.Time.GetUtcNow() - c.Event.CreatedAt > TimeSpan.FromMinutes(30))
+                        log.LogError("Portal order.cancelled for order {Number} has waited more than 30 minutes for earlier refunds ({Applied} of {Expected} cents applied); a person should look", order.Number, applied, portalReturned);
+                    return HandlerOutcome.Parked("order", order.Number, "earlier refunds not applied yet");
+                }
+            }
             request = new PortalRefund(order.Id, group.Id, due, 0, lines.Select(l => new PortalRefundLine(l.Id, l.Quantity)).ToList(), Num(data, "taxCents"), !partial, true, "cancelled:" + c.Event.Id, "order_cancelled", null, Num(data, "shippingTaxCents"));
         }
         switch (await refunds.ReservePortalAsync(request, perGroupShipping: portalOptions.Value.PerGroupShipping, ct))

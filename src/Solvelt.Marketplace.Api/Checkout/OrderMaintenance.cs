@@ -73,6 +73,18 @@ public sealed class OrderMaintenance(MarketplaceDb db, Outbox.OutboxWriter outbo
     }
 }
 
+public static class DisputeStateMaintenance
+{
+    /// <summary>The order guard of a dispute (<c>dispute_states</c>) is kept 90 days after its last event when the dispute closed, and 180 days otherwise (a dispute can be open a long time); then it goes (decision M3-19, which promised it).</summary>
+    public static Task<int> PurgeAsync(MarketplaceDb db, TimeProvider time, CancellationToken ct = default)
+    {
+        var now = time.GetUtcNow().ToUniversalTime();
+        var closedCut = now.AddDays(-90);
+        var openCut = now.AddDays(-180);
+        return db.DisputeStates.Where(d => (d.Closed && d.UpdatedAt < closedCut) || d.UpdatedAt < openCut).ExecuteDeleteAsync(ct);
+    }
+}
+
 public sealed class OrderWorker(IServiceScopeFactory scopes, ILogger<OrderWorker> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -87,6 +99,7 @@ public sealed class OrderWorker(IServiceScopeFactory scopes, ILogger<OrderWorker
                 await m.ExpirePendingAsync(stoppingToken);
                 await m.ReleaseHeldDisputesAsync(stoppingToken);
                 await m.PurgeAbandonedAsync(stoppingToken);
+                await DisputeStateMaintenance.PurgeAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), scope.ServiceProvider.GetRequiredService<TimeProvider>(), stoppingToken);
                 await scope.ServiceProvider.GetRequiredService<Fulfilment.FulfilmentMaintenance>().RunAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }

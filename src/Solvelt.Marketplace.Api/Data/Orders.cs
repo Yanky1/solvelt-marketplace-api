@@ -177,7 +177,10 @@ public sealed class DisputeState
 {
     public string DisputeId { get; set; } = "";
     public long LastCreated { get; set; }
+    /// <summary>The Stripe event id of the last event applied: the tie-breaker between two events of the same second.</summary>
+    public string LastEventId { get; set; } = "";
     public bool Closed { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 internal sealed class DisputeStateConfiguration : IEntityTypeConfiguration<DisputeState>
