@@ -27,9 +27,11 @@ public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<Pro
     public async Task InvokeAsync(HttpContext ctx)
     {
         try { await next(ctx); }
-        catch (BadHttpRequestException ex) when (ex.StatusCode == 413)
+        catch (BadHttpRequestException ex)
         {
-            await Write(ctx, 413, "payload_too_large", "Request body too large.");
+            // Malformed requests (bad route/query values, unreadable bodies, oversized bodies) are the caller's mistake, never a 500.
+            if (!ctx.Response.HasStarted)
+                await (ex.StatusCode == 413 ? Write(ctx, 413, "payload_too_large", "Request body too large.") : Write(ctx, 400, "bad_request", "The request could not be understood."));
         }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { }
         catch (Exception ex)

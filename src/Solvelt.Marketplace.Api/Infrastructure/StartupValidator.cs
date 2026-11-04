@@ -44,6 +44,10 @@ public static class StartupValidator
                     problems.Add($"{present[i].Name} and {present[j].Name} must differ; one key per purpose.");
         if (string.IsNullOrWhiteSpace(config["Portal:BaseUrl"])) problems.Add("Portal:BaseUrl (env Portal__BaseUrl) is required.");
         else if (BaseUrlProblem(config["Portal:BaseUrl"]!, requireHttps: true) is { } baseUrlProblem) problems.Add(baseUrlProblem);
+        var catalogSource = config["Catalog:Source"];
+        if (string.Equals(catalogSource, "Fixture", StringComparison.OrdinalIgnoreCase)) problems.Add("Catalog:Source=Fixture (seed data) must not be used outside Development/Testing.");
+        else if (!string.IsNullOrWhiteSpace(catalogSource) && !string.Equals(catalogSource, "None", StringComparison.OrdinalIgnoreCase) && !string.Equals(catalogSource, "Http", StringComparison.OrdinalIgnoreCase))
+            problems.Add($"Catalog:Source '{catalogSource}' is not valid (None or Http).");
         if (string.IsNullOrWhiteSpace(config["Marketplace:RelayDomain"])) problems.Add("Marketplace:RelayDomain (env Marketplace__RelayDomain) is required.");
         if (string.IsNullOrWhiteSpace(config["Marketplace:PublicBaseUrl"])) problems.Add("Marketplace:PublicBaseUrl (env Marketplace__PublicBaseUrl) is required.");
         if (!string.Equals(config["Database:Provider"], "Postgres", StringComparison.OrdinalIgnoreCase))

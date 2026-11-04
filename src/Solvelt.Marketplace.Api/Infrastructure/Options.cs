@@ -70,3 +70,13 @@ public static class OptionsSetup
         if (devLike) o.ForwardingKey ??= DevDefaults.WebForwardingKey;
     }
 }
+
+public sealed class CatalogOptions
+{
+    /// <summary>"Fixture" (realistic seed; Development/Testing default), "None" (empty catalog; default elsewhere) or "Http" (portal catalog feed, request C1; not built yet).</summary>
+    public string? Source { get; set; }
+    public int SyncIntervalSeconds { get; set; } = 60;
+    public int PageSize { get; set; } = 100;
+    public int MaxPagesPerRun { get; set; } = 50;
+    public int MaxPendingFetchesPerRun { get; set; } = 100;
+}
