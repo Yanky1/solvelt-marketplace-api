@@ -127,6 +127,22 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, BookingRefundService 
     }
 
     /// <summary>
+    /// <c>charge.refund.updated</c> for one of OUR booking refunds that Stripe accepted and then failed (the card was closed): the refund is marked failed and its amount goes back under the cap, so it can
+    /// be made again, and a person is alerted because the portal may have been told it succeeded. Null when the refund is not a booking refund of ours.
+    /// </summary>
+    public async Task<StripeOutcome?> RefundFailedAsync(string refundId, CancellationToken ct)
+    {
+        var row = await db.BookingRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.StripeRefundId == refundId, ct);
+        if (row is null) return null;
+        var changed = await db.BookingRefunds.Where(r => r.Id == row.Id && r.Status == RefundStatus.Succeeded)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Failed).SetProperty(r => r.UpdatedAt, time.GetUtcNow()), ct);
+        if (changed == 0) return StripeOutcome.Ignored;
+        await db.BookingPayments.Where(p => p.Id == row.PaymentId).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents - row.AmountCents), ct);
+        log.LogError("ALERT: booking refund {Key} ({Amount} cents) FAILED at Stripe after it was accepted; its amount is back under the cap and the portal may have been told it succeeded", row.Key, row.AmountCents);
+        return StripeOutcome.Applied;
+    }
+
+    /// <summary>
     /// <c>charge.dispute.*</c> for a booking intent: told to the portal with <c>marketplaceBookingId</c> (our own event id, the portal dedupes on it), ordered like the order path (an older event for a
     /// dispute is dropped, nothing follows a closed one), and the amount at stake is held back from refunds while the dispute is open or lost, so we never refund money a chargeback already took.
     /// </summary>

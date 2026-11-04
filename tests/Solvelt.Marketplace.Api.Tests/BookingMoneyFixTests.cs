@@ -338,4 +338,20 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         using var s2 = _k.F.Services.CreateScope();
         Assert.Equal(BookingReserveOutcome.Reserved, await s2.ServiceProvider.GetRequiredService<BookingRefundService>().ReserveAsync((await Pay(b.Id)).Id, 100, "after-win", "test", false, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task A_booking_refund_that_stripe_accepted_and_then_failed_goes_back_under_the_cap_once()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        await PortalEvent("booking.cancelled", Now.AddMinutes(1), b, new { cancelledBy = "seller", refundDueCents = 24000 });
+        await Drain();
+        var refund = Assert.Single(Stripe.Refunds);
+        Assert.Equal(24000, (await Pay(b.Id)).RefundedCents);
+        Assert.True((await StripeObject("charge.refund.updated", new { id = refund.Id, status = "failed" })).IsSuccessStatusCode);
+        Assert.Equal(0, (await Pay(b.Id)).RefundedCents);                          // the money did not leave: it can be refunded again
+        Assert.True((await StripeObject("charge.refund.updated", new { id = refund.Id, status = "failed" })).IsSuccessStatusCode);
+        Assert.Equal(0, (await Pay(b.Id)).RefundedCents);                          // and a repeat does not give it back twice
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("ALERT"));
+    }
 }
