@@ -410,7 +410,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         var title = SnapshotLimits.Clip(s.Title, SnapshotLimits.Title);
         listing.Type = s.Type; listing.Title = title; listing.TitleSort = Slug.From(title); listing.Summary = SnapshotLimits.Clip(s.Summary, SnapshotLimits.Summary); listing.Description = s.Description ?? "";
         listing.SellerId = s.Seller.Id; listing.BrandId = s.Brand.Id; listing.CategoryId = s.CategoryId;
-        listing.Status = s.Status; listing.Currency = s.Currency;
+        listing.Status = s.Status; listing.Currency = s.Currency.Trim().ToUpperInvariant();   // ISO 4217 in upper case, whatever the feed sends (review L5)
         listing.CreatedAt = s.CreatedAt.ToUniversalTime(); listing.UpdatedAt = s.UpdatedAt.ToUniversalTime();
         listing.Version = s.Version;
         listing.KnownVersion = Math.Max(listing.KnownVersion, s.Version);
@@ -450,7 +450,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         else if (s.Variants.Count > SnapshotLimits.MaxVariants) why = "too many variants";
         else if (s.Variants.Select(v => v.Id).Distinct().Count() != s.Variants.Count) why = "duplicate variant ids";
         else if (s.Variants.Any(v => v.PriceCents < 0)) why = "negative price";
-        else if (s.Currency is not { Length: 3 }) why = "currency";
+        else if (s.Currency?.Trim() is not { Length: 3 } cur || !cur.All(char.IsAsciiLetter)) why = "currency";
         return why.Length == 0;
     }
 

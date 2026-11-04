@@ -360,9 +360,12 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         if (refundId is null || status is not ("failed" or "canceled")) return StripeOutcome.Ignored;
         if (await bookingEvents.RefundFailedAsync(evt, ct) is { } bookingOutcome) return bookingOutcome;   // a booking refund of ours (M4-15)
         var row = await db.OrderRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.StripeRefundId == refundId, ct);
+        // Our call may have timed out after Stripe created the refund, so its id was never stored: the refund_key we put in the metadata finds our still-reserved row (review M2).
+        if (row is null && evt.Object.TryGetProperty("metadata", out var md) && md.ValueKind == JsonValueKind.Object && md.TryGetProperty("refund_key", out var rk) && rk.ValueKind == JsonValueKind.String && rk.GetString() is { Length: > 0 } refundKey)
+            row = await db.OrderRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.Key == refundKey && r.Reason != "external", ct);
         if (row is null) { log.LogError("Stripe refund {RefundId} {Status}; it is not one of ours (a dashboard refund): a person should check the order's refund counters", refundId, status); return StripeOutcome.Unmatched; }
         var now = time.GetUtcNow().ToUniversalTime();
-        var changed = await db.OrderRefunds.Where(r => r.Id == row.Id && r.Status == RefundStatus.Succeeded).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Failed).SetProperty(r => r.UpdatedAt, now), ct);
+        var changed = await db.OrderRefunds.Where(r => r.Id == row.Id && (r.Status == RefundStatus.Succeeded || r.Status == RefundStatus.Reserved)).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Failed).SetProperty(r => r.UpdatedAt, now), ct);
         if (changed == 0) return StripeOutcome.Ignored;
         await RefundService.ReleaseCountersAsync(db, row, ct);
         log.LogError("Refund {Key} ({Amount} cents) of an order FAILED at Stripe after it was accepted; its counters were given back and the portal, which was told it succeeded, needs a person", row.Key, row.AmountCents);
