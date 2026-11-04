@@ -16,7 +16,7 @@ public sealed record SignInResult(SignInStatus Status, string? Token = null, Buy
 /// difference is only in what we email. Unknown and known accounts share rate limits and the same time cost.
 /// </summary>
 public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<AuthOptions> authOptions, IOptions<MarketplaceOptions> marketplace,
-    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links, SignInGate gate, GateKeys gateKeys)
+    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links, SignInGate gate, GateKeys gateKeys, GuestClaims guestClaims)
 {
     private AuthOptions O => authOptions.Value;
     private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
@@ -93,6 +93,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.EmailVerifiedAt == null && a.DeletedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.EmailVerifiedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
         await gate.SucceededAsync(addressKey, ipKey, ct);
+        await guestClaims.ClaimAsync(row.Id, row.Email!, ct);   // the address is now proven: guest orders placed with it become this account's
         return true;
     }
 
@@ -133,6 +134,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
             await db.BuyerAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, newHash), ct);
         }
         var token = await CreateSessionAsync(account.Id, ct);
+        await guestClaims.ClaimAsync(account.Id, normal, ct);   // orders placed as a guest since the last sign-in
         return new SignInResult(SignInStatus.Ok, token, account);
     }
 
@@ -265,6 +267,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         await gate.ClearAddressAsync(gateKeys.Address(peek.Email!), ct);
         await tx.CommitAsync(ct);
+        await guestClaims.ClaimAsync(peek.Id, peek.Email!, ct);   // a reset proves the mailbox too
         return new ResetOutcome(true);
     }
 

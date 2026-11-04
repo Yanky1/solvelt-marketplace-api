@@ -36,6 +36,8 @@ builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();
 builder.Services.AddSingleton<PasswordService>();
 builder.Services.AddSingleton<GateKeys>();
+builder.Services.AddSingleton<GuestLinks>();
+builder.Services.AddScoped<GuestClaims>();
 builder.Services.AddScoped<SignInGate>();
 builder.Services.AddScoped<AuthMaintenance>();
 builder.Services.AddScoped<AuthService>();

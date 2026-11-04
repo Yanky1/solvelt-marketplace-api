@@ -71,7 +71,7 @@ public static class OptionsSetup
     public static void Auth(AuthOptions o, IConfiguration config, bool devLike)
     {
         config.GetSection("Auth").Bind(o);
-        if (devLike) o.EmailLinkKey ??= DevDefaults.EmailLinkKey;
+        if (devLike) { o.EmailLinkKey ??= DevDefaults.EmailLinkKey; o.GuestLinkKey ??= DevDefaults.GuestLinkKey; }
     }
 
     public static void Admin(AdminOptions o, IConfiguration config, bool devLike)
@@ -147,6 +147,10 @@ public sealed class AuthOptions
 {
     /// <summary>Key of the emailed verify/reset links (HMAC). Its own key: never a portal, webhook, web or admin key.</summary>
     public string? EmailLinkKey { get; set; }
+    /// <summary>Key of the guest order-access links (HMAC). Its own key: a guest link and an account link can never stand in for each other.</summary>
+    public string? GuestLinkKey { get; set; }
+    /// <summary>How long a guest order-access link works from the moment it is made.</summary>
+    public int GuestLinkDays { get; set; } = 30;
     /// <summary>PBKDF2 iterations of the password hasher (ASP.NET Core Identity V3, HMAC-SHA512). Tests lower it; a stored hash keeps its own count and is upgraded at the next sign-in.</summary>
     public int PasswordIterations { get; set; } = 210_000;
     public int PasswordMinLength { get; set; } = 10;

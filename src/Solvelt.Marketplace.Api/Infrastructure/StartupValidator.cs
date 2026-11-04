@@ -12,6 +12,7 @@ public static class DevDefaults
     public const string PortalWebhookSecret = "dev-only-portal-webhook-secret-not-for-production";
     public const string WebForwardingKey = "dev-only-web-forwarding-key-not-for-production";
     public const string EmailLinkKey = "dev-only-email-link-key-not-for-production";
+    public const string GuestLinkKey = "dev-only-guest-link-key-not-for-production";
     public const string AdminApiKey = "dev-only-admin-api-key-not-for-production";
     public const string StripeWebhookSecret = "whsec_dev_only_not_for_production_0000000";
     public const string PublicBaseUrl = "http://localhost:3000";
@@ -55,9 +56,10 @@ public static class StartupValidator
             ("Web:ForwardingKey", "Web__ForwardingKey", config["Web:ForwardingKey"]),
             ("Admin:ApiKey", "Admin__ApiKey", config["Admin:ApiKey"]),
             ("Auth:EmailLinkKey", "Auth__EmailLinkKey", config["Auth:EmailLinkKey"]),
+            ("Auth:GuestLinkKey", "Auth__GuestLinkKey", config["Auth:GuestLinkKey"]),
             ("Stripe:WebhookSecret", "Stripe__WebhookSecret", config["Stripe:WebhookSecret"]),
         };
-        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey, DevDefaults.EmailLinkKey, DevDefaults.StripeWebhookSecret };
+        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey, DevDefaults.EmailLinkKey, DevDefaults.GuestLinkKey, DevDefaults.StripeWebhookSecret };
         foreach (var (name, envName, value) in keys)
         {
             // The admin key is optional: unset disables /api/admin/*. The Stripe webhook secret is required only once a Stripe key is set (checked below).
