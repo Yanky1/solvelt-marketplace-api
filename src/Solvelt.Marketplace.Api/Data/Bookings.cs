@@ -63,6 +63,10 @@ public sealed class Booking
     public long NoShowFeeCents { get; set; }
     public long AdditionalChargeCents { get; set; }
     public int RescheduleCount { get; set; }
+    /// <summary>Set for a booking created by accepting a quote: the portal confirms it at once, so the buyer must PAY by this time or we cancel it (decision M4-13). Null for every other booking.</summary>
+    public DateTimeOffset? PaymentDueAt { get; set; }
+    /// <summary>The quote this booking came from (our id), if any.</summary>
+    public Guid? QuoteId { get; set; }
     // The policy snapshot as the portal sent it (null = the portal has not told us): used only to PREVIEW a fee; the fee itself is always the portal's.
     public int? PolicyCancelFreeHours { get; set; }
     public int? PolicyCancelFeePercent { get; set; }

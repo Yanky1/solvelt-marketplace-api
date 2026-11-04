@@ -39,6 +39,12 @@ public interface ISignedPortalClient
     Task<PortalResult<BookingResponse>> CreateBookingHoldAsync(BookingRequestBody request, CancellationToken ct = default);
     /// <summary><c>POST /bookings/{mid}/confirm</c>: turns a hold into Confirmed (instant) or Requested (request mode). The portal re-checks an expired hold and may answer 409.</summary>
     Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string marketplaceBookingId, BookingConfirmBody body, CancellationToken ct = default);
+    /// <summary><c>POST /quote-requests</c> (idempotent on <c>marketplaceQuoteId</c>).</summary>
+    Task<PortalResult<QuoteCreatedResponse>> CreateQuoteRequestAsync(QuoteRequestBody body, CancellationToken ct = default);
+    /// <summary><c>POST /quotes/{qid}/accept</c>: creates the booking under the portal's slot lock; idempotent on <c>marketplaceBookingId</c>.</summary>
+    Task<PortalResult<BookingResponse>> AcceptQuoteAsync(string marketplaceQuoteId, QuoteAcceptBody body, CancellationToken ct = default);
+    /// <summary><c>POST /quotes/{qid}/decline</c>.</summary>
+    Task<PortalResult<JsonElement>> DeclineQuoteAsync(string marketplaceQuoteId, QuoteDeclineBody body, CancellationToken ct = default);
     /// <summary><c>GET /services/{id}/options</c>: add-ons, intake questions, providers, policy (portal contract request; 404 until it ships).</summary>
     Task<PortalResult<ServiceOptionsDocument>> GetServiceOptionsAsync(Guid serviceId, CancellationToken ct = default);
     /// <summary><c>POST /bookings/{mid}/cancellations</c> (idempotent on the booking and <c>requestId</c>): the portal decides the fee by policy.</summary>
@@ -161,6 +167,15 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string mid, BookingConfirmBody b, CancellationToken ct = default)
         => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/confirm", b, Retry.Standard, ct);
+
+    public Task<PortalResult<QuoteCreatedResponse>> CreateQuoteRequestAsync(QuoteRequestBody b, CancellationToken ct = default)
+        => Call<QuoteCreatedResponse>(HttpMethod.Post, $"{ApiBase}/quote-requests", b, Retry.Standard, ct);
+
+    public Task<PortalResult<BookingResponse>> AcceptQuoteAsync(string qid, QuoteAcceptBody b, CancellationToken ct = default)
+        => Call<BookingResponse>(HttpMethod.Post, $"{ApiBase}/quotes/{Id(qid)}/accept", b, Retry.Standard, ct);
+
+    public Task<PortalResult<JsonElement>> DeclineQuoteAsync(string qid, QuoteDeclineBody b, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/quotes/{Id(qid)}/decline", b, Retry.Standard, ct);
 
     public Task<PortalResult<ServiceOptionsDocument>> GetServiceOptionsAsync(Guid serviceId, CancellationToken ct = default)
         => Call<ServiceOptionsDocument>(HttpMethod.Get, $"{ApiBase}/services/{serviceId:D}/options", null, Retry.Standard, ct);

@@ -13,10 +13,10 @@ namespace Solvelt.Marketplace.Api.Services;
 /// is re-read the same way, so a lost event cannot keep a booking "held" forever. (3) Retention: personal data is wiped <c>Bookings:RedactAfterDays</c> (30, as the portal does,
 /// SERVICES.md §9) after a booking ended, and a day after a hold attempt failed; money, ids and the policy numbers stay.
 /// </summary>
-public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient portal, BookingService bookings, PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingMaintenance> log)
+public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient portal, BookingService bookings, BuyerQuoteService quotes, PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingMaintenance> log)
 {
     public const int Batch = 50;
-    public sealed record Result(int Resolved, int Failed, int Redacted);
+    public sealed record Result(int Resolved, int Failed, int Redacted, int Cancelled = 0);
 
     public async Task<Result> RunAsync(CancellationToken ct = default)
     {
@@ -53,7 +53,56 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
             }
         }
         db.ChangeTracker.Clear();
-        return new Result(resolved, failed, await RedactAsync(now, ct));
+        var cancelled = await CancelUnpaidQuoteBookingsAsync(now, ct);
+        await ResolveRequestingQuotesAsync(now, ct);
+        return new Result(resolved, failed, await RedactAsync(now, ct), cancelled);
+    }
+
+    /// <summary>
+    /// A booking made by accepting a quote is confirmed by the portal at once. If it is not paid by <c>PaymentDueAt</c> it is cancelled at the portal (reason <c>payment_not_completed</c>, request id derived from our
+    /// booking id), so a provider's calendar is never blocked by someone who did not pay. A booking that has a captured payment is left alone (its timer is cleared when the payment is reported).
+    /// </summary>
+    private async Task<int> CancelUnpaidQuoteBookingsAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var ids = await db.Bookings.AsNoTracking().Where(b => b.PaymentDueAt != null && b.PaymentDueAt <= now && (b.Status == BookingStatus.Confirmed || b.Status == BookingStatus.Requested || b.Status == BookingStatus.Rescheduled))
+            .OrderBy(b => b.PaymentDueAt).Select(b => b.Id).Take(Batch).ToListAsync(ct);
+        var n = 0;
+        foreach (var id in ids)
+        {
+            db.ChangeTracker.Clear();
+            var row = await db.Bookings.FirstOrDefaultAsync(b => b.Id == id, ct);
+            if (row is null || row.PaymentDueAt is null) continue;
+            if (await db.BookingPayments.AnyAsync(p => p.BookingId == id && p.Kind == "booking" && p.Status == BookingPaymentStatus.Captured, ct)) continue;   // paid: the confirm handler clears the timer
+            PortalResult<PortalBookingSummary> r;
+            try { r = await portal.CancelBookingAsync(row.MarketplaceBookingId, new BookingCancelBody("cancel-unpaid-" + row.MarketplaceBookingId, "payment_not_completed"), ct); }
+            catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException or PortalResponseTooLargeException or HttpRequestException or System.Text.Json.JsonException) { break; }
+            if (r.IsSuccess && r.Value is { } s && string.Equals(s.MarketplaceBookingId, row.MarketplaceBookingId, StringComparison.Ordinal))
+            {
+                await bookings.ApplySummaryAsync(row, s, now, ct);
+                await db.Bookings.Where(b => b.Id == id).ExecuteUpdateAsync(b => b.SetProperty(x => x.PaymentDueAt, (DateTimeOffset?)null), ct);
+                n++;
+            }
+            else if (r.Status == 409 || r.Status == 404) await db.Bookings.Where(b => b.Id == id).ExecuteUpdateAsync(b => b.SetProperty(x => x.PaymentDueAt, (DateTimeOffset?)null), ct);   // already over at the portal: stop asking
+        }
+        db.ChangeTracker.Clear();
+        return n;
+    }
+
+    /// <summary>A quote request whose portal answer never came: sent again (idempotent on our quote id at the portal), or closed as failed after a day.</summary>
+    private async Task ResolveRequestingQuotesAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var stale = now.AddSeconds(-Math.Clamp(options.Value.PendingResolveAfterSeconds, 5, 3600));
+        var rows = await db.Quotes.AsNoTracking().Where(q => q.Status == QuoteStatus.Requesting && q.UpdatedAt <= stale).OrderBy(q => q.UpdatedAt).Take(Batch).ToListAsync(ct);
+        foreach (var q in rows)
+        {
+            db.ChangeTracker.Clear();
+            var who = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == q.AccountId && a.DeletedAt == null).Select(a => new { a.DisplayName, a.RelayEmail }).FirstOrDefaultAsync(ct);
+            if (who is null) { await db.Quotes.Where(x => x.Id == q.Id && x.Status == QuoteStatus.Requesting).ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, QuoteStatus.Failed).SetProperty(x => x.FailureCode, "account_deleted").SetProperty(x => x.UpdatedAt, now), ct); continue; }
+            var r = await quotes.SendRequestAsync(q, who.RelayEmail, who.DisplayName, false, ct);
+            if (r.Status == QuoteOutcome.Unavailable && q.CreatedAt <= now.AddDays(-1))
+                await db.Quotes.Where(x => x.Id == q.Id && x.Status == QuoteStatus.Requesting).ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, QuoteStatus.Failed).SetProperty(x => x.FailureCode, "unresolved").SetProperty(x => x.UpdatedAt, now), ct);
+        }
+        db.ChangeTracker.Clear();
     }
 
     private async Task Fail(Booking row, string code, DateTimeOffset now, CancellationToken ct)
@@ -69,7 +118,13 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
         var ended = now.AddDays(-Math.Clamp(options.Value.RedactAfterDays, 1, 3650));
         var failedBefore = now.AddDays(-1);
         string[] terminal = [.. BookingStatus.Terminal];
-        return await db.Bookings.Where(b => b.RedactedAt == null && (
+        string[] quoteTerminal = [.. QuoteStatus.Terminal];
+        var quotesRedacted = await db.Quotes.Where(q => q.RedactedAt == null && ((q.Status == QuoteStatus.Failed && q.UpdatedAt <= failedBefore) || (q.Status != QuoteStatus.Failed && quoteTerminal.Contains(q.Status) && q.UpdatedAt <= ended)))
+            .ExecuteUpdateAsync(s => s.SetProperty(q => q.Details, "").SetProperty(q => q.PreferredTimesJson, (string?)null).SetProperty(q => q.Note, (string?)null).SetProperty(q => q.DeclineReason, (string?)null)
+                .SetProperty(q => q.AddrName, (string?)null).SetProperty(q => q.AddrLine1, (string?)null).SetProperty(q => q.AddrLine2, (string?)null).SetProperty(q => q.AddrCity, (string?)null).SetProperty(q => q.AddrRegion, (string?)null)
+                .SetProperty(q => q.AddrPostalCode, (string?)null).SetProperty(q => q.AddrCountry, (string?)null).SetProperty(q => q.AddrLat, (double?)null).SetProperty(q => q.AddrLng, (double?)null).SetProperty(q => q.Phone, (string?)null)
+                .SetProperty(q => q.RedactedAt, now), ct);
+        return quotesRedacted + await db.Bookings.Where(b => b.RedactedAt == null && (
                 (b.Status == BookingStatus.Failed && b.UpdatedAt <= failedBefore) ||
                 (b.Status != BookingStatus.Failed && terminal.Contains(b.Status) && b.UpdatedAt <= ended)))
             .ExecuteUpdateAsync(s => s
