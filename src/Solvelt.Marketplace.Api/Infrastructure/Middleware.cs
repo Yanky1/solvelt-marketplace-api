@@ -34,14 +34,18 @@ public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<Pro
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            log.LogError(ex, "Unhandled exception on {Method}", ctx.Request.Method);
-            if (!ctx.Response.HasStarted) await Write(ctx, 500, "internal_error", "Something went wrong.");
+            // Exception messages (database, HTTP, parsing) can carry PII, so only the type, the stack and a correlation id
+            // are logged; the same id is returned to the caller so a report can be matched to the log line.
+            var correlationId = Guid.NewGuid().ToString("N");
+            log.LogError("Unhandled {ExceptionType} on {Method} [{CorrelationId}]\n{Stack}", ex.GetType().FullName, ctx.Request.Method, correlationId, ex.StackTrace);
+            if (!ctx.Response.HasStarted) await Write(ctx, 500, "internal_error", "Something went wrong.", correlationId);
         }
     }
 
-    internal static Task Write(HttpContext ctx, int status, string code, string message)
+    internal static Task Write(HttpContext ctx, int status, string code, string message, string? correlationId = null)
     {
         ctx.Response.Clear();
+        if (correlationId is not null) ctx.Response.Headers["X-Correlation-Id"] = correlationId;
         ctx.Response.StatusCode = status;
         ctx.Response.ContentType = "application/json";
         return ctx.Response.WriteAsync(JsonSerializer.Serialize(new ProblemBody(code, message), new JsonSerializerOptions(JsonSerializerDefaults.Web)));

@@ -8,6 +8,7 @@ public static class DevDefaults
 {
     public const string PortalInboundSecret = "dev-only-portal-inbound-secret-not-for-production";
     public const string PortalWebhookSecret = "dev-only-portal-webhook-secret-not-for-production";
+    public const string WebForwardingKey = "dev-only-web-forwarding-key-not-for-production";
     public const string RelayDomain = "relay.solvelt.test";
     public const string SqliteConnection = "Data Source=marketplace-dev.db";
 }
@@ -22,16 +23,25 @@ public static class StartupValidator
         var problems = new List<string>();
         if (IsDevLike(env)) return problems;
 
-        var inbound = config["Portal:InboundSecret"];
-        var webhook = config["Portal:WebhookSecret"];
-        if (string.IsNullOrWhiteSpace(inbound)) problems.Add("Portal:InboundSecret (env Portal__InboundSecret) is required.");
-        if (string.IsNullOrWhiteSpace(webhook)) problems.Add("Portal:WebhookSecret (env Portal__WebhookSecret) is required.");
-        if (!string.IsNullOrWhiteSpace(inbound) && inbound == webhook)
-            problems.Add("Portal:InboundSecret and Portal:WebhookSecret must differ; one key per purpose.");
-        foreach (var (name, value) in new[] { ("Portal:InboundSecret", inbound), ("Portal:WebhookSecret", webhook) })
-            if (value is { Length: > 0 and < 32 }) problems.Add($"{name} must be at least 32 characters.");
-        if (inbound == DevDefaults.PortalInboundSecret || webhook == DevDefaults.PortalWebhookSecret)
-            problems.Add("Development default secrets must not be used outside Development/Testing.");
+        var keys = new (string Name, string Env, string? Value)[]
+        {
+            ("Portal:InboundSecret", "Portal__InboundSecret", config["Portal:InboundSecret"]),
+            ("Portal:WebhookSecret", "Portal__WebhookSecret", config["Portal:WebhookSecret"]),
+            ("Web:ForwardingKey", "Web__ForwardingKey", config["Web:ForwardingKey"]),
+        };
+        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey };
+        foreach (var (name, envName, value) in keys)
+        {
+            if (string.IsNullOrWhiteSpace(value)) { problems.Add($"{name} (env {envName}) is required."); continue; }
+            if (value.Length < 32) problems.Add($"{name} must be at least 32 characters.");
+            // Any dev default in any slot is rejected, so swapped defaults cannot pass.
+            if (devDefaults.Contains(value)) problems.Add($"{name}: Development default secrets must not be used outside Development/Testing.");
+        }
+        var present = keys.Where(k => !string.IsNullOrWhiteSpace(k.Value)).ToList();
+        for (var i = 0; i < present.Count; i++)
+            for (var j = i + 1; j < present.Count; j++)
+                if (present[i].Value == present[j].Value)
+                    problems.Add($"{present[i].Name} and {present[j].Name} must differ; one key per purpose.");
         if (string.IsNullOrWhiteSpace(config["Portal:BaseUrl"])) problems.Add("Portal:BaseUrl (env Portal__BaseUrl) is required.");
         if (string.IsNullOrWhiteSpace(config["Marketplace:RelayDomain"])) problems.Add("Marketplace:RelayDomain (env Marketplace__RelayDomain) is required.");
         if (string.IsNullOrWhiteSpace(config["Marketplace:PublicBaseUrl"])) problems.Add("Marketplace:PublicBaseUrl (env Marketplace__PublicBaseUrl) is required.");

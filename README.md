@@ -32,11 +32,12 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Portal__BaseUrl` | yes | Seller portal base URL |
 | `Portal__InboundSecret` | yes, >= 32 chars | Signs our calls to the portal |
 | `Portal__WebhookSecret` | yes, >= 32 chars, must differ from the above | Verifies portal webhooks |
+| `Web__ForwardingKey` | yes, >= 32 chars, must differ from both portal secrets | Verifies the end-user IP the web server forwards (see docs/API.md) |
 | `Marketplace__RelayDomain` | yes | Domain of the buyer relay emails |
 | `Marketplace__PublicBaseUrl` | yes | Public website URL (links in emails) |
 | `Database__Provider` | yes, `Postgres` | `Sqlite` is for dev/tests only |
 | `ConnectionStrings__Default` | yes | |
 | `RateLimits__AuthPerMinute`, `RateLimits__PublicPerMinute` | no | Defaults 10 and 240 per client IP |
 
-Outside Development/Testing the app refuses to start when a required value is missing, secrets are short or equal, or the dev defaults are used.
+Outside Development/Testing (any other environment name, Staging included) the app refuses to start when a required value is missing, a key is short, any two keys are equal, or a dev default is used in any slot.
 No secrets are stored in the repository.
