@@ -36,9 +36,11 @@ public sealed class TestFactory : WebApplicationFactory<Program>
     private readonly string _dbName = "mp_test_" + Guid.NewGuid().ToString("N");
     private readonly string _sqlitePath;
     private readonly Dictionary<string, string?> _extra = new();
+    private readonly Action<IServiceCollection>? _services;
 
-    public TestFactory(Dictionary<string, string?>? config = null)
+    public TestFactory(Dictionary<string, string?>? config = null, Action<IServiceCollection>? services = null)
     {
+        _services = services;
         Portal = new FakePortal(DevDefaults.PortalInboundSecret, Clock);
         _sqlitePath = Path.Combine(Path.GetTempPath(), _dbName + ".db");
         if (config != null) foreach (var kv in config) _extra[kv.Key] = kv.Value;
@@ -72,6 +74,7 @@ public sealed class TestFactory : WebApplicationFactory<Program>
         builder.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(settings));
         builder.ConfigureServices(s =>
         {
+            _services?.Invoke(s);
             s.RemoveAll<TimeProvider>();
             s.AddSingleton<TimeProvider>(Clock);
             s.AddHttpClient<ISignedPortalClient, SignedPortalClient>().ConfigurePrimaryHttpMessageHandler(() => Portal);

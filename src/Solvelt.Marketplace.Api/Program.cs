@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Portal;
+using Solvelt.Marketplace.Api.Portal.Webhooks;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,6 +19,11 @@ builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Da
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();
+builder.Services.AddSingleton<ProjectionRegistry>();
+builder.Services.AddScoped<ProjectionStore>();
+builder.Services.AddScoped<PortalEventProcessor>();
+builder.Services.AddScoped<PortalEventMaintenance>();
+if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<PortalEventWorker>();
 builder.Services.AddSingleton<AttemptLimiter>();
 builder.Services.AddMarketplaceRateLimiting();
 builder.Services.AddDbContext<MarketplaceDb>(o =>
@@ -43,6 +49,8 @@ if (devLike)
 
 app.MapGet("/health", () => Results.Json(new { status = "ok" }));
 app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateLimiting(RateLimitPolicies.Public);
+
+app.MapPortalWebhooks();
 
 app.Run();
 

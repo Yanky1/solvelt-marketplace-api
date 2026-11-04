@@ -9,6 +9,16 @@ public sealed class PortalOptions
     public string? WebhookSecret { get; set; }
     /// <summary>Per-attempt deadline in seconds (contract: at most 30).</summary>
     public int AttemptTimeoutSeconds { get; set; } = 30;
+    /// <summary>Days the raw payload of an inbound portal event is kept (parked events: until applied).</summary>
+    public int InboundPayloadRetentionDays { get; set; } = 30;
+    /// <summary>
+    /// Event types whose payload carries live driver positions or short-lived proof URLs (CONTRACT.md §5: positions at most 24 h, proof URLs never
+    /// kept past expiry). Their payload is dropped after <see cref="InboundShortRetentionHours"/> even when parked (a parked one then expires).
+    /// </summary>
+    public string[] InboundShortRetentionTypes { get; set; } = ["order.tracking_updated", "shipment.delivered"];
+    public int InboundShortRetentionHours { get; set; } = 24;
+    /// <summary>Days the inbound event id row is kept; must outlive the portal's retry horizon (the id table is the replay guard).</summary>
+    public int InboundRowRetentionDays { get; set; } = 90;
     /// <summary>Deadline for the whole call across all attempts and backoffs (decision O-08). Longer persistence is the outbox's job.</summary>
     public int TotalDeadlineSeconds { get; set; } = 30;
     /// <summary>Total attempts per call including the first.</summary>

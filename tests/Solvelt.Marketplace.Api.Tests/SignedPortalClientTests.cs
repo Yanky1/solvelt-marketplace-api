@@ -594,13 +594,14 @@ public class SignedPortalClientTests
     [Fact]
     public async Task The_body_cap_is_exactly_262144_bytes()
     {
+        const int cap = 262144;   // a literal on purpose: a test that reads the production constant cannot notice it changing
         var rig = new Rig();
         var baseLen = JsonSerializer.SerializeToUtf8Bytes(Order() with { GiftMessage = "" }, PortalJson.Options).Length;
-        var atCap = Order() with { GiftMessage = new string('x', PortalSigning.MaxBodyBytes - baseLen) };
+        var atCap = Order() with { GiftMessage = new string('x', cap - baseLen) };
         var res = await rig.Client.CreateOrderAsync(atCap);
         Assert.True(res.IsSuccess);
-        Assert.Equal(PortalSigning.MaxBodyBytes, rig.Portal.Calls[0].Body.Length);
-        var over = Order() with { GiftMessage = new string('x', PortalSigning.MaxBodyBytes - baseLen + 1) };
+        Assert.Equal(cap, rig.Portal.Calls[0].Body.Length);
+        var over = Order() with { GiftMessage = new string('x', cap - baseLen + 1) };
         await Assert.ThrowsAsync<PortalRequestTooLargeException>(() => rig.Client.CreateOrderAsync(over));
         Assert.Single(rig.Portal.Calls);
     }
