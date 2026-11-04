@@ -5,6 +5,7 @@ using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Auth;
 using Solvelt.Marketplace.Api.Carts;
 using Solvelt.Marketplace.Api.Checkout;
+using Solvelt.Marketplace.Api.Payments;
 using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
@@ -72,6 +73,14 @@ builder.Services.Configure<ShippingOptions>(builder.Configuration.GetSection("Sh
 builder.Services.AddSingleton<ITaxCalculator, SimpleTaxCalculator>();
 builder.Services.AddSingleton<ShippingSettingsCache>();
 builder.Services.AddScoped<QuoteService>();
+builder.Services.Configure<StripeOptions>(o => OptionsSetup.Stripe(o, builder.Configuration, devLike));
+builder.Services.AddSingleton<FakePaymentProvider>();
+builder.Services.AddHttpClient<StripeHttpProvider>();
+// Stripe when a (test) key is configured; the in-process fake in Development/Testing without one; otherwise checkout answers 503 and nothing is charged.
+builder.Services.AddScoped<IPaymentProvider>(sp =>
+    !string.IsNullOrWhiteSpace(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<StripeOptions>>().Value.SecretKey) ? sp.GetRequiredService<StripeHttpProvider>()
+    : devLike ? sp.GetRequiredService<FakePaymentProvider>() : new UnconfiguredPaymentProvider());
+builder.Services.AddScoped<CheckoutService>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();

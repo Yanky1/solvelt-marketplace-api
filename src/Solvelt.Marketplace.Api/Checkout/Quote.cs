@@ -15,7 +15,7 @@ public sealed record QuoteRequest(QuoteAddress? Address, IReadOnlyList<GroupSele
 
 public sealed record LocalOption(bool Eligible, string? Reason, long? FeeCents, string? TimeZone, IReadOnlyList<DeliveryWindow> Windows);
 public sealed record SelectedDelivery(string Kind, string? Speed, Guid? WindowId, string? Date, long ShippingCents);
-public sealed record QuoteLine(Guid LineId, Guid VariantId, string Title, int Quantity, long UnitPriceCents, long LineTotalCents, long TaxCents);
+public sealed record QuoteLine(Guid LineId, Guid ListingId, Guid VariantId, string Title, string VariantName, int Quantity, long UnitPriceCents, long LineTotalCents, long TaxCents);
 public sealed record QuoteGroup(Guid SellerId, string SellerName, Guid BrandId, string BrandName, IReadOnlyList<QuoteLine> Lines, long ItemsCents,
     IReadOnlyList<ShippingOption> ShippingOptions, LocalOption? Local, SelectedDelivery? Selected, long ShippingCents, long ShippingTaxCents, long TaxCents, long TotalCents);
 public sealed record QuoteView(string Currency, IReadOnlyList<QuoteGroup> Groups, long ItemsCents, long ShippingCents, long TaxCents, long TotalCents, bool CanPay);
@@ -98,7 +98,7 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
         var groups = new List<QuoteGroup>();
         foreach (var (g, opts, local, sel, _) in built)
         {
-            var lines = g.Lines.Select(l => new QuoteLine(l.Id, l.VariantId, l.Title, l.Quantity, l.UnitPriceCents, l.LineTotalCents, taxes.LineTaxCents[l.Id.ToString()])).ToList();
+            var lines = g.Lines.Select(l => new QuoteLine(l.Id, l.ListingId, l.VariantId, l.Title, l.VariantName, l.Quantity, l.UnitPriceCents, l.LineTotalCents, taxes.LineTaxCents[l.Id.ToString()])).ToList();
             var shipping = sel?.ShippingCents ?? 0;
             var shipTax = taxes.ShippingTaxCents[g.SellerId + ":" + g.BrandId];
             var groupTax = lines.Sum(l => l.TaxCents) + shipTax;

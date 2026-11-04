@@ -55,6 +55,8 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time)
         return (cart, token);
     }
 
+    public Task<Guid?> CartIdAsync(CartOwner o, CancellationToken ct) => Find(o).AsNoTracking().Select(c => (Guid?)c.Id).FirstOrDefaultAsync(ct);
+
     public async Task<CartView> GetAsync(CartOwner o, CancellationToken ct)
     {
         var cart = await Find(o).AsNoTracking().FirstOrDefaultAsync(ct);

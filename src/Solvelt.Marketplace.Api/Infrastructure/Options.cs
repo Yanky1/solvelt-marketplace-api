@@ -80,6 +80,12 @@ public static class OptionsSetup
         if (devLike) o.ApiKey ??= DevDefaults.AdminApiKey;
     }
 
+    public static void Stripe(Payments.StripeOptions o, IConfiguration config, bool devLike)
+    {
+        config.GetSection("Stripe").Bind(o);
+        if (devLike) o.WebhookSecret ??= DevDefaults.StripeWebhookSecret;
+    }
+
     public static void Web(WebOptions o, IConfiguration config, bool devLike)
     {
         config.GetSection("Web").Bind(o);
