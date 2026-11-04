@@ -95,7 +95,7 @@ public static class OptionsSetup
 
 public sealed class CatalogOptions
 {
-    /// <summary>"Fixture" (realistic seed; Development/Testing default), "None" (empty catalog; default elsewhere) or "Http" (portal catalog feed, request C1; not built yet).</summary>
+    /// <summary>"Fixture" (realistic seed; Development/Testing default), "Http" (the portal's signed catalog feed; default elsewhere) or "None" (empty catalog).</summary>
     public string? Source { get; set; }
     public int SyncIntervalSeconds { get; set; } = 60;
     public int PageSize { get; set; } = 100;

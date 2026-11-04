@@ -23,6 +23,12 @@ public interface ISignedPortalClient
     Task<PortalResult<LocalDeliveryEligibility>> CheckLocalDeliveryEligibilityAsync(LocalDeliveryEligibilityRequest request, CancellationToken ct = default);
     Task<PortalResult<ServiceAvailability>> GetServiceAvailabilityAsync(ServiceAvailabilityQuery query, CancellationToken ct = default);
     Task<PortalResult<PaymentEventResponse>> SendPaymentEventAsync(PaymentEventRequest request, CancellationToken ct = default);
+
+    // The catalog feed (docs/CATALOG.md in the portal). The documents come back as raw JSON: the one file that reads them is Catalog/HttpCatalogSource.cs.
+    Task<PortalResult<JsonElement>> GetCatalogListingsAsync(string? since, int limit, CancellationToken ct = default);
+    Task<PortalResult<JsonElement>> GetCatalogListingAsync(Guid listingId, CancellationToken ct = default);
+    Task<PortalResult<JsonElement>> GetCatalogCategoriesAsync(CancellationToken ct = default);
+    Task<PortalResult<JsonElement>> GetCatalogBrandsAsync(Guid? since, int limit, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -34,6 +40,8 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
     private const string ApiBase = "/api/internal/v1";
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
     private const int MaxResponseBytes = 2 * 1024 * 1024;
+    /// <summary>A feed page holds up to 200 full documents (Markdown and HTML descriptions): its own, larger cap. The catalog source halves its page size when even this is exceeded.</summary>
+    public const int CatalogMaxResponseBytes = 16 * 1024 * 1024;
 
     [GeneratedRegex("^[A-Za-z0-9_-]{1,100}$")] private static partial Regex SafeId();
 
@@ -79,11 +87,24 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
         return Call<PaymentEventResponse>(HttpMethod.Post, $"{ApiBase}/payment-events", r, Retry.PaymentEvent, ct);
     }
 
+    // ---------- catalog feed (read-only) ----------
+    public Task<PortalResult<JsonElement>> GetCatalogListingsAsync(string? since, int limit, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/listings?{(string.IsNullOrEmpty(since) ? "" : $"since={Uri.EscapeDataString(since)}&")}limit={Math.Clamp(limit, 1, 200)}", null, Retry.Standard, ct, CatalogMaxResponseBytes);
+
+    public Task<PortalResult<JsonElement>> GetCatalogListingAsync(Guid listingId, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/listings/{listingId:D}", null, Retry.Standard, ct, CatalogMaxResponseBytes);
+
+    public Task<PortalResult<JsonElement>> GetCatalogCategoriesAsync(CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/categories", null, Retry.Standard, ct, CatalogMaxResponseBytes);
+
+    public Task<PortalResult<JsonElement>> GetCatalogBrandsAsync(Guid? since, int limit, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/brands?{(since is { } b ? $"since={b:D}&" : "")}limit={Math.Clamp(limit, 1, 200)}", null, Retry.Standard, ct, CatalogMaxResponseBytes);
+
     // ---------- core ----------
     private static string Id(string id)
         => SafeId().IsMatch(id) ? id : throw new ArgumentException("Identifier contains characters that are not allowed in a signed path.", nameof(id));
 
-    private async Task<PortalResult<T>> Call<T>(HttpMethod method, string pathAndQuery, object? body, Retry profile, CancellationToken ct)
+    private async Task<PortalResult<T>> Call<T>(HttpMethod method, string pathAndQuery, object? body, Retry profile, CancellationToken ct, int maxResponseBytes = MaxResponseBytes)
     {
         var o = options.Value;
         if (string.IsNullOrEmpty(o.InboundSecret)) throw new PortalNotConfiguredException("Portal:InboundSecret");
@@ -137,7 +158,7 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
                 try
                 {
                     res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
-                    text = await ReadCapped(res, cts.Token);
+                    text = await ReadCapped(res, maxResponseBytes, cts.Token);
                 }
                 catch (Exception ex) when (ex is HttpRequestException or IOException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
                 {
@@ -214,7 +235,7 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
         return d > MaxBackoff ? MaxBackoff : d;
     }
 
-    private static async Task<string> ReadCapped(HttpResponseMessage res, CancellationToken ct)
+    private static async Task<string> ReadCapped(HttpResponseMessage res, int maxBytes, CancellationToken ct)
     {
         await using var s = await res.Content.ReadAsStreamAsync(ct);
         using var ms = new MemoryStream();
@@ -223,7 +244,7 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
         while ((n = await s.ReadAsync(buf, ct)) > 0)
         {
             ms.Write(buf, 0, n);
-            if (ms.Length > MaxResponseBytes) throw new PortalResponseTooLargeException();
+            if (ms.Length > maxBytes) throw new PortalResponseTooLargeException();
         }
         return Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
     }

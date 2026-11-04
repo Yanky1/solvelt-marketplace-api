@@ -44,7 +44,7 @@ builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();
 builder.Services.Configure<CatalogOptions>(builder.Configuration.GetSection("Catalog"));
 builder.Services.AddSingleton<FixtureCatalogSource>();
-// Resolved lazily from the final configuration. Fixture data is for Development/Testing only (the validator rejects it elsewhere); "None" is an empty catalog.
+// Resolved lazily from the final configuration. Fixture data is for Development/Testing only (the validator rejects it elsewhere); "None" is an empty catalog; "Http" (the portal's signed feed) is the default everywhere else.
 builder.Services.AddSingleton<ICatalogSource>(sp =>
 {
     var source = CatalogSourceSelection.Resolve(sp.GetRequiredService<IConfiguration>()["Catalog:Source"], devLike);
@@ -52,7 +52,7 @@ builder.Services.AddSingleton<ICatalogSource>(sp =>
     {
         "fixture" => sp.GetRequiredService<FixtureCatalogSource>(),
         "none" => new EmptyCatalogSource(),
-        "http" => throw new NotSupportedException("Catalog:Source=Http is not available yet (portal contract change C1)."),
+        "http" => new HttpCatalogSource(sp.GetRequiredService<ISignedPortalClient>(), sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<HttpCatalogSource>>()),
         _ => throw new InvalidOperationException($"Unknown Catalog:Source '{source}'."),
     };
 });
@@ -61,7 +61,7 @@ builder.Services.AddSingleton<ISearchIndex>(_ => (builder.Configuration["Databas
 builder.Services.AddSingleton<IProjectionHandler, CatalogEventHandler>();
 builder.Services.AddScoped<CatalogSyncService>();
 builder.Services.AddScoped<CategoryMap>();
-if (!builder.Environment.IsEnvironment("Testing") && !string.Equals(builder.Configuration["Catalog:Source"], "None", StringComparison.OrdinalIgnoreCase) && (devLike || !string.IsNullOrWhiteSpace(builder.Configuration["Catalog:Source"])))
+if (!builder.Environment.IsEnvironment("Testing") && !string.Equals(builder.Configuration["Catalog:Source"], "None", StringComparison.OrdinalIgnoreCase) )
     builder.Services.AddHostedService<CatalogSyncWorker>();
 builder.Services.AddSingleton<ProjectionRegistry>();
 builder.Services.AddSingleton<TerminalStateRules>();
