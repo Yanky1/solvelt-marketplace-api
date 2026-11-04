@@ -39,13 +39,14 @@ public static class OrderEndpoints
         return Problems.Json(r.Status, r.Code ?? "error", r.Message ?? "");
     }
 
-    private static async Task<IResult> List(HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, CancellationToken ct)
+    private static async Task<IResult> List(HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, Guid? beforeId, CancellationToken ct)
     {
         var buyer = ctx.Buyer();
         var take = Math.Clamp(limit ?? 20, 1, 50);
         var q = db.Orders.AsNoTracking().Where(o => o.AccountId == buyer.AccountId && (o.Status == OrderStatus.Placed || o.Status == OrderStatus.Paid));
-        if (before is { } b) q = q.Where(o => o.CreatedAt < b);
-        var orders = await q.OrderByDescending(o => o.CreatedAt).Take(take + 1).Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().ToListAsync(ct);
+        // keyset cursor (time, id): orders created in the same instant are neither skipped nor repeated
+        if (before is { } b) q = beforeId is { } bid ? q.Where(o => o.CreatedAt < b || (o.CreatedAt == b && o.Id.CompareTo(bid) < 0)) : q.Where(o => o.CreatedAt < b);
+        var orders = await q.OrderByDescending(o => o.CreatedAt).ThenByDescending(o => o.Id).Take(take + 1).Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().ToListAsync(ct);
         var page = orders.Take(take).ToList();
         var groupIds = page.SelectMany(o => o.Groups.Select(g => g.Id)).ToList();
         var states = await db.SellerOrderStates.AsNoTracking().Where(s => groupIds.Contains(s.GroupId)).ToDictionaryAsync(s => s.GroupId, s => s.Status, ct);
@@ -61,7 +62,7 @@ public static class OrderEndpoints
                     itemCount = o.Lines.Where(l => l.GroupId == g.Id).Sum(l => l.Quantity), firstItem = o.Lines.Where(l => l.GroupId == g.Id).Select(l => l.Title).FirstOrDefault(),
                 }),
             }),
-            next = orders.Count > take ? page[^1].CreatedAt : (DateTimeOffset?)null,
+            next = orders.Count > take ? new { before = page[^1].CreatedAt, beforeId = page[^1].Id } : null,
         }), ctx);
     }
 
@@ -118,7 +119,8 @@ public static class OrderEndpoints
                             returnableQty = f is null ? 0 : Math.Max(0, f.ShippedQty - f.ReturnedQty - f.RefundedQty - f.ReturnPendingQty),
                         };
                     }),
-                    shipments = ship.Where(s => s.GroupId == g.Id).OrderBy(s => s.ShippedAt).Select(s => new
+                    shipments = ship.Where(s => s.GroupId == g.Id && s.ShippedAt != null).OrderBy(s => s.ShippedAt)   // a placeholder made by an early tracking event shows once its shipped event arrives
+                        .Select(s => new
                     {
                         id = s.Id, method = s.Method, carrier = s.Carrier, service = s.Service, trackingNumber = s.TrackingNumber, trackingUrl = s.TrackingUrl, shippedAt = s.ShippedAt, deliveredAt = s.DeliveredAt,
                         voided = s.VoidedAt != null, trackingStatus = s.TrackingStatus, trackingStatusDetail = s.TrackingStatusDetail, eta = s.Eta,
