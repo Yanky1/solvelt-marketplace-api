@@ -41,34 +41,133 @@ public sealed class RefundEventTests : OrderFlowBase
     private async Task<List<JsonElement>> Sent(string type) => Portal2("payment-events").Select(c => JsonDocument.Parse(c.BodyText).RootElement.Clone()).Where(e => e.GetProperty("type").GetString() == type).ToList();
     private IReadOnlyList<ReceivedCall> Portal2(string path) => _k.F.Portal.VerifiedCalls.Where(c => c.PathAndQuery == "/api/internal/v1/" + path).ToList();
 
-    [Fact]
-    public async Task A_portal_refund_returns_items_shipping_and_the_tax_on_them_in_proportion_and_the_last_one_returns_exactly_the_rest()
-    {
-        var o = await Paid();
-        var g = JudaicaGroup(o);
-        Assert.Equal(417, g.TaxCents);                                  // 373 on the line + 44 on shipping
-        Assert.Equal(5117, g.TotalCents);
-        Assert.Equal("applied", await Portal("refund.issued", o, g, new { refundId = "rf-1", amountCents = 1000, shippingCents = 0, reason = "damaged" }));
-        await Drain();
-        var first = Assert.Single(Stripe.Refunds);
-        Assert.Equal(1000 + 89, first.AmountCents);                     // 417 x 1000 / 4700 = 88.7 -> 89
-        var e = Assert.Single(await Sent("refund.processed"));
-        var d = e.GetProperty("data");
-        Assert.Equal((first.Id, g.SellerOrderNumber, 1000L, 0L), (d.GetProperty("refundId").GetString(), d.GetProperty("sellerOrderNumber").GetString(), d.GetProperty("amountCents").GetInt64(), d.GetProperty("shippingCents").GetInt64()));   // the portal hears items and shipping only
-        Assert.Equal("refund-processed:portal:rf-1", e.GetProperty("eventId").GetString());
+    // ---- C9: the portal's amounts INCLUDE line tax; the buyer gets exactly them; refund.processed excludes tax by the same floor proration ----
 
-        Assert.Equal("applied", await Portal("refund.issued", o, g, new { refundId = "rf-2", amountCents = 3200, shippingCents = 500, reason = "other" }));
+    /// <summary>3 pewter cups (4200 each) from one seller: items 12600, shipping 500, line tax 1118, tax on shipping 44 (folded into the line: 1162 sent), total 14262. The portal's line net is 12600 + 1162 = 13762.</summary>
+    private async Task<(MarketplaceOrder Order, OrderGroup Group, string LineId)> Three()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter", 3);
+        var (number, intent, total) = await Checkout();
+        await Pay(number, intent, total);
+        await Drain();
+        var o = await Order(number);
+        var g = o.Groups.Single();
+        Assert.Equal((12600L, 500L, 1162L, 14262L), (g.ItemsCents, g.ShippingCents, g.TaxCents, g.TotalCents));
+        return (o, g, o.Lines.Single().MarketplaceLineId);
+    }
+
+    private Task<string> RefundLines(MarketplaceOrder o, OrderGroup g, string refundId, string lineId, int qty, long lineAmount, long shipping = 0, string? id = null)
+        => Portal("refund.issued", o, g, new { RefundId = refundId, AmountCents = lineAmount + shipping, ShippingCents = shipping, Lines = new[] { new { marketplaceLineId = lineId, quantity = qty, amountCents = lineAmount } } }, id: id);
+
+    [Fact]
+    public async Task One_of_three_units_refunds_exactly_the_portal_amount_and_refund_processed_is_that_minus_floor_prorated_tax()
+    {
+        var (o, g, line) = await Three();
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));          // floor(13762 / 3)
+        await Drain();
+        var refund = Assert.Single(Stripe.Refunds);
+        Assert.Equal(4587, refund.AmountCents);                                            // exactly what the portal said: no tax added on top
+        var d = Assert.Single(await Sent("refund.processed")).GetProperty("data");
+        Assert.Equal((4587L - 387, 0L), (d.GetProperty("amountCents").GetInt64(), d.GetProperty("shippingCents").GetInt64()));   // 387 = floor(1162 / 3): items 4200 excluding tax
+        var ag = (await Order(o.Number)).Groups.Single();
+        Assert.Equal((4587L, 387L, 0L), (ag.RefundedCents, ag.RefundedTaxCents, ag.RefundedShippingCents));
+        Assert.Equal((1, 387L), ((await Order(o.Number)).Lines.Single().RefundedQuantity, (await Order(o.Number)).Lines.Single().RefundedTaxCents));
+    }
+
+    [Fact]
+    public async Task Three_successive_partial_refunds_sum_to_the_paid_line_exactly_and_the_last_takes_the_remainder()
+    {
+        var (o, g, line) = await Three();
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
+        Assert.Equal("applied", await RefundLines(o, g, "rf-2", line, 1, 4587));
+        Assert.Equal("applied", await RefundLines(o, g, "rf-3", line, 1, 4588));          // 13762 - 2 x 4587: the portal's last unit takes the remainder
+        await Drain();
+        Assert.Equal(new long[] { 4587, 4587, 4588 }, Stripe.Refunds.Select(r => r.AmountCents).OrderBy(x => x).ToArray());
+        Assert.Equal(13762, Stripe.Refunds.Sum(r => r.AmountCents));                       // the whole line, exactly
+        var items = (await Sent("refund.processed")).Select(e => e.GetProperty("data").GetProperty("amountCents").GetInt64()).OrderBy(x => x).ToList();
+        Assert.Equal([4200L, 4200L, 4200L], items);                                        // 4587-387, 4587-387, 4588-388: items 12600 in total, tax 1162 backed out exactly
+        var after = await Order(o.Number);
+        Assert.Equal((13762L, 1162L, 3), (after.Groups.Single().RefundedCents, after.Groups.Single().RefundedTaxCents, after.Lines.Single().RefundedQuantity));
+        // a fourth unit does not exist; the shipping is still there to refund (shipping only, no tax in it)
+        Assert.Equal("skipped", await RefundLines(o, g, "rf-4", line, 1, 100));
+        Assert.Equal("applied", await Portal("refund.issued", o, g, new { RefundId = "rf-ship", AmountCents = 500, ShippingCents = 500 }));
+        await Drain();
+        var ship = (await Sent("refund.processed")).Select(e => e.GetProperty("data")).Single(d => d.GetProperty("shippingCents").GetInt64() == 500);
+        Assert.Equal(0, ship.GetProperty("amountCents").GetInt64());
+        Assert.Equal(14262, (await Order(o.Number)).RefundedCents);                        // all that was paid, not a cent more
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "rf-more", AmountCents = 1, ShippingCents = 0 }));
+    }
+
+    [Fact]
+    public async Task A_full_cancel_returns_everything_not_yet_returned_and_a_partial_remainder_cancel_the_units_net_without_shipping()
+    {
+        var (o, g, line) = await Three();
+        await RefundLines(o, g, "rf-1", line, 1, 4587);                                    // one unit already refunded
+        // full cancel: TotalCents - already refunded = 14262 - 4587, shipping and tax included
+        Assert.Equal("applied", await Portal("order.cancelled", o, g, new { RefundDueCents = 9675, Partial = false }));
         await Drain();
         Assert.Equal(2, Stripe.Refunds.Count);
-        Assert.Equal(g.TotalCents - 1089, Stripe.Refunds.Last().AmountCents);   // the rest of the seller order, tax remainder included
+        Assert.Contains(Stripe.Refunds, r => r.AmountCents == 9675);
+        var d = (await Sent("refund.processed")).Select(e => e.GetProperty("data")).Single(x => x.GetProperty("amountCents").GetInt64() != 4200 && x.GetProperty("shippingCents").GetInt64() == 500);
+        Assert.Equal(8400, d.GetProperty("amountCents").GetInt64());                        // 9675 - 500 shipping - 775 remaining tax (1162 - 387): the 2 other units
         var after = await Order(o.Number);
-        var ag = after.Groups.Single(x => x.Id == g.Id);
-        Assert.Equal((4700L, 417L, 5117L), (ag.RefundedNetCents, ag.RefundedTaxCents, ag.RefundedCents));
-        Assert.Equal(5117, after.RefundedCents);
-        // not a cent more, and the other seller order is untouched
-        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { refundId = "rf-3", amountCents = 1, shippingCents = 0 }));
-        Assert.Equal(2, Stripe.Refunds.Count);
-        Assert.Equal(0, after.Groups.Single(x => x.Id == Bakery(o).Id).RefundedCents);
+        Assert.Equal((14262L, 1162L, 500L, 3), (after.Groups.Single().RefundedCents, after.Groups.Single().RefundedTaxCents, after.Groups.Single().RefundedShippingCents, after.Lines.Single().RefundedQuantity));
+
+        // partial remainder cancel (a second order): the cancelled unit's line net INCLUDING tax, no shipping
+        var (o2, g2, line2) = await SecondThree();
+        Assert.Equal("applied", await Portal("order.cancelled", o2, g2, new { RefundDueCents = 4587, Partial = true, Lines = new[] { new { marketplaceLineId = line2, quantity = 1, amountCents = 4587 } } }));
+        await Drain();
+        var p = (await Sent("refund.processed")).Select(e => e.GetProperty("data")).Single(x => x.GetProperty("sellerOrderNumber").GetString() == g2.SellerOrderNumber);
+        Assert.Equal(3, Stripe.Refunds.Count);
+        Assert.Equal(2, Stripe.Refunds.Count(r => r.AmountCents == 4587));                  // the first order's unit and this cancelled one: the buyer got exactly the portal amount
+        Assert.Equal((4200L, 0L), (p.GetProperty("amountCents").GetInt64(), p.GetProperty("shippingCents").GetInt64()));
+        Assert.Equal((0L, 387L), ((await Order(o2.Number)).Groups.Single().RefundedShippingCents, (await Order(o2.Number)).Groups.Single().RefundedTaxCents));
+        // a cancellation that claims more than is left is cut down to it, never above
+        Assert.Equal("skipped", await Portal("order.cancelled", o, g, new { RefundDueCents = 99999, Partial = false }, id: "pe-again"));   // fully returned already: nothing left to cancel
+        Assert.Equal(14262, (await Order(o.Number)).Groups.Single().RefundedCents);
+        Assert.Equal("applied", await Portal("order.cancelled", o2, g2, new { RefundDueCents = 99999, Partial = true }, id: "pe-big"));    // claims more than is left: cut to what is left, never above
+        Assert.Equal(14262, (await Order(o2.Number)).Groups.Single().RefundedCents);
+    }
+
+    private async Task<(MarketplaceOrder Order, OrderGroup Group, string LineId)> SecondThree()
+    {
+        await AddToCart("kiddush-cup-pewter", 3);
+        var (number, intent, total) = await Checkout();
+        await Pay(number, intent, total);
+        await Drain();
+        var o = await Order(number);
+        return (o, o.Groups.Single(), o.Lines.Single().MarketplaceLineId);
+    }
+
+    [Fact]
+    public async Task Refunds_that_do_not_add_up_or_name_a_line_we_do_not_have_are_not_acted_on()
+    {
+        var (o, g, line) = await Three();
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "bad-sum", AmountCents = 5000, ShippingCents = 0, Lines = new[] { new { marketplaceLineId = line, quantity = 1, amountCents = 4587 } } }));   // lines + shipping != amount
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "bad-line", AmountCents = 100, ShippingCents = 0, Lines = new[] { new { marketplaceLineId = "L-not-ours", quantity = 1, amountCents = 100 } } }));
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "too-many", AmountCents = 100, ShippingCents = 0, Lines = new[] { new { marketplaceLineId = line, quantity = 4, amountCents = 100 } } }));
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "bad-qty", AmountCents = 100, ShippingCents = 0, Lines = new[] { new { marketplaceLineId = line, quantity = 0, amountCents = 100 } } }));
+        Assert.Equal("skipped", await Portal("refund.issued", o, g, new { RefundId = "shipping-too-big", AmountCents = 600, ShippingCents = 600 }));
+        await Drain();
+        Assert.Empty(Stripe.Refunds);
+        Assert.Equal(0, (await Order(o.Number)).RefundedCents);
+    }
+
+    [Fact]
+    public async Task A_refund_stripe_refuses_gives_back_the_line_counters_and_the_tax_too()
+    {
+        var (o, g, line) = await Three();
+        Stripe.Capture(o.PaymentIntentId!);
+        var intent = Stripe.Intents.Single();
+        await Stripe.RefundAsync(intent.Id, intent.CapturedCents, "dashboard", new Dictionary<string, string>(), default);   // someone refunded everything in the dashboard
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
+        await Drain();
+        var after = await Order(o.Number);
+        Assert.Equal((0L, 0L, 0L, 0), (after.Groups.Single().RefundedCents, after.Groups.Single().RefundedTaxCents, after.Groups.Single().RefundedShippingCents, after.Lines.Single().RefundedQuantity));
+        Assert.Equal("rejected", (await _k.Db(db => db.OrderRefunds.SingleAsync(r => r.Key == "portal:rf-1"))).Status);
+        // the reservation is free again: the same unit can be refunded under a new refund id
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1b", line, 1, 4587));
     }
 
     [Fact]
@@ -93,7 +192,7 @@ public sealed class RefundEventTests : OrderFlowBase
         // right marketplace id, the OTHER seller order's id: the id pair must be equal to the stored pair of some group, and this one is: it refunds THAT group (the one the portal named)
         Assert.Equal("applied", await Portal("refund.issued", o, other, new { refundId = "rf-a", amountCents = 100, shippingCents = 0 }));
         await Drain();
-        Assert.Equal(100L, (await Order(o.Number)).Groups.Single(x => x.Id == other.Id).RefundedNetCents);
+        Assert.Equal(100L, (await Order(o.Number)).Groups.Single(x => x.Id == other.Id).RefundedCents);
         Assert.Equal(0, (await Order(o.Number)).Groups.Single(x => x.Id == g.Id).RefundedCents);
         // a portal id that belongs to none of our groups: nothing is refunded
         Assert.Equal("skipped", await Portal("refund.issued", o, g, new { refundId = "rf-b", amountCents = 100, shippingCents = 0 }, sellerOrderId: Guid.NewGuid()));
@@ -139,54 +238,25 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal("placed", (await Order(number)).Status);
         await Drain();
         var refund = Assert.Single(Stripe.Refunds);                     // the parked event was applied right after the ingest stored the seller order
-        Assert.True(refund.AmountCents >= 500);
+        Assert.Equal(500, refund.AmountCents);
         Assert.Single(await Sent("refund.processed"));
     }
 
     [Fact]
-    public async Task A_cancelled_seller_order_is_refunded_in_full_with_its_shipping_and_tax_and_a_partial_remainder_without_shipping()
+    public async Task Parallel_refunds_still_reserve_exactly_what_fits_by_amount_and_by_units()
     {
-        var o = await Paid();
-        var g = JudaicaGroup(o);
-        var bakery = Bakery(o);
-        Assert.Equal("applied", await Portal("order.cancelled", o, g, new { refundDueCents = 4700, partial = false, reason = "seller" }));        // items + shipping, as the ledger counts it
-        Assert.Equal("applied", await Portal("order.cancelled", o, bakery, new { refundDueCents = 650, partial = true }));
+        var (o, g, line) = await Three();
+        // by units: 8 refunds of 2 of the 3 units: one fits
+        var byUnits = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => RefundLines(o, g, $"rf-u{i}", line, 2, 9174, id: $"pe-u{i}")));
+        Assert.Equal(1, byUnits.Count(r => r == "applied"));
+        // by amount (no lines): 8 refunds of 4000 on what is left (14262 - 9174 = 5088): one fits
+        var byAmount = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Portal("refund.issued", o, g, new { RefundId = $"rf-a{i}", AmountCents = 4000, ShippingCents = 0 }, id: $"pe-a{i}")));
+        Assert.Equal(1, byAmount.Count(r => r == "applied"));
         await Drain();
         Assert.Equal(2, Stripe.Refunds.Count);
-        Assert.Contains(Stripe.Refunds, r => r.AmountCents == g.TotalCents);                      // 5117: everything the buyer paid for that seller order, tax included
-        var after = await Order(o.Number);
-        Assert.Equal(g.TotalCents, after.Groups.Single(x => x.Id == g.Id).RefundedCents);
-        var b = after.Groups.Single(x => x.Id == bakery.Id);
-        Assert.Equal((650L, 0L), (b.RefundedNetCents, b.RefundedTaxCents));                       // no tax on exempt food, and shipping stays with the shipped part
-        var reported = await Sent("refund.processed");
-        Assert.Equal(2, reported.Count);
-        var big = reported.Single(e => e.GetProperty("data").GetProperty("sellerOrderNumber").GetString() == g.SellerOrderNumber).GetProperty("data");
-        Assert.Equal((4200L, 500L), (big.GetProperty("amountCents").GetInt64(), big.GetProperty("shippingCents").GetInt64()));
-        // nothing due is nothing refunded; a cancellation that claims more than is left is cut down, never exceeded
-        Assert.Equal("skipped", await Portal("order.cancelled", o, bakery, new { refundDueCents = 0 }));
-        Assert.Equal("applied", await Portal("order.cancelled", o, bakery, new { refundDueCents = 99999, partial = false }, id: "pe-big"));
-        await Drain();
-        Assert.Equal(bakery.ItemsCents + bakery.ShippingCents, (await Order(o.Number)).Groups.Single(x => x.Id == bakery.Id).RefundedNetCents);
-        Assert.Equal(bakery.TotalCents, (await Order(o.Number)).Groups.Single(x => x.Id == bakery.Id).RefundedCents);
-        Assert.True((await Order(o.Number)).RefundedCents <= o.PaidCents);
-    }
-
-    [Fact]
-    public async Task Parallel_refund_events_for_one_seller_order_reserve_exactly_what_fits_and_return_the_tax_once()
-    {
-        var o = await Paid();
-        var g = JudaicaGroup(o);
-        // 8 distinct refunds of 2500 net on a seller order that holds 4700: one fits, the others do not
-        var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Portal("refund.issued", o, g, new { refundId = $"rf-p{i}", amountCents = 2500, shippingCents = 0 }, id: $"pe-p{i}")));
-        Assert.Equal(1, results.Count(r => r == "applied"));
-        await Drain();
-        Assert.Single(Stripe.Refunds);
-        var ag = (await Order(o.Number)).Groups.Single(x => x.Id == g.Id);
-        Assert.Equal(2500, ag.RefundedNetCents);
-        Assert.Equal(2500 + 222, ag.RefundedCents);                     // 417 x 2500 / 4700 = 221.8 -> 222
-        // 2200 more is exactly the rest: the remaining tax (417 - 222 = 195) comes with it, once
-        Assert.Equal("applied", await Portal("refund.issued", o, g, new { refundId = "rf-last", amountCents = 2200, shippingCents = 0 }));
-        Assert.Equal(g.TotalCents, (await Order(o.Number)).Groups.Single(x => x.Id == g.Id).RefundedCents);
+        var after = (await Order(o.Number)).Groups.Single();
+        Assert.Equal(9174 + 4000, after.RefundedCents);
+        Assert.True(after.RefundedCents <= after.TotalCents);
     }
 
     [Fact]

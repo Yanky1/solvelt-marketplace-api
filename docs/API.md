@@ -242,7 +242,7 @@ Configuration (env only): `Stripe__SecretKey` (`sk_test_`/`rk_test_`), `Stripe__
 Order lifecycle seen by the web: `pending_payment` -> `paid` (webhook) -> `placed` (portal accepted; seller order numbers visible) or `failed` (`failureCode`, full refund, buyer emailed). The order endpoint returns no failure details beyond the status; the page shows a generic text per status.
 * `charge.refunded`: a refund made outside this system (the Stripe dashboard) is recorded against the order's refund cap and logged; refunds we made are recognised and ignored.
 * `charge.dispute.*`: forwarded to the portal as `dispute.created|updated|closed`, one per seller order of the payment (amount = the seller share of the dispute, split exactly).
-Portal webhooks (`/api/portal/webhooks`) now also act on `refund.issued` and `order.cancelled` (with `refundDueCents`): the buyer is refunded through Stripe (items + shipping + the tax on them) and the portal is told with `refund.processed`.
+Portal webhooks (`/api/portal/webhooks`) now also act on `refund.issued` and `order.cancelled` (with `refundDueCents`): the buyer is refunded through Stripe EXACTLY the amount the portal states (it already includes line tax and shipping) and the portal is told with `refund.processed`, whose `amountCents` excludes the tax (backed out per line, floor proration; decision M3-16).
 
 ## Buyer orders (M5)
 All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Control: private, no-store`, and answer 404 for another buyer's order.

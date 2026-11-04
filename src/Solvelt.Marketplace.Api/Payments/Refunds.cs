@@ -8,6 +8,25 @@ namespace Solvelt.Marketplace.Api.Payments;
 
 public enum ReserveOutcome { Reserved, Duplicate, ExceedsPaid, NotPaid }
 
+/// <summary>One line of a portal refund: our <c>marketplaceLineId</c> and how many units.</summary>
+public sealed record PortalRefundLine(string MarketplaceLineId, int Quantity);
+
+/// <summary>
+/// A refund the portal asked for. <see cref="TotalCents"/> is the FULL amount to give the buyer (it already includes line tax and <see cref="ShippingCents"/>). <see cref="FullCancel"/>:
+/// everything not yet returned on the seller order; <see cref="Clamp"/>: cut to what is left instead of refusing. <see cref="TaxCents"/> is the portal's own figure once it sends it.
+/// </summary>
+public sealed record PortalRefund(Guid OrderId, Guid GroupId, long TotalCents, long ShippingCents, IReadOnlyList<PortalRefundLine> Lines, long? TaxCents, bool FullCancel, bool Clamp, string Key, string Reason, string? PortalRefundId);
+
+/// <summary>The tax we sent per line at ingest (the line's own tax plus its share of tax charged on shipping while that is folded in, C8): the base of every back-out, so a reversal is exact.</summary>
+public static class OrderTaxSent
+{
+    public static long[] PerLine(OrderGroup g, IReadOnlyList<OrderLine> orderedLines, bool perGroupShipping)
+    {
+        var shipTax = perGroupShipping ? new long[orderedLines.Count] : Checkout.OrderIngestHandler.AllocateShippingTax(g.ShippingTaxCents, orderedLines);
+        return orderedLines.Select((l, i) => l.TaxCents + shipTax[i]).ToArray();
+    }
+}
+
 /// <summary>
 /// The only way money leaves: a refund is first RESERVED against the cap with conditional updates
 /// (<c>RefundedCents + amount &lt;= PaidCents</c> on the order, <c>&lt;= TotalCents</c> on the seller order), together with its unique idempotency key and the outbox message that will
@@ -57,59 +76,90 @@ public sealed class RefundService(MarketplaceDb db, OutboxWriter outbox, TimePro
     }
 
     /// <summary>
-    /// Reserves a refund the PORTAL asked for on one seller order (<c>refund.issued</c>, a cancellation): <paramref name="itemsCents"/> and <paramref name="shippingCents"/> are what the
-    /// portal's ledger counts; the buyer also gets back the tax on them, in proportion (round half up, the last refund of the seller order takes the remainder, so tax is returned
-    /// in full and never twice). Stripe is refunded <c>items + shipping + tax</c>; the portal is told only items and shipping. With <paramref name="clamp"/> (cancellations) a
-    /// request above what is left on the seller order is cut down to it instead of refused.
+    /// Reserves a refund the PORTAL asked for on one seller order (<c>refund.issued</c>, an order cancellation). Decision M3-16 (portal answer to C9): the portal's amounts ALREADY INCLUDE the
+    /// line tax, so the buyer (Stripe) gets back exactly <see cref="PortalRefund.TotalCents"/>, nothing added. The portal's ledger excludes tax, so <c>refund.processed</c> reports the amount
+    /// with the tax backed out: per line the tax we sent at ingest, floor-prorated by the quantity refunded, the last refund of a line taking the remainder (the portal does the same
+    /// to the line's amount, so the two reconcile to the cent). Everything runs under the seller order's row lock, so parallel refunds, replays and cancellations never both fit.
     /// </summary>
-    public async Task<ReserveOutcome> ReserveGroupAsync(Guid orderId, Guid groupId, long itemsCents, long shippingCents, bool clamp, string key, string reason, string? portalRefundId, CancellationToken ct)
+    public async Task<ReserveOutcome> ReservePortalAsync(PortalRefund r, bool perGroupShipping, CancellationToken ct)
     {
-        if (itemsCents < 0 || shippingCents < 0 || itemsCents + shippingCents <= 0) throw new ArgumentOutOfRangeException(nameof(itemsCents));
         var own = db.Database.CurrentTransaction is null;
         await using var tx = own ? await db.Database.BeginTransactionAsync(ct) : null;
-        if (await db.OrderRefunds.AnyAsync(r => r.Key == key, ct)) return ReserveOutcome.Duplicate;
-        for (var attempt = 0; attempt < 6; attempt++)
-        {
-            var g = await db.OrderGroups.AsNoTracking().Where(x => x.Id == groupId && x.OrderId == orderId).FirstOrDefaultAsync(ct);
-            var paid = await db.Orders.AsNoTracking().Where(o => o.Id == orderId).Select(o => o.PaidAt).FirstOrDefaultAsync(ct);
-            if (g is null || paid is null) return ReserveOutcome.NotPaid;
-            var sellable = g.ItemsCents + g.ShippingCents;
-            var net = itemsCents + shippingCents;
-            var shipping = shippingCents;
-            if (clamp && g.RefundedNetCents + net > sellable) { net = Math.Max(0, sellable - g.RefundedNetCents); shipping = Math.Min(shipping, net); }
-            if (net <= 0) return ReserveOutcome.ExceedsPaid;
-            if (g.RefundedNetCents + net > sellable) return ReserveOutcome.ExceedsPaid;
-            var tax = g.RefundedNetCents + net >= sellable
-                ? g.TaxCents - g.RefundedTaxCents                                                                   // the last refund returns the rest of the tax
-                : (long)Math.Round((decimal)g.TaxCents * net / sellable, 0, MidpointRounding.AwayFromZero);
-            tax = Math.Clamp(tax, 0, g.TaxCents - g.RefundedTaxCents);
-            var total = net + tax;
-            var seen = g.RefundedNetCents;
-            // compare-and-swap on what we read, so two parallel refunds cannot both take "the remainder" of the tax or both fit under the cap
-            var won = await db.OrderGroups.Where(x => x.Id == groupId && x.RefundedNetCents == seen && x.RefundedCents + total <= x.TotalCents)
-                .ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedNetCents, x => x.RefundedNetCents + net).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents + tax)
-                    .SetProperty(x => x.RefundedCents, x => x.RefundedCents + total), ct);
-            if (won == 0) continue;   // someone else moved the counters: read again (reads are untracked, so nothing stale is kept)
-            var order = await db.Orders.Where(o => o.Id == orderId && o.PaidAt != null && o.RefundedCents + total <= o.PaidCents)
-                .ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + total), ct);
-            if (order == 0)
+        if (await db.OrderRefunds.AnyAsync(x => x.Key == r.Key, ct)) return ReserveOutcome.Duplicate;
+        // the lock: a write to the seller order's row (every refund of it starts here; a concurrent one waits, then sees our counters)
+        if (await db.OrderGroups.Where(x => x.Id == r.GroupId && x.OrderId == r.OrderId).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents), ct) == 0) return ReserveOutcome.NotPaid;
+        var paid = await db.Orders.AsNoTracking().Where(o => o.Id == r.OrderId).Select(o => o.PaidAt).FirstOrDefaultAsync(ct);
+        if (paid is null) return ReserveOutcome.NotPaid;
+        var g = await db.OrderGroups.AsNoTracking().FirstAsync(x => x.Id == r.GroupId, ct);
+        var lines = await db.OrderLines.AsNoTracking().Where(l => l.GroupId == g.Id).ToListAsync(ct);
+        lines = lines.OrderBy(l => l.MarketplaceLineId, StringComparer.Ordinal).ToList();
+        var sentTax = OrderTaxSent.PerLine(g, lines, perGroupShipping);
+
+        var left = g.TotalCents - g.RefundedCents;
+        var shippingLeft = g.ShippingCents - g.RefundedShippingCents;
+        long total = r.TotalCents, shipping = r.ShippingCents;
+        if (r.FullCancel) { total = Math.Min(total, left); shipping = Math.Min(shippingLeft, total); }          // a full cancel returns everything not yet returned, shipping included
+        else if (r.Clamp && total > left) { total = left; shipping = Math.Min(shipping, total); }
+        if (total <= 0 || shipping < 0 || shipping > total || total > left || shipping > shippingLeft) return ReserveOutcome.ExceedsPaid;
+
+        // which lines (and how many units) this refund covers, and the tax inside it
+        var parts = new List<(OrderLine Line, int Qty, long Tax)>();
+        if (r.FullCancel)
+            for (var i = 0; i < lines.Count; i++)
             {
-                await db.OrderGroups.Where(x => x.Id == groupId).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedNetCents, x => x.RefundedNetCents - net)
-                    .SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - tax).SetProperty(x => x.RefundedCents, x => x.RefundedCents - total), ct);
-                return ReserveOutcome.ExceedsPaid;
+                var q = lines[i].Quantity - lines[i].RefundedQuantity;
+                if (q > 0) parts.Add((lines[i], q, sentTax[i] - lines[i].RefundedTaxCents));
             }
-            var now = time.GetUtcNow().ToUniversalTime();
-            db.OrderRefunds.Add(new OrderRefund
+        else
+            foreach (var grp in r.Lines.GroupBy(l => l.MarketplaceLineId, StringComparer.Ordinal))
             {
-                Id = Guid.NewGuid(), Key = key, OrderId = orderId, GroupId = groupId, AmountCents = total, ShippingCents = shipping, TaxCents = tax, Reason = reason, Status = RefundStatus.Reserved,
-                ReportToPortal = true, PortalRefundId = portalRefundId, CreatedAt = now, UpdatedAt = now,
-            });
-            outbox.Enqueue(StripeRefundType, new RefundPayload(key), $"refund:{key}");
-            if (own) { await db.SaveChangesAsync(ct); await tx!.CommitAsync(ct); }
-            return ReserveOutcome.Reserved;
+                var i = lines.FindIndex(l => l.MarketplaceLineId == grp.Key);
+                var q = grp.Sum(x => x.Quantity);
+                if (i < 0 || q <= 0 || lines[i].RefundedQuantity + q > lines[i].Quantity) return ReserveOutcome.ExceedsPaid;   // a line that is not on this seller order, or more units than it has
+                var last = lines[i].RefundedQuantity + q == lines[i].Quantity;
+                parts.Add((lines[i], q, last ? sentTax[i] - lines[i].RefundedTaxCents : sentTax[i] * q / lines[i].Quantity));   // floor, the last refund of a line takes the remainder
+            }
+        var remainingTax = g.TaxCents - g.RefundedTaxCents;
+        long tax;
+        if (r.TaxCents is { } explicitTax) tax = explicitTax;                                                       // the portal will send it (additive): then we only read it
+        else if (parts.Count > 0) tax = parts.Sum(p => p.Tax);
+        else
+        {
+            // no lines (a goodwill refund of an amount): the same floor proration on the whole seller order's remaining tax
+            var itemsGross = total - shipping;
+            var remainingGross = g.ItemsCents + g.TaxCents - (g.RefundedCents - g.RefundedShippingCents);
+            tax = itemsGross <= 0 || remainingGross <= 0 ? 0 : itemsGross >= remainingGross ? remainingTax : remainingTax * itemsGross / remainingGross;
         }
-        return ReserveOutcome.ExceedsPaid;   // the counters kept moving under us: refuse rather than guess; the portal's event is retried
+        tax = Math.Clamp(tax, 0, Math.Min(remainingTax, total - shipping));
+
+        if (await db.Orders.Where(o => o.Id == r.OrderId && o.PaidAt != null && o.RefundedCents + total <= o.PaidCents).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + total), ct) == 0)
+            return ReserveOutcome.ExceedsPaid;
+        var moved = await db.OrderGroups.Where(x => x.Id == g.Id && x.RefundedCents + total <= x.TotalCents && x.RefundedShippingCents + shipping <= x.ShippingCents)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents + total).SetProperty(x => x.RefundedShippingCents, x => x.RefundedShippingCents + shipping)
+                .SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents + tax), ct);
+        if (moved == 0)
+        {
+            await db.Orders.Where(o => o.Id == r.OrderId).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - total), ct);
+            return ReserveOutcome.ExceedsPaid;
+        }
+        foreach (var (line, qty, lineTax) in parts)
+        {
+            var id = line.Id;
+            await db.OrderLines.Where(l => l.Id == id).ExecuteUpdateAsync(s => s.SetProperty(l => l.RefundedQuantity, l => l.RefundedQuantity + qty).SetProperty(l => l.RefundedTaxCents, l => l.RefundedTaxCents + lineTax), ct);
+        }
+        var now = time.GetUtcNow().ToUniversalTime();
+        db.OrderRefunds.Add(new OrderRefund
+        {
+            Id = Guid.NewGuid(), Key = r.Key, OrderId = r.OrderId, GroupId = g.Id, AmountCents = total, ShippingCents = shipping, TaxCents = tax, Reason = r.Reason, Status = RefundStatus.Reserved,
+            ReportToPortal = true, PortalRefundId = r.PortalRefundId, CreatedAt = now, UpdatedAt = now,
+            PartsJson = JsonSerializer.Serialize(parts.Select(p => new RefundPart(p.Line.Id, p.Qty, p.Tax)).ToList()),
+        });
+        outbox.Enqueue(StripeRefundType, new RefundPayload(r.Key), $"refund:{r.Key}");
+        if (own) { await db.SaveChangesAsync(ct); await tx!.CommitAsync(ct); }
+        return ReserveOutcome.Reserved;
     }
+
+    public sealed record RefundPart(Guid LineId, int Quantity, long TaxCents);
 
     public sealed record RefundPayload(string Key);
 }
@@ -149,9 +199,13 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
                 await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - refund.AmountCents), ct);
                 if (refund.GroupId is { } g)
                 {
-                    var net = refund.AmountCents - refund.TaxCents;
                     await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents)
-                        .SetProperty(x => x.RefundedNetCents, x => x.RefundedNetCents - (refund.ReportToPortal ? net : 0)).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - refund.TaxCents), ct);
+                        .SetProperty(x => x.RefundedShippingCents, x => x.RefundedShippingCents - refund.ShippingCents).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - refund.TaxCents), ct);
+                    foreach (var part in refund.PartsJson is null ? [] : JsonSerializer.Deserialize<List<RefundService.RefundPart>>(refund.PartsJson) ?? [])
+                    {
+                        var (id, qty, lt) = (part.LineId, part.Quantity, part.TaxCents);
+                        await db.OrderLines.Where(l => l.Id == id).ExecuteUpdateAsync(s => s.SetProperty(l => l.RefundedQuantity, l => l.RefundedQuantity - qty).SetProperty(l => l.RefundedTaxCents, l => l.RefundedTaxCents - lt), ct);
+                    }
                 }
             }
             await tx.CommitAsync(ct);
