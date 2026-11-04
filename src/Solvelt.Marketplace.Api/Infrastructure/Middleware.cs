@@ -143,3 +143,20 @@ internal sealed class WarningOnlyLogger(ILogger inner) : ILogger
         if (logLevel >= LogLevel.Warning) inner.Log(logLevel, eventId, state, exception, formatter);
     }
 }
+
+/// <summary>
+/// Caps the body of the auth endpoints (16 KB by default; a password is at most 128 characters). A declared length over the cap is refused at once with 413;
+/// the server's own limit is set for bodies that declare no length (chunked), so they are cut off while being read instead of read in full.
+/// </summary>
+public sealed class AuthBodyLimitMiddleware(RequestDelegate next, Microsoft.Extensions.Options.IOptions<AuthOptions> options)
+{
+    public Task InvokeAsync(HttpContext ctx)
+    {
+        if (!ctx.Request.Path.StartsWithSegments("/api/v1/auth")) return next(ctx);
+        var cap = Math.Max(1024, options.Value.MaxBodyBytes);
+        if (ctx.Request.ContentLength > cap) return ProblemExceptionMiddleware.Write(ctx, 413, "too_large", "Request body too large.");
+        var feature = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (feature is { IsReadOnly: false }) feature.MaxRequestBodySize = cap;
+        return next(ctx);
+    }
+}

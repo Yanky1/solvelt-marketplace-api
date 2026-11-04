@@ -6,7 +6,7 @@ namespace Solvelt.Marketplace.Api.Auth;
 public static class AuthEmails
 {
     public static EmailMessage VerifyEmail(string to, string name, string baseUrl, string token, int hours) => new(to, "Confirm your email address",
-        $"Hello {name},\n\nConfirm your email address to finish creating your Solvelt account:\n\n{baseUrl}/verify-email?token={token}\n\nThe link works once and expires in {hours} hours. If you did not sign up, ignore this message.\n");
+        $"Hello {name},\n\nConfirm your email address to finish creating your Solvelt account:\n\n{baseUrl}/verify-email?token={token}\n\nTo confirm, open the link and enter the password you chose when you signed up. If you do not remember it, use \"Forgot password\" on the sign-in page instead: that also confirms your address.\n\nThe link works once and expires in {hours} hours. If you did not sign up, ignore this message.\n");
 
     public static EmailMessage PasswordReset(string to, string baseUrl, string token, int minutes) => new(to, "Reset your password",
         $"We received a request to reset your Solvelt password:\n\n{baseUrl}/reset-password?token={token}\n\nThe link works once and expires in {minutes} minutes. If you did not ask for this, ignore this message: your password has not changed.\n");

@@ -24,6 +24,8 @@ public sealed record AuthMailPayload(string Kind, Guid AccountId, Guid? TokenId 
 public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSender sender, TimeProvider time, IOptions<MarketplaceOptions> marketplace, IOptions<EmailOptions> email) : IOutboxHandler
 {
     public const string Type = "auth.mail";
+    /// <summary>Placeholder rows only (decision M1-65): written already delivered, never dispatched, purged within the hour.</summary>
+    public const string DecoyType = "auth.decoy";
     public IReadOnlyCollection<string> Types { get; } = [Type];
 
     public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)

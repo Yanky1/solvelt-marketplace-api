@@ -154,7 +154,11 @@ public sealed class AuthOptions
     public int SessionAbsoluteDays { get; set; } = 30;
     public int VerificationTokenHours { get; set; } = 24;
     public int ResetTokenMinutes { get; set; } = 60;
-    /// <summary>Wrong passwords in a row before the account is locked for <see cref="LockoutMinutes"/>.</summary>
-    public int LockoutThreshold { get; set; } = 5;
-    public int LockoutMinutes { get; set; } = 15;
+    /// <summary>Failed sign-ins per address with no delay at all. After failure n (n above this) the next attempt must wait 2^(n - this - 1) seconds, capped at <see cref="SignInMaxDelaySeconds"/>.</summary>
+    public int SignInFreeFailures { get; set; } = 5;
+    public int SignInMaxDelaySeconds { get; set; } = 900;
+    /// <summary>Failed sign-in (and verify-email) attempts one client IP may make per hour, across all addresses. Shared by every instance (stored in the database).</summary>
+    public int SignInIpFailuresPerHour { get; set; } = 20;
+    /// <summary>Largest request body the auth endpoints read. A password is at most 128 characters.</summary>
+    public int MaxBodyBytes { get; set; } = 16 * 1024;
 }

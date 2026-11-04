@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,11 +17,11 @@ public sealed class AuthKit : IDisposable
     public TestFactory F { get; }
     public HttpClient Http { get; }
 
-    public AuthKit(Dictionary<string, string?>? config = null)
+    public AuthKit(Dictionary<string, string?>? config = null, Action<Microsoft.Extensions.DependencyInjection.IServiceCollection>? services = null)
     {
         var c = new Dictionary<string, string?> { ["Auth:PasswordIterations"] = "1000", ["RateLimits:AuthPerMinute"] = "10000", ["RateLimits:PublicPerMinute"] = "10000" };
         if (config != null) foreach (var kv in config) c[kv.Key] = kv.Value;
-        F = new TestFactory(c);
+        F = new TestFactory(c, services);
         Http = F.CreateClient();
     }
 
@@ -30,6 +31,18 @@ public sealed class AuthKit : IDisposable
     {
         var r = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create(body ?? new { }) };
         if (token != null) r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return Http.SendAsync(r);
+    }
+
+    /// <summary>Posts as the end user <paramref name="ip"/>, forwarded and signed the way the web server does.</summary>
+    public Task<HttpResponseMessage> PostFrom(string ip, string path, object? body)
+    {
+        var ts = F.Clock.GetUtcNow().ToUnixTimeSeconds().ToString();
+        var r = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create(body ?? new { }) };
+        r.Headers.Add(Solvelt.Marketplace.Api.Infrastructure.ClientIpResolver.IpHeader, ip);
+        r.Headers.Add(Solvelt.Marketplace.Api.Infrastructure.ClientIpResolver.TimestampHeader, ts);
+        var mac = System.Security.Cryptography.HMACSHA256.HashData(Encoding.UTF8.GetBytes(Solvelt.Marketplace.Api.Infrastructure.DevDefaults.WebForwardingKey), Encoding.UTF8.GetBytes($"{ts}\n{ip}"));
+        r.Headers.Add(Solvelt.Marketplace.Api.Infrastructure.ClientIpResolver.SignatureHeader, "v1=" + Convert.ToHexStringLower(mac));
         return Http.SendAsync(r);
     }
 
@@ -70,7 +83,7 @@ public sealed class AuthKit : IDisposable
     {
         Assert.Equal(HttpStatusCode.NoContent, (await SignUp(email, password, name)).StatusCode);
         var mail = (await Mail(email.Trim().ToLowerInvariant())).Last(m => m.Subject.StartsWith("Confirm"));
-        Assert.Equal(HttpStatusCode.NoContent, (await Post("/api/v1/auth/verify-email", new { token = TokenIn(mail, "/verify-email") })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await Post("/api/v1/auth/verify-email", new { token = TokenIn(mail, "/verify-email"), password = password ?? Password })).StatusCode);
         var r = await Post("/api/v1/auth/sign-in", new { email, password = password ?? Password });
         Assert.Equal(HttpStatusCode.OK, r.StatusCode);
         return (await r.Content.ReadFromJsonAsync<SignInResponse>())!.Token;

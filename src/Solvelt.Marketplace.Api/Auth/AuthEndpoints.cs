@@ -9,7 +9,7 @@ public static class AuthEndpoints
 
     public sealed record SignUpBody(string? Email, string? Password, string? DisplayName);
     public sealed record EmailBody(string? Email);
-    public sealed record TokenBody(string? Token);
+    public sealed record VerifyBody(string? Token, string? Password);
     public sealed record SignInBody(string? Email, string? Password);
     public sealed record ResetBody(string? Token, string? Password);
 
@@ -50,14 +50,20 @@ public static class AuthEndpoints
         return Results.NoContent();
     }
 
-    private static async Task<IResult> VerifyEmail(TokenBody? body, AuthService auth, CancellationToken ct)
-        => !string.IsNullOrEmpty(body?.Token) && await auth.VerifyEmailAsync(body.Token, ct) ? Results.NoContent() : Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
+    /// <summary>Needs the link and the account's password (decision O-16 b). A wrong password is the same generic 400 as a bad link, and the link is not used up.</summary>
+    private static async Task<IResult> VerifyEmail(VerifyBody? body, AuthService auth, HttpContext ctx, ClientIpResolver ips, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(body?.Token)) return Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
+        if (string.IsNullOrEmpty(body.Password)) return Problems.Validation(new Dictionary<string, string> { ["password"] = "Enter the password you chose when you signed up." });
+        if (body.Password.Length > 128) return Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
+        return await auth.VerifyEmailAsync(body.Token, body.Password, ips.Resolve(ctx), ct) ? Results.NoContent() : Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
+    }
 
-    private static async Task<IResult> SignIn(SignInBody? body, AuthService auth, HttpContext ctx, CancellationToken ct)
+    private static async Task<IResult> SignIn(SignInBody? body, AuthService auth, HttpContext ctx, ClientIpResolver ips, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(body?.Email) || string.IsNullOrEmpty(body.Password) || body.Password.Length > 128 || body.Email.Length > 254)
             return Problems.Json(401, "invalid_credentials", "The email or password is not correct.");
-        var r = await auth.SignInAsync(body.Email, body.Password, ct);
+        var r = await auth.SignInAsync(body.Email, body.Password, ips.Resolve(ctx), ct);
         switch (r.Status)
         {
             case SignInStatus.Ok:
@@ -83,7 +89,9 @@ public static class AuthEndpoints
         if (string.IsNullOrEmpty(body?.Token)) return Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
         if (AuthValidation.PasswordProblem(body.Password, null, o.Value.PasswordMinLength) is { } p)
             return Problems.Validation(new Dictionary<string, string> { ["password"] = p });
-        return await auth.ResetPasswordAsync(body.Token, body.Password!, ct) ? Results.NoContent() : Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
+        var r = await auth.ResetPasswordAsync(body.Token, body.Password!, ct);   // also refuses a password equal to the address, without using the link up
+        if (r.PasswordProblem is { } problem) return Problems.Validation(new Dictionary<string, string> { ["password"] = problem });
+        return r.Ok ? Results.NoContent() : Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
     }
 
     private static async Task<IResult> SignOut(HttpContext ctx, AuthService auth, CancellationToken ct)

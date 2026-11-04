@@ -14,8 +14,6 @@ public sealed class BuyerAccount
     public DateTimeOffset? EmailVerifiedAt { get; set; }
     /// <summary><c>relay-&lt;random&gt;@&lt;relay domain&gt;</c>, generated once, unique, the only address the portal and sellers see.</summary>
     public string RelayEmail { get; set; } = "";
-    public int FailedSignIns { get; set; }
-    public DateTimeOffset? LockedUntil { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? DeletedAt { get; set; }
@@ -39,6 +37,50 @@ public sealed class BuyerSession
 public static class EmailTokenPurpose
 {
     public const string Verify = "verify", Reset = "reset";
+    /// <summary>A placeholder row written for an address that has no account, so that "forgot password" does the same writes for every address (decision M1-65). Always already used and expired; purged after an hour.</summary>
+    public const string Decoy = "decoy";
+}
+
+/// <summary>
+/// The sign-in gate's memory for ONE address, known or not (decision M1-63): how many attempts were claimed and when the next one is allowed. The key is a
+/// keyed hash of the normalised address, so the table holds no address. Success or a password reset deletes the row.
+/// </summary>
+public sealed class SignInAttempt
+{
+    public string Key { get; set; } = "";
+    public int Failures { get; set; }
+    public DateTimeOffset NextAllowedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>The sign-in gate's per-client-IP failure budget for the current hour, stored in the database so every instance shares it. The key is a keyed hash of the IP.</summary>
+public sealed class SignInIpBudget
+{
+    public string Key { get; set; } = "";
+    public int Count { get; set; }
+    public DateTimeOffset WindowStart { get; set; }
+}
+
+internal sealed class SignInAttemptConfiguration : IEntityTypeConfiguration<SignInAttempt>
+{
+    public void Configure(EntityTypeBuilder<SignInAttempt> b)
+    {
+        b.ToTable("signin_attempts");
+        b.HasKey(a => a.Key);
+        b.Property(a => a.Key).HasMaxLength(64).ValueGeneratedNever();
+        b.HasIndex(a => a.UpdatedAt);
+    }
+}
+
+internal sealed class SignInIpBudgetConfiguration : IEntityTypeConfiguration<SignInIpBudget>
+{
+    public void Configure(EntityTypeBuilder<SignInIpBudget> b)
+    {
+        b.ToTable("signin_ip_budgets");
+        b.HasKey(a => a.Key);
+        b.Property(a => a.Key).HasMaxLength(64).ValueGeneratedNever();
+        b.HasIndex(a => a.WindowStart);
+    }
 }
 
 /// <summary>
