@@ -53,6 +53,7 @@ public static class CatalogEndpoints
         g.MapGet("/suggest", Suggest);
         g.MapGet("/listings/{slugOrId}", Listing);
         g.MapStorefronts();
+        g.MapImages();
         return app;
     }
 

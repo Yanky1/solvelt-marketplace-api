@@ -65,6 +65,10 @@ builder.Services.AddSingleton<ICatalogSource>(sp =>
         _ => throw new InvalidOperationException($"Unknown Catalog:Source '{source}'."),
     };
 });
+// Image bytes: the portal's originals for the portal feed; a generated placeholder with the seed fixture or an empty catalog (there is no portal to ask).
+builder.Services.AddSingleton<ICatalogImageSource>(sp =>
+    CatalogSourceSelection.Resolve(sp.GetRequiredService<IConfiguration>()["Catalog:Source"], devLike).Equals("Http", StringComparison.OrdinalIgnoreCase)
+        ? new PortalImageSource(sp.GetRequiredService<IServiceScopeFactory>(), sp.GetRequiredService<ILogger<PortalImageSource>>()) : new PlaceholderImageSource());
 builder.Services.AddSingleton<ISearchIndex>(_ => (builder.Configuration["Database:Provider"] ?? "Sqlite").Equals("Postgres", StringComparison.OrdinalIgnoreCase)
     ? new PostgresSearchIndex() : new SqliteSearchIndex());
 builder.Services.AddSingleton<IProjectionHandler, CatalogEventHandler>();

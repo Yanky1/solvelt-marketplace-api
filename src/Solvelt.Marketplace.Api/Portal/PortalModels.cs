@@ -14,6 +14,13 @@ public sealed record PortalResult<T>(int Status, T? Value, PortalError? Error, i
     public bool Retryable { get; init; }
 }
 
+/// <summary>The answer of <c>GET /catalog/images/{id}</c>: the stored original (bytes and its Content-Type) or a status without bytes.</summary>
+public sealed record PortalImageResult(int Status, byte[]? Bytes, string? ContentType)
+{
+    public bool IsSuccess => Status is >= 200 and < 300 && Bytes is not null;
+    public bool Retryable { get; init; }
+}
+
 // ---- POST /orders (ORDERS.md §3.2, LOCAL-DELIVERY.md §4) ----
 public sealed record PortalBuyer(string DisplayName, string RelayEmail, string? Phone = null);
 public sealed record PortalAddress(string Name, string Line1, string? Line2, string City, string? Region, string PostalCode, string Country, double? Lat = null, double? Lng = null);

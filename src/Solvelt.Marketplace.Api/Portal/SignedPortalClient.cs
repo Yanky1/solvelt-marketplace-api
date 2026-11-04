@@ -43,6 +43,8 @@ public interface ISignedPortalClient
     Task<PortalResult<JsonElement>> GetCatalogListingAsync(Guid listingId, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> GetCatalogCategoriesAsync(CancellationToken ct = default);
     Task<PortalResult<JsonElement>> GetCatalogBrandsAsync(Guid? since, int limit, CancellationToken ct = default);
+    /// <summary><c>GET /catalog/images/{imageId}</c>: the original bytes of an image of a visible listing (the portal answers 404 for anything else). Server-side only.</summary>
+    Task<PortalImageResult> GetCatalogImageAsync(Guid imageId, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -134,6 +136,80 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<JsonElement>> GetCatalogBrandsAsync(Guid? since, int limit, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/brands?{(since is { } b ? $"since={b:D}&" : "")}limit={Math.Clamp(limit, 1, 200)}", null, Retry.Standard, ct, CatalogMaxResponseBytes);
+
+    /// <summary>The largest image we accept from the portal (an original, before our resizer shrinks it).</summary>
+    public const int MaxImageBytes = 10 * 1024 * 1024;
+
+    /// <summary>
+    /// A signed GET of one image's bytes. Same signing, deadline and retry rules as the JSON calls (a fresh timestamp and nonce per attempt; 503 is retried, 404 and
+    /// every other answer is returned as it is), but the body is read as bytes with its own cap, and the Content-Type is passed on for the caller to judge.
+    /// </summary>
+    public async Task<PortalImageResult> GetCatalogImageAsync(Guid imageId, CancellationToken ct = default)
+    {
+        var o = options.Value;
+        if (string.IsNullOrEmpty(o.InboundSecret)) throw new PortalNotConfiguredException("Portal:InboundSecret");
+        if (http.BaseAddress is null) throw new PortalNotConfiguredException("Portal:BaseUrl");
+        var path = $"{ApiBase}/catalog/images/{imageId:D}";
+        var maxAttempts = Math.Max(1, o.MaxAttempts);
+        var attemptTimeout = TimeSpan.FromSeconds(Math.Clamp(o.AttemptTimeoutSeconds, 1, 30));
+        var total = TimeSpan.FromSeconds(Math.Clamp(o.TotalDeadlineSeconds, 1, 60));
+        var started = time.GetTimestamp();
+        PortalImageResult? last = null; Exception? failure = null;
+        for (var attempt = 1; ; attempt++)
+        {
+            var remaining = total - time.GetElapsedTime(started);
+            if (attempt > 1 && remaining <= TimeSpan.Zero) { if (last is not null) return last; throw new PortalUnavailableException($"Portal unreachable after {attempt - 1} attempt(s).", failure); }
+            var timestamp = time.GetUtcNow().ToUnixTimeSeconds().ToString();
+            var nonce = PortalSigning.NewNonce();
+            using var req = new HttpRequestMessage(HttpMethod.Get, path);
+            req.Headers.TryAddWithoutValidation(PortalSigning.TimestampHeader, timestamp);
+            req.Headers.TryAddWithoutValidation(PortalSigning.NonceHeader, nonce);
+            req.Headers.TryAddWithoutValidation(PortalSigning.SignatureHeader, PortalSigning.Sign(o.InboundSecret, PortalSigning.Canonical(timestamp, nonce, "GET", path, [])));
+            using var deadline = new CancellationTokenSource(attemptTimeout < remaining ? attemptTimeout : remaining, time);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+            HttpResponseMessage? res = null;
+            try
+            {
+                byte[]? bytes = null;
+                try
+                {
+                    res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                    if (res.IsSuccessStatusCode) bytes = await ReadBytesCapped(res, MaxImageBytes, cts.Token);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or IOException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+                {
+                    failure = ex; last = null;
+                    var wait = Backoff(o, attempt, null);
+                    if (attempt >= maxAttempts || !HasBudgetFor(wait, started, total)) throw new PortalUnavailableException($"Portal unreachable after {attempt} attempt(s).", ex);
+                    await Task.Delay(wait, time, ct);
+                    continue;
+                }
+                var status = (int)res.StatusCode;
+                var answer = new PortalImageResult(status, bytes, res.Content.Headers.ContentType?.MediaType) { Retryable = status is 503 or 429 };
+                if (status == 503 && attempt < maxAttempts)
+                {
+                    var wait = Backoff(o, attempt, RetryAfterDelay(res));
+                    if (HasBudgetFor(wait, started, total)) { last = answer; failure = null; await Task.Delay(wait, time, ct); continue; }
+                }
+                return answer;
+            }
+            finally { res?.Dispose(); }
+        }
+    }
+
+    private static async Task<byte[]> ReadBytesCapped(HttpResponseMessage res, int maxBytes, CancellationToken ct)
+    {
+        await using var s = await res.Content.ReadAsStreamAsync(ct);
+        using var ms = new MemoryStream();
+        var buf = new byte[81920];
+        int n;
+        while ((n = await s.ReadAsync(buf, ct)) > 0)
+        {
+            ms.Write(buf, 0, n);
+            if (ms.Length > maxBytes) throw new PortalResponseTooLargeException();
+        }
+        return ms.ToArray();
+    }
 
     // ---------- core ----------
     private static string Id(string id)

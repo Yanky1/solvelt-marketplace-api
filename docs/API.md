@@ -147,6 +147,19 @@ Every page carries `ETag` and `Last-Modified` (its newest entry, to the second) 
 ```
 The web tier builds `sitemap.xml` (an index of `totalPages` child sitemaps per kind) from this; it must not cache the answers for more than a few seconds beyond what its own sitemap cache needs.
 
+### `GET /api/v1/catalog/images/{imageId}`
+The original bytes of an image of a **visible** listing, for the web tier's resizer (the browser never calls it; the web server serves resized copies under `/img`). The `imageId` is the `image.id` of a listing card or detail. Anything that is not a visible listing's image (unknown id, malformed id, a hidden, unlisted or suspended-seller listing, an image the portal no longer has) is the same `404 not_found`, and the portal is not asked. The visibility check runs on **every** request, before any cache, so an unlisted listing's images stop being served at once (the web tier keeps its own copies for at most a day).
+
+| Answer | When |
+|---|---|
+| `200` + bytes | `Content-Type` is the stored type, one of `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/avif`. Headers: `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Content-Security-Policy: default-src 'none'; sandbox`, `Cache-Control: public, max-age=300`, a strong `ETag` |
+| `304` | `If-None-Match` matches the `ETag` (no body) |
+| `404 not_found` | see above |
+| `502 bad_image` | the portal's answer is not a raster picture (any other type, **SVG included**, or empty) or is over 10 MB |
+| `503 image_unavailable` | the portal could not be reached; `Retry-After: 30`, `no-store` |
+
+Bytes come from the portal (`GET /catalog/images/{id}`, signed, server-side only) and are kept in a bounded memory cache (64 MB, 10 minutes). With the seed fixture there is no portal: the endpoint serves a generated placeholder (SVG of the stored width and height, made from the id alone).
+
 ### `GET /api/v1/catalog/suggest?q=&limit=`
 Autocomplete for the header search box. Below two characters (after normalising) the answer is an empty list. `limit` is 1 to 10 (default 8, else `400`); `q` at most 100 characters.
 ```json
