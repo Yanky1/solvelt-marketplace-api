@@ -92,7 +92,7 @@ public sealed class CheckoutTests : IDisposable
         Assert.Equal(intent.ClientSecret, r.GetProperty("payment").GetProperty("clientSecret").GetString());
 
         // money sums per group equal the intent amount, in the stored rows as well
-        var order = await _k.Db(db => db.Orders.AsNoTracking().Include(o => o.Groups).Include(o => o.Lines).SingleAsync());
+        var order = await _k.Db(db => db.Orders.AsNoTracking().Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().SingleAsync());
         Assert.Equal(intent.AmountCents, order.TotalCents);
         Assert.Equal(order.TotalCents, order.Groups.Sum(g => g.TotalCents));
         Assert.Equal(order.Groups.Sum(g => g.ItemsCents + g.ShippingCents + g.TaxCents), order.TotalCents);
