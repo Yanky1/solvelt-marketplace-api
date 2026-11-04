@@ -42,7 +42,7 @@ public sealed class ListingQuery
 
     public enum Dim { Type, Seller, Brand, Category, Price, Availability, Attribute }
 
-    public static async Task<(ListingQuery? Query, IResult? Error)> ParseAsync(IQueryCollection q, MarketplaceDb db, ISearchIndex index, CancellationToken ct)
+    public static async Task<(ListingQuery? Query, IResult? Error)> ParseAsync(IQueryCollection q, MarketplaceDb db, ISearchIndex index, CategoryMap map, CancellationToken ct)
     {
         IResult Bad(string m) => Problems.BadRequest("invalid_query", m);
         var r = new ListingQuery();
@@ -112,9 +112,8 @@ public sealed class ListingQuery
         if (One("category") is { } category && !string.IsNullOrWhiteSpace(category))
         {
             r.CategoryGiven = true;
-            var all = await db.CatalogCategories.AsNoTracking().ToListAsync(ct);
-            var root = Guid.TryParse(category, out var cg) ? all.FirstOrDefault(c => c.Id == cg) : all.FirstOrDefault(c => c.Slug == category);
-            r.CategoryIds = root is null ? [] : CatalogEndpoints.Descendants(all, root.Id);
+            var root = await map.FindAsync(category, ct);
+            r.CategoryIds = root is null ? [] : await map.DescendantsAsync(root.Id, ct);
         }
 
         if (r.Searching)
@@ -161,9 +160,9 @@ public sealed class ListingQuery
         return q;
     }
 
-    public async Task<ListingFacets> FacetsAsync(MarketplaceDb db, IQueryable<CatalogListing> visible, CancellationToken ct)
+    public async Task<ListingFacets> FacetsAsync(MarketplaceDb db, IQueryable<CatalogListing> visible, CategoryMap map, CancellationToken ct)
     {
-        var categoryRows = await db.CatalogCategories.AsNoTracking().OrderBy(c => c.SortOrder).ThenBy(c => c.Name).ToListAsync(ct);
+        var categoryRows = await map.AllAsync(ct);
         var direct = await Apply(db, visible, Dim.Category).GroupBy(l => l.CategoryId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
         var tree = CatalogEndpoints.BuildTree(categoryRows, direct);
 

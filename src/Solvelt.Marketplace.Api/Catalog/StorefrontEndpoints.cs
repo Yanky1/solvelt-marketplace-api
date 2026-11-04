@@ -24,14 +24,14 @@ public static class StorefrontEndpoints
         return g;
     }
 
-    private static async Task<List<CategoryNode>> CategoriesOf(MarketplaceDb db, IQueryable<CatalogListing> listings, CancellationToken ct)
+    private static async Task<List<CategoryNode>> CategoriesOf(CategoryMap map, IQueryable<CatalogListing> listings, CancellationToken ct)
     {
-        var rows = await db.CatalogCategories.AsNoTracking().OrderBy(c => c.SortOrder).ThenBy(c => c.Name).ToListAsync(ct);
+        var rows = await map.AllAsync(ct);
         var direct = await listings.GroupBy(l => l.CategoryId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
         return CatalogEndpoints.BuildTree(rows, direct);
     }
 
-    private static async Task<IResult> Brand(MarketplaceDb db, string slugOrId, CancellationToken ct)
+    private static async Task<IResult> Brand(MarketplaceDb db, CategoryMap map, string slugOrId, CancellationToken ct)
     {
         var brand = Guid.TryParse(slugOrId, out var id)
             ? await db.CatalogBrands.AsNoTracking().FirstOrDefaultAsync(b => b.Id == id, ct)
@@ -41,10 +41,10 @@ public static class StorefrontEndpoints
         var count = await listings.CountAsync(ct);
         if (count == 0) return Problems.NotFound("Brand not found.");     // a brand with nothing visible does not exist as far as buyers can tell
         var seller = await db.CatalogSellers.AsNoTracking().FirstAsync(s => s.Id == brand.SellerId, ct);
-        return Results.Json(new BrandStorefront(brand.Id, brand.Slug, brand.Name, brand.LogoImageId, new SellerCard(seller.Id, seller.DisplayName), count, await CategoriesOf(db, listings, ct)));
+        return Results.Json(new BrandStorefront(brand.Id, brand.Slug, brand.Name, brand.LogoImageId, new SellerCard(seller.Id, seller.DisplayName), count, await CategoriesOf(map, listings, ct)));
     }
 
-    private static async Task<IResult> Seller(MarketplaceDb db, string id, CancellationToken ct)
+    private static async Task<IResult> Seller(MarketplaceDb db, CategoryMap map, string id, CancellationToken ct)
     {
         if (!Guid.TryParse(id, out var sellerId)) return Problems.NotFound("Seller not found.");
         var seller = await db.CatalogSellers.AsNoTracking().FirstOrDefaultAsync(s => s.Id == sellerId && s.Active, ct);
@@ -55,7 +55,7 @@ public static class StorefrontEndpoints
         var counts = await listings.GroupBy(l => l.BrandId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
         var brands = (await db.CatalogBrands.AsNoTracking().Where(b => counts.Keys.Contains(b.Id)).ToListAsync(ct)).OrderBy(b => b.Name, StringComparer.Ordinal)
             .Select(b => new BrandItem(b.Id, b.Slug, b.Name, new SellerCard(seller.Id, seller.DisplayName), b.LogoImageId, counts[b.Id])).ToList();
-        return Results.Json(new SellerStorefront(seller.Id, seller.DisplayName, count, brands, await CategoriesOf(db, listings, ct)));
+        return Results.Json(new SellerStorefront(seller.Id, seller.DisplayName, count, brands, await CategoriesOf(map, listings, ct)));
     }
 
     /// <summary>
@@ -63,7 +63,7 @@ public static class StorefrontEndpoints
     /// <c>brands</c>: slug and the newest update among their visible listings (a category counts its subtree); <c>sellers</c>: id and the same.
     /// Only entries with at least one visible listing appear. Order is by key, so pages are stable.
     /// </summary>
-    private static async Task<IResult> Sitemap(MarketplaceDb db, string kind, string? page, string? pageSize, CancellationToken ct)
+    private static async Task<IResult> Sitemap(MarketplaceDb db, CategoryMap map, string kind, string? page, string? pageSize, CancellationToken ct)
     {
         if (!SitemapKinds.Contains(kind)) return Problems.NotFound();
         if (!CatalogEndpoints.TryInt(page, 1, 1, 100_000, out var pageNo)) return Problems.BadRequest("invalid_query", "page must be a whole number from 1.");
@@ -93,7 +93,7 @@ public static class StorefrontEndpoints
             default:     // categories: the newest listing anywhere in the subtree
             {
                 var direct = await visible.GroupBy(l => l.CategoryId).Select(g => new { Id = g.Key, At = g.Max(l => l.UpdatedAt) }).ToDictionaryAsync(x => x.Id, x => x.At, ct);
-                var categories = await db.CatalogCategories.AsNoTracking().ToListAsync(ct);
+                var categories = await map.AllAsync(ct);
                 var byId = categories.ToDictionary(c => c.Id);
                 var newest = new Dictionary<Guid, DateTimeOffset>();
                 foreach (var (id, at) in direct)       // push each leaf time up through its ancestors (a cycle in portal data stops at the first repeat)

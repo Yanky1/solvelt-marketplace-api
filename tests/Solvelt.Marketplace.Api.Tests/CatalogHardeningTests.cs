@@ -417,6 +417,26 @@ public class CatalogSyncHardeningTests
     }
 
     [Fact]
+    public async Task The_ninety_days_count_from_when_the_seller_was_last_visible_not_from_when_it_was_first_seen()
+    {
+        using var f = new TestFactory();
+        var fx = Fixture(f);
+        await Sync(f);
+        var mazel = FixtureCatalogSource.Id("seller:mazel");
+        f.Clock.Advance(TimeSpan.FromDays(200));
+        await Sync(f);                                                                            // still visible on day 200
+        foreach (var l in fx.All().Where(l => l.Seller.Id == mazel)) fx.Upsert(l.Id, x => x with { Status = "Archived" });
+        await Sync(f);                                                                            // everything hidden at day 200
+        Assert.True(WithDb(f, db => db.CatalogSellers.Any(s => s.Id == mazel)));                  // 200 days after it was first seen, but 0 days after it was last visible
+        f.Clock.Advance(TimeSpan.FromDays(90));
+        await Sync(f);
+        Assert.True(WithDb(f, db => db.CatalogSellers.Any(s => s.Id == mazel)));                  // exactly 90 days: kept
+        f.Clock.Advance(TimeSpan.FromSeconds(1));
+        await Sync(f);
+        Assert.False(WithDb(f, db => db.CatalogSellers.Any(s => s.Id == mazel)));                 // 90 days and a second: deleted
+    }
+
+    [Fact]
     public async Task A_seller_that_stays_visible_is_never_deleted_however_long_the_service_runs()
     {
         using var f = new TestFactory();
