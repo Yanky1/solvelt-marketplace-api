@@ -83,6 +83,7 @@ public static class AccountEndpoints
             case AccountOutcome.ReauthenticationRequired: return Problems.Json(403, "reauthentication_required", "Confirm your password again first.");
             case AccountOutcome.WeakPassword: return Problems.Validation(new Dictionary<string, string> { [passwordField] = r.Problem ?? "Choose a stronger password." });
             case AccountOutcome.InvalidCredentials: return Problems.Json(401, "invalid_credentials", "The password is not correct.");
+            case AccountOutcome.Conflict: return Problems.Json(409, "account_changed", "Your account changed while this was running. Sign in again and retry.");
             case AccountOutcome.RateLimited:
                 ctx.Response.Headers.RetryAfter = Math.Max(1, r.RetryAfterSeconds).ToString();
                 return Problems.Json(429, "rate_limited", "Too many attempts. Try again later.");

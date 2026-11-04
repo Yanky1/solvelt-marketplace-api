@@ -487,9 +487,11 @@ public class AccountTests
         // at once: nothing works any more, and the redaction is queued in the same transaction
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);
-        var soft = await k.Account(Email);
+        var soft = await k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Id == before.Id));
         Assert.NotNull(soft.DeletedAt);
         Assert.Null(soft.PasswordHash);
+        Assert.Null(soft.Email);                                                                               // the address is free at once (L2)
+        Assert.Equal("Jane Brown", soft.DisplayName);                                                          // the rest waits for the job
         Assert.Null(soft.RedactedAt);
         var queued = await k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "account.redact"));
         Assert.Equal($"redact:{before.Id:N}", queued.DedupeKey);
@@ -499,7 +501,8 @@ public class AccountTests
         var gone = await k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Id == before.Id));
         Assert.Equal((null, "Deleted buyer", null, null), (gone.Email, gone.DisplayName, gone.Phone, gone.PasswordHash));
         Assert.NotNull(gone.RedactedAt);
-        Assert.Equal(before.RelayEmail, gone.RelayEmail);                                                      // the opaque id orders refer to stays
+        Assert.NotEqual(before.RelayEmail, gone.RelayEmail);                                                   // the relay address is retired (L1) ...
+        Assert.Equal($"deleted-{before.Id:N}@relay.invalid", gone.RelayEmail);                                // ... to a tombstone that is unique and unroutable
         Assert.Equal(before.CreatedAt, gone.CreatedAt);
         Assert.Equal(0, await k.Db(db => db.BuyerAddresses.CountAsync(a => a.AccountId == before.Id)));
         Assert.Equal(0, await k.Db(db => db.EmailTokens.CountAsync(t => t.AccountId == before.Id)));
@@ -544,15 +547,15 @@ public class AccountTests
         var eraser = new RecordingEraser { Throw = true };
         using var k = new AuthKit(null, s => s.AddSingleton<IAccountEraser>(eraser));
         var token = await k.VerifiedSession(Email);
-        await k.Send(Post, "/api/v1/account/delete", new { password = Pw }, token);
         var id = (await k.Account(Email)).Id;
+        await k.Send(Post, "/api/v1/account/delete", new { password = Pw }, token);
         await k.Dispatch();
         var msg = await k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "account.redact"));
         Assert.Equal(("pending", "InvalidOperationException"), (msg.Status, msg.LastError));                  // the type only
-        var half = await k.Account(Email);
+        var half = await k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Id == id));
         Assert.NotNull(half.DeletedAt);
         Assert.Null(half.RedactedAt);
-        Assert.Equal(Email, half.Email);                                                                       // not erased yet: the eraser must succeed first
+        Assert.Equal("Jane Brown", half.DisplayName);                                                          // not erased yet: the eraser must succeed first
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);
         eraser.Throw = false;
         k.F.Clock.Advance(TimeSpan.FromMinutes(2));
