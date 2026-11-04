@@ -198,7 +198,7 @@ public class CatalogEndpointTests : IAsyncLifetime
         Assert.Equal(750, variants[0].GetProperty("compareAtCents").GetInt64());
         Assert.Equal(JsonValueKind.Null, variants[1].GetProperty("compareAtCents").ValueKind);
         Assert.Equal(3, d.GetProperty("images").GetArrayLength());
-        Assert.Equal(["kosher-certification", "kosher-status", "weight"], d.GetProperty("attributes").EnumerateArray().Select(a => a.GetProperty("key").GetString()));
+        Assert.Equal(["kosher-certification", "kosher-status", "weight", "delivery", "delivery"], d.GetProperty("attributes").EnumerateArray().Select(a => a.GetProperty("key").GetString()));
         Assert.Contains("OU", d.GetProperty("faqs")[0].GetProperty("answer").GetString());
         Assert.Contains("Hand-braided", d.GetProperty("description").GetString());
         Assert.True(DateTimeOffset.TryParse(d.GetProperty("createdAt").GetString(), out var created) && created.Offset == TimeSpan.Zero);

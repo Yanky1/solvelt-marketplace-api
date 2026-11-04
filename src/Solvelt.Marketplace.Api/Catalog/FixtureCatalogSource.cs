@@ -199,6 +199,7 @@ public sealed record FixtureCatalogData(IReadOnlyList<ListingSnapshot> Listings,
                 return new VariantDto(Id($"variant:{slug}:{i}"), kv[0], price, OnSale.TryGetValue(slug, out var extra) && i == 0 ? price + extra : null, !v.StartsWith('!'));
             }).ToList();
             var attributes = attrs.Split(';').Select(a => a.Split(':', 2)).Select(a => new AttributeDto(a[0], a[1])).ToList();
+            attributes.AddRange(Delivery(type, category, attributes).Select(d => new AttributeDto("delivery", d)));
             var imgs = Enumerable.Range(0, images).Select(i => new ImageDto(Id($"image:{slug}:{i}"), i == 0 ? 1200 : 1600, i == 0 ? 1200 : 1200, $"{title}, photo {i + 1}")).ToList();
             var cert = attributes.FirstOrDefault(a => a.Key == "kosher-certification")?.Value;
             var faqs = new List<FaqDto>();
@@ -212,6 +213,20 @@ public sealed record FixtureCatalogData(IReadOnlyList<ListingSnapshot> Listings,
                 new BrandRef(Id("brand:" + brand), brandNames[brand]), Id("category:" + category), "USD", vs, imgs, attributes, faqs, at, at.AddDays(3), Keywords.GetValueOrDefault(slug)));
         }
         return new FixtureCatalogData(listings, categories, brands);
+    }
+
+    /// <summary>Delivery options (attribute key <c>delivery</c>; values ships, local, at-home, online): food is also delivered locally, services come to you or run online.</summary>
+    private static IEnumerable<string> Delivery(string type, string category, List<AttributeDto> attributes)
+    {
+        if (type == "product")
+        {
+            yield return "ships";
+            if (category is "bakery" or "meat-poultry") yield return "local";
+            yield break;
+        }
+        var where = attributes.FirstOrDefault(a => a.Key == "location")?.Value ?? "";
+        if (where.Contains("online")) yield return "online";
+        if (where.Contains("home") || attributes.Any(a => a.Key == "service-area")) yield return "at-home";
     }
 
     private static string Capitalise(string key) => char.ToUpperInvariant(key[0]) + key[1..].Replace('-', ' ');
