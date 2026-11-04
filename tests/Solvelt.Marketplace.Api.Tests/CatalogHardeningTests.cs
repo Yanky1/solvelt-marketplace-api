@@ -271,6 +271,55 @@ public class CatalogSyncHardeningTests
         return await Service(scope, s, f.Clock, pageSize, maxPending, retentionDays).RunAsync();
     }
 
+    // ---------- review follow-ups ----------
+    [Fact]
+    public async Task A_run_whose_lease_was_taken_over_on_a_single_page_writes_neither_the_page_nor_the_cursor()
+    {
+        using var f = new TestFactory();
+        var gateA = new TaskCompletionSource(); var gateB = new TaskCompletionSource();
+        var a = new ProbeSource(Fixture(f)) { Gate = gateA }; var b = new ProbeSource(Fixture(f)) { Gate = gateB };
+        var runA = Run(f, a, pageSize: 100);                                         // one page: A's last renewal is before it
+        await a.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        f.Clock.Advance(TimeSpan.FromMinutes(6));
+        var runB = Run(f, b, pageSize: 100);
+        await b.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var ownerB = State(f).LeaseOwner;
+        gateA.SetResult();
+        var resultA = await runA;
+        Assert.Equal(0, resultA.Applied);                                            // the page was rolled back with the cursor
+        Assert.Equal(0, WithDb(f, db => db.CatalogListings.Count()));
+        Assert.Null(State(f).Cursor);
+        Assert.Equal(ownerB, State(f).LeaseOwner);
+        gateB.SetResult();
+        Assert.Null((await runB).Error);
+        Assert.Equal(43, WithDb(f, db => db.CatalogListings.Count()));
+    }
+
+    [Fact]
+    public void Clipping_never_cuts_inside_a_surrogate_pair()
+    {
+        var clipped = SnapshotLimits.Clip(new string('a', 299) + "\U0001F36F" + "tail", SnapshotLimits.Title);
+        Assert.Equal(new string('a', 299), clipped);
+        Assert.All(clipped, ch => Assert.False(char.IsSurrogate(ch)));
+        Assert.Equal("", SnapshotLimits.Clip(null, 5));
+        Assert.Equal("ab\U0001F36F", SnapshotLimits.Clip("ab\U0001F36F", 4));         // fits exactly: kept whole
+    }
+
+    [Fact]
+    public void A_very_deep_category_chain_is_normalised_in_linear_time_and_keeps_the_depth_rule()
+    {
+        const int n = 20_000;
+        var feed = Enumerable.Range(1, n).Select(i => new CategoryDto(new Guid(i, 0, 0, new byte[8]), i == 1 ? null : new Guid(i - 1, 0, 0, new byte[8]), $"s{i}", $"n{i}", i)).ToList();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = CategoryRules.Normalise(feed).ToDictionary(c => c.Id);
+        sw.Stop();
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"took {sw.Elapsed}");
+        var cap = new Guid(CategoryRules.MaxDepth - 1, 0, 0, new byte[8]);
+        Assert.Equal(cap, result[new Guid(n, 0, 0, new byte[8])].ParentId);          // everything deeper hangs from the ancestor at MaxDepth - 1
+        Assert.Equal(cap, result[new Guid(CategoryRules.MaxDepth + 1, 0, 0, new byte[8])].ParentId);
+        Assert.Equal(new Guid(CategoryRules.MaxDepth - 1, 0, 0, new byte[8]), result[new Guid(CategoryRules.MaxDepth, 0, 0, new byte[8])].ParentId);   // level MaxDepth keeps its parent
+    }
+
     // ---------- lease owner and renewal (item 5) ----------
     [Fact]
     public async Task A_run_that_lost_its_lease_stops_at_the_next_page_and_never_releases_the_new_owners_lease()
@@ -287,7 +336,8 @@ public class CatalogSyncHardeningTests
         Assert.NotNull(ownerB);
         gateA.SetResult();
         var resultA = await runA;
-        Assert.Equal(10, resultA.Applied);                                           // A finished the page it held, then its renewal failed: it stopped (renewal per page)
+        Assert.Equal(0, resultA.Applied);                                            // A lost its lease while it held the page: the page and cursor are rolled back, nothing of A's is written (stricter than before: A used to commit the page it held)
+        Assert.Equal(0, WithDb(f, db => db.CatalogListings.Count()));
         Assert.Equal(ownerB, State(f).LeaseOwner);                                  // A did not release B's lease
         Assert.NotNull(State(f).LeaseUntil);
         Assert.Null(State(f).LastRunAt);                                            // and wrote nothing into the shared state
