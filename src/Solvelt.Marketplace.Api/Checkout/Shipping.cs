@@ -43,16 +43,23 @@ public static class ShippingRates
             long? price = sp.Method switch
             {
                 "flat" => sp.FlatCents,
-                "weight" => free ? 0 : sp.BaseCents is { } b && sp.PerKgCents is { } k ? b + (weightGrams!.Value + 999) / 1000 * k : null,   // a free group needs no weight (review C4)
+                "weight" => free ? 0 : sp.BaseCents is { } b && sp.PerKgCents is { } k ? WeightPrice(b, k, weightGrams!.Value) : null,   // a free group needs no weight (review C4)
                 _ => null,
             };
-            if (price is not { } p || p < 0) continue;   // a speed we cannot price is not offered
+            if (price is not { } p || p < 0 || p > Carts.CartLimits.MaxTotalCents) continue;   // a speed we cannot price (or whose fee is absurd: portal data is bounded, review K5) is not offered
             var transit = o.TransitDays.GetValueOrDefault(sp.Speed.ToLowerInvariant(), o.DefaultTransitDays);
             var first = AddBusinessDays(today, Math.Max(0, s.HandlingDays) + transit);
             var last = AddBusinessDays(first, transit >= 3 ? 2 : 1);
             result.Add(new ShippingOption(sp.Speed, free ? 0 : p, free, new DeliveryEstimate(first.ToString("yyyy-MM-dd"), last.ToString("yyyy-MM-dd"))));
         }
         return new(result.OrderBy(r => r.PriceCents).ThenBy(r => r.Estimate.Earliest, StringComparer.Ordinal).ToList(), unavailable);
+    }
+
+    /// <summary>base + ceil(kg) x per kg in checked arithmetic: an overflow (absurd portal settings) is "cannot be priced", never a wrapped number.</summary>
+    private static long? WeightPrice(long baseCents, long perKgCents, long grams)
+    {
+        try { return checked(baseCents + (grams + 999) / 1000 * perKgCents); }
+        catch (OverflowException) { return null; }
     }
 
     public static DateOnly AddBusinessDays(DateOnly d, int days)

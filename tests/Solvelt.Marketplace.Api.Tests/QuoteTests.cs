@@ -267,6 +267,30 @@ public sealed class QuoteTests : IDisposable
     }
 
     [Fact]
+    public async Task One_local_only_line_takes_carrier_delivery_away_from_the_whole_group_even_beside_lines_that_ship()
+    {
+        var window = Guid.NewGuid();
+        PortalAnswers(c => FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
+        {
+            eligible = true, method = "local", feeCents = 400, timeZone = "America/New_York",
+            windows = new[] { new { windowId = window, date = "2026-11-06", start = "2026-11-06T17:00:00Z", end = "2026-11-06T19:00:00Z", remaining = 2 } },
+        })));
+        await Cart(("challah-classic", 1, 0), ("challah-whole-wheat", 1, 0));              // same seller and brand (a group of two)
+        Assert.NotEmpty(Group(await Ok(await Quote(new { address = Addr() })), ChallahCorner).GetProperty("shippingOptions").EnumerateArray());   // both ship today
+        var local = new[] { CatalogKit.ListingId("challah-whole-wheat") };
+        await _k.Db(async db =>
+        {
+            db.CatalogAttributes.RemoveRange(db.CatalogAttributes.Where(x => local.Contains(x.ListingId) && x.Key == "delivery"));
+            db.CatalogAttributes.Add(new Solvelt.Marketplace.Api.Data.CatalogAttribute { ListingId = local[0], Key = "delivery", Value = "local" });   // one line is local-only
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        var q = await Ok(await Quote(new { address = Addr() }));
+        Assert.Empty(Group(q, ChallahCorner).GetProperty("shippingOptions").EnumerateArray());          // the other line ships, but the group is not shipped by carrier (review K2)
+        Assert.False(q.GetProperty("canPay").GetBoolean());
+    }
+
+    [Fact]
     public async Task A_failing_local_delivery_check_only_hides_local_delivery()
     {
         PortalAnswers(_ => throw new HttpRequestException("down"));
