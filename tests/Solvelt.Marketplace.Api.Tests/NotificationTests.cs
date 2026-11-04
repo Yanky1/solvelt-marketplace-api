@@ -94,12 +94,36 @@ public sealed class NotificationTests : OrderFlowBase
         Assert.Empty(await Mails("Your order " + o.Number + " has shipped"));
         Assert.Single(await Mails("Your order " + o.Number + " was delivered"));
         Assert.Equal(2, (await Centre()).GetProperty("notifications").GetArrayLength());     // both are in the centre
-        // switch delivered off AFTER the mail is queued but before it is sent
+        // switch a category off AFTER the mail is queued but before it is sent: it is not sent
         _k.Sink.Clear();
-        await Evt("refund.issued", o, g, new { refundId = "rf-1", amountCents = 500, shippingCents = 0 }, id: "ne-rf");
-        await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { refunds = false } });
+        await Evt("order.accepted", o, g, new { }, id: "ne-acc");
+        await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { order_updates = false } });
         await Drain();
-        Assert.DoesNotContain(_k.Sink.Sent, m => m.Subject.StartsWith("A refund"));
+        Assert.DoesNotContain(_k.Sink.Sent, m => m.Subject.Contains("accepted order"));
+    }
+
+    [Fact]
+    public async Task Refund_cancellation_and_failed_delivery_mail_is_transactional_it_cannot_be_switched_off_and_all_leaves_it_on()
+    {
+        var (o, g) = await Placed();
+        var id = (await _k.Account(Email)).Id;
+        var prefs = await Prefs();
+        Assert.Equal(new[] { "refunds", "cancellations", "failed_delivery_attempts" }, prefs.GetProperty("alwaysOn").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.False(prefs.GetProperty("email").TryGetProperty("refunds", out _));                          // no switch for it
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { refunds = false } })).StatusCode);
+        // "stop all notification emails" through a signed link, then the events happen
+        var all = _k.F.Services.GetRequiredService<Solvelt.Marketplace.Api.Notifications.UnsubscribeTokens>().Make(id, "all");
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, "/api/v1/notifications/unsubscribe", new { token = all }, "none")).StatusCode);
+        _k.Sink.Clear();
+        await Evt("delivery.attempt_failed", o, g, new { shipmentId = "sh-1", attempt = 1, reason = "no one home" }, id: "ne-fail");
+        await Evt("refund.issued", o, g, new { refundId = "rf-t", amountCents = 500, shippingCents = 0 }, id: "ne-rf2");
+        await Drain();
+        Assert.Contains(_k.Sink.Sent, m => m.To == Email && m.Subject.StartsWith("A refund"));
+        Assert.Contains(_k.Sink.Sent, m => m.To == Email && m.Subject.StartsWith("A delivery attempt"));
+        // and the switchable ones stay off
+        await Evt("order.accepted", o, g, new { }, id: "ne-acc2");
+        await Drain();
+        Assert.DoesNotContain(_k.Sink.Sent, m => m.Subject.Contains("accepted order"));
     }
 
     [Fact]
@@ -107,7 +131,7 @@ public sealed class NotificationTests : OrderFlowBase
     {
         await Login(Email);
         var p = (await Prefs()).GetProperty("email");
-        Assert.All(new[] { "order_updates", "shipped", "out_for_delivery", "delivered", "refunds", "messages", "bookings" }, c => Assert.True(p.GetProperty(c).GetBoolean()));
+        Assert.All(new[] { "order_updates", "shipped", "out_for_delivery", "delivered", "messages", "bookings" }, c => Assert.True(p.GetProperty(c).GetBoolean()));
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { marketing = true } })).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", new { })).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await Call(HttpMethod.Get, "/api/v1/notifications/preferences", session: "none")).StatusCode);
@@ -167,9 +191,9 @@ public sealed class NotificationTests : OrderFlowBase
         string Sign(string key, Guid acc, string cat, long? exp = null) { var e = exp ?? _k.F.Clock.GetUtcNow().AddDays(30).ToUnixTimeSeconds(); return $"{acc:N}.{cat}.{e}." + Convert.ToBase64String(HMACSHA256.HashData(Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes($"unsub|{acc:N}|{cat}|{e}"))).TrimEnd('=').Replace('+', '-').Replace('/', '_'); }
         Task<HttpResponseMessage> Unsub(string? t) => Call(HttpMethod.Post, "/api/v1/notifications/unsubscribe", new { token = t }, "none");
         // the right key (the dev default of the Testing app) works for one category
-        Assert.Equal(HttpStatusCode.NoContent, (await Unsub(Sign(DevDefaults.UnsubscribeKey, id, "refunds"))).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await Unsub(Sign(DevDefaults.UnsubscribeKey, id, "delivered"))).StatusCode);
         var p = (await Prefs()).GetProperty("email");
-        Assert.False(p.GetProperty("refunds").GetBoolean());
+        Assert.False(p.GetProperty("delivered").GetBoolean());
         Assert.True(p.GetProperty("shipped").GetBoolean());
         // the email-link key and every other key cannot mint it
         Assert.Equal(HttpStatusCode.BadRequest, (await Unsub(Sign(DevDefaults.EmailLinkKey, id, "shipped"))).StatusCode);
@@ -188,7 +212,7 @@ public sealed class NotificationTests : OrderFlowBase
         Assert.True((await Prefs()).GetProperty("email").GetProperty("shipped").GetBoolean());
         // "all" switches every category off; an unknown (deleted) account is a quiet no-op, not an error that reveals anything
         Assert.Equal(HttpStatusCode.NoContent, (await Unsub(Sign(DevDefaults.UnsubscribeKey, id, "all"))).StatusCode);
-        Assert.All(new[] { "order_updates", "shipped", "out_for_delivery", "delivered", "refunds", "messages", "bookings" }, c => Assert.False((Prefs().Result).GetProperty("email").GetProperty(c).GetBoolean()));
+        Assert.All(new[] { "order_updates", "shipped", "out_for_delivery", "delivered", "messages", "bookings" }, c => Assert.False((Prefs().Result).GetProperty("email").GetProperty(c).GetBoolean()));
         Assert.Equal(HttpStatusCode.NoContent, (await Unsub(Sign(DevDefaults.UnsubscribeKey, Guid.NewGuid(), "all"))).StatusCode);
     }
 

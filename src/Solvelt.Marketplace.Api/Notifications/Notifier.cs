@@ -100,7 +100,7 @@ public sealed class NotificationMailHandler(MarketplaceDb db, IEmailSender sende
         if (account is null) return OutboxResult.Delivered();
         var category = NotificationKinds.CategoryOf(n.Kind);
         var prefs = await db.NotificationPreferences.AsNoTracking().FirstOrDefaultAsync(x => x.AccountId == n.AccountId, ct);
-        if (prefs is not null && !prefs.Wants(category)) return OutboxResult.Delivered();
+        if (category != NotificationCategories.Transactional && prefs is not null && !prefs.Wants(category)) return OutboxResult.Delivered();   // transactional mail ignores the preferences (O-21)
         var baseUrl = (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
         var catToken = tokens.Make(n.AccountId, category);
         var apiBase = (notifications.Value.PublicApiBaseUrl ?? baseUrl).TrimEnd('/');

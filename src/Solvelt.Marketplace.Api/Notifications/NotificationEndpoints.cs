@@ -63,7 +63,7 @@ public static class NotificationEndpoints
         return Private(Results.NoContent(), ctx);
     }
 
-    private static object View(NotificationPreference? p) => new { email = NotificationCategories.Switchable.ToDictionary(c => c, c => p?.Wants(c) ?? true) };
+    private static object View(NotificationPreference? p) => new { email = NotificationCategories.Switchable.ToDictionary(c => c, c => p?.Wants(c) ?? true), alwaysOn = NotificationCategories.AlwaysOn };
 
     private static async Task<IResult> GetPrefs(HttpContext ctx, MarketplaceDb db, CancellationToken ct)
         => Private(Results.Json(View(await db.NotificationPreferences.AsNoTracking().FirstOrDefaultAsync(p => p.AccountId == ctx.Buyer().AccountId, ct))), ctx);

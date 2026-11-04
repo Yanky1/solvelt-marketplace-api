@@ -7,8 +7,12 @@ namespace Solvelt.Marketplace.Api.Data;
 public static class NotificationCategories
 {
     public const string OrderUpdates = "order_updates", Shipped = "shipped", OutForDelivery = "out_for_delivery", Delivered = "delivered",
-        Refunds = "refunds", Messages = "messages", Bookings = "bookings", All = "all";
-    public static readonly string[] Switchable = [OrderUpdates, Shipped, OutForDelivery, Delivered, Refunds, Messages, Bookings];
+        Messages = "messages", Bookings = "bookings", All = "all";
+    /// <summary>Mail about money and about a delivery that did not happen (refund issued, order cancelled, failed delivery attempt): TRANSACTIONAL (decision O-21 / M5-20). It cannot be switched
+    /// off, "all" does not touch it, and it is not in <see cref="Switchable"/>; the in-app entry exists as always.</summary>
+    public const string Transactional = "transactional";
+    public static readonly string[] Switchable = [OrderUpdates, Shipped, OutForDelivery, Delivered, Messages, Bookings];
+    public static readonly string[] AlwaysOn = ["refunds", "cancellations", "failed_delivery_attempts"];
 }
 
 public static class NotificationKinds
@@ -25,7 +29,7 @@ public static class NotificationKinds
         OrderShipped => NotificationCategories.Shipped,
         OutForDelivery => NotificationCategories.OutForDelivery,
         OrderDelivered => NotificationCategories.Delivered,
-        RefundIssued => NotificationCategories.Refunds,
+        RefundIssued or OrderCancelled or DeliveryAttemptFailed => NotificationCategories.Transactional,
         MessageReceived => NotificationCategories.Messages,
         var k when k.StartsWith("booking_") => NotificationCategories.Bookings,
         _ => NotificationCategories.OrderUpdates,
@@ -57,7 +61,6 @@ public sealed class NotificationPreference
     public bool EmailShipped { get; set; } = true;
     public bool EmailOutForDelivery { get; set; } = true;
     public bool EmailDelivered { get; set; } = true;
-    public bool EmailRefunds { get; set; } = true;
     public bool EmailMessages { get; set; } = true;
     public bool EmailBookings { get; set; } = true;
     public DateTimeOffset UpdatedAt { get; set; }
@@ -65,7 +68,7 @@ public sealed class NotificationPreference
     public bool Wants(string category) => category switch
     {
         NotificationCategories.OrderUpdates => EmailOrderUpdates, NotificationCategories.Shipped => EmailShipped, NotificationCategories.OutForDelivery => EmailOutForDelivery,
-        NotificationCategories.Delivered => EmailDelivered, NotificationCategories.Refunds => EmailRefunds, NotificationCategories.Messages => EmailMessages,
+        NotificationCategories.Delivered => EmailDelivered, NotificationCategories.Messages => EmailMessages,
         NotificationCategories.Bookings => EmailBookings, _ => false,
     };
 
@@ -77,7 +80,6 @@ public sealed class NotificationPreference
             case NotificationCategories.Shipped: EmailShipped = on; break;
             case NotificationCategories.OutForDelivery: EmailOutForDelivery = on; break;
             case NotificationCategories.Delivered: EmailDelivered = on; break;
-            case NotificationCategories.Refunds: EmailRefunds = on; break;
             case NotificationCategories.Messages: EmailMessages = on; break;
             case NotificationCategories.Bookings: EmailBookings = on; break;
         }
