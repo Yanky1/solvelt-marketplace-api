@@ -358,7 +358,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         var status = evt.Str("status");
         var refundId = evt.Str("id");
         if (refundId is null || status is not ("failed" or "canceled")) return StripeOutcome.Ignored;
-        if (await bookingEvents.RefundFailedAsync(refundId, ct) is { } bookingOutcome) return bookingOutcome;   // a booking refund of ours (M4-15)
+        if (await bookingEvents.RefundFailedAsync(evt, ct) is { } bookingOutcome) return bookingOutcome;   // a booking refund of ours (M4-15)
         var row = await db.OrderRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.StripeRefundId == refundId, ct);
         if (row is null) { log.LogError("Stripe refund {RefundId} {Status}; it is not one of ours (a dashboard refund): a person should check the order's refund counters", refundId, status); return StripeOutcome.Unmatched; }
         var now = time.GetUtcNow().ToUniversalTime();
