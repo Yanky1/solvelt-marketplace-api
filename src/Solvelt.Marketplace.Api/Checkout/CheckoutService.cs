@@ -11,11 +11,15 @@ namespace Solvelt.Marketplace.Api.Checkout;
 
 public sealed record CheckoutAddress(string? Name, string? Line1, string? Line2, string? City, string? Region, string? PostalCode, string? Country, string? Phone, double? Lat = null, double? Lng = null);
 /// <summary>The buyer's choices only: where to, which delivery per group, a gift note. No money field exists.</summary>
-public sealed record CheckoutRequest(CheckoutAddress? Address, IReadOnlyList<GroupSelection>? Selections, string? GiftMessage);
+/// <summary>
+/// <paramref name="ExpectedTotalCents"/> is the total the buyer SAW and agreed to. It is never charged and never prices anything: it only guards consent. When it is present and the server's total
+/// differs (a price moved, tax or shipping changed) nothing is created and the answer is <c>409 price_changed</c> with the new quote to show and confirm.
+/// </summary>
+public sealed record CheckoutRequest(CheckoutAddress? Address, IReadOnlyList<GroupSelection>? Selections, string? GiftMessage, long? ExpectedTotalCents = null);
 public sealed record CheckoutPayment(string Provider, string ClientSecret, string? PublishableKey);
-public sealed record CheckoutResult(string OrderNumber, string Status, QuoteView Quote, CheckoutPayment Payment);
+public sealed record CheckoutResult(string OrderNumber, string Status, QuoteView Quote, CheckoutPayment? Payment);
 
-public enum CheckoutStatus { Ok, Invalid, Quote, NotPending, PaymentsUnavailable, AmountTooSmall, PaymentRejected }
+public enum CheckoutStatus { Ok, Invalid, Quote, NotPending, PaymentsUnavailable, AmountTooSmall, PaymentRejected, PriceChanged }
 
 public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartService carts, IPaymentProvider payments, IOptions<StripeOptions> stripe, TimeProvider time, ILogger<CheckoutService> log)
 {
@@ -47,6 +51,7 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartS
         if (q.Status != QuoteStatus.Ok) return (CheckoutStatus.Quote, null, q.Status.ToString() + (q.Detail is null ? "" : ":" + q.Detail));
         var quote = q.View!;
         if (!quote.CanPay) return (CheckoutStatus.Quote, null, "delivery_unavailable");
+        if (req.ExpectedTotalCents is { } seen && seen != quote.TotalCents) return (CheckoutStatus.PriceChanged, new CheckoutResult("", "price_changed", quote, null), null);
         if (quote.TotalCents < 50) return (CheckoutStatus.AmountTooSmall, null, null);   // Stripe's minimum charge
         var cartId = await carts.CartIdAsync(owner, ct);
 

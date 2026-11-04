@@ -88,6 +88,7 @@ builder.Services.AddScoped<StripeEventProcessor>();
 builder.Services.AddScoped<IOutboxHandler, OrderIngestHandler>();
 builder.Services.AddSingleton<IProjectionHandler, PortalRefundHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeRefundHandler>();
+builder.Services.AddSingleton<CartHooks>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();
@@ -112,6 +113,13 @@ builder.Services.AddDbContext<MarketplaceDb>(o =>
 
 var app = builder.Build();
 
+// Carts and checkouts are personal: never stored by a shared cache or the browser (also on 401 and 429, which is why this runs before the rate limiter).
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api/v1/cart") || ctx.Request.Path.StartsWithSegments("/api/v1/checkout"))
+        ctx.Response.OnStarting(() => { ctx.Response.Headers.CacheControl = "private, no-store"; return Task.CompletedTask; });
+    await next();
+});
 app.UseMiddleware<SafeRequestLoggingMiddleware>();
 app.UseMiddleware<ProblemExceptionMiddleware>();
 app.UseMiddleware<StatusProblemMiddleware>();
