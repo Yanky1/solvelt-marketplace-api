@@ -6,7 +6,7 @@ using Solvelt.Marketplace.Api.Outbox;
 
 namespace Solvelt.Marketplace.Api.Auth;
 
-public sealed record BuyerPrincipal(Guid AccountId, Guid SessionId, string DisplayName, string Email);
+public sealed record BuyerPrincipal(Guid AccountId, Guid SessionId, string DisplayName, string Email, DateTimeOffset AuthenticatedAt);
 public enum SignInStatus { Ok, InvalidCredentials, EmailNotVerified, TooManyAttempts }
 public sealed record SignInResult(SignInStatus Status, string? Token = null, BuyerAccount? Account = null, int? RetryAfterSeconds = null);
 
@@ -15,7 +15,7 @@ public sealed record SignInResult(SignInStatus Status, string? Token = null, Buy
 /// difference is only in what we email. Unknown and known accounts share rate limits and the same time cost.
 /// </summary>
 public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<AuthOptions> authOptions, IOptions<MarketplaceOptions> marketplace,
-    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords)
+    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links)
 {
     private AuthOptions O => authOptions.Value;
     private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
@@ -36,7 +36,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         if (existing is { EmailVerifiedAt: not null })
         {
             passwords.BurnTime(password);
-            outbox.EnqueueEmail(AuthEmails.AlreadyRegistered(normal, PublicBase), $"signup-exists:{existing.Id:N}:{now.ToUnixTimeSeconds() / 3600}");
+            outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Exists, existing.Id), $"signup-exists:{existing.Id:N}:{now.ToUnixTimeSeconds() / 3600}");
             await db.SaveChangesAsync(ct);
             return;
         }
@@ -138,7 +138,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var absolute = now.AddDays(Math.Max(1, O.SessionAbsoluteDays));
         db.BuyerSessions.Add(new BuyerSession
         {
-            Id = Guid.NewGuid(), AccountId = accountId, TokenHash = Tokens.Hash(token), CreatedAt = now, LastSeenAt = now,
+            Id = Guid.NewGuid(), AccountId = accountId, TokenHash = Tokens.Hash(token), CreatedAt = now, LastSeenAt = now, AuthenticatedAt = now,
             ExpiresAt = Min(now.AddDays(Math.Max(1, O.SessionIdleDays)), absolute), AbsoluteExpiresAt = absolute,
         });
         await db.SaveChangesAsync(ct);
@@ -155,14 +155,14 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
                          join a in db.BuyerAccounts.AsNoTracking() on s.AccountId equals a.Id
                          where s.TokenHash == hash && s.RevokedAt == null && s.ExpiresAt > now && s.AbsoluteExpiresAt > now
                                && a.DeletedAt == null && a.EmailVerifiedAt != null
-                         select new { s.Id, s.LastSeenAt, s.AbsoluteExpiresAt, AccountId = a.Id, a.DisplayName, a.Email }).FirstOrDefaultAsync(ct);
+                         select new { s.Id, s.LastSeenAt, s.AuthenticatedAt, s.AbsoluteExpiresAt, AccountId = a.Id, a.DisplayName, a.Email }).FirstOrDefaultAsync(ct);
         if (row is null) return null;
         if (now - row.LastSeenAt > TimeSpan.FromMinutes(5))
         {
             var idle = Min(now.AddDays(Math.Max(1, O.SessionIdleDays)), row.AbsoluteExpiresAt);
             await db.BuyerSessions.Where(s => s.Id == row.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.LastSeenAt, now).SetProperty(x => x.ExpiresAt, idle), ct);
         }
-        return new BuyerPrincipal(row.AccountId, row.Id, row.DisplayName, row.Email ?? "");
+        return new BuyerPrincipal(row.AccountId, row.Id, row.DisplayName, row.Email ?? "", row.AuthenticatedAt);
     }
 
     public Task SignOutAsync(Guid sessionId, CancellationToken ct)
@@ -187,10 +187,10 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Email == normal && a.EmailVerifiedAt != null && a.DeletedAt == null, ct);
         if (account is null) return;
         await InvalidateTokensAsync(account.Id, EmailTokenPurpose.Reset, ct);
-        var token = Tokens.New();
         var now = Now;
-        db.EmailTokens.Add(new EmailToken { Id = Guid.NewGuid(), AccountId = account.Id, Purpose = EmailTokenPurpose.Reset, TokenHash = Tokens.Hash(token), CreatedAt = now, ExpiresAt = now.AddMinutes(Math.Max(5, O.ResetTokenMinutes)) });
-        outbox.EnqueueEmail(AuthEmails.PasswordReset(account.Email!, PublicBase, token, Math.Max(5, O.ResetTokenMinutes)));
+        var id = Guid.NewGuid();
+        db.EmailTokens.Add(new EmailToken { Id = id, AccountId = account.Id, Purpose = EmailTokenPurpose.Reset, CreatedAt = now, ExpiresAt = now.AddMinutes(Math.Max(5, O.ResetTokenMinutes)) });
+        outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Reset, account.Id, id));
         await db.SaveChangesAsync(ct);
     }
 
@@ -214,16 +214,14 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
 
     // ---------- internals ----------
 
-    private string PublicBase => (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
 
     private async Task QueueVerificationAsync(BuyerAccount account, CancellationToken ct)
     {
         await InvalidateTokensAsync(account.Id, EmailTokenPurpose.Verify, ct);
-        var token = Tokens.New();
         var now = Now;
-        var hours = Math.Max(1, O.VerificationTokenHours);
-        db.EmailTokens.Add(new EmailToken { Id = Guid.NewGuid(), AccountId = account.Id, Purpose = EmailTokenPurpose.Verify, TokenHash = Tokens.Hash(token), CreatedAt = now, ExpiresAt = now.AddHours(hours) });
-        outbox.EnqueueEmail(AuthEmails.VerifyEmail(account.Email!, account.DisplayName, PublicBase, token, hours));
+        var id = Guid.NewGuid();
+        db.EmailTokens.Add(new EmailToken { Id = id, AccountId = account.Id, Purpose = EmailTokenPurpose.Verify, CreatedAt = now, ExpiresAt = now.AddHours(Math.Max(1, O.VerificationTokenHours)) });
+        outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Verify, account.Id, id));
     }
 
     /// <summary>A fresh link invalidates the older ones.</summary>
@@ -236,10 +234,9 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
     /// <summary>Marks the token used in one atomic UPDATE (two clicks consume it once) and returns its account, or null.</summary>
     private async Task<Guid?> ConsumeTokenAsync(string purpose, string token, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(token) || token.Length > 100) return null;
-        var hash = Tokens.Hash(token);
+        if (links.Parse(purpose, token) is not { } tokenId) return null;
         var now = Now;
-        var row = await db.EmailTokens.AsNoTracking().Where(t => t.TokenHash == hash && t.Purpose == purpose && t.UsedAt == null && t.ExpiresAt > now).Select(t => new { t.Id, t.AccountId }).FirstOrDefaultAsync(ct);
+        var row = await db.EmailTokens.AsNoTracking().Where(t => t.Id == tokenId && t.Purpose == purpose && t.UsedAt == null && t.ExpiresAt > now).Select(t => new { t.Id, t.AccountId }).FirstOrDefaultAsync(ct);
         if (row is null) return null;
         var claimed = await db.EmailTokens.Where(t => t.Id == row.Id && t.UsedAt == null).ExecuteUpdateAsync(s => s.SetProperty(t => t.UsedAt, (DateTimeOffset?)now), ct);
         return claimed == 1 ? row.AccountId : null;

@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Solvelt.Marketplace.Api.Auth;
@@ -124,7 +125,7 @@ public class AuthTests
     public async Task Sign_up_mail_is_limited_to_three_an_hour_per_address_without_changing_the_answer()
     {
         using var k = new AuthKit();
-        for (var i = 0; i < 6; i++) Assert.Equal(HttpStatusCode.NoContent, (await k.SignUp(Email)).StatusCode);
+        for (var i = 0; i < 6; i++) { Assert.Equal(HttpStatusCode.NoContent, (await k.SignUp(Email)).StatusCode); await k.Mail(Email); }
         Assert.Equal(3, (await k.Mail(Email)).Count);
         k.F.Clock.Advance(TimeSpan.FromMinutes(61));
         await k.SignUp(Email);
@@ -209,7 +210,8 @@ public class AuthTests
     {
         using var k = new AuthKit();
         await k.SignUp(Email);                                   // 1 (sign-up has its own budget)
-        for (var i = 0; i < 6; i++) Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/resend-verification", new { email = Email })).StatusCode);
+        await k.Mail(Email);                                     // sent before the first resend replaces its link
+        for (var i = 0; i < 6; i++) { Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/resend-verification", new { email = Email })).StatusCode); await k.Mail(Email); }
         Assert.Equal(1 + 3, (await k.Mail(Email)).Count);
     }
 
@@ -493,16 +495,148 @@ public class AuthTests
 
     // ---------- storage and logs ----------
 
+    private static LinkTokens Links(string key = "dev-only-email-link-key-not-for-production") => new(Options.Create(new AuthOptions { EmailLinkKey = key }));
+
     [Fact]
-    public async Task Emailed_tokens_are_stored_only_as_hashes()
+    public async Task Account_mail_in_the_outbox_and_the_database_holds_no_link_secret_and_no_address()
     {
         using var k = new AuthKit();
         await k.SignUp(Email);
-        var token = AuthKit.TokenIn((await k.Mail(Email)).Single(), "/verify-email");
+        // queued, not yet sent
+        var queued = await k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync());
+        Assert.Equal("auth.mail", queued.Type);
+        using var doc = JsonDocument.Parse(queued.Payload!);
+        Assert.Equal(new[] { "accountId", "kind", "tokenId" }, doc.RootElement.EnumerateObject().Select(p => p.Name).Order().ToArray());
+        Assert.DoesNotContain("@", queued.Payload);
+        var mail = Assert.Single(await k.Mail(Email));
+        var token = AuthKit.TokenIn(mail, "/verify-email");
+        var dump = JsonSerializer.Serialize(new
+        {
+            outbox = await k.Db(db => db.OutboxMessages.AsNoTracking().ToListAsync()),
+            tokens = await k.Db(db => db.EmailTokens.AsNoTracking().ToListAsync()),
+        });
+        Assert.DoesNotContain(token, dump);
+        Assert.DoesNotContain(token[33..], dump);          // not even the MAC half
+        Assert.DoesNotContain(Email, dump);
         var row = await k.Db(db => db.EmailTokens.AsNoTracking().SingleAsync());
-        Assert.NotEqual(token, row.TokenHash);
-        Assert.Equal(Tokens.Hash(token), row.TokenHash);
-        Assert.Equal(64, row.TokenHash.Length);
+        Assert.Equal($"{row.Id:N}", token[..32]);          // the link names the row; the secret half is only computed
+        Assert.Equal(Links().Make("verify", row.Id), token);
+    }
+
+    [Fact]
+    public async Task Forged_or_foreign_links_are_refused()
+    {
+        using var k = new AuthKit();
+        await k.SignUp(Email);
+        var good = AuthKit.TokenIn((await k.Mail(Email)).Single(), "/verify-email");
+        var id = Guid.Parse(good[..32]);
+        var forgeries = new[]
+        {
+            $"{id:N}.{new string('A', 43)}",                         // right id, wrong MAC
+            Links("another-key-another-key-another-key-0000").Make("verify", id),   // MAC from another key
+            Links().Make("reset", id),                               // MAC for the other purpose
+            good + "x", good[..^1], good[33..], good[..32], good.Replace('.', '-'),
+            $"{Guid.NewGuid():N}.{good[33..]}",                      // another id, copied MAC
+        };
+        foreach (var f in forgeries)
+            Assert.Equal(HttpStatusCode.BadRequest, (await k.Post("/api/v1/auth/verify-email", new { token = f })).StatusCode);
+        Assert.Null((await k.Account(Email)).EmailVerifiedAt);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/verify-email", new { token = good })).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_link_that_died_while_its_mail_waited_is_not_sent()
+    {
+        using var k = new AuthKit();
+        await k.SignUp(Email);
+        await k.SignUp(Email, "the owners password");            // replaces the first link before anything was sent
+        var mails = await k.Mail(Email);
+        Assert.Single(mails);                                     // only the live link is mailed
+        Assert.Equal(0, await k.Db(db => db.OutboxMessages.CountAsync(m => m.Status != "delivered")));
+
+        await k.SignUp("late@example.com");
+        k.F.Clock.Advance(TimeSpan.FromHours(25));
+        Assert.Empty(await k.Mail("late@example.com"));           // expired before it was sent: no mail, and the message is not stuck
+        Assert.Equal(0, await k.Db(db => db.OutboxMessages.CountAsync(m => m.Status != "delivered")));
+    }
+
+    [Fact]
+    public async Task Mail_for_a_deleted_account_is_dropped()
+    {
+        using var k = new AuthKit();
+        await k.SignUp(Email);
+        var now = k.F.Clock.GetUtcNow();
+        await k.Db(db => db.BuyerAccounts.Where(a => a.Email == Email).ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now)));
+        Assert.Empty(await k.Mail(Email));
+        Assert.Equal(0, await k.Db(db => db.OutboxMessages.CountAsync(m => m.Status != "delivered")));
+    }
+
+    [Fact]
+    public async Task Mail_without_a_provider_waits_and_keeps_no_secret_while_it_waits()
+    {
+        using var k = new AuthKit();
+        await k.SignUp(Email);
+        // no sender: the unconfigured sender throws, so the message stays pending, still with ids only
+        using var broken = new TestFactory(new() { ["Auth:PasswordIterations"] = "1000", ["RateLimits:AuthPerMinute"] = "1000" },
+            s => s.AddSingleton<Solvelt.Marketplace.Api.Outbox.IEmailSender, Solvelt.Marketplace.Api.Outbox.UnconfiguredEmailSender>());
+        var c = broken.CreateClient();
+        await c.PostAsJsonAsync("/api/v1/auth/sign-up", new { email = Email, password = Pw, displayName = "Jane Brown" });
+        using (var scope = broken.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Outbox.OutboxDispatcher>().DispatchDueAsync();
+        using var check = broken.Services.CreateScope();
+        var m = await check.ServiceProvider.GetRequiredService<MarketplaceDb>().OutboxMessages.AsNoTracking().SingleAsync();
+        Assert.Equal(("pending", "email_not_configured"), (m.Status, m.LastError));
+        Assert.DoesNotContain("@", m.Payload);
+        using var payload = JsonDocument.Parse(m.Payload!);
+        Assert.Equal(new[] { "accountId", "kind", "tokenId" }, payload.RootElement.EnumerateObject().Select(p => p.Name).Order().ToArray());   // ids only
+    }
+
+    [Fact]
+    public async Task A_session_records_when_the_buyer_last_signed_in_and_activity_does_not_change_it()
+    {
+        using var k = new AuthKit();
+        var token = await k.VerifiedSession(Email);
+        var signedIn = k.F.Clock.GetUtcNow();
+        var row = await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync());
+        Assert.Equal((signedIn, signedIn), (row.CreatedAt, row.AuthenticatedAt));
+        k.F.Clock.Advance(TimeSpan.FromMinutes(20));
+        await k.Get("/api/v1/account/me", token);
+        var after = await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync());
+        Assert.Equal(signedIn, after.AuthenticatedAt);                         // the touch moved LastSeenAt, not the proof of identity
+        Assert.NotEqual(signedIn, after.LastSeenAt);
+    }
+
+    private sealed class Env(string name) : Microsoft.Extensions.Hosting.IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = name;
+        public string ApplicationName { get; set; } = "t";
+        public string ContentRootPath { get; set; } = "/";
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
+    }
+
+    private static Dictionary<string, string?> GoodProd() => new()
+    {
+        ["Portal:InboundSecret"] = new string('a', 40), ["Portal:WebhookSecret"] = new string('b', 40), ["Web:ForwardingKey"] = new string('c', 40),
+        ["Auth:EmailLinkKey"] = new string('e', 40),
+        ["Portal:BaseUrl"] = "https://portal.example", ["Marketplace:RelayDomain"] = "relay.example", ["Marketplace:PublicBaseUrl"] = "https://shop.example",
+        ["Database:Provider"] = "Postgres", ["ConnectionStrings:Default"] = "Host=db;Database=mp",
+    };
+
+    private static IReadOnlyList<string> Validate(Dictionary<string, string?> d)
+        => StartupValidator.Validate(new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(d).Build(), new Env("Production"));
+
+    [Fact]
+    public void The_email_link_key_is_required_long_distinct_and_never_a_dev_default_in_production()
+    {
+        Assert.Empty(Validate(GoodProd()));
+        var missing = GoodProd(); missing.Remove("Auth:EmailLinkKey");
+        Assert.Contains(Validate(missing), p => p.Contains("Auth:EmailLinkKey") && p.Contains("required"));
+        var shortKey = GoodProd(); shortKey["Auth:EmailLinkKey"] = "short";
+        Assert.Contains(Validate(shortKey), p => p.Contains("Auth:EmailLinkKey") && p.Contains("32"));
+        var dev = GoodProd(); dev["Auth:EmailLinkKey"] = DevDefaults.EmailLinkKey;
+        Assert.Contains(Validate(dev), p => p.Contains("Auth:EmailLinkKey") && p.Contains("Development default"));
+        var reused = GoodProd(); reused["Auth:EmailLinkKey"] = reused["Web:ForwardingKey"];
+        Assert.Contains(Validate(reused), p => p.Contains("must differ"));
     }
 
     [Fact]

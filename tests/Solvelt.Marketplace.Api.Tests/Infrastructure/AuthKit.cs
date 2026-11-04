@@ -60,7 +60,7 @@ public sealed class AuthKit : IDisposable
 
     public static string TokenIn(EmailMessage m, string page)
     {
-        var match = Regex.Match(m.TextBody, Regex.Escape(page) + @"\?token=([A-Za-z0-9_-]+)");
+        var match = Regex.Match(m.TextBody, Regex.Escape(page) + @"\?token=([A-Za-z0-9_.-]+)");
         Assert.True(match.Success, $"no {page} link in: {m.TextBody}");
         return match.Groups[1].Value;
     }

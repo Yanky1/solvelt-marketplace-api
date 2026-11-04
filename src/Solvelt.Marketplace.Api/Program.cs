@@ -28,7 +28,9 @@ builder.Services.Configure<PortalOptions>(o => OptionsSetup.Portal(o, builder.Co
 builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, builder.Configuration, devLike));
 builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
 builder.Services.Configure<AdminOptions>(o => OptionsSetup.Admin(o, builder.Configuration, devLike));
-builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection("Auth"));
+builder.Services.Configure<AuthOptions>(o => OptionsSetup.Auth(o, builder.Configuration, devLike));
+builder.Services.AddSingleton<LinkTokens>();
+builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();
 builder.Services.AddSingleton<PasswordService>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));

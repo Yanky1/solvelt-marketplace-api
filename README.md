@@ -33,6 +33,7 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Portal__InboundSecret` | yes, >= 32 chars | Signs our calls to the portal |
 | `Portal__WebhookSecret` | yes, >= 32 chars, must differ from the above | Verifies portal webhooks |
 | `Web__ForwardingKey` | yes, >= 32 chars, must differ from both portal secrets | Verifies the end-user IP the web server forwards (see docs/API.md) |
+| `Auth__EmailLinkKey` | yes, >= 32 chars, must differ from every other key | Signs the verify and reset links in account mail (decision M1-56) |
 | `Admin__ApiKey` | no (unset disables `/api/admin/*`); when set >= 32 chars, must differ from every other key | Key for the operations endpoints (outbox list/retry) |
 | `Auth__PasswordIterations`, `Auth__SessionIdleDays`, `Auth__SessionAbsoluteDays`, `Auth__LockoutThreshold`, `Auth__LockoutMinutes` | no | Defaults 210000, 7, 30, 5, 15 (decisions M1-51 to M1-54) |
 | `Outbox__MaxAttempts`, `Outbox__BackoffSeconds`, `Outbox__MaxBackoffSeconds`, `Outbox__LeaseSeconds` | no | Defaults 8, 30, 3600, 120 (decision M1-47) |

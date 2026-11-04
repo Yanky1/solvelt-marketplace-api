@@ -15,6 +15,30 @@ public static class Tokens
     private static string Base64Url(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
 
+/// <summary>
+/// Emailed one-time links: <c>&lt;id&gt;.&lt;base64url HMAC-SHA256(Auth:EmailLinkKey, "link|purpose|id")&gt;</c>. The database stores only the id, so nothing in it
+/// (rows, outbox payloads, backups) can be turned into a working link without the key.
+/// </summary>
+public sealed class LinkTokens(IOptions<AuthOptions> options)
+{
+    private byte[] Key => Encoding.UTF8.GetBytes(options.Value.EmailLinkKey ?? throw new InvalidOperationException("Auth:EmailLinkKey is not configured."));
+
+    public string Make(string purpose, Guid id) => $"{id:N}.{Mac(purpose, id)}";
+
+    /// <summary>The id when the token has a valid MAC for this purpose, otherwise null. The MAC is compared in constant time.</summary>
+    public Guid? Parse(string purpose, string? token)
+    {
+        if (string.IsNullOrEmpty(token) || token.Length != 32 + 1 + 43 || token[32] != '.') return null;
+        if (!Guid.TryParseExact(token.AsSpan(0, 32), "N", out var id)) return null;
+        var expected = Encoding.ASCII.GetBytes(Mac(purpose, id));
+        var given = Encoding.ASCII.GetBytes(token[33..]);
+        return CryptographicOperations.FixedTimeEquals(expected, given) ? id : null;
+    }
+
+    private string Mac(string purpose, Guid id)
+        => Convert.ToBase64String(HMACSHA256.HashData(Key, Encoding.UTF8.GetBytes($"link|{purpose}|{id:N}"))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+}
+
 /// <summary>Password hashing with ASP.NET Core Identity's V3 hasher (PBKDF2, HMAC-SHA512, random salt, self-describing format).</summary>
 public sealed class PasswordService(IOptions<AuthOptions> options)
 {

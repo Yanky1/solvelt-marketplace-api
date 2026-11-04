@@ -29,6 +29,8 @@ public sealed class BuyerSession
     public string TokenHash { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset LastSeenAt { get; set; }
+    /// <summary>When the buyer last proved who they are (password or passkey) in this session. Sensitive changes need it within 10 minutes (decision O-11).</summary>
+    public DateTimeOffset AuthenticatedAt { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset AbsoluteExpiresAt { get; set; }
     public DateTimeOffset? RevokedAt { get; set; }
@@ -39,13 +41,15 @@ public static class EmailTokenPurpose
     public const string Verify = "verify", Reset = "reset";
 }
 
-/// <summary>A one-time emailed token (verify address, reset password). Only its SHA-256 is stored.</summary>
+/// <summary>
+/// A one-time emailed link (verify address, reset password). The row holds NO secret: the link carries <c>&lt;id&gt;.&lt;HMAC(Auth:EmailLinkKey, purpose|id)&gt;</c>,
+/// computed when the mail is sent and checked when the link is used, so a copy of the database (or an outbox payload) cannot produce a working link.
+/// </summary>
 public sealed class EmailToken
 {
     public Guid Id { get; set; }
     public Guid AccountId { get; set; }
     public string Purpose { get; set; } = "";
-    public string TokenHash { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? UsedAt { get; set; }
@@ -89,8 +93,6 @@ internal sealed class EmailTokenConfiguration : IEntityTypeConfiguration<EmailTo
         b.HasKey(t => t.Id);
         b.Property(t => t.Id).ValueGeneratedNever();
         b.Property(t => t.Purpose).HasMaxLength(20).IsRequired();
-        b.Property(t => t.TokenHash).HasMaxLength(64).IsRequired();
-        b.HasIndex(t => t.TokenHash).IsUnique();
         b.HasIndex(t => new { t.AccountId, t.Purpose });
     }
 }
