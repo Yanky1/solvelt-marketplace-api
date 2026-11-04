@@ -376,9 +376,31 @@ public sealed class RefundEventTests : OrderFlowBase
         => Event(type, dp, null, amount, id: id, extra: new { payment_intent = o.PaymentIntentId, status, reason = "fraudulent", evidence_details = new { due_by = 1_800_000_000L } });
 
     [Fact]
+    public async Task Per_seller_order_disputes_are_on_by_default_so_a_multi_seller_dispute_goes_out_at_once_one_event_per_seller_order()
+    {
+        Assert.True(new Solvelt.Marketplace.Api.Infrastructure.PortalOptions().PerSellerOrderDisputes);          // the shipped default (decision M3-33)
+        var o = await Paid();
+        Assert.Contains("applied", await (await PostStripe(Dispute("charge.dispute.created", o, "needs_response", amount: o.TotalCents, id: "evt_on"))).Content.ReadAsStringAsync());
+        await Drain();
+        var created = await Sent("dispute.created");
+        Assert.Equal(2, created.Count);                                                      // no hold, no flag to turn on
+        Assert.Equal(2, created.Select(e => e.GetProperty("data").GetProperty("sellerOrderNumber").GetString()).Distinct().Count());
+        Assert.Equal(6500, created.Sum(e => e.GetProperty("data").GetProperty("amountCents").GetInt64()));     // the full dispute: each seller order's sale (tax stays with the portal's staff flag)
+        Assert.All(created, e => Assert.Equal("USD", e.GetProperty("data").GetProperty("currency").GetString()));
+        // a won dispute is sent for EVERY seller order (the portal credits a seller only through its own event)
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(1));
+        await PostStripe(Dispute("charge.dispute.closed", o, "won", amount: o.TotalCents, id: "evt_on2"));
+        await Drain();
+        var closed = await Sent("dispute.closed");
+        Assert.Equal(2, closed.Count);
+        Assert.All(closed, e => Assert.Equal("won", e.GetProperty("data").GetProperty("status").GetString()));
+    }
+
+    [Fact]
     public async Task A_multi_seller_dispute_is_held_until_the_portal_keys_disputes_per_seller_order_and_then_split_exactly()
     {
         var o = await Paid();
+        _k.F.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Infrastructure.PortalOptions>>().Value.PerSellerOrderDisputes = false;   // the emergency switch / a portal without C10
         Assert.Contains("applied", await (await PostStripe(Dispute("charge.dispute.created", o, "needs_response", amount: o.TotalCents, id: "evt_d1"))).Content.ReadAsStringAsync());
         await Drain();
         Assert.Empty(await Sent("dispute.created"));                                       // C10 not merged: several events with one dispute id would book only the first, so they wait
