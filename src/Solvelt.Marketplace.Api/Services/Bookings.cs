@@ -245,6 +245,7 @@ public static class BookingEndpoints
         var g = app.MapGroup("/api/v1/bookings").RequireRateLimiting(RateLimitPolicies.Public).AddEndpointFilter<RequireBuyerFilter>();
         g.MapPost("/holds", Hold);
         g.MapBookingActions();
+        g.MapGet("/{id:guid}/calendar.ics", BookingCalendar.Get);
         g.MapPost("/{id:guid}/extra-charge/accept", ExtraAccept);
         g.MapPost("/{id:guid}/extra-charge/decline", ExtraDecline);
         g.MapPost("/{id:guid}/checkout", Checkout);

@@ -12,6 +12,7 @@ public static class ServicesModule
     {
         services.Configure<ServicesOptions>(configuration.GetSection("Services"));
         services.AddSingleton<AvailabilityCache>();
+        services.AddSingleton<ServiceOptionsCache>();
         services.Configure<BookingOptions>(configuration.GetSection("Bookings"));
         services.AddScoped<BookingService>();
         services.AddScoped<BookingMaintenance>();
