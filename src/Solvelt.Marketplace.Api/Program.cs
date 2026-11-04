@@ -93,6 +93,8 @@ builder.Services.AddScoped<IPaymentProvider>(sp =>
 builder.Services.AddSingleton<CheckoutHooks>();
 builder.Services.AddScoped<CheckoutService>();
 builder.Services.AddScoped<IOutboxHandler, StripeCancelHandler>();
+builder.Services.AddScoped<IOutboxHandler, StripeOrphanCancelHandler>();
+builder.Services.AddScoped<IOutboxHandler, StripeIntentRefundHandler>();
 builder.Services.AddScoped<RefundService>();
 builder.Services.AddScoped<OrderMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<OrderWorker>();

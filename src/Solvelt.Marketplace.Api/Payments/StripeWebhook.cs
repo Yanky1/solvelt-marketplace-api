@@ -90,6 +90,7 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         {
             "payment_intent.succeeded" => await SucceededAsync(evt, ct),
             "payment_intent.payment_failed" => await FailedAsync(evt, ct),
+            "payment_intent.processing" => await ProcessingAsync(evt, ct),
             "charge.refunded" => await ChargeRefundedAsync(evt, ct),
             "charge.dispute.created" or "charge.dispute.updated" or "charge.dispute.closed" or "charge.dispute.funds_withdrawn" or "charge.dispute.funds_reinstated" => await DisputeAsync(evt, ct),
             _ => StripeOutcome.Ignored,
@@ -132,11 +133,22 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
     {
         if (Solvelt.Marketplace.Api.Services.BookingPaymentEvents.IsBookingIntent(evt)) return await bookingEvents.SucceededAsync(evt, ct);   // booking intents (M4-08); the order code below is untouched
         var order = await FindOrderAsync(evt, ct);
-        if (order is null) return StripeOutcome.Unmatched;
         var amount = evt.Long("amount_received") ?? evt.Long("amount");
+        if (order is null)
+        {
+            // An intent WE created (our order number is in its metadata, which only we set) that has no live order behind it: the order was purged, or this is a stray intent of an order that now
+            // stores another one. The money must not stay with us: refund it by intent id through the outbox (decision M3-25).
+            if (evt.Str("id") is { } orphan && evt.Meta("marketplace_order_id") is { } orphanNumber && amount is > 0)
+            {
+                log.LogError("A payment of {Amount} on intent {Intent} names order {Number}, which has no matching live order; it is being refunded", amount, orphan, orphanNumber);
+                outbox.Enqueue(StripeIntentRefundHandler.Type, new StripeIntentRefundHandler.Payload(orphan, amount.Value, orphanNumber), StripeIntentRefundHandler.DedupeKey(orphan));
+                return StripeOutcome.Applied;
+            }
+            return StripeOutcome.Unmatched;
+        }
         var now = time.GetUtcNow().ToUniversalTime();
-        // Paid is reached once, and only from the pending order: that is the one the buyer was shown and the cart's one payable order.
-        var paid = await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.PendingPayment)
+        // Paid is reached once, and only from the pending order (or one whose delayed payment was in flight): that is the one the buyer was shown and the cart's one payable order.
+        var paid = await db.Orders.Where(o => o.Id == order.Id && (o.Status == OrderStatus.PendingPayment || o.Status == OrderStatus.PaymentProcessing))
             .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.Paid).SetProperty(o => o.PaidAt, now).SetProperty(o => o.PaidCents, amount ?? 0).SetProperty(o => o.ActiveKey, (string?)null).SetProperty(o => o.UpdatedAt, now), ct);
         if (paid == 0)
         {
@@ -270,7 +282,23 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         var code = evt.Object.TryGetProperty("last_payment_error", out var e) && e.ValueKind == JsonValueKind.Object && e.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.String
             ? new string(c.GetString()!.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch == '_').Take(60).ToArray()) : "payment_failed";
         await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.PendingPayment).ExecuteUpdateAsync(s => s.SetProperty(o => o.FailureCode, code), ct);
+        // a delayed payment that failed: the order is payable again
+        await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.PaymentProcessing).ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.PendingPayment).SetProperty(o => o.FailureCode, code), ct);
         return StripeOutcome.Applied;
+    }
+
+    /// <summary>
+    /// <c>payment_intent.processing</c>: a delayed method is in flight, so the money may still arrive. The order is marked <c>payment_processing</c>, which a newer checkout and the expiry both leave
+    /// alone (they only close <c>pending_payment</c>); the success or the failure moves it on (decision M3-25).
+    /// </summary>
+    private async Task<StripeOutcome> ProcessingAsync(StripeEnvelope evt, CancellationToken ct)
+    {
+        var order = await FindOrderAsync(evt, ct);
+        if (order is null) return StripeOutcome.Unmatched;
+        var now = time.GetUtcNow().ToUniversalTime();
+        var changed = await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.PendingPayment)
+            .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.PaymentProcessing).SetProperty(o => o.ActiveKey, (string?)null).SetProperty(o => o.UpdatedAt, now), ct);
+        return changed == 1 ? StripeOutcome.Applied : StripeOutcome.Ignored;
     }
 }
 

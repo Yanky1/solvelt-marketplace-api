@@ -30,27 +30,37 @@ public sealed class OrderMaintenance(MarketplaceDb db, Outbox.OutboxWriter outbo
     {
         var now = time.GetUtcNow().ToUniversalTime();
         var cutoff = now - PendingLifetime;
-        var stale = await db.Orders.AsNoTracking().Where(o => o.Status == OrderStatus.PendingPayment && o.CreatedAt < cutoff).Select(o => new { o.Id, o.Number, o.PaymentIntentId }).Take(200).ToListAsync(ct);
+        var stale = await db.Orders.AsNoTracking().Where(o => o.Status == OrderStatus.PendingPayment && o.CreatedAt < cutoff).Select(o => new { o.Id, o.Number }).Take(200).ToListAsync(ct);
         var expired = 0;
         foreach (var o in stale)
         {
+            // One transaction: the status change, the read of the intent id AFTER it (a checkout retry may have stored one since the listing above; the store only succeeds while the order is pending, so
+            // after this change no intent can appear) and the cancel's outbox row. A crash in between rolls all of it back, so a cancel is never lost (decision M3-25).
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
             var changed = await db.Orders.Where(x => x.Id == o.Id && x.Status == OrderStatus.PendingPayment)
                 .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, OrderStatus.Expired).SetProperty(x => x.ActiveKey, (string?)null).SetProperty(x => x.UpdatedAt, now), ct);
-            if (changed == 0) continue;   // paid in the meantime
+            if (changed == 0) { await tx.RollbackAsync(CancellationToken.None); continue; }   // paid (or began processing) in the meantime
+            var pi = await db.Orders.AsNoTracking().Where(x => x.Id == o.Id).Select(x => x.PaymentIntentId).FirstAsync(ct);
+            await EnqueueCancelAsync(outbox, o.Number, pi, ct);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
             expired++;
-            // the cancel goes through the outbox (retried until Stripe accepts it): a payable intent must never be left on a closed order
-            if (o.PaymentIntentId is { } pi && !await outbox.ExistsAsync(StripeCancelHandler.DedupeKey(pi), ct))
-            {
-                outbox.Enqueue(StripeCancelHandler.Type, new StripeCancelHandler.Payload(pi), StripeCancelHandler.DedupeKey(pi));
-                await db.SaveChangesAsync(ct);
-            }
         }
         return expired;
     }
 
+    /// <summary>Queues the cancel of a closed order's intent through the outbox (retried): the intent's own cancel when one is stored, otherwise the "orphan" cancel that finds it again by its idempotency key.</summary>
+    public static async Task EnqueueCancelAsync(Outbox.OutboxWriter outbox, string orderNumber, string? intentId, CancellationToken ct)
+    {
+        var (type, key, payload) = intentId is { } pi
+            ? (StripeCancelHandler.Type, StripeCancelHandler.DedupeKey(pi), (object)new StripeCancelHandler.Payload(pi))
+            : (StripeOrphanCancelHandler.Type, StripeOrphanCancelHandler.DedupeKey(orderNumber), new StripeOrphanCancelHandler.Payload(orderNumber));
+        if (!await outbox.ExistsAsync(key, ct)) outbox.Enqueue(type, payload, key);
+    }
+
     /// <summary>
-    /// Orders that never became paid are deleted after 30 days when they never had a PaymentIntent, and after 90 days when they did (a late payment on a purged order could never be matched,
-    /// so it would loop 5xx and never be refunded: the cancel has long been delivered by then and Stripe stops retrying webhooks after three days).
+    /// Orders that never became paid are deleted after 30 days when they never had a PaymentIntent, and after 90 days when they did, and ONLY once their cancel was DELIVERED (the intent is verifiably
+    /// closed): a payment that lands on a purged order could not be matched to anything. A cancel that is still pending or dead keeps the order, so a person can see it (decision M3-25).
     /// </summary>
     public Task<int> PurgeAbandonedAsync(CancellationToken ct = default)
     {
@@ -58,7 +68,8 @@ public sealed class OrderMaintenance(MarketplaceDb db, Outbox.OutboxWriter outbo
         var cut = now.AddDays(-30);
         var cutWithIntent = now.AddDays(-90);
         return db.Orders.Where(o => o.PaidAt == null && (o.Status == OrderStatus.Expired || o.Status == OrderStatus.Superseded)
-            && ((o.PaymentIntentId == null && o.CreatedAt < cut) || (o.PaymentIntentId != null && o.CreatedAt < cutWithIntent))).ExecuteDeleteAsync(ct);
+            && ((o.PaymentIntentId == null && o.CreatedAt < cut && db.OutboxMessages.Any(m => m.DedupeKey == "cancel-orphan:" + o.Number && m.Status == Data.OutboxStatus.Delivered))
+                || (o.PaymentIntentId != null && o.CreatedAt < cutWithIntent && db.OutboxMessages.Any(m => m.DedupeKey == "cancel:" + o.PaymentIntentId && m.Status == Data.OutboxStatus.Delivered)))).ExecuteDeleteAsync(ct);
     }
 }
 
