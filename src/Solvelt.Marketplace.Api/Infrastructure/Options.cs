@@ -7,6 +7,12 @@ public sealed class PortalOptions
     public string? InboundSecret { get; set; }
     /// <summary>Verifies portal webhooks (portal: Orders:OutboundSecret).</summary>
     public string? WebhookSecret { get; set; }
+    /// <summary>Per-attempt deadline in seconds (contract: at most 30).</summary>
+    public int AttemptTimeoutSeconds { get; set; } = 30;
+    /// <summary>Total attempts per call including the first.</summary>
+    public int MaxAttempts { get; set; } = 5;
+    /// <summary>Backoff base in milliseconds: base x 2^(attempt-1), jittered, capped at 30 s.</summary>
+    public int RetryBaseDelayMs { get; set; } = 500;
 }
 
 public sealed class MarketplaceOptions

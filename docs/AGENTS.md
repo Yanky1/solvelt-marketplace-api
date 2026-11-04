@@ -3,7 +3,7 @@
 | Workstream | Repo | Branch | Scope | Brief | Session | Status | Updated |
 |---|---|---|---|---|---|---|---|
 | Orchestrator | both | n/a | Plans and supervises M1–M7 | agent-briefs/ORCHESTRATOR.md | session_018hZb8pE5JAKd7eu3Enzfnr | Running | 2026-11-04 |
-| M1 Foundation | api | feat/m1-* | Buyer auth/accounts, signed portal client, webhook receiver, outbox, catalog read model | agent-briefs/M1-foundation.md | M1 worker (see session link in orchestrator) | In progress: slice 1 skeleton+CI on feat/m1-foundation | 2026-11-04 |
+| M1 Foundation | api | feat/m1-* | Buyer auth/accounts, signed portal client, webhook receiver, outbox, catalog read model | agent-briefs/M1-foundation.md | M1 worker (see session link in orchestrator) | In progress: slice 1 merged (b57bd8c); slice 2a signed portal client on feat/m1-portal-client | 2026-11-04 |
 | W1 Web foundation | web | feat/w1-* | RR7 framework-mode SSR skeleton, Solvelt design tokens, auth pages via BFF, CI + Playwright/axe | (after M1 skeleton) | - | Planned | 2026-11-04 |
 | M2 Catalog & search | api+web | - | Categories, brands, filters, full-text search, PDP/service pages, SEO | - | - | Planned | - |
 | M3 Cart & checkout | api+web | - | Multi-seller cart, shipping rates, local delivery, tax, Stripe test mode, order ingest | - | - | Planned | - |
