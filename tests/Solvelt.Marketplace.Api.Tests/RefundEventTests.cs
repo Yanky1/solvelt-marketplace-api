@@ -185,6 +185,30 @@ public sealed class RefundEventTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task A_full_cancel_that_arrives_before_an_earlier_refund_waits_for_it_and_both_are_applied_in_the_right_order()
+    {
+        var (o, g, line) = await Three();
+        // the portal returned 4587 (rf-1) and then cancelled (due 9675 = 14262 - 4587), but the cancel arrives FIRST
+        Assert.Equal("parked", await Portal("order.cancelled", o, g, new { RefundDueCents = 9675, Partial = false }, id: "pe-cancel"));
+        await Drain();
+        Assert.Empty(Stripe.Refunds);                                                        // nothing moved: the cancel did not run ahead of rf-1
+        Assert.Equal(0, (await Order(o.Number)).Groups.Single().RefundedCents);
+        Assert.Equal("applied", await RefundLines(o, g, "rf-1", line, 1, 4587));
+        using (var scope = _k.F.Services.CreateScope())
+            Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor>().ReplayAllParkedAsync());
+        await Drain();
+        Assert.Equal([4587L, 9675L], Stripe.Refunds.Select(r => r.AmountCents).Order().ToList());   // the buyer got exactly what the portal says, in total all of it
+        var after = await Order(o.Number);
+        Assert.Equal((14262L, 3), (after.Groups.Single().RefundedCents, after.Lines.Single().RefundedQuantity));
+        var processed = (await Sent("refund.processed")).Select(e => e.GetProperty("data").GetProperty("amountCents").GetInt64()).Order().ToList();
+        Assert.Equal([4200L, 8400L], processed);                                              // the portal expected 8400 for the cancel (it reported 8013 when the cancel ran first)
+        // the portal's own figure, when it sends one, is used instead of inferring it
+        var (o2, g2, _) = await SecondThree();
+        Assert.Equal("parked", await Portal("order.cancelled", o2, g2, new { RefundDueCents = 9675, Partial = false, PreviouslyRefundedCents = 4587 }, id: "pe-c2"));
+        Assert.Equal("applied", await Portal("order.cancelled", o2, g2, new { RefundDueCents = 14262, Partial = false, PreviouslyRefundedCents = 0 }, id: "pe-c3"));   // nothing earlier: runs at once
+    }
+
+    [Fact]
     public async Task A_portal_refund_that_no_longer_fits_after_a_dashboard_refund_is_cut_to_what_is_really_left_and_resent()
     {
         var (o, g, line) = await Three();                                                  // paid 14262
@@ -410,6 +434,73 @@ public sealed class RefundEventTests : OrderFlowBase
         var states = await _k.Db(db => db.OutboxMessages.Where(m => m.DedupeKey!.StartsWith("payment:dispute:")).Select(m => new { m.DedupeKey, m.Status }).ToListAsync());
         Assert.Equal(1, states.Count(x => x.Status == "dead" && x.DedupeKey!.EndsWith(refused!)));
         Assert.Equal(1, states.Count(x => x.Status == "delivered"));
+    }
+
+    [Fact]
+    public async Task A_created_that_arrives_after_a_later_event_is_still_sent_once_and_nothing_reopens_a_closed_dispute_and_same_second_events_have_a_stable_order()
+    {
+        var (o, g, _) = await Three();
+        var createdBody = Dispute("charge.dispute.created", o, "needs_response", amount: 5000, id: "evt_c");
+        _k.F.Clock.Advance(TimeSpan.FromSeconds(30));
+        var fundsBody = Dispute("charge.dispute.funds_withdrawn", o, "needs_response", amount: 5000, id: "evt_f");
+        // the later event arrives first: it is sent (the portal upserts) with the amount, and the created that follows is NOT dropped (review R4)
+        Assert.Contains("applied", await (await PostStripe(fundsBody)).Content.ReadAsStringAsync());
+        Assert.Contains("applied", await (await PostStripe(createdBody)).Content.ReadAsStringAsync());
+        await Drain();
+        Assert.Single(await Sent("dispute.created"));
+        var updated = Assert.Single(await Sent("dispute.updated")).GetProperty("data");
+        Assert.True(updated.GetProperty("amountCents").GetInt64() > 0);                    // the first event for the seller order carries the amount
+        // closed, then a stale created: nothing reopens a closed dispute
+        _k.F.Clock.Advance(TimeSpan.FromSeconds(30));
+        Assert.Contains("applied", await (await PostStripe(Dispute("charge.dispute.closed", o, "won", amount: 5000, id: "evt_w"))).Content.ReadAsStringAsync());
+        Assert.Contains("ignored", await (await PostStripe(Dispute("charge.dispute.created", o, "needs_response", amount: 5000, id: "evt_c2"))).Content.ReadAsStringAsync());
+        // two updates of the SAME second: the larger event id wins whatever the arrival order
+        var (o2, _, _) = await SecondThree();
+        _k.F.Clock.Advance(TimeSpan.FromSeconds(1));
+        var a = Dispute("charge.dispute.updated", o2, "under_review", amount: 5000, id: "evt_a", dp: "dp_tie");
+        var b = Dispute("charge.dispute.updated", o2, "needs_response", amount: 5000, id: "evt_b", dp: "dp_tie");
+        Assert.Contains("applied", await (await PostStripe(b)).Content.ReadAsStringAsync());
+        Assert.Contains("ignored", await (await PostStripe(a)).Content.ReadAsStringAsync());   // same second, smaller id: older
+        Assert.Equal("evt_b", await _k.Db(db => db.DisputeStates.Where(d => d.DisputeId == "dp_tie").Select(d => d.LastEventId).SingleAsync()));
+    }
+
+    [Fact]
+    public async Task Parallel_events_of_one_dispute_never_lose_the_state_and_every_dispute_event_carries_the_orders_currency()
+    {
+        var (o, _, _) = await Three();
+        var bodies = new List<string>();
+        for (var i = 0; i < 8; i++) { _k.F.Clock.Advance(TimeSpan.FromSeconds(1)); bodies.Add(Dispute("charge.dispute.updated", o, "under_review", amount: 5000, id: $"evt_p{i}", dp: "dp_par")); }
+        var results = await Task.WhenAll(bodies.AsEnumerable().Reverse().Select(b => PostStripe(b)));
+        Assert.All(results, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
+        var state = await _k.Db(db => db.DisputeStates.AsNoTracking().SingleAsync(d => d.DisputeId == "dp_par"));
+        Assert.Equal("evt_p7", state.LastEventId);                                            // the newest one won, however they interleaved
+        // a Stripe dispute in another currency is still sent in the ORDER's currency (the portal refuses a mismatch with 422 currency_mismatch)
+        var eur = Event("charge.dispute.created", "dp_eur", null, 5000, currency: "eur", id: "evt_eur", extra: new { payment_intent = o.PaymentIntentId, status = "needs_response", reason = "fraudulent" });
+        await PostStripe(eur);
+        await Drain();
+        var sent = (await Sent("dispute.created")).Select(e => e.GetProperty("data")).Where(d => d.GetProperty("disputeId").GetString() == "dp_eur").ToList();
+        Assert.Single(sent);
+        Assert.Equal("USD", sent[0].GetProperty("currency").GetString());
+    }
+
+    [Fact]
+    public async Task Dispute_states_are_purged_90_days_after_a_closed_dispute_and_180_after_an_open_one()
+    {
+        await Login();
+        var now = _k.F.Clock.GetUtcNow();
+        await _k.Db(async db =>
+        {
+            db.DisputeStates.AddRange(
+                new DisputeState { DisputeId = "dp_closed_old", Closed = true, LastEventId = "e", UpdatedAt = now.AddDays(-91) },
+                new DisputeState { DisputeId = "dp_closed_new", Closed = true, LastEventId = "e", UpdatedAt = now.AddDays(-89) },
+                new DisputeState { DisputeId = "dp_open_mid", Closed = false, LastEventId = "e", UpdatedAt = now.AddDays(-120) },
+                new DisputeState { DisputeId = "dp_open_old", Closed = false, LastEventId = "e", UpdatedAt = now.AddDays(-181) });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        using var scope = _k.F.Services.CreateScope();
+        Assert.Equal(2, await DisputeStateMaintenance.PurgeAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), scope.ServiceProvider.GetRequiredService<TimeProvider>()));
+        Assert.Equal(["dp_closed_new", "dp_open_mid"], (await _k.Db(db => db.DisputeStates.Select(d => d.DisputeId).ToListAsync())).Order().ToList());
     }
 
     [Fact]
