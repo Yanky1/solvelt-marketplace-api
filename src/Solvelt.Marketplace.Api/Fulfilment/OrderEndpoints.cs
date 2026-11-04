@@ -26,6 +26,9 @@ public static class OrderEndpoints
         return app;
     }
 
+    /// <summary>A position older than this is not drawn (the driver may have stopped sharing); it is still deleted only at 24 h or earlier.</summary>
+    public const int PositionFreshMinutes = 30;
+
     private static IResult Private(IResult r, HttpContext ctx) { ctx.Response.Headers.CacheControl = "private, no-store"; return r; }
 
     private static IResult Respond(ActionResult r, HttpContext ctx)
@@ -117,8 +120,13 @@ public static class OrderEndpoints
                     }),
                     shipments = ship.Where(s => s.GroupId == g.Id).OrderBy(s => s.ShippedAt).Select(s => new
                     {
-                        method = s.Method, carrier = s.Carrier, service = s.Service, trackingNumber = s.TrackingNumber, trackingUrl = s.TrackingUrl, shippedAt = s.ShippedAt, deliveredAt = s.DeliveredAt,
+                        id = s.Id, method = s.Method, carrier = s.Carrier, service = s.Service, trackingNumber = s.TrackingNumber, trackingUrl = s.TrackingUrl, shippedAt = s.ShippedAt, deliveredAt = s.DeliveredAt,
                         voided = s.VoidedAt != null, trackingStatus = s.TrackingStatus, trackingStatusDetail = s.TrackingStatusDetail, eta = s.Eta,
+                        etaWindowStart = s.EtaWindowStart, etaWindowEnd = s.EtaWindowEnd, driverFirstName = s.DriverFirstName, placement = s.Placement,
+                        timeline = s.TrackingEventsJson is null ? (System.Text.Json.JsonElement?)null : System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(s.TrackingEventsJson),
+                        // live position: only while the stop is next, at most 24 h old (the job clears it too), and only a recent one is drawn
+                        position = s.TrackingStatus == "out_for_delivery" && s.DeliveredAt == null && s.PositionLat != null && s.PositionAt > now.AddMinutes(-PositionFreshMinutes) ? new { lat = s.PositionLat, lng = s.PositionLng, at = s.PositionAt } : null,
+                        proofCount = s.ProofExpiresAt > now && s.ProofJson != null ? System.Text.Json.JsonSerializer.Deserialize<List<string>>(s.ProofJson)!.Count : 0,
                         lines = shipLines.Where(l => l.ShipmentId == s.Id).Select(l => new { lineId = l.MarketplaceLineId, quantity = l.Quantity }),
                     }),
                     returns = returns.Where(r => r.GroupId == g.Id).Select(r => new
