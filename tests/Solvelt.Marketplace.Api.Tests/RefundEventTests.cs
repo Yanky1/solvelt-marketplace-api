@@ -333,6 +333,61 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1_800_000_000L), created[0].GetProperty("data").GetProperty("evidenceDueBy").GetDateTimeOffset());
     }
 
+    // ---- C10 shares (decision M3-26) ----
+
+    [Fact]
+    public void Dispute_shares_follow_the_charged_totals_are_capped_at_what_each_seller_order_sold_and_the_cut_goes_to_those_with_room()
+    {
+        // 2-seller split: proportional to the charged totals, floor, the remainder to the largest group
+        Assert.Equal([2169L, 831L], StripeEventProcessor.AllocateDispute(3000, [4999, 1918], [4700, 1800]));
+        // a full dispute: each share hits its cap (the tax that cannot be placed stays with the portal's staff flag)
+        Assert.Equal([4700L, 1800L], StripeEventProcessor.AllocateDispute(6917, [4999, 1918], [4700, 1800]));
+        // the cap binds on one: what it cuts goes to the group with room, so the shares add up to min(amount, sum of sales)
+        Assert.Equal([1000L, 5000L], StripeEventProcessor.AllocateDispute(6000, [5000, 5000], [1000, 9000]));
+        Assert.Equal([50L, 50L], StripeEventProcessor.AllocateDispute(200, [100, 100], [50, 50]));
+        // degenerate input is all zero, never negative
+        Assert.Equal([0L, 0L], StripeEventProcessor.AllocateDispute(0, [100, 100], [50, 50]));
+        Assert.Equal([0L, 0L], StripeEventProcessor.AllocateDispute(-5, [100, 100], [50, 50]));
+        Assert.Equal([0L, 0L], StripeEventProcessor.AllocateDispute(100, [0, 0], [50, 50]));
+        Assert.Equal([0L, 100L], StripeEventProcessor.AllocateDispute(100, [100, 100], [0, 500]));
+        // the invariants over many shapes
+        var rnd = new Random(7);
+        for (var n = 0; n < 2000; n++)
+        {
+            var k = rnd.Next(1, 5);
+            var totals = Enumerable.Range(0, k).Select(_ => (long)rnd.Next(1, 20000)).ToList();
+            var sales = totals.Select(t => Math.Max(0L, t - rnd.Next(0, 3000))).ToList();
+            var amount = rnd.Next(1, 40000);
+            var shares = StripeEventProcessor.AllocateDispute(amount, totals, sales);
+            Assert.All(shares.Zip(sales), z => Assert.InRange(z.First, 0, z.Second));
+            Assert.Equal(Math.Min(amount, sales.Sum()), shares.Sum());
+        }
+    }
+
+    [Fact]
+    public async Task A_partial_dispute_on_two_seller_orders_is_split_by_charged_totals_with_the_fee_split_the_same_way_and_a_rejected_share_does_not_stop_the_other()
+    {
+        var o = await Paid();
+        _k.F.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Infrastructure.PortalOptions>>().Value.PerSellerOrderDisputes = true;
+        // the portal refuses one seller order's share (exceeds_sale) and takes the other
+        var refused = JudaicaGroup(o).SellerOrderNumber;
+        _onPaymentEvent = c => c.BodyText.Contains(refused!) ? FakePortal.Json(HttpStatusCode.UnprocessableEntity, "{\"code\":\"exceeds_sale\"}") : null;
+        var body = Dispute("charge.dispute.created", o, "needs_response", amount: 3000, id: "evt_p1");
+        body = body.Replace("\"status\":\"needs_response\"", "\"status\":\"needs_response\",\"balance_transactions\":[{\"fee\":1500}]");
+        await PostStripe(body);
+        await Drain();
+        var datas = (await Sent("dispute.created")).Select(e => e.GetProperty("data")).ToList();
+        Assert.Equal(2, datas.Count);
+        Assert.Equal(3000, datas.Sum(d => d.GetProperty("amountCents").GetInt64()));                       // proportional to the charged totals, adds up exactly
+        Assert.Equal(1500, datas.Sum(d => d.GetProperty("feeCents").GetInt64()));                          // the fee split the same way
+        var sold = o.Groups.ToDictionary(g => g.SellerOrderNumber!, g => g.ItemsCents + g.ShippingCents);
+        Assert.All(datas, d => Assert.InRange(d.GetProperty("amountCents").GetInt64(), 0, sold[d.GetProperty("sellerOrderNumber").GetString()!]));
+        // the refused share is dead (a person sees it); the other was delivered on its own
+        var states = await _k.Db(db => db.OutboxMessages.Where(m => m.DedupeKey!.StartsWith("payment:dispute:")).Select(m => new { m.DedupeKey, m.Status }).ToListAsync());
+        Assert.Equal(1, states.Count(x => x.Status == "dead" && x.DedupeKey!.EndsWith(refused!)));
+        Assert.Equal(1, states.Count(x => x.Status == "delivered"));
+    }
+
     [Fact]
     public async Task A_single_seller_dispute_goes_out_at_once_and_nothing_follows_a_closed_one_and_older_events_are_dropped()
     {
@@ -342,7 +397,7 @@ public sealed class RefundEventTests : OrderFlowBase
         await Drain();
         var created = Assert.Single(await Sent("dispute.created"));                       // one seller order: no C10 needed, no hold
         Assert.Equal(g.SellerOrderNumber, created.GetProperty("data").GetProperty("sellerOrderNumber").GetString());
-        Assert.Equal(12859, created.GetProperty("data").GetProperty("amountCents").GetInt64());   // 14000 x (12600 + 500) / 14262, rounded down: the seller share, tax excluded
+        Assert.Equal(13100, created.GetProperty("data").GetProperty("amountCents").GetInt64());   // 14000 charged back, but the seller order sold 12600 + 500 = 13100 (tax excluded): the share is capped there (M3-26; was 12859 by proportion)
         // an update that is OLDER than what we already sent (Stripe delivers out of order) is dropped
         var older = Dispute("charge.dispute.updated", o, "under_review", amount: 14000, id: "evt_s0");
         var closedBody = Dispute("charge.dispute.closed", o, "lost", amount: 14000, id: "evt_s2");
