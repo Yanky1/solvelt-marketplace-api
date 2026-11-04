@@ -26,7 +26,7 @@ public interface ISignedPortalClient
     /// <summary><c>POST /messages</c>: a buyer message, idempotent on <c>messageId</c> (ORDERS.md §3.3).</summary>
     Task<PortalResult<JsonElement>> SendMessageAsync(BuyerMessageBody body, CancellationToken ct = default);
     /// <summary><c>POST /messages/{id}/receipts</c>: <c>delivered | read | failed</c> for a seller message (the id from <c>message.sent</c>); the status only moves forward.</summary>
-    Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string portalMessageId, string status, CancellationToken ct = default, string? sellerOrderNumber = null, Guid? sellerId = null);
+    Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string portalMessageId, string status, CancellationToken ct = default);
     /// <summary><c>GET /attachments/{id}</c>: a seller attachment's bytes (signed GET, empty body). One attempt inside the 30 s deadline, at most <see cref="MaxAttachmentBytes"/>; the outbox retries.</summary>
     Task<PortalBytes> GetAttachmentAsync(Guid attachmentId, CancellationToken ct = default);
     /// <summary><c>POST /content/reports</c> (CATALOG.md §6): idempotent on <c>reportId</c>.</summary>
@@ -97,8 +97,8 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
     public Task<PortalResult<JsonElement>> SendMessageAsync(BuyerMessageBody b, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/messages", b, Retry.Standard, ct);
 
-    public Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string id, string status, CancellationToken ct = default, string? sellerOrderNumber = null, Guid? sellerId = null)
-        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/messages/{Id(id)}/receipts", new { status, sellerOrderNumber, sellerId }, Retry.Standard, ct);
+    public Task<PortalResult<JsonElement>> SendMessageReceiptAsync(string id, string status, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/messages/{Id(id)}/receipts", new { status }, Retry.Standard, ct);
 
     public async Task<PortalBytes> GetAttachmentAsync(Guid id, CancellationToken ct = default)
     {

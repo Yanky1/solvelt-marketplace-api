@@ -21,7 +21,7 @@ public sealed class MessageService(MarketplaceDb db, OutboxWriter outbox, TimePr
     public const int MaxText = 4000;
     public const string SendType = "portal.message", ReceiptType = "portal.message-receipt", ReportType = "portal.content-report";
     public sealed record IdPayload(string Id);
-    public sealed record ReceiptPayload(string PortalMessageId, string Status, string? SellerOrderNumber = null, Guid? SellerId = null);
+    public sealed record ReceiptPayload(string PortalMessageId, string Status);
 
     private static string NewKey(string prefix) => prefix + Guid.NewGuid().ToString("N")[..24].ToUpperInvariant();
 
@@ -102,14 +102,13 @@ public sealed class MessageService(MarketplaceDb db, OutboxWriter outbox, TimePr
         var now = time.GetUtcNow().ToUniversalTime();
         var unread = await db.ThreadMessages.AsNoTracking().Where(m => m.ThreadId == threadId && m.Direction == MessageDirections.Seller && m.ReadAt == null && m.RedactedAt == null).Select(m => new { m.Id, m.PortalMessageId }).ToListAsync(ct);
         if (unread.Count == 0) return new ActionResult(204);
-        var (sellerOrderNumber, sellerId) = await SellerRefAsync(db, threadId, ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         foreach (var m in unread)
         {
             var id = m.Id;
             var claimed = await db.ThreadMessages.Where(x => x.Id == id && x.ReadAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.ReadAt, (DateTimeOffset?)now), ct);
             if (claimed == 1 && m.PortalMessageId is { } pid)
-                await outbox.TryEnqueueAsync(ReceiptType, new ReceiptPayload(pid, "read", sellerOrderNumber, sellerId), $"receipt:{pid}:read", ct: ct);
+                await outbox.TryEnqueueAsync(ReceiptType, new ReceiptPayload(pid, "read"), $"receipt:{pid}:read", ct: ct);
         }
         await tx.CommitAsync(ct);
         return new ActionResult(204);
@@ -126,27 +125,14 @@ public sealed class MessageService(MarketplaceDb db, OutboxWriter outbox, TimePr
         m.ReportedAt = time.GetUtcNow().ToUniversalTime();
         // the portal's target id is the marketplace message id: ours for a buyer message, the portal's own for a seller message
         var target = m.MessageKey ?? m.PortalMessageId!;
-        var (sellerOrderNumber, sellerId) = await SellerRefAsync(db, m.ThreadId, ct);
-        outbox.Enqueue(ReportType, new ReportPayload("MR-" + target, target, reason.Trim(), string.IsNullOrWhiteSpace(note) ? null : note.Trim(), ReporterRef(buyer.AccountId), sellerOrderNumber, sellerId), "message-report:" + m.Id);
+        outbox.Enqueue(ReportType, new ReportPayload("MR-" + target, target, reason.Trim(), string.IsNullOrWhiteSpace(note) ? null : note.Trim(), ReporterRef(buyer.AccountId)), "message-report:" + m.Id);
         try { await db.SaveChangesAsync(ct); }
         catch (DbUpdateException) { db.ChangeTracker.Clear(); }   // a parallel click reported it first
         return new ActionResult(202, new { reported = true });
     }
 
-    public sealed record ReportPayload(string ReportId, string TargetId, string Reason, string? Note, string ReporterRef, string? SellerOrderNumber = null, Guid? SellerId = null);
+    public sealed record ReportPayload(string ReportId, string TargetId, string Reason, string? Note, string ReporterRef);
 
-    /// <summary>
-    /// Message ids are unique per seller only (portal N3): a receipt or a report that names a message must also name its seller, or the portal can answer <c>422 ambiguous_message</c> /
-    /// <c>ambiguous_target</c>. Order threads give the seller order number and the seller id of the seller order; product threads give the seller id of the listing.
-    /// </summary>
-    internal static async Task<(string? SellerOrderNumber, Guid? SellerId)> SellerRefAsync(MarketplaceDb db, Guid threadId, CancellationToken ct)
-    {
-        var t = await db.MessageThreads.AsNoTracking().Where(x => x.Id == threadId).Select(x => new { x.GroupId, x.ListingId }).FirstOrDefaultAsync(ct);
-        if (t is null) return (null, null);
-        if (t.GroupId is { } gid) { var g = await db.OrderGroups.AsNoTracking().Where(x => x.Id == gid).Select(x => new { x.SellerOrderNumber, x.SellerId }).FirstOrDefaultAsync(ct); return (g?.SellerOrderNumber, g?.SellerId); }
-        if (t.ListingId is { } lid) return (null, await db.CatalogListings.AsNoTracking().Where(x => x.Id == lid).Select(x => (Guid?)x.SellerId).FirstOrDefaultAsync(ct));
-        return (null, null);
-    }
 
     /// <summary>An opaque, stable reference for the reporter (a hash of the account id: never a name or an address).</summary>
     public static string ReporterRef(Guid accountId) => "b-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("reporter|" + accountId.ToString("N"))))[..24].ToLowerInvariant();
@@ -197,7 +183,7 @@ public sealed class MessageReceiptOutboxHandler(ISignedPortalClient portal) : IO
         MessageService.ReceiptPayload? p;
         try { p = message.Payload is null ? null : JsonSerializer.Deserialize<MessageService.ReceiptPayload>(message.Payload, PortalJson.Options); } catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
         if (p is null || p.Status is not ("delivered" or "read" or "failed")) return OutboxResult.Dead("invalid_payload");
-        try { var res = await portal.SendMessageReceiptAsync(p.PortalMessageId, p.Status, ct, p.SellerOrderNumber, p.SellerId); return res.Status == 404 ? OutboxResult.Delivered() : PortalOutcome.From(res); }   // an unknown message: nothing to acknowledge
+        try { var res = await portal.SendMessageReceiptAsync(p.PortalMessageId, p.Status, ct); return res.Status == 404 ? OutboxResult.Delivered() : PortalOutcome.From(res); }   // an unknown message: nothing to acknowledge
         catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException) { return OutboxResult.Retry("portal_unavailable"); }
     }
 }
@@ -213,7 +199,7 @@ public sealed class ContentReportOutboxHandler(ISignedPortalClient portal) : IOu
         if (p is null) return OutboxResult.Dead("invalid_payload");
         try
         {
-            var res = await portal.ReportContentAsync(new ContentReportBody(p.ReportId, "message", p.TargetId, p.Reason, p.Note, p.ReporterRef, p.SellerOrderNumber, p.SellerId), ct);
+            var res = await portal.ReportContentAsync(new ContentReportBody(p.ReportId, "message", p.TargetId, p.Reason, p.Note, p.ReporterRef), ct);
             // 429: the portal limits reports per (caller, target) at 60/min: wait the minute it asks for
             if (res.Status == 429) return OutboxResult.Retry("portal_429", TimeSpan.FromSeconds(60));
             if (res.Status == 409 && res.Error?.Code == "already_resolved") return OutboxResult.Delivered();   // a decision was already made on this report (portal N3): done, nothing to send again
