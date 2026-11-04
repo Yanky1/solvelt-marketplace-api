@@ -97,7 +97,7 @@ Brands with at least one visible listing, by name (at most 500). `sellerId` (an 
 | `priceMin`, `priceMax` | Whole cents, 0 to 1000000000000; `priceMin` above `priceMax` is `400`. A listing matches when some buyable price lies in the range (its price range overlaps it) |
 | `available` | `true` leaves out sold-out listings (anything else is `400`) |
 | `kosher` | Comma separated kosher certifications (`OU,Star-K`): alternatives (OR). Shortcut for `attr=kosher-certification:<value>` |
-| `delivery` | Comma separated, each one of `ships`, `local`, `at-home`, `online`: alternatives. Shortcut for `attr=delivery:<value>`; products carry `ships` and sometimes `local`, services `at-home` and/or `online` |
+| `delivery` | Comma separated, each one of `ships`, `local`, `at-home`, `at-seller`, `online`: alternatives. Shortcut for `attr=delivery:<value>`; products carry `ships` and sometimes `local`, services `at-home` and/or `online` |
 | `attr` | Repeatable `key:value` filter on any attribute (`attr=kosher-status:dairy`). Values of one key are alternatives (OR), different keys all have to hold (AND). At most 12 pairs, 10 values per key, keys up to 100 and values up to 60 characters, else `400` |
 | `facets` | `true` adds a `facets` object (see below); anything but `true`/`false` is `400` |
 | `sort` | `relevance` (default when `q` is given; without `q` it behaves as `newest`), `newest` (default otherwise), `best_selling` (placeholder: the newest order until M3 records sales), `price_asc`, `price_desc`, `title`. Equal sort values break on id. `page` numbers are positions: if listings change between two requests, a page can repeat or skip an item. Use `cursor` for a walk that never repeats or drops one |
