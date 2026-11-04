@@ -5,6 +5,7 @@ using Solvelt.Marketplace.Api.Checkout;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Outbox;
+using Solvelt.Marketplace.Api.Portal;
 
 namespace Solvelt.Marketplace.Api.Payments;
 
@@ -89,6 +90,8 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         {
             "payment_intent.succeeded" => await SucceededAsync(evt, ct),
             "payment_intent.payment_failed" => await FailedAsync(evt, ct),
+            "charge.refunded" => await ChargeRefundedAsync(evt, ct),
+            "charge.dispute.created" or "charge.dispute.updated" or "charge.dispute.closed" or "charge.dispute.funds_withdrawn" or "charge.dispute.funds_reinstated" => await DisputeAsync(evt, ct),
             _ => StripeOutcome.Ignored,
         };
         row.Outcome = outcome.ToString().ToLowerInvariant();
@@ -140,6 +143,72 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
             await db.CartLines.Where(l => l.CartId == cart && variants.Contains(l.VariantId)).ExecuteDeleteAsync(ct);
         }
         return StripeOutcome.Applied;
+    }
+
+    /// <summary>
+    /// <c>charge.refunded</c>: our own refunds are reserved BEFORE Stripe is called, so Stripe's cumulative <c>amount_refunded</c> can never exceed what we reserved. When it does, someone
+    /// refunded in Stripe's dashboard: the money is gone, so it is recorded against the cap (an <c>external</c> row, idempotent per amount) and logged for a person; the portal cannot be
+    /// told which seller order it belonged to.
+    /// </summary>
+    private async Task<StripeOutcome> ChargeRefundedAsync(StripeEnvelope evt, CancellationToken ct)
+    {
+        var intentId = evt.Str("payment_intent");
+        var refunded = evt.Long("amount_refunded");
+        if (intentId is null || refunded is null) return StripeOutcome.Unmatched;
+        var order = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.PaymentIntentId == intentId, ct);
+        if (order is null) return StripeOutcome.Unmatched;
+        if (refunded <= order.RefundedCents) return StripeOutcome.Ignored;   // ours (or already recorded)
+        var delta = refunded.Value - order.RefundedCents;
+        var now = time.GetUtcNow().ToUniversalTime();
+        db.OrderRefunds.Add(new OrderRefund { Id = Guid.NewGuid(), Key = $"external:{order.Number}:{refunded}", OrderId = order.Id, AmountCents = delta, Reason = "external", Status = RefundStatus.Succeeded, CreatedAt = now, UpdatedAt = now });
+        await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + delta), ct);
+        log.LogError("Order {Number} was refunded {Delta} cents outside this system (Stripe dashboard); it is recorded and needs a person to tell the seller", order.Number, delta);
+        return StripeOutcome.Applied;
+    }
+
+    /// <summary>
+    /// <c>charge.dispute.*</c> becomes <c>dispute.created|updated|closed</c> for the portal, per seller order of the payment (matched by our stored intent id). The dispute amount is
+    /// allocated over the seller orders by what each sold (items + shipping: tax is not seller money, PAYMENTS.md §2), largest remainder, so the parts add up exactly. Events are
+    /// queued through our outbox with our own ids; the portal dedupes on them and orders by status. Inquiries (<c>warning_*</c> except closed) move no money and are the portal's own
+    /// webhook's business.
+    /// </summary>
+    private async Task<StripeOutcome> DisputeAsync(StripeEnvelope evt, CancellationToken ct)
+    {
+        var intentId = evt.Str("payment_intent");
+        var disputeId = evt.Str("id");
+        var amount = evt.Long("amount");
+        var status = evt.Str("status");
+        if (intentId is null || disputeId is null || amount is null || status is null) return StripeOutcome.Unmatched;
+        var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstOrDefaultAsync(o => o.PaymentIntentId == intentId, ct);
+        if (order is null) return StripeOutcome.Unmatched;
+        var portalStatus = status switch
+        {
+            "needs_response" => "needs_response", "under_review" => "under_review", "won" => "won", "lost" => "lost", "warning_closed" => "warning_closed", _ => null,
+        };
+        if (portalStatus is null) return StripeOutcome.Ignored;
+        if (order.Status == OrderStatus.Failed) return StripeOutcome.Ignored;   // never placed and already refunded: nothing at the portal to tell
+        if (order.Groups.Any(g => g.SellerOrderNumber is null)) throw new StripeOrderNotYetKnownException();   // not ingested yet: Stripe retries
+        var type = evt.Type == "charge.dispute.created" ? PaymentEventTypes.DisputeCreated : portalStatus is "won" or "lost" or "warning_closed" ? PaymentEventTypes.DisputeClosed : PaymentEventTypes.DisputeUpdated;
+        var groups = order.Groups.OrderByDescending(g => g.TotalCents).ThenBy(g => g.Id).ToList();
+        var share = Allocate(amount.Value * groups.Sum(g => g.ItemsCents + g.ShippingCents) / Math.Max(1, order.TotalCents), groups.Select(g => g.ItemsCents + g.ShippingCents).ToList());
+        DateTimeOffset? due = evt.Object.TryGetProperty("evidence_details", out var ed) && ed.ValueKind == JsonValueKind.Object && ed.TryGetProperty("due_by", out var db2) && db2.TryGetInt64(out var unix) ? DateTimeOffset.FromUnixTimeSeconds(unix) : null;
+        for (var i = 0; i < groups.Count; i++)
+            outbox.EnqueuePaymentEvent($"dispute:{evt.Id}:{groups[i].SellerOrderNumber}", type,
+                new DisputeData(disputeId, order.Number, groups[i].SellerOrderNumber, null, share[i], portalStatus, i == 0 ? null : 0, order.Currency, evt.Str("reason"), due));   // the dispute fee: portal default, once
+        return StripeOutcome.Applied;
+    }
+
+    /// <summary>Splits <paramref name="total"/> in proportion to <paramref name="weights"/>, exactly (largest remainder; ties go to the earlier entry).</summary>
+    public static long[] Allocate(long total, IReadOnlyList<long> weights)
+    {
+        var result = new long[weights.Count];
+        var sum = weights.Sum();
+        if (total <= 0 || sum <= 0) return result;
+        var rema = new (long Rem, int I)[weights.Count];
+        long given = 0;
+        for (var i = 0; i < weights.Count; i++) { result[i] = total * weights[i] / sum; given += result[i]; rema[i] = (total * weights[i] % sum, i); }
+        foreach (var (_, i) in rema.OrderByDescending(r => r.Rem).ThenBy(r => r.I).Take((int)(total - given))) result[i]++;
+        return result;
     }
 
     /// <summary>A failed attempt on an intent is not final (the buyer may try another card): only the decline code is kept for the page, and never on an order that is already paid.</summary>

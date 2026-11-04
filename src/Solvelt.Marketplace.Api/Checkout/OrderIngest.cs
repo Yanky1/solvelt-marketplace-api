@@ -12,7 +12,7 @@ namespace Solvelt.Marketplace.Api.Checkout;
 /// with the same id and yields one order. On success it stores the seller orders and queues one <c>payment.captured</c> per seller order. A <c>422 invalid_order</c> (nothing was
 /// created at the portal, for example a delivery window that filled up) fails the order and refunds the buyer in full.
 /// </summary>
-public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient portal, OutboxWriter outbox, RefundService refunds, TimeProvider time) : IOutboxHandler
+public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient portal, OutboxWriter outbox, RefundService refunds, Portal.Webhooks.PortalEventProcessor portalEvents, TimeProvider time) : IOutboxHandler
 {
     public const string Type = "order.ingest";
     public sealed record Payload(Guid OrderId);
@@ -105,6 +105,8 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         await EnqueueBuyerMailAsync(order, "Your Solvelt order " + order.Number,
             $"Thank you for your order {order.Number}.\n\nTotal charged: {Money(order.TotalCents, order.Currency)}. Each seller prepares their own part; you will get tracking details as soon as they ship.\n", $"placed:{order.Number}", ct);
         await tx.CommitAsync(ct);
+        // seller orders now exist: re-apply portal events (shipped, refund.issued, ...) that arrived before we knew them
+        await portalEvents.ReplayParkedAsync("order", order.Number, ct);
         return OutboxResult.Delivered();
     }
 

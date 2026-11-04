@@ -86,6 +86,7 @@ builder.Services.AddScoped<OrderMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<OrderWorker>();
 builder.Services.AddScoped<StripeEventProcessor>();
 builder.Services.AddScoped<IOutboxHandler, OrderIngestHandler>();
+builder.Services.AddSingleton<IProjectionHandler, PortalRefundHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeRefundHandler>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();

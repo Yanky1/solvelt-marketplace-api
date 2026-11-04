@@ -56,6 +56,61 @@ public sealed class RefundService(MarketplaceDb db, OutboxWriter outbox, TimePro
         return ReserveOutcome.Reserved;
     }
 
+    /// <summary>
+    /// Reserves a refund the PORTAL asked for on one seller order (<c>refund.issued</c>, a cancellation): <paramref name="itemsCents"/> and <paramref name="shippingCents"/> are what the
+    /// portal's ledger counts; the buyer also gets back the tax on them, in proportion (round half up, the last refund of the seller order takes the remainder, so tax is returned
+    /// in full and never twice). Stripe is refunded <c>items + shipping + tax</c>; the portal is told only items and shipping. With <paramref name="clamp"/> (cancellations) a
+    /// request above what is left on the seller order is cut down to it instead of refused.
+    /// </summary>
+    public async Task<ReserveOutcome> ReserveGroupAsync(Guid orderId, Guid groupId, long itemsCents, long shippingCents, bool clamp, string key, string reason, string? portalRefundId, CancellationToken ct)
+    {
+        if (itemsCents < 0 || shippingCents < 0 || itemsCents + shippingCents <= 0) throw new ArgumentOutOfRangeException(nameof(itemsCents));
+        var own = db.Database.CurrentTransaction is null;
+        await using var tx = own ? await db.Database.BeginTransactionAsync(ct) : null;
+        if (await db.OrderRefunds.AnyAsync(r => r.Key == key, ct)) return ReserveOutcome.Duplicate;
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            var g = await db.OrderGroups.AsNoTracking().Where(x => x.Id == groupId && x.OrderId == orderId).FirstOrDefaultAsync(ct);
+            var paid = await db.Orders.AsNoTracking().Where(o => o.Id == orderId).Select(o => o.PaidAt).FirstOrDefaultAsync(ct);
+            if (g is null || paid is null) return ReserveOutcome.NotPaid;
+            var sellable = g.ItemsCents + g.ShippingCents;
+            var net = itemsCents + shippingCents;
+            var shipping = shippingCents;
+            if (clamp && g.RefundedNetCents + net > sellable) { net = Math.Max(0, sellable - g.RefundedNetCents); shipping = Math.Min(shipping, net); }
+            if (net <= 0) return ReserveOutcome.ExceedsPaid;
+            if (g.RefundedNetCents + net > sellable) return ReserveOutcome.ExceedsPaid;
+            var tax = g.RefundedNetCents + net >= sellable
+                ? g.TaxCents - g.RefundedTaxCents                                                                   // the last refund returns the rest of the tax
+                : (long)Math.Round((decimal)g.TaxCents * net / sellable, 0, MidpointRounding.AwayFromZero);
+            tax = Math.Clamp(tax, 0, g.TaxCents - g.RefundedTaxCents);
+            var total = net + tax;
+            var seen = g.RefundedNetCents;
+            // compare-and-swap on what we read, so two parallel refunds cannot both take "the remainder" of the tax or both fit under the cap
+            var won = await db.OrderGroups.Where(x => x.Id == groupId && x.RefundedNetCents == seen && x.RefundedCents + total <= x.TotalCents)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedNetCents, x => x.RefundedNetCents + net).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents + tax)
+                    .SetProperty(x => x.RefundedCents, x => x.RefundedCents + total), ct);
+            if (won == 0) continue;   // someone else moved the counters: read again (reads are untracked, so nothing stale is kept)
+            var order = await db.Orders.Where(o => o.Id == orderId && o.PaidAt != null && o.RefundedCents + total <= o.PaidCents)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + total), ct);
+            if (order == 0)
+            {
+                await db.OrderGroups.Where(x => x.Id == groupId).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedNetCents, x => x.RefundedNetCents - net)
+                    .SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - tax).SetProperty(x => x.RefundedCents, x => x.RefundedCents - total), ct);
+                return ReserveOutcome.ExceedsPaid;
+            }
+            var now = time.GetUtcNow().ToUniversalTime();
+            db.OrderRefunds.Add(new OrderRefund
+            {
+                Id = Guid.NewGuid(), Key = key, OrderId = orderId, GroupId = groupId, AmountCents = total, ShippingCents = shipping, TaxCents = tax, Reason = reason, Status = RefundStatus.Reserved,
+                ReportToPortal = true, PortalRefundId = portalRefundId, CreatedAt = now, UpdatedAt = now,
+            });
+            outbox.Enqueue(StripeRefundType, new RefundPayload(key), $"refund:{key}");
+            if (own) { await db.SaveChangesAsync(ct); await tx!.CommitAsync(ct); }
+            return ReserveOutcome.Reserved;
+        }
+        return ReserveOutcome.ExceedsPaid;   // the counters kept moving under us: refuse rather than guess; the portal's event is retried
+    }
+
     public sealed record RefundPayload(string Key);
 }
 
@@ -92,7 +147,12 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
             if (changed == 1)
             {
                 await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents - refund.AmountCents), ct);
-                if (refund.GroupId is { } g) await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents), ct);
+                if (refund.GroupId is { } g)
+                {
+                    var net = refund.AmountCents - refund.TaxCents;
+                    await db.OrderGroups.Where(x => x.Id == g).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents)
+                        .SetProperty(x => x.RefundedNetCents, x => x.RefundedNetCents - (refund.ReportToPortal ? net : 0)).SetProperty(x => x.RefundedTaxCents, x => x.RefundedTaxCents - refund.TaxCents), ct);
+                }
             }
             await tx.CommitAsync(ct);
             return OutboxResult.Dead("stripe_" + ex.Code);
@@ -108,7 +168,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
                 var group = refund.GroupId is { } gid ? order.Groups.FirstOrDefault(g => g.Id == gid) : null;
                 if (refund.ReportToPortal && group?.SellerOrderNumber is { } sellerOrderNumber)
                     outbox.EnqueuePaymentEvent($"refund-processed:{refund.Key}", PaymentEventTypes.RefundProcessed,
-                        new RefundProcessedData(result.Id, order.Number, sellerOrderNumber, null, refund.AmountCents - refund.ShippingCents, refund.ShippingCents, order.Currency, refund.Reason));
+                        new RefundProcessedData(result.Id, order.Number, sellerOrderNumber, null, refund.AmountCents - refund.ShippingCents - refund.TaxCents, refund.ShippingCents, order.Currency, refund.Reason));
                 await db.SaveChangesAsync(ct);
             }
             await tx.CommitAsync(ct);

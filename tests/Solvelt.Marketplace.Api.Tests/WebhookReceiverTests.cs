@@ -121,7 +121,14 @@ public class WebhookReceiverTests
 {
     private static TestFactory Factory(ScriptedHandler? handler = null, Dictionary<string, string?>? config = null)
     {
-        var f = new TestFactory(config, handler is null ? null : s => s.AddSingleton<IProjectionHandler>(handler));
+        // The scripted stand-in replaces any production handler for the same event types (the framework tests exercise the framework, not the M3 order handlers).
+        var f = new TestFactory(config, handler is null ? null : s =>
+        {
+            foreach (var d in s.Where(d => d.ServiceType == typeof(IProjectionHandler) && d.ImplementationType is { } t && t != typeof(ScriptedHandler)
+                         && (t == typeof(Solvelt.Marketplace.Api.Checkout.PortalRefundHandler)) && handler.EventTypes.Intersect(new Solvelt.Marketplace.Api.Checkout.PortalRefundHandler(Microsoft.Extensions.Logging.Abstractions.NullLogger<Solvelt.Marketplace.Api.Checkout.PortalRefundHandler>.Instance).EventTypes).Any()).ToList())
+                s.Remove(d);
+            s.AddSingleton<IProjectionHandler>(handler);
+        });
         f.Clock.Advance(TimeSpan.FromHours(3));   // "now" is T0 + 3 h, so events dated T0 + minutes are in the past (future-dated events are clamped, see below)
         return f;
     }

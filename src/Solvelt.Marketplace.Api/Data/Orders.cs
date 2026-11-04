@@ -88,8 +88,12 @@ public sealed class OrderGroup
     public string? SellerOrderNumber { get; set; }
     /// <summary>The portal could not cover every unit from stock; the seller will sort it out (shown to the buyer).</summary>
     public bool Oversold { get; set; }
-    /// <summary>Per seller order, the same cap as on the order.</summary>
+    /// <summary>Per seller order, the same cap as on the order (items + shipping + tax).</summary>
     public long RefundedCents { get; set; }
+    /// <summary>Items + shipping refunded so far (what the portal's ledger counts; never above <c>ItemsCents + ShippingCents</c>).</summary>
+    public long RefundedNetCents { get; set; }
+    /// <summary>Tax returned with those refunds (the portal's ledger never sees tax: the marketplace remits it).</summary>
+    public long RefundedTaxCents { get; set; }
 }
 
 public sealed class OrderLine
@@ -129,6 +133,8 @@ public sealed class OrderRefund
     public Guid? GroupId { get; set; }
     public long AmountCents { get; set; }
     public long ShippingCents { get; set; }
+    /// <summary>The tax share inside <see cref="AmountCents"/> (not reported to the portal).</summary>
+    public long TaxCents { get; set; }
     public string Reason { get; set; } = "";
     public string Status { get; set; } = RefundStatus.Reserved;
     public string? StripeRefundId { get; set; }
