@@ -39,6 +39,13 @@ public sealed record ReturnRequestBody(string ReturnId, string Reason, string? C
 /// <summary>Deliberately has no <c>deliveredAt</c>: the portal stamps its own server time (never a client value).</summary>
 public sealed record DeliveryConfirmationBody(string? SellerOrderNumber = null, string? TrackingNumber = null);
 
+// ---- messaging (ORDERS.md §3.3, §6) and content reports (CATALOG.md §6) ----
+/// <summary><c>kind</c> is <c>order</c> or <c>product</c>; the buyer is shown to the seller by display name only.</summary>
+public sealed record BuyerMessageBody(string MessageId, string ConversationId, string Kind, string? MarketplaceOrderId, string? SellerOrderNumber, Guid? ProductId,
+    string BuyerName, string Text, DateTimeOffset SentAt);
+/// <summary><c>reporterRef</c> is an opaque reference for the reporter (never a name or e-mail).</summary>
+public sealed record ContentReportBody(string ReportId, string Kind, string TargetId, string Reason, string? Note, string ReporterRef);
+
 /// <summary>The answer to <c>POST /returns/{id}/label-link</c>: a signed link valid about 24 h, bound to that one label.</summary>
 public sealed record ReturnLabelLink(string? LabelUrl, DateTimeOffset? LabelUrlExpiresAt, string? TrackingNumber, string? Carrier);
 

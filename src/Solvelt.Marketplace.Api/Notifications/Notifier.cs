@@ -18,11 +18,22 @@ public static class Notifier
 
     /// <summary>Adds the entry and its mail message to the caller's unit of work (nothing is saved here). <paramref name="eventId"/> + kind make it once-only.</summary>
     public static Notification Add(MarketplaceDb db, OutboxWriter outbox, TimeProvider time, MarketplaceOrder order, OrderGroup? group, string kind, string eventId, object? parameters = null)
+        => AddForAccount(db, outbox, time, order.AccountId, kind, eventId, order.Number, group?.SellerOrderNumber, new Dictionary<string, object?> { ["sellerName"] = group?.SellerName }.Concat(Flatten(parameters)));
+
+    /// <summary>
+    /// The same for a booking (called by M4's projection, in its own transaction, after the state change). <paramref name="marketplaceBookingId"/> is our <c>BK-…</c> id; the entry is in the
+    /// <c>bookings</c> email category (switchable), the in-app entry is always kept.
+    /// </summary>
+    public static Notification AddBooking(MarketplaceDb db, OutboxWriter outbox, TimeProvider time, Guid accountId, string kind, string eventId, string bookingNumber, string? marketplaceBookingId, object? parameters = null)
+        => AddForAccount(db, outbox, time, accountId, kind, eventId, null, null,
+            new Dictionary<string, object?> { ["bookingNumber"] = bookingNumber, ["marketplaceBookingId"] = marketplaceBookingId }.Concat(Flatten(parameters)));
+
+    public static Notification AddForAccount(MarketplaceDb db, OutboxWriter outbox, TimeProvider time, Guid accountId, string kind, string eventId, string? orderNumber, string? sellerOrderNumber, IEnumerable<KeyValuePair<string, object?>> parameters)
     {
         var n = new Notification
         {
-            Id = Guid.NewGuid(), AccountId = order.AccountId, Kind = kind, OrderNumber = order.Number, SellerOrderNumber = group?.SellerOrderNumber,
-            ParamsJson = JsonSerializer.Serialize(new Dictionary<string, object?> { ["sellerName"] = group?.SellerName }.Concat(Flatten(parameters)).ToDictionary(kv => kv.Key, kv => kv.Value), PortalJson.Options),
+            Id = Guid.NewGuid(), AccountId = accountId, Kind = kind, OrderNumber = orderNumber, SellerOrderNumber = sellerOrderNumber,
+            ParamsJson = JsonSerializer.Serialize(parameters.GroupBy(kv => kv.Key).ToDictionary(g => g.Key, g => g.Last().Value), PortalJson.Options),
             DedupeKey = $"{eventId}:{kind}", CreatedAt = time.GetUtcNow().ToUniversalTime(),
         };
         db.Notifications.Add(n);
@@ -87,6 +98,14 @@ public sealed class NotificationMailHandler(MarketplaceDb db, IEmailSender sende
 
 public static class NotificationEmails
 {
+    private static string BookingSubject(string kind, string number) => kind switch
+    {
+        NotificationKinds.BookingConfirmed => $"Booking {number} confirmed", NotificationKinds.BookingDeclined => $"Booking {number} declined", NotificationKinds.BookingTimeProposed => $"New time proposed for booking {number}",
+        NotificationKinds.BookingRescheduled => $"Booking {number} rescheduled", NotificationKinds.BookingCancelled => $"Booking {number} cancelled", NotificationKinds.BookingCompleted => $"Booking {number} completed",
+        NotificationKinds.BookingReminder => $"Reminder: booking {number}", NotificationKinds.BookingExtraChargeRequested => $"Extra charge requested for booking {number}", NotificationKinds.BookingNoShow => $"Booking {number}: no-show",
+        _ => $"Update on booking {number}",
+    };
+
     public static EmailMessage Build(string to, string name, Notification n, string baseUrl, string unsubscribeCategory, string unsubscribeAll)
     {
         string P(string key) { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : ""; } catch (JsonException) { return ""; } }
@@ -107,9 +126,12 @@ public static class NotificationEmails
             NotificationKinds.ReturnLabelReady => ($"Your return label for {order} is ready", $"Your return label for order {order} is ready on the order page."),
             NotificationKinds.DeliveryAttemptFailed => ($"A delivery attempt for {order} did not work", $"A delivery attempt for order {order} from {seller} was unsuccessful. The seller will try again or contact you."),
             NotificationKinds.RefundIssued => ($"A refund for order {order}", $"{seller} refunded ${Money() / 100m:0.00} for order {order}. It returns to your original payment method."),
+            NotificationKinds.MessageReceived => ($"New message from {seller}", $"{seller} sent you a message about {(P("subject") is { Length: > 0 } sub ? sub : "your order")}. Open it in your Solvelt messages."),
+            var k when k.StartsWith("booking_") => (BookingSubject(k, P("bookingNumber")), $"There is an update on your booking {P("bookingNumber")}: {BookingSubject(k, P("bookingNumber")).ToLowerInvariant()}."),
             _ => ($"Update on order {order}", $"There is an update on your order {order}."),
         };
-        var body = $"Hello {name},\n\n{line}\n\nSee the details: {baseUrl}/account/orders/{n.OrderNumber}\n\n" +
+        var link = n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? $"{baseUrl}/account/bookings" : $"{baseUrl}/account/orders/{n.OrderNumber}";
+        var body = $"Hello {name},\n\n{line}\n\nSee the details: {link}\n\n" +
                    $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";
         return new EmailMessage(to, subject, body);
     }

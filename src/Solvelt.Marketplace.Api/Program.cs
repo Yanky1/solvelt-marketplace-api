@@ -110,6 +110,11 @@ builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Fulfilment.ProofFetcher>(
 }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });   // a redirect would leave the portal origin
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Messaging.MessageService>();
+builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Messaging.MessageSentHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.MessageSendOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.MessageReceiptOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.ContentReportOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.CancelRequestOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.ReturnRequestOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.DeliveryConfirmationOutboxHandler>();
@@ -160,7 +165,7 @@ app.UseRateLimiter();
 app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
-    if (path.StartsWithSegments("/api/v1/orders") || path.StartsWithSegments("/api/v1/notifications"))
+    if (path.StartsWithSegments("/api/v1/orders") || path.StartsWithSegments("/api/v1/notifications") || path.StartsWithSegments("/api/v1/messages"))
         ctx.Response.OnStarting(() => { if (!ctx.Response.Headers.ContainsKey("Cache-Control")) ctx.Response.Headers.CacheControl = "private, no-store"; return Task.CompletedTask; });
     await next();
 });
@@ -193,6 +198,7 @@ app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
 Solvelt.Marketplace.Api.Fulfilment.ProofEndpoints.MapProofs(app);
 Solvelt.Marketplace.Api.Notifications.NotificationEndpoints.MapNotifications(app);
+Solvelt.Marketplace.Api.Messaging.MessageEndpoints.MapMessages(app);
 app.MapStripeWebhooks();
 
 app.Run();
