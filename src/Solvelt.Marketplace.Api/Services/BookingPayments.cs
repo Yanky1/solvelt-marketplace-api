@@ -171,7 +171,19 @@ public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, 
         var now = time.GetUtcNow().ToUniversalTime();
         db.BookingRefunds.Add(new BookingRefund { Id = Guid.NewGuid(), Key = key, PaymentId = paymentId, BookingId = pay.BookingId, AmountCents = amountCents, Reason = reason, Status = RefundStatus.Reserved, ReportToPortal = reportToPortal, CreatedAt = now, UpdatedAt = now });
         outbox.Enqueue(StripeRefundType, new RefundPayload(key), $"refund:{key}");
-        if (own) { await db.SaveChangesAsync(ct); await tx!.CommitAsync(ct); }
+        if (own)
+        {
+            try { await db.SaveChangesAsync(ct); await tx!.CommitAsync(ct); }
+            catch (DbUpdateException)
+            {
+                // A parallel reservation with the same key won the unique index (PostgreSQL lets both pass the read above; SQLite serialises writers). Our reservation of the cap rolls back
+                // with this transaction, so the loser is simply "already done".
+                await tx!.RollbackAsync(CancellationToken.None);
+                db.ChangeTracker.Clear();
+                if (await db.BookingRefunds.AsNoTracking().AnyAsync(r => r.Key == key, ct)) return BookingReserveOutcome.Duplicate;
+                throw;
+            }
+        }
         return BookingReserveOutcome.Reserved;
     }
 }
