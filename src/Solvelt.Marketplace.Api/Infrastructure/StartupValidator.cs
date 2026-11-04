@@ -29,6 +29,15 @@ public static class StartupValidator
 
     private static int IntOr(string? value, int fallback) => int.TryParse(value, out var n) ? n : fallback;
 
+    /// <summary>Things that are allowed but should not last: logged at start-up, never fatal.</summary>
+    public static IReadOnlyList<string> Warnings(IConfiguration config, IHostEnvironment env)
+    {
+        var warnings = new List<string>();
+        if (!IsDevLike(env) && string.IsNullOrWhiteSpace(config["Portal:ImageKey"]))
+            warnings.Add("Portal:ImageKey (env Portal__ImageKey) is not set: image downloads are signed with Portal:InboundSecret. Set a separate key before the portal sets Orders:ImageAcceptInboundKey=false (then also set Portal:RequireImageKey=true).");
+        return warnings;
+    }
+
     /// <summary>Returns every configuration problem; empty means the configuration is acceptable.</summary>
     public static IReadOnlyList<string> Validate(IConfiguration config, IHostEnvironment env)
     {
@@ -54,6 +63,7 @@ public static class StartupValidator
         {
             ("Portal:InboundSecret", "Portal__InboundSecret", config["Portal:InboundSecret"]),
             ("Portal:WebhookSecret", "Portal__WebhookSecret", config["Portal:WebhookSecret"]),
+            ("Portal:ImageKey", "Portal__ImageKey", config["Portal:ImageKey"]),
             ("Web:ForwardingKey", "Web__ForwardingKey", config["Web:ForwardingKey"]),
             ("Admin:ApiKey", "Admin__ApiKey", config["Admin:ApiKey"]),
             ("Auth:EmailLinkKey", "Auth__EmailLinkKey", config["Auth:EmailLinkKey"]),
@@ -66,7 +76,12 @@ public static class StartupValidator
         {
             // The admin key is optional: unset disables /api/admin/*. The Stripe webhook secret is required only once a Stripe key is set (checked below).
             // When set, both are held to the same rules as every other key.
-            if (string.IsNullOrWhiteSpace(value)) { if (name is not ("Admin:ApiKey" or "Stripe:WebhookSecret")) problems.Add($"{name} (env {envName}) is required."); continue; }
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                if (name == "Portal:ImageKey") { if (string.Equals(config["Portal:RequireImageKey"], "true", StringComparison.OrdinalIgnoreCase)) problems.Add($"{name} (env {envName}) is required because Portal:RequireImageKey is true (the portal no longer accepts the inbound key for image downloads)."); continue; }
+                if (name is not ("Admin:ApiKey" or "Stripe:WebhookSecret")) problems.Add($"{name} (env {envName}) is required.");
+                continue;
+            }
             if (value.Length < 32) problems.Add($"{name} must be at least 32 characters.");
             // Any dev default in any slot is rejected, so swapped defaults cannot pass.
             if (devDefaults.Contains(value)) problems.Add($"{name}: Development default secrets must not be used outside Development/Testing.");

@@ -15,7 +15,8 @@ orchestrator (see §9); we never change portal code.
 
 * Start-up fails outside Development/Testing when either secret is missing or when they are equal. Neither secret is ever reused for anything
   else (buyer sessions, email links, image URLs, CSRF, passkeys each get their own key; see DECISIONS).
-* Secrets come only from env (`Portal__InboundSecret`, `Portal__WebhookSecret`). Tests use fixed test values.
+* Secrets come only from env (`Portal__InboundSecret`, `Portal__WebhookSecret`, and `Portal__ImageKey` for image downloads). Tests use fixed test values.
+* **Image key (`Portal:ImageKey`).** Image downloads (`GET /catalog/images/{id}`) may be signed with a key of their own, distinct from every other key (checked at start-up like the others: 32 characters or more, never equal to another key). Until the portal sets `Orders:ImageAcceptInboundKey=false` it is optional: without it image calls fall back to `Portal:InboundSecret` and start-up logs a warning. When the portal switches, set the key and `Portal:RequireImageKey=true`: Production then refuses to start without it. JSON calls always use the inbound key.
 
 ### 1.1 Signing our calls (`SignedPortalClient`)
 Headers `X-Solvelt-Timestamp` (unix seconds, our clock), `X-Solvelt-Nonce` (32 random hex, new per **attempt**, including retries),

@@ -27,6 +27,7 @@ if (problems.Count > 0)
     throw new InvalidOperationException("Invalid configuration:\n - " + string.Join("\n - ", problems));
 
 var devLike = StartupValidator.IsDevLike(builder.Environment);
+var startupWarnings = StartupValidator.Warnings(builder.Configuration, builder.Environment);
 builder.Services.Configure<PortalOptions>(o => OptionsSetup.Portal(o, builder.Configuration, devLike));
 builder.Services.Configure<MarketplaceOptions>(o => OptionsSetup.Marketplace(o, builder.Configuration, devLike));
 builder.Services.Configure<WebOptions>(o => OptionsSetup.Web(o, builder.Configuration, devLike));
@@ -147,6 +148,7 @@ builder.Services.AddDbContext<MarketplaceDb>(o =>
 });
 
 var app = builder.Build();
+foreach (var warning in startupWarnings) app.Logger.LogWarning("{Warning}", warning);
 
 // Carts and checkouts are personal: never stored by a shared cache or the browser (also on 401 and 429, which is why this runs before the rate limiter).
 app.Use(async (ctx, next) =>
