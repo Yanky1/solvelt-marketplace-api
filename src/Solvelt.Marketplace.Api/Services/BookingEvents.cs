@@ -48,6 +48,13 @@ public sealed class BookingEventHandler(ILogger<BookingEventHandler> log) : IPro
         if (BookingStatus.IsTerminal(b.Status) && !(Target(c.Event.Type, data) == b.Status || (c.Event.Type == ExtraCharge && b.Status == BookingStatus.Completed)))
             return HandlerOutcome.Skipped("the booking is finished");
 
+        // The portal says an earlier event of this booking went dead: its effect is unknown, so the booking is read and applied (decision M4-20). The event itself is still applied below, deduped on its signed id.
+        if (c.Event.PredecessorDead)
+        {
+            var outbox = new OutboxWriter(c.Db, c.Time);
+            var dedupe = BookingReconcileHandler.DedupeKey(c.Event.Id);
+            if (!await outbox.ExistsAsync(dedupe, ct)) outbox.Enqueue(BookingReconcileHandler.Type, new BookingReconcileHandler.Payload(b.MarketplaceBookingId), dedupe);
+        }
         var now = c.Time.GetUtcNow().ToUniversalTime();
         var key = b.MarketplaceBookingId;
         async Task<bool> Step(string group, string? status = null, string? terminal = null)

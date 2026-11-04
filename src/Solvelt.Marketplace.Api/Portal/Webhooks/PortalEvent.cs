@@ -13,6 +13,9 @@ public sealed record PortalEvent(string Id, string Type, DateTimeOffset CreatedA
     /// <summary>The portal's own <c>createdAt</c> as sent. <see cref="CreatedAt"/> is the ordering time handlers see (clamped, see <see cref="EffectiveTime"/>).</summary>
     public DateTimeOffset RawCreatedAt { get; init; } = CreatedAt;
 
+    /// <summary>Top-level <c>predecessorDead</c> (portal ordering, C14/C15): an earlier event of the same aggregate went dead, so this one means "reconcile" (read the record and apply it).</summary>
+    public bool PredecessorDead { get; init; }
+
     /// <summary>The ordering time: <c>min(createdAt, receivedAt + 5 min)</c>. Dates in the past are never changed.</summary>
     public static DateTimeOffset EffectiveTime(DateTimeOffset raw, DateTimeOffset receivedAt)
     {
@@ -36,7 +39,7 @@ public sealed record PortalEvent(string Id, string Type, DateTimeOffset CreatedA
                 !DateTimeOffset.TryParse(created, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var at))
             { error = "createdAt is required (ISO 8601)."; return false; }
             var data = root.TryGetProperty("data", out var d) ? d.Clone() : JsonDocument.Parse("{}").RootElement.Clone();
-            evt = new PortalEvent(id, type, at.ToUniversalTime(), data) { RawCreatedAt = at.ToUniversalTime() };
+            evt = new PortalEvent(id, type, at.ToUniversalTime(), data) { RawCreatedAt = at.ToUniversalTime(), PredecessorDead = root.TryGetProperty("predecessorDead", out var pd) && pd.ValueKind == JsonValueKind.True };
             return true;
         }
         catch (JsonException) { error = "The body is not valid JSON."; return false; }

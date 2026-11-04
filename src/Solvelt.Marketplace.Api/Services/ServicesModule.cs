@@ -52,6 +52,7 @@ public static class ServicesModule
         services.AddScoped<IOutboxHandler, BookingConfirmHandler>();
         services.AddScoped<IOutboxHandler, BookingStripeRefundHandler>();
         services.AddScoped<IOutboxHandler, BookingLateCancelHandler>();
+        services.AddScoped<IOutboxHandler, BookingReconcileHandler>();
         return services;
     }
 
