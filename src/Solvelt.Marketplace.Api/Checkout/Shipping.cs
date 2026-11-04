@@ -35,7 +35,8 @@ public static class ShippingRates
         var free = profile.FreeShippingThresholdCents is { } t && itemsSubtotalCents >= t;
         var result = new List<ShippingOption>();
         var unavailable = new List<UnavailableSpeed>();
-        foreach (var sp in zone.Speeds.Where(x => x.Enabled))
+        // only speeds the portal's ingest accepts (standard, expedited, overnight; C8) are offered: a speed it would refuse with a 422 must never be sold (decision M3-37)
+        foreach (var sp in zone.Speeds.Where(x => x.Enabled && IngestMapping.Speeds.Contains(x.Speed.Trim().ToLowerInvariant())))
         {
             // Decision O-15: a weight-based price needs a KNOWN weight for every line of the group. Counting an unknown weight as 0 would under-charge,
             // so the speed is unavailable (flat speeds and local delivery are unaffected), unless the group ships free: then the weight does not matter.

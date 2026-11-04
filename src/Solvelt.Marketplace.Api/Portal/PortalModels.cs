@@ -28,14 +28,17 @@ public sealed record PortalAddress(string Name, string Line1, string? Line2, str
 public sealed record OrderLineRequest(string MarketplaceLineId, Guid SellerId, Guid BrandId, Guid ProductId, Guid? VariantId,
     int Quantity, long UnitPriceCents, long DiscountCents = 0, long TaxCents = 0);
 /// <summary>
-/// One shipping charge per (seller, brand) group. <see cref="Speed"/>, <see cref="Method"/> and <see cref="TaxCents"/> are contract request C8 (accepted by the portal, not merged yet):
+/// One shipping charge per (seller, brand) group. <see cref="Speed"/>, <see cref="Method"/> and <see cref="TaxCents"/> are contract request C8 (merged by the portal, decision M3-37):
 /// they are sent only when <c>Portal:PerGroupShipping</c> is on, and omitted (null) otherwise.
 /// </summary>
 public sealed record ShippingChargeRequest(Guid SellerId, Guid BrandId, long AmountCents, string? Speed = null, string? Method = null, long? TaxCents = null);
 public sealed record LocalDeliveryRequest(Guid SellerId, Guid BrandId, string Method, Guid WindowId, string Date);
 public sealed record CreateOrderRequest(string MarketplaceOrderId, DateTimeOffset PlacedAt, string Currency, PortalBuyer Buyer, PortalAddress ShippingAddress,
     string ShippingMethod, string ShippingSpeed, string? GiftMessage, IReadOnlyList<OrderLineRequest> Lines, IReadOnlyList<ShippingChargeRequest> Shipping,
-    IReadOnlyList<LocalDeliveryRequest>? Deliveries = null);
+    IReadOnlyList<LocalDeliveryRequest>? Deliveries = null)
+{
+    public string Currency { get; init; } = Currency.Trim().ToUpperInvariant();
+}
 public sealed record SellerOrderRef(Guid SellerOrderId, string Number, Guid SellerId, Guid BrandId, string Status, bool Oversold, long TotalCents, long FeeCents, long NetCents);
 public sealed record CreateOrderResponse(bool Created, IReadOnlyList<SellerOrderRef> Orders);
 
@@ -128,11 +131,21 @@ public static class PaymentKinds
         NoShowFee = "booking_no_show_fee", ExtraCharge = "booking_extra_charge";
 }
 public sealed record PaymentCapturedData(string Kind, string? MarketplaceOrderId, string? MarketplaceBookingId, string? SellerOrderNumber,
-    string PaymentRef, string Currency, long? AmountCents = null, DateTimeOffset? CapturedAt = null);
+    string PaymentRef, string Currency, long? AmountCents = null, DateTimeOffset? CapturedAt = null)
+{
+    /// <summary>ISO 4217 in upper case, whatever the caller held (Stripe says "usd"; the portal refuses anything else with 422).</summary>
+    public string Currency { get; init; } = Currency.Trim().ToUpperInvariant();
+}
 public sealed record RefundProcessedData(string RefundId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
-    long AmountCents, long? ShippingCents = null, string? Currency = null, string? Reason = null);
+    long AmountCents, long? ShippingCents = null, string? Currency = null, string? Reason = null)
+{
+    public string? Currency { get; init; } = Currency?.Trim().ToUpperInvariant();
+}
 public sealed record DisputeData(string DisputeId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
-    long AmountCents, string Status, long? FeeCents = null, string? Currency = null, string? Reason = null, DateTimeOffset? EvidenceDueBy = null, DateTimeOffset? CreatedAt = null);
+    long AmountCents, string Status, long? FeeCents = null, string? Currency = null, string? Reason = null, DateTimeOffset? EvidenceDueBy = null, DateTimeOffset? CreatedAt = null)
+{
+    public string? Currency { get; init; } = Currency?.Trim().ToUpperInvariant();
+}
 /// <summary><see cref="EventId"/> is ours, stored in our outbox before sending (the portal dedupes on it).</summary>
 public sealed record PaymentEventRequest(string EventId, string Type, object Data);
 public sealed record PaymentEventResponse(string Status, JsonElement? Result);

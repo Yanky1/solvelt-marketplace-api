@@ -5,7 +5,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Checkout;
 
 /// <summary>
-/// M3's part of deleting an account (M1's <see cref="IAccountEraser"/>, decision M3-37; orchestrator review). The buyer's orders keep their number, status, totals, tax and lines for accounting,
+/// M3's part of deleting an account (M1's <see cref="IAccountEraser"/>, decision M3-35; orchestrator review). The buyer's orders keep their number, status, totals, tax and lines for accounting,
 /// but lose everything that identifies a person: name, phone, the delivery address with coordinates, the gift message and the relay address (replaced by the tombstone
 /// <c>deleted-&lt;id&gt;@relay.invalid</c>, which can never receive mail). The buyer's carts are deleted. Guest orders (no account) whose guest address equals the deleted account's address lose that
 /// address. It runs before the account's own address is erased, so the guest match still has the address to compare. Idempotent: a second run changes nothing.

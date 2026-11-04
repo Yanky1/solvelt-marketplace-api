@@ -30,7 +30,15 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         if (order.Status != OrderStatus.Paid) return OutboxResult.Delivered();   // already placed, or failed and refunded: nothing left to do
 
         PortalResult<CreateOrderResponse> result;
-        try { result = await portal.CreateOrderAsync(BuildRequest(order, portalOptions.Value.PerGroupShipping), ct); }
+        CreateOrderRequest request;
+        try { request = BuildRequest(order, portalOptions.Value.PerGroupShipping); }
+        catch (InvalidShippingException ex)
+        {
+            // never sent: the portal would refuse it with a 422 and nothing would be created. The order stays paid and the message dies where a person sees it (the speeds we quote are always in the enum, so this is a bug alarm).
+            log.LogError("Order {Number}: {Reason}; not sent to the portal", order.Number, ex.Message);
+            return OutboxResult.Dead("invalid_shipping_speed");
+        }
+        try { result = await portal.CreateOrderAsync(request, ct); }
         catch (PortalUnavailableException) { return OutboxResult.Retry("portal_unavailable"); }
         catch (PortalNotConfiguredException) { return OutboxResult.Retry("portal_not_configured"); }
 
@@ -148,19 +156,41 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
 /// portal's total has no field for it. With the switch on (the portal merged C8): every <c>shipping[]</c> entry carries its own speed and method and its own <c>taxCents</c>, and no
 /// line tax is touched. Flipping the switch changes nothing else.
 /// </summary>
+/// <summary>The stored shipping of an order cannot be expressed in the portal's contract.</summary>
+public sealed class InvalidShippingException(string message) : Exception(message);
+
 public static class IngestMapping
 {
     public static (string Method, string Speed) OrderMethodAndSpeed(IReadOnlyList<OrderGroup> groups)
     {
         var carrier = groups.Where(g => g.DeliveryKind == "carrier").ToList();
-        var speed = carrier.Select(g => g.ShippingSpeed!).OrderBy(SpeedRank).FirstOrDefault() ?? "standard";
+        var speed = carrier.Select(g => ValidSpeed(g.ShippingSpeed)).OrderBy(SpeedRank).FirstOrDefault() ?? "standard";
         return (carrier.Count == 0 ? "local" : char.ToUpperInvariant(speed[0]) + speed[1..], speed);
     }
 
+    /// <summary>The speeds the portal accepts in <c>shipping[].speed</c> (C8). Anything else is a 422 there, so it is never sent.</summary>
+    public static readonly IReadOnlyList<string> Speeds = ["standard", "expedited", "overnight"];
+    public const int MaxMethodLength = 80;
+
+    public static string ValidSpeed(string? speed)
+    {
+        var s = speed?.Trim().ToLowerInvariant();
+        return s is not null && Speeds.Contains(s) ? s : throw new InvalidShippingException($"unknown shipping speed '{speed}'");
+    }
+
+    /// <summary>
+    /// One entry per group. Per group (C8): the speed from the enum, a method of at most 80 characters, and <c>taxCents</c> (never negative, and only with an amount above zero: the portal refuses
+    /// a tax on free shipping, so then the field is left out).
+    /// </summary>
     public static ShippingChargeRequest ShippingCharge(OrderGroup g, bool perGroup)
-        => !perGroup ? new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents)
-         : g.DeliveryKind == "local" ? new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents, "standard", "local", g.ShippingTaxCents)
-         : new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents, g.ShippingSpeed, char.ToUpperInvariant(g.ShippingSpeed![0]) + g.ShippingSpeed[1..], g.ShippingTaxCents);
+    {
+        if (!perGroup) return new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents);
+        var speed = g.DeliveryKind == "local" ? "standard" : ValidSpeed(g.ShippingSpeed);
+        var method = g.DeliveryKind == "local" ? "local" : char.ToUpperInvariant(speed[0]) + speed[1..];
+        if (method.Length > MaxMethodLength) method = method[..MaxMethodLength];
+        if (g.ShippingTaxCents < 0) throw new InvalidShippingException("negative shipping tax");
+        return new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents, speed, method, g.ShippingCents > 0 ? g.ShippingTaxCents : null);
+    }
 
     /// <summary>The shipping tax each line carries to the portal: all of it folded in while the interim mapping is on, none once the portal has its own field.</summary>
     public static long[] LineShippingTax(OrderGroup g, IReadOnlyList<OrderLine> lines, bool perGroup)

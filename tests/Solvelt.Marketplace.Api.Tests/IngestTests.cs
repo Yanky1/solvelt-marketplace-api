@@ -16,6 +16,10 @@ namespace Solvelt.Marketplace.Api.Tests;
 
 public sealed class IngestTests : OrderFlowBase
 {
+    // These tests describe the INTERIM mapping (decision M3-09: one order-level speed, shipping tax folded into line tax), which stays as the emergency path now that Portal:PerGroupShipping is ON by default
+    // (M3-37). They run with the switch off, exactly as written; the switch-on contract is in PerGroupShippingTests.
+    public IngestTests() : base(new Dictionary<string, string?> { ["Portal:PerGroupShipping"] = "false" }) { }
+
     [Fact]
     public async Task A_paid_order_is_ingested_stored_per_seller_order_and_captured_once_per_seller_order()
     {

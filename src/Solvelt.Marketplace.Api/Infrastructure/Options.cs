@@ -42,10 +42,11 @@ public sealed class PortalOptions
     /// </summary>
     public bool PerSellerOrderDisputes { get; set; } = true;
     /// <summary>
-    /// Contract request C8 (portal accepted, bundled with C7, not merged yet): per seller order shipping speed and the tax on shipping as their own fields of <c>shipping[]</c>.
-    /// Off (interim): one order-level speed (the fastest chosen) and tax on shipping folded into line tax. Turning it on is this one switch; see <c>IngestMapping</c>.
+    /// Contract request C8 (merged by the portal in 3ed6c8b, decision M3-37): per seller order shipping speed (standard, expedited or overnight), method (at most 80 characters) and the tax on shipping
+    /// as their own fields of <c>shipping[]</c>. ON by default. Off (an emergency switch, or a portal older than C8): one order-level speed (the fastest chosen) and tax on shipping folded into line
+    /// tax; see <c>IngestMapping</c>.
     /// </summary>
-    public bool PerGroupShipping { get; set; }
+    public bool PerGroupShipping { get; set; } = true;
     /// <summary>Total attempts per call including the first.</summary>
     public int MaxAttempts { get; set; } = 5;
     /// <summary>Backoff base in milliseconds: base x 2^(attempt-1), jittered, capped at 30 s.</summary>
