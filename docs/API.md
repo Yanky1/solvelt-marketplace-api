@@ -206,6 +206,22 @@ All bodies are JSON. The web server holds the session token in its own HttpOnly 
 
 Rules: email is trimmed and lower-cased; password 10 to 128 characters and not the email address; display name 1 to 60 characters. The token returned by sign-in is 43 characters of base64url, shown once. Sessions end after 7 idle days (sliding) or 30 days in all. Sign-in is **delayed, not locked** (decision M1-63): six failures per address with no delay, then the next attempt must wait 1 s, 2 s, 4 s ... up to 15 minutes, the same for a known and an unknown address; a right password or a password reset clears it; each client IP may fail 20 times an hour across all addresses. Auth request bodies are limited to 16 KB (`413`). Links in mails open `<Marketplace:PublicBaseUrl>/verify-email?token=...` and `/reset-password?token=...` (24 h and 60 min; the token is `<32 hex>.<43 base64url>` and is opaque to the web: pass it through unchanged); the pages must POST the token (a mail scanner opening the link then cannot use it up). The buyer is known to the portal only as a relay address and a name like "Jane B." (decision M1-55 and the PII table).
 
+## Account (buyers)
+All endpoints need `Authorization: Bearer <token>` (`401 unauthorized` otherwise) and answer `Cache-Control: no-store, private`.
+
+| Endpoint | Body | Answers |
+|---|---|---|
+| `GET /api/v1/account/profile` | none | `200 { id, displayName, email, phone }` |
+| `PUT /api/v1/account/profile` | `{ displayName, phone? }` | `200` the profile; `422 validation_failed` with `errors` per field |
+| `GET /api/v1/account/addresses` | none | `200 [address]`, default first then oldest |
+| `POST /api/v1/account/addresses` | `{ fullName, line1, line2?, city, region?, postalCode, country, phone?, lat?, lng?, isDefault? }` | `201` the address; `422`; `409 too_many_addresses` (20); the first address is always the default |
+| `GET/PUT/DELETE /api/v1/account/addresses/{id}` | as above for PUT | `200`/`204`; `404` for another buyer's, unknown or malformed ids; deleting the default promotes the oldest remaining |
+| `POST /api/v1/account/addresses/{id}/default` | none | `200` the address, now the only default |
+| `POST /api/v1/account/password` | `{ currentPassword, newPassword }` | `204`; `403 reauthentication_required` (sign in again within 10 minutes: call `/auth/reauthenticate`, then repeat); `401 invalid_credentials`; `422` weak password; `429` with `Retry-After`; other sessions are revoked |
+| `POST /api/v1/account/delete` | `{ password }` | `204`; same errors as the password change; the session and every other one stop at once, personal data is erased by a job shortly after |
+
+US addresses (`country: "US"`) need a 5 or 9 digit ZIP and a state code; other countries a plain postal code. `lat` and `lng` come together or not at all.
+
 ## Cart (M3)
 `/api/v1/cart`, public rate limit. The owner is the signed-in buyer (`Authorization: Bearer`) or a guest (`X-Solvelt-Cart-Token`). A guest cart is created by the first add; the answer carries `cartToken` **once** (43 base64url characters; the web server keeps it in its own HttpOnly cookie). An unknown guest token never becomes a cart id: it gets a fresh cart and a fresh token. A present but invalid Bearer is `401` (never a silent guest cart).
 
