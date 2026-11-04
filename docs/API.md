@@ -12,6 +12,8 @@ Rate limited endpoints answer `429 { code: "rate_limited" }` with `Retry-After`.
 | GET | `/api/v1/catalog/listings` | none | Paged, filterable, sortable listing cards |
 | GET | `/api/v1/catalog/suggest` | none | Autocomplete: listing, brand and category suggestions |
 | GET | `/api/v1/catalog/listings/{slugOrId}` | none | One listing in full |
+| GET | `/api/admin/outbox` | admin key | Outbox counts and recent messages (never payloads); see Operations |
+| POST | `/api/admin/outbox/{id}/retry` | admin key | Re-queue a dead message; see Operations |
 | GET | `/api/v1/ping` | none | Public rate limit bucket smoke endpoint (removed when the catalog endpoints land) |
 
 ## Headers the web server (BFF) must send
@@ -125,3 +127,14 @@ Listings come first (best matches, visible only), then at most three brands and 
 ### Portal events that change the catalog
 `listing.upserted` and `listing.unlisted` (`data: { listingId, version }`) arrive on `POST /api/portal/webhooks`: an upsert records that a newer version exists and the sync job fetches it; an unlist hides the listing immediately and keeps it hidden against any snapshot of that version or older.
 
+## Operations (outbox)
+For operators and the future staff area (M7), not for browsers. Send `X-Solvelt-Admin-Key: <Admin:ApiKey>` (env `Admin__ApiKey`, at least 32 characters, its own key). Without a configured key the endpoints answer `404`; a missing or wrong key is `401 { code: "unauthorized" }`. Rate limited like the auth endpoints.
+
+### `GET /api/admin/outbox?status=pending|delivered|dead&limit=1..200`
+`200 { counts: { pending, delivered, dead }, messages: [{ id, type, status, attempts, nextAttemptAt, lastError, createdAt, deliveredAt, deadAt }] }`, newest first (default 50). `lastError` is a short code (for example `portal_422_exceeds_sale`, `email_not_configured`, an exception type). The payload is never returned. An unknown `status` is `400 invalid_status`.
+
+### `POST /api/admin/outbox/{id}/retry`
+`204`: a dead message goes back to pending with 0 attempts and is due now. `409 not_retryable`: the message is not dead, or its payload was already purged (30 days after dead-lettering). `404`: unknown id.
+
+### Delivery rules
+At least once. A failed message is retried after 30 s, 60 s, 120 s ... doubling, capped at 1 h, and is dead after 8 failures (or at once when waiting cannot help, such as a portal `422`). Configuration: `Outbox:MaxAttempts`, `BackoffSeconds`, `MaxBackoffSeconds`, `LeaseSeconds`, `BatchSize`, `PollSeconds`, `DeliveredPayloadRetentionDays`, `DeadPayloadRetentionDays`, `RowRetentionDays`.

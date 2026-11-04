@@ -33,6 +33,8 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Portal__InboundSecret` | yes, >= 32 chars | Signs our calls to the portal |
 | `Portal__WebhookSecret` | yes, >= 32 chars, must differ from the above | Verifies portal webhooks |
 | `Web__ForwardingKey` | yes, >= 32 chars, must differ from both portal secrets | Verifies the end-user IP the web server forwards (see docs/API.md) |
+| `Admin__ApiKey` | no (unset disables `/api/admin/*`); when set >= 32 chars, must differ from every other key | Key for the operations endpoints (outbox list/retry) |
+| `Outbox__MaxAttempts`, `Outbox__BackoffSeconds`, `Outbox__MaxBackoffSeconds`, `Outbox__LeaseSeconds` | no | Defaults 8, 30, 3600, 120 (decision M1-47) |
 | `Marketplace__RelayDomain` | yes | Domain of the buyer relay emails |
 | `Marketplace__PublicBaseUrl` | yes | Public website URL (links in emails) |
 | `Database__Provider` | yes, `Postgres` | `Sqlite` is for dev/tests only |
