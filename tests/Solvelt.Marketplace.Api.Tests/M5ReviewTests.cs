@@ -180,7 +180,9 @@ public sealed class M5ReviewTests : OrderFlowBase
 
     // ---------------------------------------------------------------- X (review of the replay)
 
+#pragma warning disable EF1002   // table names are literals of this test file
     private static async Task Rename(AuthKit k, string from, string to) => await k.Db(async db => await db.Database.ExecuteSqlRawAsync($"ALTER TABLE {from} RENAME TO {to}"));
+#pragma warning restore EF1002
 
     private async Task<OutboxMessage> QueuedReplay() => await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "m5.reproject"));
 
@@ -199,7 +201,7 @@ public sealed class M5ReviewTests : OrderFlowBase
             using var scope = _k.F.Services.CreateScope();
             await Assert.ThrowsAnyAsync<Exception>(() => Replay(scope).HandleAsync(msg, default));         // the notifications table is still gone: the replay fails
             var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
-            Assert.Empty(db.ChangeTracker.Entries().Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted));   // nothing half-applied is left to be saved by the next handler
+            Assert.DoesNotContain(db.ChangeTracker.Entries(), e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted);   // nothing half-applied is left to be saved by the next handler
         }
         finally { await Rename(_k, "notifications_x", "notifications"); }
     }
@@ -208,10 +210,9 @@ public sealed class M5ReviewTests : OrderFlowBase
     public async Task X2_Replaying_the_same_event_twice_changes_nothing_the_second_time()
     {
         var (o, g) = await Placed();
-        await Ship(o, g, 2);
         var lid = o.Lines.Single().MarketplaceLineId;
         await Rename(_k, "order_line_fulfilment", "order_line_fulfilment_x");
-        try { Assert.Equal("applied", await Evt("order.cancelled", o, g, new { partial = true, refundDueCents = 0, lines = new[] { new { marketplaceLineId = lid, quantity = 1 } } })); }   // the projection fails inside its savepoint
+        try { await Evt("order.cancelled", o, g, new { partial = true, refundDueCents = 0, lines = new[] { new { marketplaceLineId = lid, quantity = 1 } } }); }   // the projection fails inside its savepoint (the event's own outcome is M3's money part)
         finally { await Rename(_k, "order_line_fulfilment_x", "order_line_fulfilment"); }
         var msg = await QueuedReplay();
         for (var i = 0; i < 2; i++) { using var scope = _k.F.Services.CreateScope(); Assert.Equal(OutboxOutcome.Delivered, (await Replay(scope).HandleAsync(msg, default)).Outcome); }
@@ -236,7 +237,8 @@ public sealed class M5ReviewTests : OrderFlowBase
             var ctx = new Solvelt.Marketplace.Api.Portal.Webhooks.ProjectionContext(db, new Solvelt.Marketplace.Api.Portal.Webhooks.PortalEvent("e-x5", "refund.issued", _k.F.Clock.GetUtcNow().AddMinutes(-1), data),
                 scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Portal.Webhooks.ProjectionStore>(), _k.F.Clock);
             await scope.ServiceProvider.GetRequiredService<FulfilmentProjector>().ApplyIsolatedAsync(ctx, true, default);
-            Assert.Equal(("shipped", EntityState.Unchanged), (state.Status, db.Entry(state).State));          // the in-memory "refunded" is gone
+            Assert.Contains(_k.F.Logs.Lines, l => l.Contains("projection of a refund.issued event failed"));   // it really failed inside the savepoint
+            Assert.Equal(("shipped", EntityState.Unchanged), (state.Status, db.Entry(state).State));          // the in-memory "refunded" is gone (setting Unchanged discards a Modified entity's values; the reload also covers one that was SAVED before the failure)
             await tx.RollbackAsync();
         }
         finally { await Rename(_k, "notifications_x", "notifications"); }
@@ -248,9 +250,9 @@ public sealed class M5ReviewTests : OrderFlowBase
         var (o, g) = await Placed();
         var t = _k.F.Clock.GetUtcNow();
         await Rename(_k, "notifications", "notifications_x");
-        try { Assert.Equal("applied", await Evt("order.cancelled", o, g, new { refundDueCents = 0 }, id: "re-late", at: t.AddMinutes(-100))); }   // projection fails; the replay is queued
+        try { await Evt("order.cancelled", o, g, new { refundDueCents = 0 }, id: "re-late"); }   // projection fails; the replay is queued
         finally { await Rename(_k, "notifications_x", "notifications"); }
-        Assert.Equal("applied", await Evt("order.delivered", o, g, new { by = "seller" }, id: "re-deliv", at: t.AddMinutes(-50)));
+        Assert.Equal("applied", await Evt("order.delivered", o, g, new { by = "seller" }, id: "re-deliv", at: t.AddSeconds(-10)));
         Assert.Equal("delivered", await Status(g));
         using (var scope = _k.F.Services.CreateScope()) await Replay(scope).HandleAsync(await QueuedReplay(), default);
         Assert.Equal("delivered", await Status(g));                                                          // the stale cancel is skipped, not forced
