@@ -30,6 +30,11 @@ public sealed class PortalOptions
     /// (it would book only its first seller order). On: those events are released and sent, one per seller order. Single-seller disputes are not affected.
     /// </summary>
     public bool PerSellerOrderDisputes { get; set; }
+    /// <summary>
+    /// Contract request C8 (portal accepted, bundled with C7, not merged yet): per seller order shipping speed and the tax on shipping as their own fields of <c>shipping[]</c>.
+    /// Off (interim): one order-level speed (the fastest chosen) and tax on shipping folded into line tax. Turning it on is this one switch; see <c>IngestMapping</c>.
+    /// </summary>
+    public bool PerGroupShipping { get; set; }
     /// <summary>Total attempts per call including the first.</summary>
     public int MaxAttempts { get; set; } = 5;
     /// <summary>Backoff base in milliseconds: base x 2^(attempt-1), jittered, capped at 30 s.</summary>

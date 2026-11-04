@@ -20,7 +20,11 @@ public sealed record PortalAddress(string Name, string Line1, string? Line2, str
 /// <summary>A line names its product by ids, never by SKU (CONTRACT.md §3).</summary>
 public sealed record OrderLineRequest(string MarketplaceLineId, Guid SellerId, Guid BrandId, Guid ProductId, Guid? VariantId,
     int Quantity, long UnitPriceCents, long DiscountCents = 0, long TaxCents = 0);
-public sealed record ShippingChargeRequest(Guid SellerId, Guid BrandId, long AmountCents);
+/// <summary>
+/// One shipping charge per (seller, brand) group. <see cref="Speed"/>, <see cref="Method"/> and <see cref="TaxCents"/> are contract request C8 (accepted by the portal, not merged yet):
+/// they are sent only when <c>Portal:PerGroupShipping</c> is on, and omitted (null) otherwise.
+/// </summary>
+public sealed record ShippingChargeRequest(Guid SellerId, Guid BrandId, long AmountCents, string? Speed = null, string? Method = null, long? TaxCents = null);
 public sealed record LocalDeliveryRequest(Guid SellerId, Guid BrandId, string Method, Guid WindowId, string Date);
 public sealed record CreateOrderRequest(string MarketplaceOrderId, DateTimeOffset PlacedAt, string Currency, PortalBuyer Buyer, PortalAddress ShippingAddress,
     string ShippingMethod, string ShippingSpeed, string? GiftMessage, IReadOnlyList<OrderLineRequest> Lines, IReadOnlyList<ShippingChargeRequest> Shipping,
