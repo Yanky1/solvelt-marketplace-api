@@ -41,11 +41,12 @@ public static class CatalogEndpoints
         g.MapGet("/listings", Listings);
         g.MapGet("/suggest", Suggest);
         g.MapGet("/listings/{slugOrId}", Listing);
+        g.MapStorefronts();
         return app;
     }
 
     /// <summary>Visible = last known portal state Active, not unlisted, seller active (CONTRACT.md §2).</summary>
-    private static IQueryable<CatalogListing> Visible(MarketplaceDb db)
+    internal static IQueryable<CatalogListing> Visible(MarketplaceDb db)
         => db.CatalogListings.AsNoTracking().Where(l => l.Visible && db.CatalogSellers.Any(s => s.Id == l.SellerId && s.Active));
 
     private static async Task<IResult> Categories(MarketplaceDb db, CancellationToken ct)
@@ -144,11 +145,22 @@ public static class CatalogEndpoints
         return (rows, more && rows.Count > 0 ? new ListingCursor("relevance", ListingCursor.KeyOf("relevance", rows[^1], score[rows[^1].Id]), rows[^1].Id).Encode() : null);
     }
 
+    /// <summary>
+    /// A listing that was shown and has been unlisted, archived or removed is 410 (permanent), so search engines drop it. A listing whose seller is
+    /// suspended, a draft, a stub we only heard an event about, and anything unknown are all 404 with no hint they exist.
+    /// </summary>
+    private static async Task<bool> IsGone(MarketplaceDb db, string slugOrId, CancellationToken ct)
+    {
+        var q = db.CatalogListings.AsNoTracking().Where(l => !l.IsStub && !l.Visible && db.CatalogSellers.Any(s => s.Id == l.SellerId && s.Active));
+        q = Guid.TryParse(slugOrId, out var id) ? q.Where(l => l.Id == id) : q.Where(l => l.Slug == slugOrId);
+        return await q.AnyAsync(l => (l.UnlistedVersion != null && l.UnlistedVersion >= l.Version) || l.Status == "Archived" || l.Status == "Removed", ct);
+    }
+
     private static async Task<IResult> Listing(MarketplaceDb db, string slugOrId, CancellationToken ct)
     {
         var q = Visible(db).Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).AsSplitQuery();
         var l = Guid.TryParse(slugOrId, out var id) ? await q.FirstOrDefaultAsync(x => x.Id == id, ct) : await q.FirstOrDefaultAsync(x => x.Slug == slugOrId, ct);
-        if (l is null) return Problems.NotFound("Listing not found.");
+        if (l is null) return await IsGone(db, slugOrId, ct) ? Problems.Gone("This listing is no longer available.") : Problems.NotFound("Listing not found.");
         var brand = await db.CatalogBrands.AsNoTracking().FirstAsync(b => b.Id == l.BrandId, ct);
         var seller = await db.CatalogSellers.AsNoTracking().FirstAsync(s => s.Id == l.SellerId, ct);
         var categories = await db.CatalogCategories.AsNoTracking().ToDictionaryAsync(c => c.Id, ct);

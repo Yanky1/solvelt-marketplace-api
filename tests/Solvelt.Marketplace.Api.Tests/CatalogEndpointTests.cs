@@ -219,7 +219,6 @@ public class CatalogEndpointTests : IAsyncLifetime
 
     [Theory]
     [InlineData("corner-shop-coffee-mug")]       // seller suspended
-    [InlineData("retired-spice-gift-set")]       // status left Active
     [InlineData("no-such-listing")]
     [InlineData("%27%3B%20DROP%20TABLE%20catalog_listings%3B--")]
     [InlineData("00000000-0000-0000-0000-000000000000")]
@@ -227,11 +226,17 @@ public class CatalogEndpointTests : IAsyncLifetime
         => Assert.Equal("not_found", Code(await Get($"{Base}/listings/{slugOrId}", HttpStatusCode.NotFound)));
 
     [Fact]
+    public async Task A_listing_whose_status_left_Active_is_410_gone_by_slug_and_by_id()      // was a 404 in M1; the SEO brief asks for 410 (M2-07)
+    {
+        Assert.Equal("gone", Code(await Get($"{Base}/listings/retired-spice-gift-set", HttpStatusCode.Gone)));
+        Assert.Equal("gone", Code(await Get($"{Base}/listings/{ListingId("retired-spice-set")}", HttpStatusCode.Gone)));
+    }
+
+    [Fact]
     public async Task A_hidden_listings_id_is_a_404_too_not_a_hint_that_it_exists()
     {
-        var hiddenId = ListingId("closed-corner-mug");
+        var hiddenId = ListingId("closed-corner-mug");                  // its seller is suspended: still no hint
         Assert.Equal("not_found", Code(await Get($"{Base}/listings/{hiddenId}", HttpStatusCode.NotFound)));
-        Assert.Equal("not_found", Code(await Get($"{Base}/listings/{ListingId("retired-spice-set")}", HttpStatusCode.NotFound)));
     }
 
     // ---------- cross-cutting ----------

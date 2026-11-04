@@ -10,6 +10,9 @@ Rate limited endpoints answer `429 { code: "rate_limited" }` with `Retry-After`.
 | GET | `/api/v1/catalog/categories` | none | Category tree with visible-listing counts; see Catalog |
 | GET | `/api/v1/catalog/brands` | none | Brands that have visible listings |
 | GET | `/api/v1/catalog/listings` | none | Paged, filterable, sortable listing cards |
+| GET | `/api/v1/catalog/brands/{slugOrId}` | none | Brand storefront: seller, count, category tree |
+| GET | `/api/v1/catalog/sellers/{id}` | none | Seller storefront: brands and category tree |
+| GET | `/api/v1/catalog/sitemap/{kind}` | none | Paged keys + last-modified for sitemaps (`listings`, `categories`, `brands`, `sellers`) |
 | GET | `/api/v1/catalog/suggest` | none | Autocomplete: listing, brand and category suggestions |
 | GET | `/api/v1/catalog/listings/{slugOrId}` | none | One listing in full |
 | GET | `/api/admin/outbox` | admin key | Outbox counts and recent messages (never payloads); see Operations |
@@ -56,7 +59,7 @@ against the signed body, then the projection (one database transaction).
 
 ## Catalog (public, anonymous, read-only)
 All four endpoints use the `public` rate limit (headers: see "Headers the web server must send"). Money is whole **cents** (`long`), currency `USD`; times are UTC ISO 8601.
-Only **visible** listings are ever returned (CONTRACT.md §2): last known portal status `Active`, seller active, and not unlisted. A listing that is not visible, or does not exist, is a `404 not_found`, with no hint which.
+Only **visible** listings are ever returned (CONTRACT.md §2): last known portal status `Active`, seller active, and not unlisted. A listing that is not visible, or does not exist, is a `404 not_found`, with no hint which, with one exception: **a listing that was public and has been unlisted, archived or removed answers `410 { "code": "gone" }`** (by slug or id), so search engines drop it quickly. A suspended seller's listings, drafts, listings we only heard an event about, and unknown ids stay `404`. Slugs never change (M1-32), so there is nothing to redirect except `/…/{id}` to the slug: the detail response by id carries the canonical `slug`.
 **Unlisting is immediate**: a `listing.unlisted` portal event hides a listing at once, so do not cache catalog responses for longer than a few seconds.
 Images are an id plus dimensions: the bytes come from the portal and are served by our own CDN path (a later workstream). Data comes from the portal catalog feed (provisional request C1; it also carries optional per-listing `searchTerms`, see M2-01); until it exists the API serves a seed of about 40 listings in Development.
 
@@ -119,6 +122,21 @@ With `facets=true` the response also has (disjunctive: each facet is counted wit
 ```
 `price` is `null`/`null` when nothing matches; counts are listings (a listing with two values of an attribute counts once for each). Rating facets arrive with M6.
 `priceFromCents`/`priceToCents` are the range over the variants that can be bought now (over all variants when everything is sold out); `compareAtFromCents` is the lowest struck-through price above the price, or `null`; `available` is false when every variant is sold out (the listing is still shown); `image` is `null` when there is none.
+
+### `GET /api/v1/catalog/brands/{slugOrId}` and `GET /api/v1/catalog/sellers/{id}`
+Storefront data for the brand and seller pages; `404` when the brand or seller is unknown, suspended, or has no visible listing. Listings come from `GET /listings?brand=` / `?seller=` (which also takes every filter, facets and cursors).
+```json
+{ "id": "…", "slug": "challah-corner", "name": "Challah Corner", "logoImageId": "…", "seller": { "id": "…", "displayName": "Mazel Bakery" }, "listingCount": 3,
+  "categories": [ { "id": "…", "slug": "food-drink", "name": "Food & Drink", "listingCount": 3, "children": [ … ] } ] }
+{ "id": "…", "displayName": "Mazel Bakery", "listingCount": 11, "brands": [ { "id": "…", "slug": "…", "name": "…", "seller": { … }, "logoImageId": "…", "listingCount": 3 } ], "categories": [ … ] }
+```
+
+### `GET /api/v1/catalog/sitemap/{kind}?page=&pageSize=`
+`kind` is `listings` (key = slug, last modified = the portal's updated time), `categories` and `brands` (key = slug; last modified = the newest update among their visible listings, a category counts its whole subtree) or `sellers` (key = id; same rule). Only entries with at least one visible listing appear, so an unlisted listing leaves at once. `pageSize` 1 to 5000 (default 1000), ordered by id so pages are stable; anything else `400`, an unknown kind `404`.
+```json
+{ "kind": "listings", "page": 1, "pageSize": 1000, "total": 40, "totalPages": 1, "items": [ { "key": "classic-braided-challah", "lastModified": "2026-09-04T09:00:00+00:00" } ] }
+```
+The web tier builds `sitemap.xml` (an index of `totalPages` child sitemaps per kind) from this; it must not cache the answers for more than a few seconds beyond what its own sitemap cache needs.
 
 ### `GET /api/v1/catalog/suggest?q=&limit=`
 Autocomplete for the header search box. Below two characters (after normalising) the answer is an empty list. `limit` is 1 to 10 (default 8, else `400`); `q` at most 100 characters.

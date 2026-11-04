@@ -29,8 +29,8 @@ public class CatalogEventTests
         var res = await Event(f, c, "listing.unlisted", Babka, v);
         Assert.Equal(("applied", HttpStatusCode.OK), (StatusOf(res.Json), res.Status));
         Assert.False(await InList(c));                                                             // gone from lists ...
-        await Json(c, $"/api/v1/catalog/listings/{Slug}", HttpStatusCode.NotFound);               // ... and from the detail page
-        await Json(c, $"/api/v1/catalog/listings/{Babka}", HttpStatusCode.NotFound);
+        await Json(c, $"/api/v1/catalog/listings/{Slug}", HttpStatusCode.Gone);                   // ... and from the detail page (410: it was public, M2-07)
+        await Json(c, $"/api/v1/catalog/listings/{Babka}", HttpStatusCode.Gone);
         Assert.False(Row(f, Babka).Visible);
         Assert.Equal(40 - 1, (await Json(c, "/api/v1/catalog/listings")).GetProperty("total").GetInt32());
     }
