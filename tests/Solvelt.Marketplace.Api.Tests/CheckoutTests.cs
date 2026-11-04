@@ -143,6 +143,7 @@ public sealed class CheckoutTests : IDisposable
         Assert.Null(old.ActiveKey);
         Assert.Equal(first.GetProperty("orderNumber").GetString(), old.Number);
         Assert.Equal(2, Stripe.Intents.Count);
+        while (await _k.Dispatch() > 0) { }                                                 // the cancel goes through the outbox
         Assert.Single(Stripe.Intents, i => i.Cancelled);
         Assert.True(Stripe.Intents.Single(i => i.Cancelled).Id == old.PaymentIntentId);
         // the original choice again is a third, new order (the old pending key was released)

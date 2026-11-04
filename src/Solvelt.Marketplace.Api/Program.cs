@@ -81,7 +81,9 @@ builder.Services.AddHttpClient<StripeHttpProvider>();
 builder.Services.AddScoped<IPaymentProvider>(sp =>
     !string.IsNullOrWhiteSpace(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<StripeOptions>>().Value.SecretKey) ? sp.GetRequiredService<StripeHttpProvider>()
     : devLike ? sp.GetRequiredService<FakePaymentProvider>() : new UnconfiguredPaymentProvider());
+builder.Services.AddSingleton<CheckoutHooks>();
 builder.Services.AddScoped<CheckoutService>();
+builder.Services.AddScoped<IOutboxHandler, StripeCancelHandler>();
 builder.Services.AddScoped<RefundService>();
 builder.Services.AddScoped<OrderMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<OrderWorker>();

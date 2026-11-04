@@ -100,21 +100,32 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         return outcome;
     }
 
-    /// <summary>Our order for an intent: both ids must agree (the intent id we stored AND the order number we put in its metadata), never one alone.</summary>
+    /// <summary>
+    /// Our order for an intent: both ids must agree (the intent id we STORED and the order number we put in its metadata), never one alone and never adopted from the event.
+    /// An order that is not stored yet, or has no intent stored yet, is a young race (the checkout request is about to save it): a 5xx makes Stripe send the event again. An event older than
+    /// <see cref="NotYetKnownGrace"/> that still matches nothing never will: it is acknowledged and alarmed (a person looks), instead of looping 5xx for Stripe's three days.
+    /// </summary>
     private async Task<MarketplaceOrder?> FindOrderAsync(StripeEnvelope evt, CancellationToken ct)
     {
         var intentId = evt.Str("id");
         var number = evt.Meta("marketplace_order_id");
         if (intentId is null || number is null) return null;
         var order = await db.Orders.FirstOrDefaultAsync(o => o.Number == number, ct);
-        if (order is null) throw new StripeOrderNotYetKnownException();   // ours by its metadata but not saved yet: 5xx, Stripe retries
-        if (order.PaymentIntentId is null)
+        if (order is null || order.PaymentIntentId is null)
         {
-            // The webhook beat the checkout request that stores the intent id (a payment within milliseconds): adopt it once.
-            await db.Orders.Where(o => o.Id == order.Id && o.PaymentIntentId == null).ExecuteUpdateAsync(s => s.SetProperty(o => o.PaymentIntentId, intentId), ct);
-            order.PaymentIntentId = intentId;
+            if (time.GetUtcNow() - DateTimeOffset.FromUnixTimeSeconds(evt.Created) < NotYetKnownGrace) throw new StripeOrderNotYetKnownException();
+            log.LogError("A Stripe {Type} names order {Number}, which is {What}; the event is older than {Grace} minutes, so it is acknowledged and needs a person", evt.Type, number, order is null ? "unknown (purged?)" : "stored without an intent", NotYetKnownGrace.TotalMinutes);
+            return null;
         }
         return order.PaymentIntentId == intentId ? order : null;
+    }
+
+    public static readonly TimeSpan NotYetKnownGrace = TimeSpan.FromMinutes(10);
+
+    private async Task MailBuyerAsync(Guid accountId, string subject, string body, string dedupe, CancellationToken ct)
+    {
+        var email = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId && a.DeletedAt == null).Select(a => a.Email).FirstOrDefaultAsync(ct);
+        if (email is not null) outbox.EnqueueEmail(new EmailMessage(email, subject, body), "mail:" + dedupe);
     }
 
     private async Task<StripeOutcome> SucceededAsync(StripeEnvelope evt, CancellationToken ct)
@@ -123,16 +134,38 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         if (order is null) return StripeOutcome.Unmatched;
         var amount = evt.Long("amount_received") ?? evt.Long("amount");
         var now = time.GetUtcNow().ToUniversalTime();
-        // Paid is reached once, from any pending-like state: also from superseded or expired, because the money WAS taken.
-        var paid = await db.Orders.Where(o => o.Id == order.Id && (o.Status == OrderStatus.PendingPayment || o.Status == OrderStatus.Superseded || o.Status == OrderStatus.Expired))
+        // Paid is reached once, and only from the pending order: that is the one the buyer was shown and the cart's one payable order.
+        var paid = await db.Orders.Where(o => o.Id == order.Id && o.Status == OrderStatus.PendingPayment)
             .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.Paid).SetProperty(o => o.PaidAt, now).SetProperty(o => o.PaidCents, amount ?? 0).SetProperty(o => o.ActiveKey, (string?)null).SetProperty(o => o.UpdatedAt, now), ct);
-        if (paid == 0) return StripeOutcome.Ignored;   // already paid, placed or failed: a second event changes nothing
+        if (paid == 0)
+        {
+            // Money arrived for an order we had closed (superseded by a newer checkout, or expired): never fulfilled, and not silently kept either. It is refunded in full, automatically,
+            // and the buyer is told (decision M3-18). Anything else (already paid, placed, failed) is a repeat and changes nothing.
+            var status = await db.Orders.AsNoTracking().Where(o => o.Id == order.Id).Select(o => o.Status).FirstAsync(ct);
+            var code = status switch { OrderStatus.Superseded => "superseded_payment", OrderStatus.Expired => "expired_payment", _ => null };
+            if (code is null) return StripeOutcome.Ignored;
+            var late = await db.Orders.Where(o => o.Id == order.Id && o.Status == status)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.Failed).SetProperty(o => o.FailureCode, code).SetProperty(o => o.PaidAt, now).SetProperty(o => o.PaidCents, amount ?? 0).SetProperty(o => o.ActiveKey, (string?)null).SetProperty(o => o.UpdatedAt, now), ct);
+            if (late == 0) return StripeOutcome.Ignored;
+            log.LogWarning("A payment arrived for order {Number}, which was {Status}; it is being refunded in full", order.Number, status);
+            if (amount is > 0)
+            {
+                await refunds.ReserveAsync(order.Id, null, amount.Value, 0, $"fail:{order.Number}", code, false, null, ct);
+                await MailBuyerAsync(order.AccountId, "Your payment for order " + order.Number + " is being refunded",
+                    "You completed a payment for an older version of your checkout (your cart or choices changed afterwards), so we did not place that order. The full amount is being refunded to your card (it can take a few days to show). Your latest checkout is unaffected.\n", $"late:{order.Number}", ct);
+            }
+            return StripeOutcome.Applied;
+        }
         if (amount != order.TotalCents || !string.Equals(evt.Str("currency"), order.Currency, StringComparison.OrdinalIgnoreCase))
         {
-            // Stripe took a different amount than the order we priced: never fulfil it. Fail and give back what was taken.
+            // Stripe took a different amount than the order we priced: never fulfil it. Fail, give back what was taken, tell the buyer.
             log.LogError("Payment for order {Number} does not match its total (received {Received}, expected {Expected})", order.Number, amount, order.TotalCents);
             await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, OrderStatus.Failed).SetProperty(o => o.FailureCode, "amount_mismatch"), ct);
-            if (amount is > 0) await refunds.ReserveAsync(order.Id, null, amount.Value, 0, $"fail:{order.Number}", "amount_mismatch", false, null, ct);
+            if (amount is > 0)
+            {
+                await refunds.ReserveAsync(order.Id, null, amount.Value, 0, $"fail:{order.Number}", "amount_mismatch", false, null, ct);
+                await MailBuyerAsync(order.AccountId, "We couldn't place your order " + order.Number, "The amount charged did not match your order, so we did not place it. The full amount is being refunded to your card (it can take a few days to show). Please try again.\n", $"mismatch:{order.Number}", ct);
+            }
             return StripeOutcome.Applied;
         }
         outbox.Enqueue(OrderIngestHandler.Type, new OrderIngestHandler.Payload(order.Id), $"ingest:{order.Number}");

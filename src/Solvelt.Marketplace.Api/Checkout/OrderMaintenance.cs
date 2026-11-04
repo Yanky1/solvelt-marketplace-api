@@ -9,7 +9,7 @@ namespace Solvelt.Marketplace.Api.Checkout;
 /// released and the intent is cancelled (best effort; a payment that still lands is honoured by the webhook, which also pays an expired order).
 /// Orders that never completed are deleted after 30 days (see the PII table).
 /// </summary>
-public sealed class OrderMaintenance(MarketplaceDb db, IPaymentProvider payments, TimeProvider time, ILogger<OrderMaintenance> log)
+public sealed class OrderMaintenance(MarketplaceDb db, Outbox.OutboxWriter outbox, TimeProvider time)
 {
     public static readonly TimeSpan PendingLifetime = TimeSpan.FromHours(23);
 
@@ -25,18 +25,27 @@ public sealed class OrderMaintenance(MarketplaceDb db, IPaymentProvider payments
                 .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, OrderStatus.Expired).SetProperty(x => x.ActiveKey, (string?)null).SetProperty(x => x.UpdatedAt, now), ct);
             if (changed == 0) continue;   // paid in the meantime
             expired++;
-            if (o.PaymentIntentId is { } pi)
-                try { await payments.CancelIntentAsync(pi, "cancel:" + o.Number, ct); }
-                catch (Exception ex) when (ex is PaymentsUnavailableException or PaymentRejectedException) { log.LogWarning("Could not cancel the intent of expired order {Number}", o.Number); }
+            // the cancel goes through the outbox (retried until Stripe accepts it): a payable intent must never be left on a closed order
+            if (o.PaymentIntentId is { } pi && !await outbox.ExistsAsync(StripeCancelHandler.DedupeKey(pi), ct))
+            {
+                outbox.Enqueue(StripeCancelHandler.Type, new StripeCancelHandler.Payload(pi), StripeCancelHandler.DedupeKey(pi));
+                await db.SaveChangesAsync(ct);
+            }
         }
         return expired;
     }
 
-    /// <summary>Orders that never became paid and are older than 30 days are deleted (no payment, nothing to account for).</summary>
+    /// <summary>
+    /// Orders that never became paid are deleted after 30 days when they never had a PaymentIntent, and after 90 days when they did (a late payment on a purged order could never be matched,
+    /// so it would loop 5xx and never be refunded: the cancel has long been delivered by then and Stripe stops retrying webhooks after three days).
+    /// </summary>
     public Task<int> PurgeAbandonedAsync(CancellationToken ct = default)
     {
-        var cut = time.GetUtcNow().ToUniversalTime().AddDays(-30);
-        return db.Orders.Where(o => o.PaidAt == null && o.CreatedAt < cut && (o.Status == OrderStatus.Expired || o.Status == OrderStatus.Superseded)).ExecuteDeleteAsync(ct);
+        var now = time.GetUtcNow().ToUniversalTime();
+        var cut = now.AddDays(-30);
+        var cutWithIntent = now.AddDays(-90);
+        return db.Orders.Where(o => o.PaidAt == null && (o.Status == OrderStatus.Expired || o.Status == OrderStatus.Superseded)
+            && ((o.PaymentIntentId == null && o.CreatedAt < cut) || (o.PaymentIntentId != null && o.CreatedAt < cutWithIntent))).ExecuteDeleteAsync(ct);
     }
 }
 

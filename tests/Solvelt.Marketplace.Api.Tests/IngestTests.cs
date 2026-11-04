@@ -199,16 +199,30 @@ public sealed class IngestTests : OrderFlowBase
     }
 
     [Fact]
-    public async Task A_payment_on_a_superseded_order_is_still_honoured()
+    public async Task A_payment_on_a_superseded_order_is_refunded_in_full_automatically_never_fulfilled_and_the_buyer_is_told()
     {
         await Login();
         await AddToCart("challah-classic");
         var first = await Checkout();
-        await Checkout(new { address = Address(), selections = new[] { new { sellerId = Mazel, brandId = ChallahCorner, speed = "overnight" } } });   // supersedes the first
+        var second = await Checkout(new { address = Address(), selections = new[] { new { sellerId = Mazel, brandId = ChallahCorner, speed = "overnight" } } });   // supersedes the first
         Assert.Equal("superseded", (await Order(first.Number)).Status);
         await Pay(first.Number, first.Intent, first.Total);               // the buyer paid the old tab
         await Drain();
-        Assert.Equal("placed", (await Order(first.Number)).Status);
+        var late = await Order(first.Number);
+        Assert.Equal(("failed", "superseded_payment"), (late.Status, late.FailureCode));
+        Assert.Equal(first.Total, late.RefundedCents);
+        var refund = Assert.Single(Stripe.Refunds);
+        Assert.Equal(first.Total, refund.AmountCents);                    // everything goes back
+        Assert.Empty(Portal("orders"));                                   // never sent to the seller
+        Assert.Contains(_k.Sink.Sent, m => m.Subject.Contains(first.Number) && m.Subject.Contains("refunded"));
+        // replaying the event, or a second delivery of the same payment, refunds nothing more
+        await PostStripe(Event("payment_intent.succeeded", first.Intent, first.Number, first.Total, id: "evt_again"));
+        await Drain();
+        Assert.Single(Stripe.Refunds);
+        // the latest checkout is unaffected: paying it places exactly one order
+        await Pay(second.Number, second.Intent, second.Total);
+        await Drain();
+        Assert.Equal("placed", (await Order(second.Number)).Status);
         Assert.Single(Portal("orders"));
     }
 
@@ -394,7 +408,7 @@ public sealed class IngestTests : OrderFlowBase
     }
 
     [Fact]
-    public async Task Pending_orders_expire_after_23_hours_release_their_key_and_cancel_the_intent_but_a_late_payment_still_counts()
+    public async Task Pending_orders_expire_after_23_hours_release_their_key_and_cancel_the_intent_and_a_late_payment_is_refunded()
     {
         await Login();
         await AddToCart("kiddush-cup-pewter");
@@ -407,21 +421,151 @@ public sealed class IngestTests : OrderFlowBase
         var o = await Order(number);
         Assert.Equal("expired", o.Status);
         Assert.Null(o.ActiveKey);
+        await Drain();                                                    // the cancel goes through the outbox
         Assert.True(Stripe.Intents.Single().Cancelled);
         Assert.Equal(0, await Expire());
         // the same cart can be checked out again: a new order and a new intent
         var again = await Checkout();
         Assert.NotEqual(number, again.Number);
-        // a payment that still arrives for the expired order is honoured (money was taken)
+        // a payment that still arrives for the expired order is refunded in full, not fulfilled
         Stripe.Capture(intent);
         Assert.Equal(HttpStatusCode.OK, (await PostStripe(Event("payment_intent.succeeded", intent, number, total))).StatusCode);
-        Assert.Equal("paid", (await Order(number)).Status);
-        // never-paid orders disappear after 30 days, paid ones never do
+        Assert.Equal(("failed", "expired_payment"), ((await Order(number)).Status, (await Order(number)).FailureCode));
+        await Drain();
+        Assert.Equal(total, Assert.Single(Stripe.Refunds).AmountCents);
+        // never-paid orders disappear after 30 days, paid ones never do (and one with a payment intent waits 90 days: see below)
         _k.F.Clock.Advance(TimeSpan.FromDays(31));
         Assert.Equal(1, await Expire());                                   // the second checkout was never paid either
         using var scope = _k.F.Services.CreateScope();
+        Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<OrderMaintenance>().PurgeAbandonedAsync());   // it has a payment intent: kept 90 days, never purged on a guess
+        _k.F.Clock.Advance(TimeSpan.FromDays(60));
         Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<OrderMaintenance>().PurgeAbandonedAsync());
         Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));
-        Assert.Equal("paid", (await Order(number)).Status);
+        Assert.Equal("failed", (await Order(number)).Status);                // the refunded late payment is a financial record: never purged
+    }
+
+    // ---- one pending order per cart (orchestrator review F1/F5) ----
+
+    [Fact]
+    public async Task Different_checkouts_of_one_cart_in_parallel_leave_exactly_one_pending_order_and_one_live_intent()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        foreach (var round in Enumerable.Range(0, 6))
+        {
+            var results = await Task.WhenAll(new[] { "NY", "NJ", "CA", "TX" }.Select(async region =>
+            {
+                var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address(region), giftMessage = $"r{round}" }) };
+                r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+                return await _k.Http.SendAsync(r);
+            }));
+            Assert.All(results, r => Assert.True(r.StatusCode is HttpStatusCode.OK or HttpStatusCode.Conflict, $"{(int)r.StatusCode}"));   // a loser is a 200 that was superseded later, or a clean 409
+            Assert.Contains(results, r => r.StatusCode == HttpStatusCode.OK);
+            await Drain();                                                                                                                  // the outbox cancels what was superseded
+            var pending = await _k.Db(db => db.Orders.AsNoTracking().Where(o => o.Status == "pending_payment").ToListAsync());
+            var order = Assert.Single(pending);                                                                                             // one payable order for the cart
+            var live = Stripe.Intents.Where(i => !i.Cancelled).ToList();
+            Assert.Single(live);                                                                                                            // and one payable intent, and it is that order's
+            Assert.Equal(order.PaymentIntentId, live[0].Id);
+        }
+    }
+
+    [Fact]
+    public async Task An_intent_created_while_a_newer_checkout_supersedes_its_order_is_cancelled_and_the_request_answers_409()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var inside = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        _k.F.Services.GetRequiredService<CheckoutHooks>().AfterIntentCreated = async () => { inside.TrySetResult(); await release.Task; };
+        var slow = Task.Run(async () =>
+        {
+            var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address("NY") }) };
+            r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+            return await _k.Http.SendAsync(r);
+        });
+        await inside.Task.WaitAsync(TimeSpan.FromSeconds(20));            // A has its intent but has not stored it yet
+        _k.F.Services.GetRequiredService<CheckoutHooks>().AfterIntentCreated = null;
+        var b = await Checkout(new { address = Address("NJ") });          // B supersedes A and finds no intent to cancel
+        release.SetResult();
+        var a = await slow;
+        Assert.Equal(HttpStatusCode.Conflict, a.StatusCode);              // A is told, and does not hand out a client secret
+        Assert.Contains("checkout_superseded", await a.Content.ReadAsStringAsync());
+        await Drain();
+        var live = Stripe.Intents.Where(i => !i.Cancelled).ToList();
+        Assert.Equal(b.Intent, Assert.Single(live).Id);                   // A's intent was cancelled by A itself (through the outbox)
+        Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync(o => o.Status == "pending_payment")));
+    }
+
+    [Fact]
+    public async Task The_database_itself_refuses_a_second_pending_order_for_a_cart()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var first = await Checkout();
+        var o = await Order(first.Number);
+        var clone = new MarketplaceOrder
+        {
+            Id = Guid.NewGuid(), Number = "MP-20261104-DUPLICAT", AccountId = o.AccountId, CartId = o.CartId, Status = "pending_payment", ActiveKey = new string('f', 64), Currency = "USD",
+            CreatedAt = o.CreatedAt, UpdatedAt = o.UpdatedAt, BuyerName = "x", RelayEmail = "x", ShipName = "x", ShipLine1 = "x", ShipCity = "x", ShipPostalCode = "x", ShipCountry = "US",
+        };
+        await Assert.ThrowsAsync<DbUpdateException>(() => _k.Db(async db => { db.Orders.Add(clone); await db.SaveChangesAsync(); return 0; }));
+        clone.Status = "superseded"; clone.ActiveKey = null;               // a closed order is fine
+        await _k.Db(async db => { db.Orders.Add(clone); await db.SaveChangesAsync(); return 0; });
+    }
+
+    [Fact]
+    public async Task A_cancel_that_cannot_reach_stripe_is_retried_until_it_does()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var first = await Checkout();
+        await AddToCart("challah-classic");                                // the cart changed: the next checkout is another order
+        var second = await Checkout();                                    // supersedes the first order: its intent is queued for cancelling
+        Stripe.FailNext = 1;                                              // Stripe is unreachable for the first cancel attempt
+        await Drain();
+        Assert.False(Stripe.Intents.Single(i => i.Id == first.Intent).Cancelled);
+        _k.F.Clock.Advance(TimeSpan.FromSeconds(31));
+        await Drain();
+        Assert.True(Stripe.Intents.Single(i => i.Id == first.Intent).Cancelled);        // retried with backoff, then delivered
+        Assert.False(Stripe.Intents.Single(i => i.Id == second.Intent).Cancelled);
+    }
+
+    // ---- webhook matching (review F8) ----
+
+    [Fact]
+    public async Task An_old_event_for_an_order_we_do_not_have_is_acknowledged_and_never_adopts_an_intent_from_metadata()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        // an order stored without an intent (a checkout that died after saving): the event cannot ADOPT its intent id from metadata; young = retry, old = acknowledged
+        await _k.Db(db => db.Orders.Where(o => o.Number == number).ExecuteUpdateAsync(s => s.SetProperty(o => o.PaymentIntentId, (string?)null)));
+        var young = await PostStripe(Event("payment_intent.succeeded", intent, number, total));
+        Assert.True((int)young.StatusCode >= 500);
+        var oldBody = Event("payment_intent.succeeded", intent, number, total, id: "evt_old");       // created now ...
+        var ghostBody = Event("payment_intent.succeeded", "pi_ghost", "MP-20260101-GHOSTGHO", 500, id: "evt_ghost");
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(11));                                                   // ... and delivered 11 minutes later
+        var old = await PostStripe(oldBody);
+        Assert.Equal(HttpStatusCode.OK, old.StatusCode);
+        Assert.Contains("unmatched", await old.Content.ReadAsStringAsync());
+        Assert.Null((await Order(number)).PaymentIntentId);               // nothing was adopted
+        Assert.Equal("pending_payment", (await Order(number)).Status);
+        // an order number we never had: same
+        var ghost = await PostStripe(ghostBody);
+        Assert.Equal(HttpStatusCode.OK, ghost.StatusCode);
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("needs a person"));
+    }
+
+    [Fact]
+    public async Task A_payment_that_does_not_match_the_priced_order_also_tells_the_buyer()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        Stripe.Capture(intent);
+        await PostStripe(Event("payment_intent.succeeded", intent, number, total - 100));
+        await Drain();
+        Assert.Contains(_k.Sink.Sent, m => m.Subject.Contains(number) && m.TextBody.Contains("refunded"));
     }
 }
