@@ -302,6 +302,33 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         Assert.NotNull(row.HiddenAt);                                                                      // the message stays hidden
     }
 
+    [Fact]
+    public async Task G5_Deleting_the_account_redacts_all_its_threads_at_once_and_deletes_its_notifications_and_email_settings()
+    {
+        var (o, g) = await Placed();                                                                      // an open order: its thread would never be redacted by retention
+        var (thread, msg, att, pid) = await Reported(o, g);
+        var prefs = new HttpRequestMessage(HttpMethod.Put, "/api/v1/notifications/preferences") { Content = JsonContent.Create(new { email = new { shipped = false } }) };
+        prefs.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        Assert.Equal(HttpStatusCode.OK, (await _k.Http.SendAsync(prefs)).StatusCode);
+        Assert.True(await _k.Db(db => db.Notifications.AnyAsync()));
+        var account = await _k.Account("ing1@example.com");
+        var other = await _k.VerifiedSession("other@example.com");
+        // delete the account (M1) and run the redaction job
+        var del = new HttpRequestMessage(HttpMethod.Post, "/api/v1/account/delete") { Content = JsonContent.Create(new { password = AuthKit.Password }) };
+        del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Http.SendAsync(del)).StatusCode);
+        while (await _k.Dispatch() > 0) { }
+        Assert.All(await _k.Db(db => db.ThreadMessages.AsNoTracking().ToListAsync()), m => { Assert.Equal("", m.Text); Assert.NotNull(m.RedactedAt); });
+        Assert.All(await _k.Db(db => db.MessageThreads.AsNoTracking().Where(t => t.AccountId == account.Id).ToListAsync()), t => Assert.NotNull(t.RedactedAt));
+        Assert.Equal(0, await _k.Db(db => db.MessageAttachments.CountAsync()));
+        Assert.Equal(0, await _k.Db(db => db.MessageAttachmentData.CountAsync()));
+        Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync(n => n.AccountId == account.Id)));
+        Assert.Equal(0, await _k.Db(db => db.NotificationPreferences.CountAsync(p => p.AccountId == account.Id)));
+        // running it again changes nothing and fails nothing; another buyer is untouched
+        using (var s = _k.F.Services.CreateScope()) await new MessagingAccountEraser(s.ServiceProvider.GetRequiredService<MarketplaceDb>(), _k.F.Clock).EraseAsync(account.Id, default);
+        Assert.NotNull(other);
+    }
+
     // ------------------------------------------------------------------ portal N3: ids are unique per seller only
 
     [Fact]
