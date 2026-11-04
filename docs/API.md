@@ -260,6 +260,7 @@ All routes need the buyer session (`Authorization: Bearer`), answer `Cache-Contr
 * `POST /api/v1/orders/{number}/return-requests` `{ sellerOrderNumber, reason, comment?, lines: [{ lineId, quantity }] }` (+ optional `Idempotency-Key` header) → `202 { returnId, status }` or `422 quantity_exceeded`. `reason`: `damaged | not_as_described | wrong_item | no_longer_needed | other`.
 * `POST /api/v1/orders/{number}/delivery-confirmations` `{ sellerOrderNumber }` → `202`/`200`; time is the server's, any time field is ignored.
 * `POST /api/v1/orders/{number}/returns/{returnId}/label-link` → `{ labelUrl, labelUrlExpiresAt }` for an approved return.
+* Shipments in the order detail now carry `id`, `timeline` (carrier events), `eta`, `etaWindowStart/End`, `driverFirstName`, `placement`, `position` (only while the stop is next and fresh) and `proofCount`. `GET /api/v1/orders/{number}/shipments/{id}/proof/{index}` returns the image (sniffed type, `nosniff`, `private, no-store`); 404 once the short-lived link has expired.
 
 ## Guest order links (for M3 and M5)
 Not endpoints of their own: services other modules call (decision M1-70).
