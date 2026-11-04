@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Solvelt.Marketplace.Api.Auth;
@@ -20,35 +22,50 @@ public sealed record QuoteGroup(Guid SellerId, string SellerName, Guid BrandId, 
     IReadOnlyList<ShippingOption> ShippingOptions, IReadOnlyList<UnavailableSpeed> UnavailableSpeeds, LocalOption? Local, SelectedDelivery? Selected, long ShippingCents, long ShippingTaxCents, long TaxCents, long TotalCents);
 public sealed record QuoteView(string Currency, IReadOnlyList<QuoteGroup> Groups, long ItemsCents, long ShippingCents, long TaxCents, long TotalCents, bool CanPay, string? QuoteHash = null, DateTimeOffset? ExpiresAt = null);
 
+/// <summary>Canonical text for hashing: every field length-prefixed, so no value can contain a separator that shifts a neighbour (a name with a `|` can never collide with another split of the same characters).</summary>
+public static class Canon
+{
+    public static StringBuilder Field(this StringBuilder sb, object? value)
+    {
+        var text = value switch { null => "\u0000", string t => t, IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture), _ => value.ToString() ?? "" };
+        return sb.Append(text.Length).Append(':').Append(text).Append(';');
+    }
+}
+
 /// <summary>
-/// Binds a quote to a checkout (decision M3-22). The token is <c>{expiry}.{sha256(expiry|everything priced)}</c>: it covers every line, unit price, tax, the chosen delivery, the shipping and the
-/// destination, so any change gives another value. It is consent, not security: checkout recomputes the quote and compares; a token that differs or is past its expiry gets 409 price_changed with the fresh quote.
+/// Binds a quote to a checkout (decisions M3-22 and M3-30). The token is <c>{expiry}.{HMAC-SHA256(Checkout:QuoteKey, expiry + everything priced)}</c>: it covers every line, unit price, quantity, tax, the
+/// chosen delivery, the shipping and the destination, so any change gives another value, and because it is keyed the client cannot compute a digest of its own (or move the expiry). Checkout recomputes the
+/// quote and compares in constant time; a token that differs or is past its expiry gets 409 price_changed with the fresh quote. It is consent, never a price.
 /// </summary>
-public static class QuoteBinding
+public sealed class QuoteSigner(IOptions<CheckoutOptions> options)
 {
     public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(15);
-    private static string Digest(QuoteView v, string country, string? region, string postal, long exp)
+
+    public string Digest(QuoteView v, string country, string? region, string postal, long exp)
     {
-        var sb = new System.Text.StringBuilder().Append(exp).Append('|').Append(v.Currency).Append('|').Append(country).Append('|').Append(region).Append('|').Append(postal.Trim().ToUpperInvariant()).Append('|').Append(v.TotalCents);
+        var sb = new StringBuilder().Field(exp).Field(v.Currency).Field(country).Field(region).Field(postal.Trim().ToUpperInvariant()).Field(v.TotalCents);
         foreach (var g in v.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId))
         {
-            sb.Append("|G:").Append(g.SellerId).Append(':').Append(g.BrandId).Append(':').Append(g.Selected?.Kind).Append(':').Append(g.Selected?.Speed).Append(':').Append(g.Selected?.WindowId).Append(':').Append(g.Selected?.Date)
-              .Append(':').Append(g.ShippingCents).Append(':').Append(g.ShippingTaxCents).Append(':').Append(g.TaxCents);
-            foreach (var l in g.Lines.OrderBy(l => l.VariantId)) sb.Append("|L:").Append(l.VariantId).Append(':').Append(l.Quantity).Append(':').Append(l.UnitPriceCents).Append(':').Append(l.TaxCents);
+            sb.Field("G").Field(g.SellerId).Field(g.BrandId).Field(g.Selected?.Kind).Field(g.Selected?.Speed).Field(g.Selected?.WindowId).Field(g.Selected?.Date)
+              .Field(g.ShippingCents).Field(g.ShippingTaxCents).Field(g.TaxCents);
+            foreach (var l in g.Lines.OrderBy(l => l.VariantId)) sb.Field("L").Field(l.VariantId).Field(l.Quantity).Field(l.UnitPriceCents).Field(l.TaxCents);
         }
-        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sb.ToString())));
+        var key = Encoding.UTF8.GetBytes(options.Value.QuoteKey ?? throw new InvalidOperationException("Checkout:QuoteKey is not configured."));
+        return Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(sb.ToString())));
     }
-    public static string Make(QuoteView v, string country, string? region, string postal, DateTimeOffset now)
+
+    public string Make(QuoteView v, string country, string? region, string postal, DateTimeOffset now)
     {
         var exp = now.Add(Lifetime).ToUnixTimeSeconds();
         return exp + "." + Digest(v, country, region, postal, exp);
     }
-    public static bool Valid(string? token, QuoteView v, string country, string? region, string postal, DateTimeOffset now)
+
+    public bool Valid(string? token, QuoteView v, string country, string? region, string postal, DateTimeOffset now)
     {
         if (token is null || token.Length > 100) return false;
         var dot = token.IndexOf('.');
         if (dot < 1 || !long.TryParse(token[..dot], out var exp) || exp < now.ToUnixTimeSeconds()) return false;
-        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(System.Text.Encoding.ASCII.GetBytes(token[(dot + 1)..]), System.Text.Encoding.ASCII.GetBytes(Digest(v, country, region, postal, exp)));
+        return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(token[(dot + 1)..]), Encoding.ASCII.GetBytes(Digest(v, country, region, postal, exp)));
     }
 }
 
@@ -60,7 +77,7 @@ public enum QuoteStatus { Ok, EmptyOrUnavailableCart, InvalidAddress, InvalidSel
 /// is the exact sum of the parts, and the same function builds the order and the payment amount at checkout (the next slice).
 /// </summary>
 public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSettingsCache settings, ISignedPortalClient portal, ITaxCalculator tax,
-    IOptions<ShippingOptions> shippingOptions, IOptions<TaxOptions> taxOptions, TimeProvider time)
+    IOptions<ShippingOptions> shippingOptions, IOptions<TaxOptions> taxOptions, QuoteSigner signer, TimeProvider time)
 {
     public async Task<(QuoteStatus Status, QuoteView? View, string? Detail)> QuoteAsync(CartOwner owner, QuoteRequest req, CancellationToken ct)
     {
@@ -103,14 +120,16 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
             LocalOption? local = null;
             var allLocal = g.Lines.All(l => attrs.Any(x => x.ListingId == l.ListingId && x.Key == "delivery" && x.Value == "local"));
             // A group whose listings say "delivery: local" and never "ships" is not shipped by carrier (decision M3-22): without an eligible local window there is nothing to pay with, so the quote cannot be paid.
-            var shipsToo = g.Lines.Any(l => attrs.Any(x => x.ListingId == l.ListingId && x.Key == "delivery" && x.Value == "ships"));
-            if (allLocal && !shipsToo) opts = [];   // "local" without "ships" on every line: local delivery only
+            // Any line that is local-only (says "local" and never "ships") rules carrier delivery out for the WHOLE group (review K2; the alternative, splitting such a line into its own delivery group, is a later
+            // product decision): the group is paid with a local window or not at all, so a carrier can never be asked to ship a line it must not.
+            bool Has(Guid listing, string value) => attrs.Any(x => x.ListingId == listing && x.Key == "delivery" && x.Value == value);
+            if (g.Lines.Any(l => Has(l.ListingId, "local") && !Has(l.ListingId, "ships"))) opts = [];
             if (allLocal)
             {
                 try
                 {
                     var e = await portal.CheckLocalDeliveryEligibilityAsync(new LocalDeliveryEligibilityRequest(g.SellerId, g.BrandId, g.SubtotalCents, new EligibilityAddress(a.PostalCode.Trim(), country, a.Lat, a.Lng)), ct);
-                    if (e.IsSuccess && e.Value is { } v) local = new LocalOption(v.Eligible, v.Reason, v.FeeCents, v.TimeZone, v.Eligible ? v.Windows ?? [] : []);
+                    if (e.IsSuccess && e.Value is { } v && (v.FeeCents is null || v.FeeCents is >= 0 and <= CartLimits.MaxTotalCents)) local = new LocalOption(v.Eligible, v.Reason, v.FeeCents, v.TimeZone, v.Eligible ? v.Windows ?? [] : []);
                 }
                 catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException or PortalResponseTooLargeException) { /* local delivery is optional: just not offered now */ }
             }
@@ -146,7 +165,7 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
         var view = new QuoteView(cart.Currency, groups, groups.Sum(x => x.ItemsCents), groups.Sum(x => x.ShippingCents), groups.Sum(x => x.TaxCents), groups.Sum(x => x.TotalCents), groups.All(x => x.Selected is not null));
         if (view.TotalCents > CartLimits.MaxTotalCents) return (QuoteStatus.TotalTooLarge, null, null);
         var now = time.GetUtcNow();
-        return (QuoteStatus.Ok, view with { QuoteHash = QuoteBinding.Make(view, country, region, a.PostalCode, now), ExpiresAt = now.Add(QuoteBinding.Lifetime) }, null);
+        return (QuoteStatus.Ok, view with { QuoteHash = signer.Make(view, country, region, a.PostalCode, now), ExpiresAt = now.Add(QuoteSigner.Lifetime) }, null);
     }
 
 }
@@ -156,6 +175,6 @@ public static class UsStates
     public static readonly HashSet<string> Codes = new(StringComparer.Ordinal)
     {
         "AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY",
-        "AS","GU","MP","PR","VI","AA","AE","AP",
+        "AS","FM","GU","MH","MP","PW","PR","VI","AA","AE","AP",
     };
 }

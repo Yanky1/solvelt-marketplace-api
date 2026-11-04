@@ -12,7 +12,7 @@ namespace Solvelt.Marketplace.Api.Checkout;
 public sealed record CheckoutAddress(string? Name, string? Line1, string? Line2, string? City, string? Region, string? PostalCode, string? Country, string? Phone, double? Lat = null, double? Lng = null);
 /// <summary>The buyer's choices only: where to, which delivery per group, a gift note. No money field exists.</summary>
 /// <summary>
-/// <paramref name="QuoteHash"/> is the token of the quote the buyer SAW and agreed to (<see cref="QuoteBinding"/>), required. It is never charged and never prices anything: it only guards consent. When it does not match
+/// <paramref name="QuoteHash"/> is the token of the quote the buyer SAW and agreed to (<see cref="QuoteSigner"/>), required. It is never charged and never prices anything: it only guards consent. When it does not match
 /// the server's fresh quote (a price, tax, shipping, delivery choice or destination changed) or has expired, nothing is created and the answer is <c>409 price_changed</c> with the new quote to show and confirm.
 /// </summary>
 public sealed record CheckoutRequest(CheckoutAddress? Address, IReadOnlyList<GroupSelection>? Selections, string? GiftMessage, string? QuoteHash = null);
@@ -29,7 +29,7 @@ public sealed class CheckoutHooks
     public Func<MarketplaceDb, Task>? BeforeSupersedeUpdate { get; set; }
 }
 
-public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartService carts, IPaymentProvider payments, IOptions<StripeOptions> stripe, Outbox.OutboxWriter outbox, CheckoutHooks hooks, TimeProvider time, ILogger<CheckoutService> log)
+public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, QuoteSigner signer, CartService carts, IPaymentProvider payments, IOptions<StripeOptions> stripe, Outbox.OutboxWriter outbox, CheckoutHooks hooks, TimeProvider time, ILogger<CheckoutService> log)
 {
     private DateTimeOffset Now => time.GetUtcNow().ToUniversalTime();
     private static string Clean(string? s) => new string((s ?? "").Where(c => !char.IsControl(c)).ToArray()).Trim();
@@ -62,7 +62,7 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartS
         if (q.Status != QuoteStatus.Ok) return (CheckoutStatus.Quote, null, q.Status.ToString() + (q.Detail is null ? "" : ":" + q.Detail));
         var quote = q.View!;
         if (!quote.CanPay) return (CheckoutStatus.Quote, null, "delivery_unavailable");
-        if (!QuoteBinding.Valid(req.QuoteHash, quote, country, region, postal, Now)) return (CheckoutStatus.PriceChanged, new CheckoutResult("", "price_changed", quote, null), null);
+        if (!signer.Valid(req.QuoteHash, quote, country, region, postal, Now)) return (CheckoutStatus.PriceChanged, new CheckoutResult("", "price_changed", quote, null), null);
         if (quote.TotalCents < 50) return (CheckoutStatus.AmountTooSmall, null, null);   // Stripe's minimum charge
         var cartId = await carts.CartIdAsync(owner, ct);
 
@@ -145,14 +145,13 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, CartS
     /// <summary>Everything the buyer agreed to, as one value. Same checkout twice (a double-submit) gives the same value; any change of price, delivery, address or cart gives another.</summary>
     public static string Fingerprint(MarketplaceOrder o)
     {
-        var sb = new StringBuilder();
-        sb.Append(o.AccountId).Append('|').Append(o.CartId).Append('|').Append(o.Currency).Append('|').Append(o.TotalCents).Append('|')
-          .Append(o.ShipName).Append('|').Append(o.ShipLine1).Append('|').Append(o.ShipLine2).Append('|').Append(o.ShipCity).Append('|').Append(o.ShipRegion).Append('|')
-          .Append(o.ShipPostalCode).Append('|').Append(o.ShipCountry).Append('|').Append(o.Phone).Append('|').Append(o.GiftMessage).Append('|').Append(o.ShipLat).Append('|').Append(o.ShipLng);
+        // every field length-prefixed (Canon): a `|` or `;` typed into the name or the address can never make two different checkouts the same value (review K3)
+        var sb = new StringBuilder().Field(o.AccountId).Field(o.CartId).Field(o.Currency).Field(o.TotalCents)
+          .Field(o.ShipName).Field(o.ShipLine1).Field(o.ShipLine2).Field(o.ShipCity).Field(o.ShipRegion).Field(o.ShipPostalCode).Field(o.ShipCountry).Field(o.Phone).Field(o.GiftMessage).Field(o.ShipLat).Field(o.ShipLng);
         foreach (var g in o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId))
-            sb.Append("|G:").Append(g.SellerId).Append(':').Append(g.BrandId).Append(':').Append(g.DeliveryKind).Append(':').Append(g.ShippingSpeed).Append(':').Append(g.LocalWindowId).Append(':').Append(g.LocalDate).Append(':').Append(g.ShippingCents).Append(':').Append(g.TaxCents);
+            sb.Field("G").Field(g.SellerId).Field(g.BrandId).Field(g.DeliveryKind).Field(g.ShippingSpeed).Field(g.LocalWindowId).Field(g.LocalDate).Field(g.ShippingCents).Field(g.TaxCents);
         foreach (var l in o.Lines.OrderBy(l => l.VariantId))
-            sb.Append("|L").Append(l.VariantId).Append(':').Append(l.Quantity).Append(':').Append(l.UnitPriceCents).Append(':').Append(l.TaxCents);
+            sb.Field("L").Field(l.VariantId).Field(l.Quantity).Field(l.UnitPriceCents).Field(l.TaxCents);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
     }
 
