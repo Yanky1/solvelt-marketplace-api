@@ -238,6 +238,8 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         var rows = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == checkedHash && a.SessionEpoch == checkedEpoch)
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now).SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.Email, (string?)null).SetProperty(a => a.UpdatedAt, now), ct);
         if (rows != 1) return new AccountResult(AccountOutcome.Conflict);
+        // the gate forgets the address in the same transaction: the job can no longer be the only one to do it, and a row made by an attempt between the password check and here does not outlive the account
+        await gate.ClearAddressAsync(gateKeys.Address(AuthValidation.NormaliseEmail(who.Email)), ct);
         await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         await outbox.TryEnqueueAsync(AccountRedactionHandler.Type, new AccountRedactionPayload(who.AccountId), $"redact:{who.AccountId:N}", ct: ct);
         await tx.CommitAsync(ct);
@@ -261,7 +263,6 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         await db.BuyerAddresses.Where(a => a.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.EmailTokens.Where(t => t.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerSessions.Where(s => s.AccountId == accountId).ExecuteDeleteAsync(ct);
-        if (account.Email is { } email) await gate.ClearAddressAsync(gateKeys.Address(email), ct);
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.RedactedAt == null).ExecuteUpdateAsync(s => s
             .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null)
             .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
