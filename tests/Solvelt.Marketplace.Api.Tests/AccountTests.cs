@@ -319,9 +319,10 @@ public class AccountTests
     private sealed class FailAddressWrites : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
     {
         public int Remaining, Failed, Code = 5;
+        public string Verb = "INSERT";
         private void Maybe(System.Data.Common.DbCommand c)
         {
-            if (Remaining > 0 && c.CommandText.TrimStart().StartsWith("INSERT", StringComparison.OrdinalIgnoreCase) && c.CommandText.Contains("buyer_addresses"))
+            if (Remaining > 0 && c.CommandText.TrimStart().StartsWith(Verb, StringComparison.OrdinalIgnoreCase) && c.CommandText.Contains("buyer_addresses"))
             { Remaining--; Failed++; throw new Microsoft.Data.Sqlite.SqliteException("injected", Code); }
         }
         public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(System.Data.Common.DbCommand command, Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData, Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result, CancellationToken cancellationToken = default)
@@ -361,6 +362,32 @@ public class AccountTests
         hook.Remaining = 0;
         Assert.Empty(await Book(k, token));                                                             // nothing half-written
         Assert.Equal(HttpStatusCode.Created, (await k.Send(Post, "/api/v1/account/addresses", Us("Later"), token)).StatusCode);   // and the next request works
+    }
+
+    [Theory]
+    [InlineData("set-default")]
+    [InlineData("update")]
+    [InlineData("delete")]
+    public async Task Every_address_write_answers_503_not_500_when_it_stays_busy(string operation)
+    {
+        var hook = new FailAddressWrites { Code = 5, Verb = operation == "delete" ? "DELETE" : "UPDATE" };
+        using var k = new AuthKit(null, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)));
+        var token = await k.VerifiedSession(Email);
+        var first = await AddAddress(k, token, Us("First"));
+        var second = await AddAddress(k, token, Us("Second"));                                           // the first is the default, this one is not
+        hook.Remaining = int.MaxValue;
+        var r = operation switch
+        {
+            "set-default" => await k.Send(Post, $"/api/v1/account/addresses/{second}/default", null, token),
+            "update" => await k.Send(Put, $"/api/v1/account/addresses/{second}", Us("Second", isDefault: true), token),
+            _ => await k.Send(Delete, $"/api/v1/account/addresses/{first}", null, token),
+        };
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, r.StatusCode);
+        Assert.NotNull(r.Headers.RetryAfter);
+        hook.Remaining = 0;
+        var book = await Book(k, token);
+        Assert.Equal(2, book.Count);                                                                     // nothing half-done
+        Assert.Equal(first, book.Single(b => b.IsDefault).Id);                                           // still exactly one default, the old one
     }
 
     [Fact]
