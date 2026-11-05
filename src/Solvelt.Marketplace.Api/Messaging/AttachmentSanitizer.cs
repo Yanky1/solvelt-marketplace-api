@@ -13,16 +13,21 @@ public static class AttachmentSanitizer
 {
     public const int MaxBytes = 5 * 1024 * 1024;
     public const int MaxLongSide = 4096;
-    public const long MaxPixels = 40_000_000;
+    /// <summary>A picture whose header claims more pixels than this is refused before anything is decoded.</summary>
+    public const long MaxPixels = 64_000_000;
+    /// <summary>The most pixels ever decoded at once (about 64 MB of memory): a bigger JPEG or WebP is decoded at 1/2, 1/4 or 1/8 of its size, a PNG (which cannot be scaled while decoding) is refused (review P2).</summary>
+    public const long DecodeBudgetPixels = 16_000_000;
     public sealed record Result(string? ContentType, byte[]? Bytes, string? Rejected);
 
-    public static Result Process(byte[] input)
+    public static Result Process(byte[] input) => Process(input, DecodeBudgetPixels);
+
+    internal static Result Process(byte[] input, long decodeBudget)
     {
         if (input.Length == 0) return Reject("empty");
         if (input.Length > MaxBytes) return Reject("too_large");
-        if (input.Length >= 3 && input[0] == 0xFF && input[1] == 0xD8 && input[2] == 0xFF) return Image(input, "image/jpeg", SKEncodedImageFormat.Jpeg);
-        if (input.Length >= 8 && input[0] == 0x89 && input[1] == 0x50 && input[2] == 0x4E && input[3] == 0x47 && input[4] == 0x0D && input[5] == 0x0A && input[6] == 0x1A && input[7] == 0x0A) return Image(input, "image/png", SKEncodedImageFormat.Png);
-        if (input.Length >= 12 && input[0] == 'R' && input[1] == 'I' && input[2] == 'F' && input[3] == 'F' && input[8] == 'W' && input[9] == 'E' && input[10] == 'B' && input[11] == 'P') return Image(input, "image/webp", SKEncodedImageFormat.Webp);
+        if (input.Length >= 3 && input[0] == 0xFF && input[1] == 0xD8 && input[2] == 0xFF) return Image(input, "image/jpeg", SKEncodedImageFormat.Jpeg, decodeBudget);
+        if (input.Length >= 8 && input[0] == 0x89 && input[1] == 0x50 && input[2] == 0x4E && input[3] == 0x47 && input[4] == 0x0D && input[5] == 0x0A && input[6] == 0x1A && input[7] == 0x0A) return Image(input, "image/png", SKEncodedImageFormat.Png, decodeBudget);
+        if (input.Length >= 12 && input[0] == 'R' && input[1] == 'I' && input[2] == 'F' && input[3] == 'F' && input[8] == 'W' && input[9] == 'E' && input[10] == 'B' && input[11] == 'P') return Image(input, "image/webp", SKEncodedImageFormat.Webp, decodeBudget);
         if (input.Length >= 5 && input[0] == '%' && input[1] == 'P' && input[2] == 'D' && input[3] == 'F' && input[4] == '-') return HasActiveContent(input) ? Reject("pdf_active_content") : new Result("application/pdf", input, null);
         return Reject("unsupported_type");
     }
@@ -38,7 +43,7 @@ public static class AttachmentSanitizer
 
     private static Result Reject(string why) => new(null, null, why);
 
-    private static Result Image(byte[] input, string type, SKEncodedImageFormat format)
+    private static Result Image(byte[] input, string type, SKEncodedImageFormat format, long decodeBudget)
     {
         var malformed = Reject("malformed_" + type[6..]);
         try
@@ -49,8 +54,18 @@ public static class AttachmentSanitizer
             var (w, h) = (codec.Info.Width, codec.Info.Height);
             if (w <= 0 || h <= 0) return malformed;
             if ((long)w * h > MaxPixels) return Reject("image_too_large");   // decided from the header, before a single pixel is decoded
-            using var decoded = SKBitmap.Decode(codec);
+            // decode at the smallest reduction (1, 1/2, 1/4, 1/8) that fits the memory budget; a format that cannot be reduced and is too big is refused
+            SKSizeI size = default;
+            var fits = false;
+            foreach (var n in new[] { 1, 2, 4, 8 })
+            {
+                size = codec.GetScaledDimensions(1f / n);
+                if ((long)size.Width * size.Height <= decodeBudget) { fits = true; break; }
+            }
+            if (!fits || size.Width <= 0 || size.Height <= 0) return Reject("image_too_large");
+            using var decoded = SKBitmap.Decode(codec, new SKImageInfo(size.Width, size.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
             if (decoded is null) return malformed;
+            (w, h) = (decoded.Width, decoded.Height);                       // from here on the decoded size is the stored size
             var origin = codec.EncodedOrigin;
             var swap = origin is SKEncodedOrigin.LeftTop or SKEncodedOrigin.RightTop or SKEncodedOrigin.RightBottom or SKEncodedOrigin.LeftBottom;
             int ow = swap ? h : w, oh = swap ? w : h;                       // size after the orientation is applied
