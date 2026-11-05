@@ -18,22 +18,22 @@ public sealed class BookingsDataExporter(MarketplaceDb db) : IAccountDataExporte
     {
         var bookings = await db.Bookings.AsNoTracking().Where(b => b.AccountId == accountId && b.Status != BookingStatus.Failed && b.Status != BookingStatus.HoldPending).OrderBy(b => b.CreatedAt).ToListAsync(ct);
         var ids = bookings.Select(b => b.Id).ToList();
-        var payments = await db.BookingPayments.AsNoTracking().Where(p => ids.Contains(p.BookingId)).OrderBy(p => p.CreatedAt).ToListAsync(ct);
-        var refunds = await db.BookingRefunds.AsNoTracking().Where(r => ids.Contains(r.BookingId) && r.Status != RefundStatus.Deferred).OrderBy(r => r.CreatedAt).ToListAsync(ct);
+        var payments = (await db.BookingPayments.AsNoTracking().Where(p => ids.Contains(p.BookingId)).OrderBy(p => p.CreatedAt).ToListAsync(ct)).ToLookup(p => p.BookingId);
+        var refunds = (await db.BookingRefunds.AsNoTracking().Where(r => ids.Contains(r.BookingId) && r.Status != RefundStatus.Deferred).OrderBy(r => r.CreatedAt).ToListAsync(ct)).ToLookup(r => r.BookingId);
         var quotes = await db.Quotes.AsNoTracking().Where(q => q.AccountId == accountId && q.Status != QuoteStatus.Failed && q.Status != QuoteStatus.Requesting).OrderBy(q => q.CreatedAt).ToListAsync(ct);
         var titles = await db.CatalogListings.AsNoTracking().Where(l => bookings.Select(b => b.ListingId).Concat(quotes.Select(q => q.ListingId)).Contains(l.Id)).ToDictionaryAsync(l => l.Id, l => l.Title, ct);
         return new
         {
             bookings = bookings.Select(b => new
             {
-                number = b.Number, service = titles.GetValueOrDefault(b.ListingId), status = b.Status, location = b.Location, startAt = b.StartAt, endAt = b.EndAt, durationMinutes = b.DurationMinutes, createdAt = b.CreatedAt,
+                number = b.Number, demo = b.IsDemo, service = titles.GetValueOrDefault(b.ListingId), status = b.Status, location = b.Location, startAt = b.StartAt, endAt = b.EndAt, durationMinutes = b.DurationMinutes, createdAt = b.CreatedAt,
                 money = new { b.Currency, b.PriceCents, b.AddOnsCents, b.TravelFeeCents, b.TotalCents, b.CancellationFeeCents, b.RefundDueCents, b.NoShowFeeCents, additionalChargeCents = b.AdditionalChargeCents, additionalChargeState = b.ExtraChargeState },
                 policy = b.PolicyCancelFreeHours is null && b.PolicyCancelFeePercent is null && b.PolicyNoShowFeePercent is null && b.PolicyMaxReschedules is null ? null
                     : new { cancelFreeHours = b.PolicyCancelFreeHours, cancelFeePercent = b.PolicyCancelFeePercent, noShowFeePercent = b.PolicyNoShowFeePercent, maxReschedules = b.PolicyMaxReschedules },
                 address = b.AddrLine1 is null ? null : new { name = b.AddrName, line1 = b.AddrLine1, line2 = b.AddrLine2, city = b.AddrCity, region = b.AddrRegion, postalCode = b.AddrPostalCode, country = b.AddrCountry },
                 phone = b.Phone, intakeAnswers = Intake(b.IntakeJson), meetingLink = BookingStatuses.RevealsMeetingLink(b.Status) ? b.OnlineInstructions : null, redacted = b.RedactedAt is not null,
-                payments = payments.Where(p => p.BookingId == b.Id).Select(p => new { kind = p.Kind, p.Currency, amountCents = p.AmountCents, status = p.Status, capturedCents = p.CapturedCents, refundedCents = p.RefundedCents, at = p.CapturedAt ?? p.CreatedAt }),
-                refunds = refunds.Where(r => r.BookingId == b.Id).Select(r => new { amountCents = r.AmountCents, reason = r.Reason, status = r.Status, at = r.CreatedAt }),
+                payments = payments[b.Id].Select(p => new { kind = p.Kind, p.Currency, amountCents = p.AmountCents, status = p.Status, capturedCents = p.CapturedCents, refundedCents = p.RefundedCents, at = p.CapturedAt ?? p.CreatedAt }),
+                refunds = refunds[b.Id].Select(r => new { amountCents = r.AmountCents, reason = r.Reason, status = r.Status, at = r.CreatedAt }),
             }),
             quoteRequests = quotes.Select(q => new
             {

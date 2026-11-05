@@ -62,6 +62,9 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter,
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Messaging.NotificationsDataExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Fulfilment.AfterSalesDataExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Checkout.OrdersDataExporter>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Account.CartsDataExporter>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Account.PasskeysDataExporter>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Fulfilment.TrackingDataExporter>();
 builder.Services.AddSingleton<PasswordService>();
 builder.Services.AddSingleton<GateKeys>();
 builder.Services.AddSingleton<GuestLinks>();

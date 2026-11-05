@@ -358,6 +358,15 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         var other = await _k.VerifiedSession("other@example.com");
         var listing = await _k.Db(db => db.CatalogListings.AsNoTracking().Where(l => l.Visible).OrderBy(l => l.Slug).FirstAsync());
         Assert.Equal(HttpStatusCode.Accepted, (await As(other, HttpMethod.Post, "/api/v1/messages", new { listingId = listing.Id, text = "SECRET-OF-THE-OTHER-BUYER" })).StatusCode);
+        // ... and an address and a cancel request of their own (review M5/M11: a query that forgot to filter by account must show up here)
+        var otherId = (await _k.Account("other@example.com")).Id;
+        await _k.Db(async db =>
+        {
+            db.BuyerAddresses.Add(new BuyerAddress { Id = Guid.NewGuid(), AccountId = otherId, FullName = "OTHER-RECIPIENT", Line1 = "OTHER-STREET 1", City = "Elsewhere", Country = "US" });
+            db.OrderCancelRequests.Add(new OrderCancelRequest { Id = Guid.NewGuid(), RequestId = "rq-other", OrderId = o.Id, GroupId = g.Id, AccountId = otherId, Reason = "changed_mind", Note = "OTHER-CANCEL-NOTE", Status = CancelRequestStatus.Requested, CreatedAt = now, UpdatedAt = now });
+            await db.SaveChangesAsync();
+            return 0;
+        });
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await _k.Http.PostAsync("/api/v1/account/data-export", null)).StatusCode);
         var res = await As(_session, HttpMethod.Post, "/api/v1/account/data-export");
@@ -366,14 +375,14 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         Assert.Contains("no-store", res.Headers.CacheControl!.ToString());
         var text = await res.Content.ReadAsStringAsync();
         var d = JsonDocument.Parse(text).RootElement.GetProperty("sections");
-        Assert.Equal(new[] { "account", "bookings", "cancellations-and-returns", "messages", "notifications", "orders" }, d.EnumerateObject().Select(p => p.Name).Order().ToArray());
+        Assert.Equal(new[] { "account", "bookings", "carts", "cancellations-and-returns", "messages", "notifications", "orders", "passkeys", "tracking" }.Order().ToArray(), d.EnumerateObject().Select(p => p.Name).Order().ToArray());
         Assert.Equal("ing1@example.com", d.GetProperty("account").GetProperty("profile").GetProperty("email").GetString());
         Assert.Contains("pay me on venmo", text);                                                         // their own thread (the seller's text)
         Assert.Contains("x.png", text);                                                                   // and the file's name
         Assert.Contains("please cancel", text);                                                           // their cancel request
         Assert.Contains("order_", text);                                                                  // their notifications
         // nothing of anyone else and no secret
-        foreach (var leak in new[] { "SECRET-OF-THE-OTHER-BUYER", "other@example.com", "passwordHash", "PasswordHash", "sessionEpoch", "token" }) Assert.DoesNotContain(leak, text, StringComparison.OrdinalIgnoreCase);
+        foreach (var leak in new[] { "SECRET-OF-THE-OTHER-BUYER", "OTHER-RECIPIENT", "OTHER-STREET", "OTHER-CANCEL-NOTE", "other@example.com", "passwordHash", "PasswordHash", "sessionEpoch", "token" }) Assert.DoesNotContain(leak, text, StringComparison.OrdinalIgnoreCase);
         // a sign-in older than ten minutes must be confirmed again
         _k.F.Clock.Advance(TimeSpan.FromMinutes(11));
         Assert.Equal(HttpStatusCode.Forbidden, (await As(_session, HttpMethod.Post, "/api/v1/account/data-export")).StatusCode);
