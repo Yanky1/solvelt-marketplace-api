@@ -12,7 +12,7 @@ public static class AuthEmails
         $"We received a request to reset your Solvelt password:\n\n{baseUrl}/reset-password?token={token}\n\nThe link works once and expires in {minutes} minutes. If you did not ask for this, ignore this message: your password has not changed.\n");
 
     public static EmailMessage PasswordChanged(string to, string baseUrl) => new(to, "Your password was changed",
-        $"The password of your Solvelt account was just changed, and every other device was signed out.\n\nIf this was you, there is nothing to do. If it was not, reset your password now: {baseUrl}/forgot-password\n");
+        $"The password of your Solvelt account was just changed, and every other device was signed out. Passkeys on your account were not changed and can still sign in.\n\nIf this was you, there is nothing to do. If it was not, reset your password now: {baseUrl}/forgot-password, then sign in and remove any passkey you do not recognise in your account settings (you can remove them all at once).\n");
 
     public static EmailMessage PasskeyAdded(string to, string baseUrl) => new(to, "A passkey was added to your account",
         $"A passkey was just added to your Solvelt account. It can be used to sign in.\n\nIf this was you, there is nothing to do. If it was not, sign in, remove the passkey in your account settings and change your password: {baseUrl}/forgot-password");

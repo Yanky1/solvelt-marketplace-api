@@ -102,6 +102,21 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         return PasskeyOutcome.Ok;
     }
 
+    /// <summary>Every passkey of the account, in one transaction under the account's row lock. Needs a recent sign-in and a password (an account whose only way in is its passkeys keeps them: <see cref="PasskeyOutcome.LastSignInMethod"/>).</summary>
+    public async Task<PasskeyOutcome> RemoveAllAsync(BuyerPrincipal who, CancellationToken ct)
+    {
+        if (!Recent(who, Now)) return PasskeyOutcome.ReauthenticationRequired;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct) != 1) return PasskeyOutcome.NotFound;
+        if (!await db.BuyerPasskeys.AnyAsync(p => p.AccountId == who.AccountId, ct)) return PasskeyOutcome.NoPasskeys;
+        if (!await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == who.AccountId && a.PasswordHash != null, ct)) return PasskeyOutcome.LastSignInMethod;
+        await db.BuyerPasskeys.Where(p => p.AccountId == who.AccountId).ExecuteDeleteAsync(ct);
+        outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasskeyRemoved, who.AccountId));
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return PasskeyOutcome.Ok;
+    }
+
     // ---------- registration ----------
 
     /// <summary>Needs a recent sign-in (O-11): adding a way to sign in is as sensitive as changing the password.</summary>
@@ -124,6 +139,8 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
     public async Task<(PasskeyOutcome Outcome, PasskeyView? Passkey)> CompleteRegistrationAsync(BuyerPrincipal who, Guid challengeId, string? name, JsonElement? credential, CancellationToken ct)
     {
         if (NameProblem(name ?? "Passkey") is not null) return (PasskeyOutcome.InvalidName, null);
+        // the recency (O-11) holds at completion too, not only when the options were asked for: a challenge lives 5 minutes, so without this the window was up to 15. The challenge is not used up by this refusal.
+        if (!Recent(who, Now)) return (PasskeyOutcome.ReauthenticationRequired, null);
         var label = string.IsNullOrWhiteSpace(name) ? "Passkey" : name.Trim();
         var stored = await ConsumeChallengeAsync(challengeId, ChallengePurpose.Register, who.AccountId, who.SessionId, ct);
         if (stored is null) return (PasskeyOutcome.InvalidChallenge, null);
@@ -146,9 +163,14 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         var row = new BuyerPasskey { Id = Guid.NewGuid(), AccountId = who.AccountId, CredentialId = registered.Id, PublicKey = registered.PublicKey, SignCount = registered.SignCount, AaGuid = registered.AaGuid, Name = label, BackedUp = registered.IsBackedUp, CreatedAt = now };
         try
         {
+            // the cap is counted under the account's row lock, in the same transaction as the insert, so parallel completions of one buyer cannot all see room (the count above is only a cheap early answer)
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            if (await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct) != 1) return (PasskeyOutcome.InvalidChallenge, null);
+            if (await db.BuyerPasskeys.CountAsync(p => p.AccountId == who.AccountId, ct) >= Math.Max(1, O.MaxPasskeys)) return (PasskeyOutcome.TooMany, null);
             db.BuyerPasskeys.Add(row);
             outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasskeyAdded, who.AccountId));
             await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
         }
         catch (DbUpdateException ex) when (AccountService.IsUniqueViolation(ex)) { db.ChangeTracker.Clear(); return (PasskeyOutcome.AlreadyRegistered, null); }
         return (PasskeyOutcome.Ok, new PasskeyView(row.Id, row.Name, row.CreatedAt, null, row.BackedUp));
@@ -173,8 +195,10 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         var stored = await ConsumeChallengeAsync(challengeId, ChallengePurpose.SignIn, null, null, ct);
         var response = Parse<AuthenticatorAssertionRawResponse>(credential);
         if (stored is null || response?.RawId is not { Length: > 0 } rawId) return fail;
+        // a discoverable sign-in names no account, so the handle the authenticator returns is what ties the credential to its owner (WebAuthn level 2, 7.2 step 6): it must be there
         var passkey = await db.BuyerPasskeys.AsNoTracking().FirstOrDefaultAsync(p => p.CredentialId == rawId, ct);
         if (passkey is null) return fail;
+        if (response.Response.UserHandle is not { Length: > 0 } handle || !handle.AsSpan().SequenceEqual(passkey.AccountId.ToByteArray())) return fail;
         var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Id == passkey.AccountId && a.DeletedAt == null && a.EmailVerifiedAt != null && a.Email != null, ct);
         if (account is null) return fail;
         if (!await VerifyAssertionAsync(passkey, response, AssertionOptions.FromJson(stored), ct)) return fail;

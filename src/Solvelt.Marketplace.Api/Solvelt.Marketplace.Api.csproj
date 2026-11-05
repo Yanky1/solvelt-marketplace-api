@@ -4,6 +4,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Fido2" Version="4.3.2" />
+    <!-- Pin (M1-85): Fido2 4.3.2 brings NSec 25.4.0 and libsodium 1.0.20.1; the newer NSec (and the libsodium it asks for) is used instead. Only Ed25519 passkeys reach libsodium; ES256 and RS256 use the platform's crypto. -->
+    <PackageReference Include="NSec.Cryptography" Version="26.4.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
     <PackageReference Include="SkiaSharp" Version="3.116.1" />

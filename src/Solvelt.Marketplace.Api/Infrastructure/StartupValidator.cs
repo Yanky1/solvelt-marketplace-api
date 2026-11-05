@@ -45,6 +45,19 @@ public static class StartupValidator
     /// The passkey settings (decision M1-80). In production the RP id and the origins are required and the origins must be https; in every environment, what is set must be
     /// consistent: an RP id that is a plain lower-case domain (not an address, no scheme or port) and origins that are bare scheme://host[:port] whose host is the RP id or below it.
     /// </summary>
+    /// <summary>
+    /// A small built-in list of public suffixes that are not a single label (the single-label ones are refused by the dot rule): the common country second-level domains and the shared hosting
+    /// suffixes where unrelated sites live under one name. Not the whole Public Suffix List; a registrable domain under any of them is fine.
+    /// </summary>
+    public static readonly HashSet<string> PublicSuffixes = new(StringComparer.Ordinal)
+    {
+        "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "ac.uk", "gov.uk", "sch.uk", "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "org.nz", "net.nz", "co.jp", "or.jp", "ne.jp", "ac.jp",
+        "com.br", "net.br", "org.br", "com.mx", "com.ar", "com.cn", "net.cn", "org.cn", "com.hk", "com.sg", "com.tw", "com.tr", "com.ua", "co.za", "co.in", "net.in", "org.in", "co.il", "co.kr", "or.kr", "co.id",
+        "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev", "workers.dev", "azurewebsites.net", "cloudapp.net", "cloudfront.net", "amazonaws.com", "appspot.com", "web.app",
+        "firebaseapp.com", "onrender.com", "fly.dev", "railway.app", "ngrok.io", "ngrok-free.app", "blogspot.com", "wordpress.com", "wixsite.com", "myshopify.com", "squarespace.com", "repl.co", "glitch.me",
+        "now.sh", "surge.sh", "render.com", "up.railway.app", "trycloudflare.com", "duckdns.org", "no-ip.org", "dyndns.org",
+    };
+
     public static IReadOnlyList<string> WebAuthnProblems(IConfiguration config, IHostEnvironment env)
     {
         var problems = new List<string>();
@@ -59,6 +72,7 @@ public static class StartupValidator
             if (id != id.ToLowerInvariant() || id.Contains("://") || id.Contains(':') || id.Contains('/') || System.Net.IPAddress.TryParse(id, out _) || id.StartsWith('.') || id.EndsWith('.') || id.Any(char.IsWhiteSpace))
                 problems.Add("Auth:WebAuthnRpId must be a lower-case domain name without scheme, port or path, and not an IP address.");
             else if (production && !id.Contains('.')) problems.Add("Auth:WebAuthnRpId must be a registrable domain in production (not localhost).");
+            else if (production && PublicSuffixes.Contains(id)) problems.Add($"Auth:WebAuthnRpId '{id}' is a public suffix: every site under it could use passkeys of this site. Use the registrable domain the site is served from, for example solvelt.com.");
         }
         foreach (var o in origins)
         {
