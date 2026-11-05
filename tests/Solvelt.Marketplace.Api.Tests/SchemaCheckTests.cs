@@ -46,11 +46,10 @@ public class SchemaCheckTests
         Assert.Empty(SchemaCheck.Differences(o.Db));
     }
 
-    [Theory]
+    [PostgresTheory]
     [InlineData("postgres")]
     public void A_database_made_from_the_current_model_has_no_differences_on_PostgreSQL(string provider)
     {
-        if (Admin is null) return;                                   // PostgreSQL only: CI's PostgreSQL job runs it (README, Test)
         A_database_made_from_the_current_model_has_no_differences(provider);
     }
 
@@ -79,11 +78,10 @@ public class SchemaCheckTests
         Assert.Empty(SchemaCheck.Differences(o.Db));
     }
 
-    [Theory]
+    [PostgresTheory]
     [InlineData("postgres")]
     public void A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it_on_PostgreSQL(string provider)
     {
-        if (Admin is null) return;
         A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it(provider);
     }
 
@@ -98,10 +96,9 @@ public class SchemaCheckTests
         Assert.Equal(0L, o.Db.BuyerAccounts.AsNoTracking().Single().SessionEpoch);                 // the row survived and has the default
     }
 
-    [Fact]
+    [PostgresFact]
     public void A_column_of_the_wrong_type_or_nullability_is_listed_as_manual_on_postgres()
     {
-        if (Admin is null) return;                                   // PostgreSQL only: CI's PostgreSQL job runs it (README, Test)
         using var o = new Old("postgres");
         o.Run("ALTER TABLE buyer_accounts ALTER COLUMN \"DisplayName\" TYPE character varying(5)");
         var diffs = SchemaCheck.Differences(o.Db);
@@ -163,10 +160,9 @@ public class SchemaCheckTests
         Assert.ThrowsAny<Exception>(() => ro.Database.ExecuteSqlRaw("CREATE TABLE should_not_exist (x int)"));
     }
 
-    [Fact]
+    [PostgresFact]
     public void A_read_only_context_cannot_change_a_PostgreSQL_database()
     {
-        if (Admin is null) return;                                   // PostgreSQL only: CI's PostgreSQL job runs it (README, Test)
         using var o = new Old("postgres");
         using var ro = SchemaCheck.OpenReadOnly("postgres", o.Db.Database.GetConnectionString()!);
         Assert.Empty(SchemaCheck.Differences(ro));

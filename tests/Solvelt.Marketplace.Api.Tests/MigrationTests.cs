@@ -78,10 +78,10 @@ public class MigrationTests
         return lines;
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task The_migrations_apply_and_give_exactly_the_schema_of_the_model()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         await using var migrated = await TempDb.Create(admin);
         await using var created = await TempDb.Create(admin);
         using (var db = migrated.Context()) await db.Database.MigrateAsync();
@@ -99,20 +99,20 @@ public class MigrationTests
         Assert.Contains(a, x => x.StartsWith("column catalog_search.document tsvector", StringComparison.Ordinal) && x.Contains("generated=s") && x.Contains("comment=v3"));
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task The_model_has_no_change_the_migrations_do_not_carry()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         await using var t = await TempDb.Create(admin);
         using var db = t.Context();
         Assert.False(db.Database.HasPendingModelChanges(), "the model changed since InitialCreate was generated: run tools/migrations/regenerate-initial-create.sh (before the first release) or add a migration");
         Assert.Single(db.Database.GetMigrations());
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Migrating_twice_changes_nothing_and_the_search_script_is_a_no_op_afterwards()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         await using var t = await TempDb.Create(admin);
         using var db = t.Context();
         await db.Database.MigrateAsync();
@@ -122,10 +122,10 @@ public class MigrationTests
         Assert.Equal(before, await Describe(t.ConnectionString));
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Down_removes_everything_and_up_applies_again()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         await using var t = await TempDb.Create(admin);
         using var db = t.Context();
         var migrator = db.GetService<Microsoft.EntityFrameworkCore.Migrations.IMigrator>();
@@ -173,10 +173,10 @@ public class DatabaseSetupTests
         finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); File.Delete(path); }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Production_on_PostgreSQL_applies_the_migrations_unless_told_not_to()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         string Create(string name) { using var c = new NpgsqlConnection(admin); c.Open(); using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", c); cmd.ExecuteNonQuery(); return new NpgsqlConnectionStringBuilder(admin) { Database = name }.ConnectionString; }
         var n1 = "mp_set_" + Guid.NewGuid().ToString("N"); var n2 = "mp_set_" + Guid.NewGuid().ToString("N");
         try
@@ -225,10 +225,10 @@ public class DatabaseSetupTests
     private static async Task<int> Scalar(MarketplaceDb db, string sql)
         => await db.Database.SqlQueryRaw<int>(sql).SingleAsync();
 
-    [Fact]
+    [PostgresFact]
     public async Task A_database_that_matches_the_model_but_has_no_history_is_baselined_and_keeps_its_data()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await OldDatabase(admin);
         try
         {
@@ -244,14 +244,14 @@ public class DatabaseSetupTests
         finally { Drop(admin, name); }
     }
 
-    [Theory]
+    [PostgresTheory]
     [InlineData("ALTER TABLE buyer_accounts DROP COLUMN \"Phone\"", "Phone")]
     [InlineData("ALTER TABLE buyer_accounts ALTER COLUMN \"DisplayName\" TYPE character varying(5)", "DisplayName")]
     [InlineData("DROP INDEX \"IX_buyer_passkeys_AccountId\"", "IX_buyer_passkeys_AccountId")]
     [InlineData("DROP TABLE webauthn_challenges", "webauthn_challenges")]
     public async Task A_database_that_differs_from_the_model_stops_the_start_and_is_left_alone(string damage, string expectedInMessage)
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await OldDatabase(admin);
         try
         {
@@ -268,7 +268,7 @@ public class DatabaseSetupTests
 
     // ---------- review of the baseline (M1-84): what the names-only check missed, concurrency, and which migration is recorded ----------
 
-    [Theory]
+    [PostgresTheory]
     [InlineData("DROP INDEX ux_buyer_addresses_one_default; CREATE INDEX ux_buyer_addresses_one_default ON buyer_addresses (\"AccountId\")", "ux_buyer_addresses_one_default")]       // unique and filtered made plain
     [InlineData("DROP INDEX \"IX_marketplace_orders_CartId\"; CREATE UNIQUE INDEX \"IX_marketplace_orders_CartId\" ON marketplace_orders (\"CartId\")", "IX_marketplace_orders_CartId")]   // partial made total
     [InlineData("ALTER TABLE cart_lines ALTER COLUMN \"IsDemo\" DROP DEFAULT", "cart_lines.IsDemo")]                                                                                        // the default gone: every cart add would fail NOT NULL
@@ -277,7 +277,7 @@ public class DatabaseSetupTests
     [InlineData("ALTER TABLE cart_lines DROP CONSTRAINT \"FK_cart_lines_carts_CartId\"; ALTER TABLE cart_lines ADD CONSTRAINT \"FK_cart_lines_carts_CartId\" FOREIGN KEY (\"CartId\") REFERENCES carts (\"Id\")", "FK_cart_lines_carts_CartId")]
     public async Task A_database_whose_indexes_defaults_or_constraints_differ_is_not_baselined(string damage, string expectedInMessage)
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await OldDatabase(admin);
         try
         {
@@ -294,10 +294,10 @@ public class DatabaseSetupTests
         finally { Drop(admin, name); }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task Four_instances_starting_together_on_an_old_database_baseline_it_once_and_none_fails()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (first, name) = await OldDatabase(admin);
         try
         {
@@ -320,10 +320,10 @@ public class DatabaseSetupTests
         finally { Drop(admin, name); }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task A_baselined_database_is_exactly_what_the_migrations_make_search_objects_included()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await OldDatabase(admin);
         try
         {
@@ -408,10 +408,10 @@ public class DatabaseSetupTests
         return (db, name);
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task A_history_row_this_build_does_not_have_stops_the_start_with_the_ids_and_the_fix_and_changes_nothing()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await MigratedDatabase(admin);
         try
         {
@@ -428,10 +428,10 @@ public class DatabaseSetupTests
         finally { Drop(admin, name); }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task The_documented_fix_works_the_history_is_cleared_and_the_database_is_baselined_again()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await MigratedDatabase(admin);
         try
         {
@@ -446,10 +446,10 @@ public class DatabaseSetupTests
         finally { Drop(admin, name); }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task After_the_fix_a_database_made_by_the_older_InitialCreate_lists_what_differs_and_the_tool_script_repairs_it()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await MigratedDatabase(admin);
         try
         {
@@ -473,10 +473,10 @@ public class DatabaseSetupTests
 
     // ---------- review of the baseline, round 2 (M1-89) ----------
 
-    [Fact]
+    [PostgresFact]
     public async Task The_search_script_runs_before_the_history_so_when_it_fails_no_history_row_is_written_and_the_next_start_retries()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await OldDatabase(admin);
         try
         {
@@ -492,10 +492,10 @@ public class DatabaseSetupTests
         finally { Drop(admin, name); }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task The_history_table_and_its_rows_are_written_in_one_transaction()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await OldDatabase(admin);
         try
         {
@@ -511,10 +511,10 @@ public class DatabaseSetupTests
         finally { Drop(admin, name); }
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task A_start_waiting_for_another_baselining_instance_gives_up_after_the_deadline_and_changes_nothing()
     {
-        if (Admin is not { } admin) return;
+        var admin = Admin!;
         var (db, name) = await OldDatabase(admin);
         var holder = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(db.Database.GetConnectionString()!) { Pooling = false }.ConnectionString);
         var wait = DatabaseSetup.LockWait;

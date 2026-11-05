@@ -273,11 +273,10 @@ public class CatalogSearchUnicodeTests : IAsyncLifetime
 
 public class CatalogSearchPostgresTests
 {
-    [Fact]
+    [PostgresFact]
     public async Task The_typo_pass_uses_the_trigram_index_and_the_threshold_does_not_leak()
     {
         using var f = new TestFactory();
-        if (f.Provider != "postgres") return;                              // PostgreSQL only: the SQLite fallback has no trigram index; CI runs this on PostgreSQL
         await Sync(f);
         using var c = f.CreateClient();
         Assert.Contains((await Json(c, "/api/v1/catalog/listings?q=chalah")).GetProperty("items").EnumerateArray(), i => i.GetProperty("slug").GetString() == "classic-braided-challah");
@@ -306,11 +305,10 @@ public class CatalogSearchPostgresTests
         Assert.NotEqual("0.5", threshold);                                         // "default" (setting not loaded in this backend) or the server default 0.6: never the app's local 0.5
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task The_tsvector_does_not_depend_on_the_text_search_parser_so_non_Latin_words_are_indexed()
     {
         using var f = new TestFactory();
-        if (f.Provider != "postgres") return;
         var fx = Fixture(f);
         fx.Add(Copy(fx.All().First(l => l.Type == "product"), Guid.NewGuid(), "גביע קידוש"));
         await Sync(f);

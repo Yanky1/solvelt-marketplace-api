@@ -596,13 +596,12 @@ public class WebhookReceiverTests
         Assert.Equal(T0.AddMinutes(3), GroupRow(f, "MP-1", "status").LastAppliedAt);                  // and the newest event won
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task A_replay_that_loses_the_race_to_create_the_first_state_row_against_a_live_event_leaves_its_event_parked()
     {
         // On PostgreSQL (read committed) a replay and a live webhook for the same aggregate can both find no state row and both insert it; the
         // second committer gets a unique violation. For the replay that must be a lost race (its event stays parked), never an exception that
         // abandons the rest of the list. SQLite serialises every writer on a file lock, so the race exists on PostgreSQL only (CI runs this there).
-        if (TestFactory.ResolveProvider(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER")) != "postgres") return;
         var known = false;
         var replayHasRead = new TaskCompletionSource();
         var liveHasCommitted = new TaskCompletionSource();

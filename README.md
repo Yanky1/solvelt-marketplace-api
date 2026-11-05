@@ -23,7 +23,7 @@ TEST_DB_PROVIDER=postgres \
 TEST_POSTGRES_CONNECTION="Host=localhost;Username=postgres;Password=postgres;Database=postgres" \
   dotnet test                                             # the same tests against PostgreSQL (a fresh database per factory)
 ```
-Tests that need PostgreSQL (the schema check against a real server, the migrations) return at once when `TEST_DB_PROVIDER=postgres` and `TEST_POSTGRES_CONNECTION` are not set, so a plain `dotnet test` passes them WITHOUT having run them; only CI's PostgreSQL job (or a local run with those variables) runs them. Nothing in CI is skipped or filtered out.
+Tests that need PostgreSQL (the schema check against a real server, the migrations, the trigram and tsvector checks, a few races: 26 tests, 34 with their theory rows) carry the attribute `[PostgresFact]` or `[PostgresTheory]` and the trait `Db=Postgres` (decision M8-15). With `TEST_DB_PROVIDER=postgres` and `TEST_POSTGRES_CONNECTION` set they run; without them a plain `dotnet test` reports them as **skipped** with the reason "needs PostgreSQL: set TEST_DB_PROVIDER=postgres and TEST_POSTGRES_CONNECTION", never as passed (they used to `return` early and pass without having run). `dotnet test --filter "Db!=Postgres"` leaves them out, which is what CI's SQLite job does (0 skipped); CI's PostgreSQL job runs everything.
 
 CI (`.github/workflows/ci.yml`) restores, builds with warnings as errors, runs the tests on SQLite, and runs them again against a PostgreSQL service container.
 It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
