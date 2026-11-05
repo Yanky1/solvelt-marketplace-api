@@ -8,7 +8,7 @@ namespace Solvelt.Marketplace.Api.Lists;
 
 /// <summary>
 /// Price-drop and back-in-stock notifications for wishlist items (M6, decisions M6-02 and M6-03). The catalog sync only QUEUES a <c>wishlist.watch</c> outbox message per applied listing version
-/// (<see cref="WishlistWatchQueue"/>, "insert unless taken", so it can never fail the catalog save); this handler does the work later, in its own transactions, ONE BUYER AT A TIME, so a problem with one
+/// (<see cref="WishlistWatchQueue"/>, inside the snapshot's own unit of work, so the message exists exactly when the snapshot is saved); this handler does the work later, in its own transactions, ONE BUYER AT A TIME, so a problem with one
 /// buyer's notification is logged and skipped and never stops the others or the catalog.
 /// <para>
 /// What is compared: each item keeps the LOWEST PRICE OF ALL VARIANTS (available or not) and the availability the buyer last knew. A price below that baseline is a price drop; a cheaper variant coming back in
@@ -63,7 +63,7 @@ public sealed class WishlistWatchHandler(MarketplaceDb db, TimeProvider time, IL
                 foreach (var i in items) { i.BaselinePriceCents = price; i.BaselineCurrency = listing.Currency; i.BaselineAvailable = listing.Available; }
                 await db.SaveChangesAsync(ct);
             }
-            catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 db.ChangeTracker.Clear();   // this buyer is skipped (their baseline did not move, so the next version tries again); the others and the catalog are untouched
                 log.LogWarning("Wishlist notification skipped for listing {ListingId}: {Type}", listing.Id, ex.GetType().Name);
@@ -79,9 +79,18 @@ public sealed class WishlistWatchHandler(MarketplaceDb db, TimeProvider time, IL
     private static string Clip(string s) => s.Length <= 120 ? s : s[..(char.IsHighSurrogate(s[119]) ? 119 : 120)];
 }
 
-/// <summary>Called by the catalog sync after a snapshot is applied: queues the watch, unless one for this listing version is already queued (never throws on a duplicate).</summary>
+/// <summary>
+/// Called by the catalog sync while a snapshot is applied: adds the watch message to the SAME unit of work as the snapshot (nothing is written here), so the message exists exactly when the
+/// snapshot is saved: the worker can never see it before the new data, and a failed save leaves no used-up key (review MED-1). The key holds the listing version, which the sync applies and saves
+/// once (a stale or duplicate snapshot is refused before this runs), so the unique key cannot be hit by a normal run; the existence check covers a replay.
+/// </summary>
 public static class WishlistWatchQueue
 {
-    public static Task QueueAsync(MarketplaceDb db, TimeProvider time, Guid listingId, long version, CancellationToken ct)
-        => new OutboxWriter(db, time).TryEnqueueAsync(WishlistWatchHandler.Type, new WishlistWatchHandler.Payload(listingId), $"wishlist-watch:{listingId:N}:{version}", ct: ct);
+    public static async Task QueueAsync(MarketplaceDb db, TimeProvider time, Guid listingId, long version, CancellationToken ct)
+    {
+        var key = $"wishlist-watch:{listingId:N}:{version}";
+        var outbox = new OutboxWriter(db, time);
+        if (await outbox.ExistsAsync(key, ct) || db.OutboxMessages.Local.Any(m => m.DedupeKey == key)) return;
+        outbox.Enqueue(WishlistWatchHandler.Type, new WishlistWatchHandler.Payload(listingId), key);
+    }
 }
