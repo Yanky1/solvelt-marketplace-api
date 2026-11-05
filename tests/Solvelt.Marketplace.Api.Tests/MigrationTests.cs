@@ -265,4 +265,124 @@ public class DatabaseSetupTests
         }
         finally { Drop(admin, name); }
     }
+
+    // ---------- review of the baseline (M1-84): what the names-only check missed, concurrency, and which migration is recorded ----------
+
+    [Theory]
+    [InlineData("DROP INDEX ux_buyer_addresses_one_default; CREATE INDEX ux_buyer_addresses_one_default ON buyer_addresses (\"AccountId\")", "ux_buyer_addresses_one_default")]       // unique and filtered made plain
+    [InlineData("DROP INDEX \"IX_marketplace_orders_CartId\"; CREATE UNIQUE INDEX \"IX_marketplace_orders_CartId\" ON marketplace_orders (\"CartId\")", "IX_marketplace_orders_CartId")]   // partial made total
+    [InlineData("ALTER TABLE cart_lines ALTER COLUMN \"IsDemo\" DROP DEFAULT", "cart_lines.IsDemo")]                                                                                        // the default gone: every cart add would fail NOT NULL
+    [InlineData("ALTER TABLE buyer_accounts ADD CONSTRAINT extra_check CHECK (\"DisplayName\" <> 'x')", "extra_check")]                                                                      // an extra constraint
+    [InlineData("CREATE INDEX extra_idx ON buyer_accounts (\"Phone\")", "extra_idx")]                                                                                                     // an extra index
+    [InlineData("ALTER TABLE cart_lines DROP CONSTRAINT \"FK_cart_lines_carts_CartId\"; ALTER TABLE cart_lines ADD CONSTRAINT \"FK_cart_lines_carts_CartId\" FOREIGN KEY (\"CartId\") REFERENCES carts (\"Id\")", "FK_cart_lines_carts_CartId")]
+    public async Task A_database_whose_indexes_defaults_or_constraints_differ_is_not_baselined(string damage, string expectedInMessage)
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await OldDatabase(admin);
+        try
+        {
+            using var _ = db;
+            await db.Database.ExecuteSqlRawAsync(damage);
+            var ex = Assert.Throws<InvalidOperationException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));
+            Assert.Contains("Nothing was changed", ex.Message);
+            Assert.Equal(0, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM information_schema.tables WHERE table_name = '__EFMigrationsHistory'"));      // not marked as migrated
+            Assert.Equal(0, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM pg_namespace WHERE nspname LIKE 'mp_baseline_%'"));                          // the temporary schema left nothing behind
+            Assert.Equal(0, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM pg_indexes WHERE indexname = 'ix_catalog_search_text_trgm'"));              // and the search script did not run
+            Assert.Equal(1, await db.BuyerAccounts.CountAsync());                                                                                                  // data intact
+            Assert.Contains(expectedInMessage, ex.Message + string.Join(";", SchemaDescription.Compare(DescribeActual(db), ExpectedForInitial(db), true)));
+        }
+        finally { Drop(admin, name); }
+    }
+
+    [Fact]
+    public async Task Four_instances_starting_together_on_an_old_database_baseline_it_once_and_none_fails()
+    {
+        if (Admin is not { } admin) return;
+        var (first, name) = await OldDatabase(admin);
+        try
+        {
+            using var _ = first;
+            var cs = first.Database.GetConnectionString()!;
+            var results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+            {
+                try
+                {
+                    using var db = new MarketplaceDb(new DbContextOptionsBuilder<MarketplaceDb>().UseNpgsql(cs).Options);
+                    DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);
+                    return (string?)null;
+                }
+                catch (Exception ex) { return ex.GetType().Name + ": " + ex.Message; }
+            })));
+            Assert.All(results, r => Assert.Null(r));
+            Assert.Equal(1, await Scalar(first, "SELECT count(*)::int AS \"Value\" FROM \"__EFMigrationsHistory\""));
+            Assert.Equal(1, await first.BuyerAccounts.CountAsync());
+        }
+        finally { Drop(admin, name); }
+    }
+
+    [Fact]
+    public async Task A_baselined_database_is_exactly_what_the_migrations_make_search_objects_included()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await OldDatabase(admin);
+        try
+        {
+            using var _ = db;
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);
+            var problems = SchemaDescription.Compare(DescribeActual(db), ExpectedForInitial(db), ignoreSearchObjects: false);
+            Assert.Empty(problems);
+        }
+        finally { Drop(admin, name); }
+    }
+
+    private static List<string> DescribeActual(MarketplaceDb db)
+    {
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open) conn.Open();
+        using var tx = conn.BeginTransaction();
+        return SchemaDescription.Describe(conn, tx, "public");
+    }
+
+    private static List<string> ExpectedForInitial(MarketplaceDb db)
+    {
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open) conn.Open();
+        var script = Microsoft.EntityFrameworkCore.Infrastructure.AccessorExtensions.GetService<Microsoft.EntityFrameworkCore.Migrations.IMigrator>(db)
+            .GenerateScript(null, db.Database.GetMigrations().First(), Microsoft.EntityFrameworkCore.Migrations.MigrationsSqlGenerationOptions.NoTransactions);
+        var schema = "mp_expected_" + Guid.NewGuid().ToString("N")[..8];
+        using var tx = conn.BeginTransaction();
+        void Run(string sql) { using var c = conn.CreateCommand(); c.Transaction = tx; c.CommandText = sql; c.ExecuteNonQuery(); }
+        Run($"CREATE SCHEMA {schema}"); Run($"SET LOCAL search_path TO {schema}, public"); Run(script);
+        var lines = SchemaDescription.Describe(conn, tx, schema);
+        tx.Rollback();
+        return lines;
+    }
+
+    // --- which migration is recorded: the newest one the database equals (a pure test of the choice, with made-up migrations) ---
+
+    [Fact]
+    public void The_baseline_is_recorded_at_the_newest_migration_the_schema_equals()
+    {
+        string[] ids = ["001_Initial", "002_AddA", "003_AddB"];
+        var m1 = new[] { "table t" };
+        var m2 = new[] { "table t", "column t.a" };
+        var m3 = new[] { "table t", "column t.a", "column t.b" };
+        IReadOnlyCollection<string> ExpectedFor(string id) => id switch { "001_Initial" => m1, "002_AddA" => m2, _ => m3 };
+
+        Assert.Equal(0, SchemaDescription.Choose(ids, ExpectedFor, m1).Index);            // made by the first migration: only the first is recorded, the others will be applied
+        Assert.Equal(1, SchemaDescription.Choose(ids, ExpectedFor, m2).Index);            // already has A: the first two are recorded, B is applied
+        Assert.Equal(2, SchemaDescription.Choose(ids, ExpectedFor, m3).Index);            // current: all three recorded
+        var (none, problems) = SchemaDescription.Choose(ids, ExpectedFor, ["table t", "column t.zzz"]);
+        Assert.Equal(-1, none);
+        Assert.Contains(problems, p => p.Contains("column t.zzz") && p.Contains("not expected"));   // the differences are against the newest migration
+        Assert.Contains(problems, p => p.Contains("column t.b"));
+    }
+
+    [Fact]
+    public void The_search_objects_are_left_out_of_the_first_comparison_only()
+    {
+        string[] expected = ["table t", "column catalog_search.document tsvector generated=s", "index catalog_search ix_catalog_search_text_trgm CREATE INDEX", "function catalog_tokens_tsvector (t text) x"];
+        Assert.Empty(SchemaDescription.Compare(["table t"], expected, ignoreSearchObjects: true));
+        Assert.Equal(3, SchemaDescription.Compare(["table t"], expected, ignoreSearchObjects: false).Count);
+    }
 }

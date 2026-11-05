@@ -206,4 +206,26 @@ public class SchemaCheckTests
         Assert.DoesNotContain("/nonexistent-dir", line.Text);
     }
 
+
+    [Fact]
+    public void The_NFC_report_counts_stored_emails_that_are_not_in_NFC_without_naming_them()
+    {
+        using var o = new Old("sqlite");
+        o.Run("INSERT INTO buyer_accounts (Id, Email, DisplayName, RelayEmail, CreatedAt, UpdatedAt, SessionEpoch, PasswordHash, Phone, EmailVerifiedAt, DeletedAt, RedactedAt) VALUES " +
+              "('00000000-0000-0000-0000-000000000001', 'jose\u0301@example.test', 'A', 'r1@relay.test', 0, 0, 0, NULL, NULL, NULL, NULL, NULL), " +        // e + combining acute: not NFC
+              "('00000000-0000-0000-0000-000000000002', 'jos\u00e9@example.test', 'B', 'r2@relay.test', 0, 0, 0, NULL, NULL, NULL, NULL, NULL), " +         // precomposed: NFC
+              "('00000000-0000-0000-0000-000000000003', 'plain@example.test', 'C', 'r3@relay.test', 0, 0, 0, NULL, NULL, NULL, NULL, NULL)");
+        var report = SchemaCheck.NfcReport(o.Db);
+        var accounts = Assert.Single(report, r => r.Column == "buyer_accounts.Email");
+        Assert.Equal((3, 1), (accounts.Values, accounts.NotNfc));
+        Assert.Contains(report, r => r.Column == "marketplace_orders.GuestEmail" && r.Values == 0 && r.NotNfc == 0);
+    }
+
+    [Fact]
+    public void The_NFC_report_skips_a_table_that_is_not_there()
+    {
+        using var o = new Old("sqlite");
+        o.Run("DROP TABLE marketplace_orders");
+        Assert.DoesNotContain(SchemaCheck.NfcReport(o.Db), r => r.Column.StartsWith("marketplace_orders", StringComparison.Ordinal));
+    }
 }

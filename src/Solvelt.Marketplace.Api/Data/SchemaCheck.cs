@@ -31,6 +31,31 @@ public static class SchemaCheck
         catch (Exception ex) { log.LogWarning("The schema could not be compared with the model ({ExceptionType}: {Reason}); it is not known whether it matches", ex.GetType().Name, Sanitise(ex.Message)); }
     }
 
+    /// <summary>One column checked for NFC: how many values it holds and how many are not in normalisation form C.</summary>
+    public sealed record NfcCount(string Column, int Values, int NotNfc);
+
+    /// <summary>
+    /// Read-only: how many stored email addresses are not in NFC (decision M1-81). Before the normaliser an address typed with combining marks and the same address typed precomposed were two
+    /// different values; one stored in the decomposed form is no longer found by a sign-in or a guest lookup (those normalise to NFC). Counts only, never the addresses. A table or column that is
+    /// not there is skipped. Works on both providers (the check runs in the application, with <see cref="Text.UnicodeNormalizer"/>).
+    /// </summary>
+    public static List<NfcCount> NfcReport(MarketplaceDb db)
+    {
+        var result = new List<NfcCount>();
+        void Check(string label, Func<List<string>> read)
+        {
+            try
+            {
+                var values = read();
+                result.Add(new NfcCount(label, values.Count, values.Count(v => !Text.UnicodeNormalizer.IsNfc(v))));
+            }
+            catch (Exception) { /* the table or column does not exist (an older database): the schema differences say so */ }
+        }
+        Check("buyer_accounts.Email", () => db.Database.SqlQueryRaw<string>("SELECT \"Email\" AS \"Value\" FROM buyer_accounts WHERE \"Email\" IS NOT NULL").ToList());
+        Check("marketplace_orders.GuestEmail", () => db.Database.SqlQueryRaw<string>("SELECT \"GuestEmail\" AS \"Value\" FROM marketplace_orders WHERE \"GuestEmail\" IS NOT NULL").ToList());
+        return result;
+    }
+
     /// <summary>
     /// The reason of a failure, safe for a log line: any <c>key=value</c> pair of a connection string (Password, Pwd, User ID, Host, Server, Data Source, ...) is replaced, line breaks are dropped and the
     /// text is cut at 300 characters, so "cannot connect" and "permission denied" can be told apart without the connection string reaching the log.
