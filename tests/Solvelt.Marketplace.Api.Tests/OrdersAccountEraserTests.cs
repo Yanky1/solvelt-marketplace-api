@@ -18,6 +18,15 @@ public sealed class OrdersAccountEraserTests : OrderFlowBase
         await Drain();
     }
 
+    /// <summary>Every seller order of the order delivered: the order is closed.</summary>
+    private Task CloseOrder(MarketplaceOrder order) => _k.Db(async db =>
+    {
+        foreach (var g in await db.OrderGroups.Where(x => x.OrderId == order.Id).ToListAsync())
+            db.SellerOrderStates.Add(new SellerOrderState { GroupId = g.Id, OrderId = order.Id, Status = FulfilmentStatus.Delivered, UpdatedAt = _k.F.Clock.GetUtcNow() });
+        await db.SaveChangesAsync();
+        return 0;
+    });
+
     [Fact]
     public async Task Deleting_the_account_redacts_the_orders_keeps_the_money_and_deletes_the_carts()
     {
@@ -29,6 +38,7 @@ public sealed class OrdersAccountEraserTests : OrderFlowBase
         await AddToCart("challah-classic");                               // a cart that is still open
         var before = await Order(number);
         Assert.NotNull(before.AccountId);
+        await CloseOrder(before);                                         // only CLOSED orders are redacted at deletion (decision M3-40): this one is delivered
 
         await DeleteAccountAndRedact(Infrastructure.AuthKit.Password);
 
@@ -80,5 +90,41 @@ public sealed class OrdersAccountEraserTests : OrderFlowBase
         Assert.Null(account.Email);
         Assert.Null((await Order(number)).GuestEmail);                                      // otherwise a new account with the same mailbox could claim it
         Assert.Equal("someone-else@example.com", (await _k.Db(db => db.Orders.AsNoTracking().SingleAsync(o => o.Id == other))).GuestEmail);
+    }
+
+    [Fact]
+    public async Task An_open_order_keeps_its_address_and_relay_so_the_seller_can_still_ship_and_the_portal_gets_the_real_data()
+    {
+        await Login("eraser3@example.com");
+        await AddToCart("challah-classic");
+        var (number, intent, total) = await Checkout(new { address = Address() });
+        await Pay(number, intent, total);                                 // paid, but the ingest has NOT run yet
+        var before = await Order(number);
+
+        await DeleteAccountAndRedact(Infrastructure.AuthKit.Password);   // the redaction job runs, then the ingest (Drain)
+
+        var o = await Order(number);
+        Assert.Equal(("Jane B.", "Jane Brown", "1 Main St", "Brooklyn", "11201"), (o.BuyerName, o.ShipName, o.ShipLine1, o.ShipCity, o.ShipPostalCode));   // untouched
+        Assert.Equal(before.RelayEmail, o.RelayEmail);                    // the relay still works for seller messages and refund mail
+        var sent = System.Text.Json.JsonDocument.Parse(Assert.Single(Portal("orders")).BodyText).RootElement.GetProperty("shippingAddress");
+        Assert.Equal("1 Main St", sent.GetProperty("line1").GetString());   // the seller got a real, shippable address
+        Assert.Equal("placed", o.Status);
+        Assert.Equal(0, await _k.Db(db => db.Carts.CountAsync(c => c.AccountId == before.AccountId)));   // the carts are still deleted
+    }
+
+    [Fact]
+    public async Task A_claimed_guest_order_loses_its_guest_address_open_or_closed()
+    {
+        await Login("eraser4@example.com");
+        await AddToCart("challah-classic");
+        var (number, intent, total) = await Checkout(new { address = Address() });
+        await Pay(number, intent, total);
+        await Drain();
+        await _k.Db(db => db.Orders.Where(o => o.Number == number).ExecuteUpdateAsync(s => s.SetProperty(o => o.GuestEmail, "claimed-guest@example.com")).ContinueWith(_ => 0));   // a guest order claimed by this account
+        Assert.Equal("claimed-guest@example.com", (await Order(number)).GuestEmail);
+
+        await DeleteAccountAndRedact(Infrastructure.AuthKit.Password);
+
+        Assert.Null((await Order(number)).GuestEmail);                    // the order is still open (kept in full), but the guest address is gone
     }
 }

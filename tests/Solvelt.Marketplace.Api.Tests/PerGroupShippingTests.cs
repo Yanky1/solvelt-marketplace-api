@@ -175,4 +175,28 @@ public sealed class PerGroupShippingTests : OrderFlowBase
         var challah = lines.Single(l => l.GetProperty("productId").GetGuid() == CatalogKit.ListingId("challah-classic"));
         Assert.True(challah.TryGetProperty("variantId", out var v) && v.GetGuid() != Guid.Empty);
     }
+
+    [Fact]
+    public async Task L4_a_line_whose_variant_id_is_its_listing_id_is_sent_without_a_variant_id_even_when_the_catalog_row_is_gone()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter");
+        var (number, intent, total) = await Checkout();
+        var listing = CatalogKit.ListingId("kiddush-cup-pewter");
+        await _k.Db(db => db.OrderLines.Where(l => l.ListingId == listing).ExecuteUpdateAsync(s => s.SetProperty(l => l.VariantId, listing)).ContinueWith(_ => 0));   // the synthetic default variant's id IS the listing id
+        await Pay(number, intent, total);
+        await Drain();
+        using var doc = JsonDocument.Parse(Assert.Single(Portal("orders")).BodyText);
+        Assert.False(doc.RootElement.GetProperty("lines")[0].TryGetProperty("variantId", out _));
+    }
+
+    [Fact]
+    public void L5_a_shipping_speed_without_a_name_is_not_offered_and_does_not_throw()
+    {
+        var zone = new Solvelt.Marketplace.Api.Portal.ShippingZone("US", "domestic", ["US"], [new(null!, true, "flat", 500, null, null), new("standard", true, "flat", 400, null, null)]);
+        var s = new Solvelt.Marketplace.Api.Portal.ShippingSettings(Guid.NewGuid(), Guid.NewGuid(), 1, null,
+            [new Solvelt.Marketplace.Api.Portal.ShippingProfile(Guid.NewGuid(), "d", true, "USD", null, [zone])]);
+        var offered = ShippingRates.Options(s, "US", 1000, null, new DateOnly(2026, 11, 4), new ShippingOptions()).Options;
+        Assert.Equal(["standard"], offered.Select(o => o.Speed));
+    }
 }

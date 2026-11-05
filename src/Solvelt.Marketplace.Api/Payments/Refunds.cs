@@ -344,7 +344,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
 
         // Nothing (more) can go back, or the refund fits and was refused for another reason: nothing moved for this refund, so everything it reserved is given back.
         // (A refund that no longer fits leaves the cap consumed by the CONFIRMED money instead: the external row above.)
-        var changed = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved)
+        var changed = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved && r.Attempt == p.Attempt)   // the attempt this worker read (review L3)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Rejected).SetProperty(r => r.UpdatedAt, now), ct);
         if (changed == 1)
         {

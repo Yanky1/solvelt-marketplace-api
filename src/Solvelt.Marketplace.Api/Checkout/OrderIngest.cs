@@ -64,7 +64,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
             for (var i = 0; i < gl.Count; i++)
             {
                 var l = gl[i];
-                lines.Add(new OrderLineRequest(l.MarketplaceLineId, l.SellerId, l.BrandId, l.ListingId, syntheticVariants?.Contains(l.VariantId) == true ? null : l.VariantId, l.Quantity, l.UnitPriceCents, 0, l.TaxCents + shipTax[i]));
+                lines.Add(new OrderLineRequest(l.MarketplaceLineId, l.SellerId, l.BrandId, l.ListingId, syntheticVariants?.Contains(l.VariantId) == true || l.VariantId == l.ListingId ? null : l.VariantId, l.Quantity, l.UnitPriceCents, 0, l.TaxCents + shipTax[i]));
             }
         }
         var (method, speed) = IngestMapping.OrderMethodAndSpeed(groups);
