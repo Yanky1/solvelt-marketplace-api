@@ -208,3 +208,18 @@ export async function apiCheckoutAndPay(buyer, listingSlug, quantity = 1) {
   check(r.status === 200, `the Stripe webhook answered ${r.status}`);
   return { number: placed.orderNumber, totalCents: total, intentId };
 }
+
+/** Books the first online slot of a service through the API and "pays" it with Stripe's signed webhook; returns { id, number }. */
+export async function apiBookAndPay(buyer, listing) {
+  const av = (await must(api("GET", `/api/v1/services/${listing.id}/availability?location=online`), 200, "availability")).body;
+  check(av.slots?.length, "the service has bookable slots");
+  const key = `journey-${uniq()}-${uniq()}`;
+  const hold = (await must(api("POST", "/api/v1/bookings/holds", { token: buyer.token, headers: { "idempotency-key": key }, body: { listingId: listing.id, start: av.slots[0].startAt, location: "online" } }), [200, 201], "hold")).body.booking;
+  const pay = (await must(api("POST", `/api/v1/bookings/${hold.id}/checkout`, { token: buyer.token, body: {} }), 200, "booking checkout")).body;
+  const mid = sql(`select "MarketplaceBookingId" from bookings where "Id" = '${hold.id}'`);
+  const total = pay.booking.totalCents;
+  const r = await stripeEvent("payment_intent.succeeded", { id: pay.payment.clientSecret.split("_secret_")[0], amount: total, amount_received: total, currency: "usd", metadata: { marketplace_booking_id: mid, kind: "booking" } });
+  check(r.status === 200, `the Stripe webhook for the booking answered ${r.status}`);
+  await until("the booking to be confirmed", async () => { await pumpPortal(); return (await api("GET", `/api/v1/bookings/${hold.id}`, { token: buyer.token })).body?.status === "Confirmed"; }, { timeout: 90_000, every: 3000 });
+  return { id: hold.id, number: hold.number };
+}
