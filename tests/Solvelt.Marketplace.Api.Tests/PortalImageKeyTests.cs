@@ -52,7 +52,7 @@ public class PortalImageKeyTests
     {
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 11, 4, 12, 0, 0, TimeSpan.Zero));
         var portal = new FakePortal(Inbound, clock).RespondAlways(_ => Png());
-        foreach (var empty in new string?[] { null, "" })
+        foreach (var empty in new string?[] { null, "", "   ", "\t" })   // whitespace is "not set", as the start-up validator reads it
             Assert.True((await Client(portal, clock, Inbound, empty).GetCatalogImageAsync(ImageId)).IsSuccess);
     }
 

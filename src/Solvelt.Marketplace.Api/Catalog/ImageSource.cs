@@ -5,7 +5,11 @@ using Solvelt.Marketplace.Api.Portal;
 
 namespace Solvelt.Marketplace.Api.Catalog;
 
-public sealed record ImageBytes(byte[] Bytes, string ContentType);
+/// <summary>The bytes of one image. The strong ETag is computed once, when the object is made (the instances are cached, so a request never hashes the bytes again).</summary>
+public sealed record ImageBytes(byte[] Bytes, string ContentType)
+{
+    public string ETag { get; } = $"\"{Convert.ToHexStringLower(SHA256.HashData(Bytes))[..32]}\"";
+}
 public enum ImageFetchStatus { Ok, NotFound, Unavailable, Invalid }
 public sealed record ImageFetch(ImageFetchStatus Status, ImageBytes? Image = null);
 
