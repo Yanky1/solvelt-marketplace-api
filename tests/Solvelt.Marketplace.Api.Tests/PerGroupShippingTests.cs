@@ -87,7 +87,7 @@ public sealed class PerGroupShippingTests : OrderFlowBase
         using var doc = JsonDocument.Parse(call.BodyText);
         var ship = doc.RootElement.GetProperty("shipping")[0];
         Assert.Contains(ship.GetProperty("speed").GetString(), IngestMapping.Speeds);
-        Assert.InRange(ship.GetProperty("method").GetString()!.Length, 1, 80);
+        Assert.InRange(ship.GetProperty("method").GetString()!.Length, 1, 64);
         var o = await Order(number);
         Assert.Equal(o.Groups.Single().ShippingTaxCents, ship.GetProperty("taxCents").GetInt64());
         Assert.Equal(o.Lines.Single().TaxCents, doc.RootElement.GetProperty("lines")[0].GetProperty("taxCents").GetInt64());   // the line's own tax only
@@ -198,5 +198,65 @@ public sealed class PerGroupShippingTests : OrderFlowBase
             [new Solvelt.Marketplace.Api.Portal.ShippingProfile(Guid.NewGuid(), "d", true, "USD", null, [zone])]);
         var offered = ShippingRates.Options(s, "US", 1000, null, new DateOnly(2026, 11, 4), new ShippingOptions()).Options;
         Assert.Equal(["standard"], offered.Select(o => o.Speed));
+    }
+
+    // ---- portal N10/N11 (portal main 35507df): the limits of shipping[] and the new refund proration (decision M3-42) ----
+
+    [Fact]
+    public void N10_the_shipping_limits_of_the_portal_are_never_exceeded_by_what_we_send()
+    {
+        Assert.Equal((64, 50, 1_000_000_000L), (IngestMapping.MaxMethodLength, IngestMapping.MaxShippingEntries, IngestMapping.MaxShippingCents));   // the portal's numbers, spelled out
+        // an amount or a tax over the cap is refused here, never sent (the portal would answer 422 and create nothing)
+        Assert.Throws<InvalidShippingException>(() => IngestMapping.ShippingCharge(Group("carrier", "standard", IngestMapping.MaxShippingCents + 1, 0), perGroup: true));
+        Assert.Throws<InvalidShippingException>(() => IngestMapping.ShippingCharge(Group("carrier", "standard", 500, IngestMapping.MaxShippingCents + 1), perGroup: true));
+        Assert.Throws<InvalidShippingException>(() => IngestMapping.ShippingCharge(Group("carrier", "standard", 500, IngestMapping.MaxShippingCents + 1), perGroup: false));   // the emergency path too
+        Assert.Throws<InvalidShippingException>(() => IngestMapping.ShippingCharge(Group("carrier", "standard", -1, 0), perGroup: true));
+        Assert.Equal(IngestMapping.MaxShippingCents, IngestMapping.ShippingCharge(Group("carrier", "standard", IngestMapping.MaxShippingCents, 0), perGroup: true).AmountCents);   // exactly at the cap is fine
+        // every method we can build is a label of 1 to 64 characters
+        foreach (var speed in IngestMapping.Speeds) Assert.InRange(IngestMapping.ShippingCharge(Group("carrier", speed, 100, 0), perGroup: true).Method!.Length, 1, 64);
+        Assert.InRange(IngestMapping.ShippingCharge(Group("local", null, 100, 0), perGroup: true).Method!.Length, 1, 64);
+        Assert.InRange(IngestMapping.OrderMethodAndSpeed([Group("carrier", "overnight", 100, 0)]).Method.Length, 1, 64);
+    }
+
+    [Fact]
+    public void N10_more_than_50_shipping_entries_are_refused_before_sending_and_our_own_cart_limits_always_fit_the_portals()
+    {
+        var order = new MarketplaceOrder { Number = "MP-TEST", Currency = "USD", Groups = [.. Enumerable.Range(0, 51).Select(_ => Group("carrier", "standard", 100, 0))] };
+        Assert.Throws<InvalidShippingException>(() => OrderIngestHandler.BuildRequest(order, perGroupShipping: true));
+        order.Groups.RemoveAt(0);                                                                                      // 50 entries: allowed
+        Assert.Equal(50, OrderIngestHandler.BuildRequest(order, perGroupShipping: true).Shipping.Count);
+        // the invariants that keep a real order inside the portal's limits: a cart has at most 50 lines (so at most 50 groups) and a shipping price above our cap is never offered
+        Assert.True(Solvelt.Marketplace.Api.Carts.CartLimits.MaxLines <= IngestMapping.MaxShippingEntries);
+        Assert.True(Solvelt.Marketplace.Api.Carts.CartLimits.MaxTotalCents < IngestMapping.MaxShippingCents);
+    }
+
+    [Fact]
+    public async Task N11_a_line_refunded_in_three_parts_takes_floor_shares_and_the_last_refund_the_remainder_so_items_are_exactly_the_unit_price()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter", 3);                                           // 3 x 4200 = 12600, line tax 1118 (the group's 1162 includes 44 on shipping)
+        var (number, intent, total) = await Checkout();
+        await Pay(number, intent, total);
+        await Drain();
+        var o = await Order(number);
+        var g = o.Groups.Single();
+        var line = o.Lines.Single();
+        Assert.Equal(1118, line.TaxCents);
+        // the portal's rule (ORDERS.md "Proration"): a line's tax share is floor(lineTax x quantity / lineQuantity) and the LAST refund of the line takes the remainder: 372, 372, 374
+        long[] taxShares = [372, 372, 374];
+        for (var n = 0; n < 3; n++)
+        {
+            var amount = 4200 + taxShares[n];
+            Assert.Equal("applied", await PortalEvent("refund.issued", o, g, new { RefundId = $"n11-{n}", AmountCents = amount, ShippingCents = 0, TaxCents = taxShares[n],
+                Lines = new[] { new { marketplaceLineId = line.MarketplaceLineId, quantity = 1, amountCents = amount } } }));
+        }
+        await Drain();
+        Assert.Equal([4572L, 4572L, 4574L], Stripe.Refunds.Select(r => r.AmountCents).OrderBy(x => x));      // the buyer gets exactly the portal's amounts
+        var processed = Portal("payment-events").Select(c => JsonDocument.Parse(c.BodyText).RootElement).Where(e => e.GetProperty("type").GetString() == "refund.processed").Select(e => e.GetProperty("data")).ToList();
+        Assert.Equal(3, processed.Count);
+        Assert.All(processed, d => Assert.Equal(4200L, d.GetProperty("amountCents").GetInt64()));            // items = amount - tax - shipping: the unit price, never negative, for every part
+        var after = await _k.Db(db => db.OrderGroups.AsNoTracking().SingleAsync(x => x.Id == g.Id));
+        Assert.Equal(1118L, after.RefundedTaxCents);                                                          // the three shares add up to the line's tax exactly
+        Assert.Equal(3, (await Order(number)).Lines.Single().RefundedQuantity);
     }
 }

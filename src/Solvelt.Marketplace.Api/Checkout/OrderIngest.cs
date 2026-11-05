@@ -68,6 +68,8 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
             }
         }
         var (method, speed) = IngestMapping.OrderMethodAndSpeed(groups);
+        if (groups.Count > IngestMapping.MaxShippingEntries) throw new InvalidShippingException("too many shipping entries for the portal");
+        if (method.Length is 0 or > IngestMapping.MaxMethodLength) throw new InvalidShippingException("the order-level shipping method must be 1 to 64 characters");
         var deliveries = groups.Where(g => g.DeliveryKind == "local").Select(g => new LocalDeliveryRequest(g.SellerId, g.BrandId, "local", g.LocalWindowId!.Value, g.LocalDate!)).ToList();
         return new CreateOrderRequest(o.Number, o.PaidAt ?? o.CreatedAt, o.Currency, new PortalBuyer(o.BuyerName, o.RelayEmail, o.Phone),
             new PortalAddress(o.ShipName, o.ShipLine1, o.ShipLine2, o.ShipCity, o.ShipRegion, o.ShipPostalCode, o.ShipCountry, o.ShipLat, o.ShipLng),
@@ -175,7 +177,10 @@ public static class IngestMapping
 
     /// <summary>The speeds the portal accepts in <c>shipping[].speed</c> (C8). Anything else is a 422 there, so it is never sent.</summary>
     public static readonly IReadOnlyList<string> Speeds = ["standard", "expedited", "overnight"];
-    public const int MaxMethodLength = 80;
+    /// <summary>The portal's limits on <c>shipping[]</c> (portal ORDERS.md C8a, N10/N11, its DECISIONS M48): a method of 1 to 64 characters (the width of its column; also the order-level <c>shippingMethod</c>),
+    /// at most 50 entries, and a group's summed amount and summed tax each within 10,000,000.00. Anything over is a 422 there and nothing is created, so it is never sent (decision M3-42).</summary>
+    public const int MaxMethodLength = 64, MaxShippingEntries = 50;
+    public const long MaxShippingCents = 1_000_000_000;
 
     public static string ValidSpeed(string? speed)
     {
@@ -184,15 +189,17 @@ public static class IngestMapping
     }
 
     /// <summary>
-    /// One entry per group. Per group (C8): the speed from the enum, a method of at most 80 characters, and <c>taxCents</c> (never negative, and only with an amount above zero: the portal refuses
+    /// One entry per group. Per group (C8): the speed from the enum, a method of 1 to 64 characters, amount and tax within the portal's cap, and <c>taxCents</c> (never negative, and only with an amount above zero: the portal refuses
     /// a tax on free shipping, so then the field is left out).
     /// </summary>
     public static ShippingChargeRequest ShippingCharge(OrderGroup g, bool perGroup)
     {
+        if (g.ShippingCents < 0 || g.ShippingCents > MaxShippingCents) throw new InvalidShippingException("shipping amount outside the portal's limit");
+        if (g.ShippingTaxCents > MaxShippingCents) throw new InvalidShippingException("shipping tax outside the portal's limit");
         if (!perGroup) return new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents);
         var speed = g.DeliveryKind == "local" ? "standard" : ValidSpeed(g.ShippingSpeed);
         var method = g.DeliveryKind == "local" ? "local" : char.ToUpperInvariant(speed[0]) + speed[1..];
-        if (method.Length > MaxMethodLength) method = method[..MaxMethodLength];
+        if (method.Length is 0 or > MaxMethodLength) throw new InvalidShippingException("shipping method must be 1 to 64 characters");
         if (g.ShippingTaxCents < 0) throw new InvalidShippingException("negative shipping tax");
         return new ShippingChargeRequest(g.SellerId, g.BrandId, g.ShippingCents, speed, method, g.ShippingCents > 0 ? g.ShippingTaxCents : null);
     }
