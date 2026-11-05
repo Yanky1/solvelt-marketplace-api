@@ -577,11 +577,10 @@ public class CatalogSyncHardeningTests
 
     // ---------- a transient database failure is not a bad record (B-2) ----------
 #pragma warning disable EF1002, EF1003   // DDL cannot be parameterised; every argument is a constant in this file
-    [Fact]
+    [PostgresFact]
     public async Task A_transient_failure_keeps_the_cursor_and_loses_nothing_PostgreSQL()
     {
         using var f = new TestFactory();
-        if (f.Provider != "postgres") return;                                              // the failure is simulated with a PostgreSQL trigger (query_canceled); CI runs this on PostgreSQL
         var fx = Fixture(f);
         await Run(f, fx);
         var cursorBefore = State(f).Cursor;

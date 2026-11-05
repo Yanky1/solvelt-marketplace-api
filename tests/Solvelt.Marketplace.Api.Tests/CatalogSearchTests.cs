@@ -320,10 +320,9 @@ public class CatalogSearchTests : IAsyncLifetime
         Assert.Equal(1, WithDb(_f, db => db.CatalogSearch.Count(s => s.Title == "parallel babka")));
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task On_PostgreSQL_the_weighted_document_and_both_indexes_exist()
     {
-        if (_f.Provider != "postgres") return;       // the objects are PostgreSQL-only; CI runs this on PostgreSQL
         var found = WithDb(_f, db => db.Database.SqlQueryRaw<int>(
             "SELECT count(*)::int AS \"Value\" FROM pg_indexes WHERE tablename = 'catalog_search' AND indexname IN ('ix_catalog_search_document', 'ix_catalog_search_text_trgm') AND indexdef LIKE '%gin%'").Single());
         Assert.Equal(2, found);

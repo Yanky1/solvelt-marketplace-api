@@ -6,6 +6,7 @@ using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Payments;
 using Solvelt.Marketplace.Api.Services;
 using static Solvelt.Marketplace.Api.Tests.Infrastructure.WebhookTestKit;
+using Solvelt.Marketplace.Api.Tests.Infrastructure;
 
 namespace Solvelt.Marketplace.Api.Tests;
 
@@ -328,11 +329,10 @@ public sealed class BookingReviewFixTests : BookingFlowBase
         Assert.Equal(10000, (await Pay(b.Id)).RefundedCents);
     }
 
-    [Fact]
+    [PostgresFact]
     public async Task LOW2_postgres_a_dispute_decision_cannot_slip_in_between_the_refunds_read_and_its_insert()
     {
         // Only PostgreSQL gives row locks a meaning here (SQLite serialises every writer anyway): on SQLite this test has nothing to observe and returns.
-        if (!string.Equals(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER"), "postgres", StringComparison.OrdinalIgnoreCase)) return;
         await Ready();
         var b = await PaidBooking();
         var intent = IntentOf(b.MarketplaceBookingId);
