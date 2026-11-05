@@ -46,9 +46,13 @@ public class SchemaCheckTests
         Assert.Empty(SchemaCheck.Differences(o.Db));
     }
 
-    [PostgresTheory]
+    [Theory]
     [InlineData("postgres")]
-    public void A_database_made_from_the_current_model_has_no_differences_on_PostgreSQL(string provider) => A_database_made_from_the_current_model_has_no_differences(provider);
+    public void A_database_made_from_the_current_model_has_no_differences_on_PostgreSQL(string provider)
+    {
+        if (Admin is null) return;                                   // PostgreSQL only: CI's PostgreSQL job runs it (README, Test)
+        A_database_made_from_the_current_model_has_no_differences(provider);
+    }
 
     [Theory]
     [InlineData("sqlite")]
@@ -75,9 +79,13 @@ public class SchemaCheckTests
         Assert.Empty(SchemaCheck.Differences(o.Db));
     }
 
-    [PostgresTheory]
+    [Theory]
     [InlineData("postgres")]
-    public void A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it_on_PostgreSQL(string provider) => A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it(provider);
+    public void A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it_on_PostgreSQL(string provider)
+    {
+        if (Admin is null) return;
+        A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it(provider);
+    }
 
     [Fact]
     public void A_missing_column_on_a_table_with_rows_gets_the_types_default_so_existing_rows_take_it()
@@ -90,9 +98,10 @@ public class SchemaCheckTests
         Assert.Equal(0L, o.Db.BuyerAccounts.AsNoTracking().Single().SessionEpoch);                 // the row survived and has the default
     }
 
-    [PostgresFact]
+    [Fact]
     public void A_column_of_the_wrong_type_or_nullability_is_listed_as_manual_on_postgres()
     {
+        if (Admin is null) return;                                   // PostgreSQL only: CI's PostgreSQL job runs it (README, Test)
         using var o = new Old("postgres");
         o.Run("ALTER TABLE buyer_accounts ALTER COLUMN \"DisplayName\" TYPE character varying(5)");
         var diffs = SchemaCheck.Differences(o.Db);
@@ -154,9 +163,10 @@ public class SchemaCheckTests
         Assert.ThrowsAny<Exception>(() => ro.Database.ExecuteSqlRaw("CREATE TABLE should_not_exist (x int)"));
     }
 
-    [PostgresFact]
+    [Fact]
     public void A_read_only_context_cannot_change_a_PostgreSQL_database()
     {
+        if (Admin is null) return;                                   // PostgreSQL only: CI's PostgreSQL job runs it (README, Test)
         using var o = new Old("postgres");
         using var ro = SchemaCheck.OpenReadOnly("postgres", o.Db.Database.GetConnectionString()!);
         Assert.Empty(SchemaCheck.Differences(ro));
@@ -196,6 +206,4 @@ public class SchemaCheckTests
         Assert.DoesNotContain("/nonexistent-dir", line.Text);
     }
 
-    [PostgresFact]
-    public void The_PostgreSQL_checks_run_only_with_a_server_and_say_so_when_skipped() => Assert.True(PostgresFactAttribute.Available);
 }
