@@ -300,7 +300,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         await db.WebAuthnChallenges.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.RedactedAt == null).ExecuteUpdateAsync(s => s
             .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null)
-            .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
+            .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.StaffLockedAt, (DateTimeOffset?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
         await tx.CommitAsync(ct);
         return true;
     }

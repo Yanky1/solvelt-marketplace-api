@@ -9,8 +9,8 @@ public static class StaffOpsEndpoints
     {
         var g = app.StaffGroup();
 
-        g.MapGet("/orders", FindOrder).StaffCan(StaffPermissions.OrdersView);
-        g.MapGet("/buyers/{id:guid}/orders", BuyerOrders).StaffCan(StaffPermissions.OrdersView);
+        g.MapPost("/orders/lookup", FindOrder).StaffCan(StaffPermissions.OrdersView);
+        g.MapPost("/buyers/{id:guid}/orders", BuyerOrders).StaffCan(StaffPermissions.OrdersView);
         g.MapPost("/orders/{id:guid}/refunds/{refundId:guid}/retry", RetryRefund).StaffCan(StaffPermissions.RefundsRetry);
         g.MapGet("/ingests", (StaffOpsService s, CancellationToken ct) => s.StuckIngestsAsync(ct).ContinueWith(t => Results.Json(t.Result), ct)).StaffCan(StaffPermissions.IngestsView);
         g.MapPost("/ingests/{orderId:guid}/retry", RetryIngest).StaffCan(StaffPermissions.IngestsRetry);
@@ -24,21 +24,22 @@ public static class StaffOpsEndpoints
 
     public sealed record RetryDeadLetterBody(string? EventId, string? Reason);
 
-    /// <summary><c>GET /orders?number=…|id=…&amp;reason=…</c>: one order, masked; the Stripe block only with <c>payments.view</c>. A lookup is an action: reason required, audited by order id.</summary>
-    private static async Task<IResult> FindOrder(HttpContext ctx, StaffOpsService ops, TimeProvider time, IOptions<StaffOptions> o, string? number, Guid? id, string? reason, CancellationToken ct)
+    public sealed record OrderLookupBody(string? Number, string? Reason);
+
+    /// <summary><c>POST /orders/lookup { number, reason }</c>: one order, masked; the Stripe block only with <c>payments.view</c>. A body, not a query string (see the buyer lookup); a lookup is an action: reason required, audited by order id, capped per hour.</summary>
+    private static async Task<IResult> FindOrder(OrderLookupBody? body, HttpContext ctx, StaffOpsService ops, TimeProvider time, IOptions<StaffOptions> o, CancellationToken ct)
     {
-        if (StaffEndpoints.Guard(ctx, time, o, reason, stepUp: false) is { } refused) return refused;
-        if ((number is null) == (id is null)) return Problems.BadRequest("one_key", "Give exactly one of number or id.");
-        var found = await ops.FindOrderAsync(id, number, ct);
-        await ops.AuditAsync(ctx.Staff(), found is null ? "order.lookup_miss" : "order.lookup", found is null ? null : "order", found?.ToString("D"), StaffReason.Clean(reason), ct);
-        return found is { } f && await ops.OrderViewAsync(f, ctx.Staff().Can(StaffPermissions.PaymentsView), ct) is { } view ? Results.Json(view) : Problems.NotFound();
+        if (StaffEndpoints.Guard(ctx, time, o, body?.Reason, stepUp: false) is { } refused) return refused;
+        if (string.IsNullOrWhiteSpace(body!.Number)) return Problems.BadRequest("number_required", "Give the order number.");
+        var r = await ops.LookupOrderAsync(ctx.Staff(), body.Number, StaffReason.Clean(body.Reason), ctx.Staff().Can(StaffPermissions.PaymentsView), ct);
+        return r.Limited ? Problems.Json(429, "lookup_limit", "Too many lookups this hour.") : r.View is null ? Problems.NotFound() : Results.Json(r.View);
     }
 
-    private static async Task<IResult> BuyerOrders(Guid id, HttpContext ctx, StaffOpsService ops, TimeProvider time, IOptions<StaffOptions> o, string? reason, CancellationToken ct)
+    private static async Task<IResult> BuyerOrders(Guid id, StaffEndpoints.ReasonBody? body, HttpContext ctx, StaffOpsService ops, TimeProvider time, IOptions<StaffOptions> o, CancellationToken ct)
     {
-        if (StaffEndpoints.Guard(ctx, time, o, reason, stepUp: false) is { } refused) return refused;
-        await ops.AuditAsync(ctx.Staff(), "buyer.orders", "buyer", id.ToString("D"), StaffReason.Clean(reason), ct);
-        return Results.Json(await ops.BuyerOrdersAsync(id, ct));
+        if (StaffEndpoints.Guard(ctx, time, o, body?.Reason, stepUp: false) is { } refused) return refused;
+        var (limited, orders) = await ops.BuyerOrdersAsync(ctx.Staff(), id, StaffReason.Clean(body!.Reason), ct);
+        return limited ? Problems.Json(429, "lookup_limit", "Too many lookups this hour.") : Results.Json(orders);
     }
 
     private static IResult Retried((OpsOutcome Outcome, string? State) r) => r.Outcome switch

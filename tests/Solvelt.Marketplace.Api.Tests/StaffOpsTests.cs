@@ -39,7 +39,8 @@ public class StaffOpsTests
         return new W(s, admin, support, finance, order.Id, refund.Id, refund.Key, intent.Id);
     }
 
-    private static string Order(string reason = "ticket 5: customer call") => $"/api/v1/staff/orders?number=MP-2001&reason={Uri.EscapeDataString(reason)}";
+    private static Task<HttpResponseMessage> Lookup(W w, string? token, string number = "MP-2001", string? reason = "ticket 5: customer call")
+        => w.S.Post("/api/v1/staff/orders/lookup", new { number, reason }, token);
 
     // ---------- orders ----------
 
@@ -47,7 +48,7 @@ public class StaffOpsTests
     public async Task An_order_is_shown_masked_and_the_stripe_block_only_to_roles_that_may_see_payments()
     {
         using var w = await Setup();
-        var support = await w.S.Get(Order(), w.Support);
+        var support = await Lookup(w, w.Support);
         Assert.Equal(HttpStatusCode.OK, support.StatusCode);
         var body = await support.Content.ReadAsStringAsync();
         foreach (var secret in new[] { "Brown", "Evergreen", "62704", "415 555", "guest.jane@example.com", "Springfield" }) Assert.DoesNotContain(secret, body);
@@ -55,15 +56,15 @@ public class StaffOpsTests
         Assert.Equal(("MP-2001", "Jane B.", "g***@e***.com", "US"), (j.GetProperty("number").GetString(), j.GetProperty("buyer").GetProperty("name").GetString(), j.GetProperty("buyer").GetProperty("guestEmail").GetString(), j.GetProperty("buyer").GetProperty("shipCountry").GetString()));
         Assert.Equal(JsonValueKind.Null, j.GetProperty("payment").ValueKind);            // support: no Stripe ids
         Assert.DoesNotContain(w.Intent, body);
-        var finance = await StaffKit.Json(await w.S.Get(Order(), w.Finance));
+        var finance = await StaffKit.Json(await Lookup(w, w.Finance));
         Assert.Equal(w.Intent, finance.GetProperty("payment").GetProperty("paymentIntentId").GetString());
         Assert.Equal(10_000, finance.GetProperty("paidCents").GetInt64());
         Assert.True(finance.GetProperty("refunds")[0].GetProperty("retryable").GetBoolean());
         var audit = await w.S.Audit();
         Assert.Equal(2, audit.Count(a => a.Action == "order.lookup" && a.TargetId == w.OrderId.ToString("D")));
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await w.S.Get("/api/v1/staff/orders?number=MP-2001", w.Support)).StatusCode);   // a reason is required
-        Assert.Equal(HttpStatusCode.NotFound, (await w.S.Get("/api/v1/staff/orders?number=NOPE&reason=ticket%205%3A%20x", w.Support)).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await w.S.Get(Order(), null)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Lookup(w, w.Support, reason: null)).StatusCode);   // a reason is required
+        Assert.Equal(HttpStatusCode.NotFound, (await Lookup(w, w.Support, "NOPE")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Lookup(w, null)).StatusCode);
     }
 
     // ---------- refund retry ----------
@@ -240,9 +241,9 @@ public class StaffOpsTests
         using var w = await Setup();
         var acct = Guid.NewGuid();
         await w.S.Db(async db => { await db.Orders.Where(o => o.Id == w.OrderId).ExecuteUpdateAsync(x => x.SetProperty(q => q.AccountId, acct)); return 0; });
-        var j = await StaffKit.Json(await w.S.Get($"/api/v1/staff/buyers/{acct}/orders?reason=ticket%207%3A%20history", w.Support));
+        var j = await StaffKit.Json(await w.S.Post($"/api/v1/staff/buyers/{acct}/orders", new { reason = "ticket 7: history" }, w.Support));
         Assert.Equal("MP-2001", j[0].GetProperty("number").GetString());
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await w.S.Get($"/api/v1/staff/buyers/{acct}/orders", w.Support)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await w.S.Post($"/api/v1/staff/buyers/{acct}/orders", new { }, w.Support)).StatusCode);
         Assert.Single(await w.S.Audit(), a => a.Action == "buyer.orders" && a.TargetId == acct.ToString("D"));
     }
 
