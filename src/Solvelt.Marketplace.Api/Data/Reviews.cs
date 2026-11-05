@@ -59,6 +59,8 @@ public sealed class ReviewReport
     public Guid AccountId { get; set; }
     public string Kind { get; set; } = "review";
     public string ReportId { get; set; } = "";
+    /// <summary>What was reported, as sent to the portal: the review id (kind <c>review</c>) or the reply id (kind <c>review_reply</c>). A decision is matched on THIS, so it still matches after the reply is gone.</summary>
+    public string? TargetId { get; set; }
     public string Reason { get; set; } = "";
     public string? Note { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
@@ -151,6 +153,7 @@ internal sealed class ReviewsConfiguration : IEntityTypeConfiguration<Review>, I
         b.Property(r => r.Id).ValueGeneratedNever();
         b.Property(r => r.Kind).HasMaxLength(20).IsRequired();
         b.Property(r => r.ReportId).HasMaxLength(100).IsRequired();
+        b.Property(r => r.TargetId).HasMaxLength(100);
         b.Property(r => r.Reason).HasMaxLength(200).IsRequired();
         b.Property(r => r.Note).HasMaxLength(1000);
         b.Property(r => r.Decision).HasMaxLength(20);

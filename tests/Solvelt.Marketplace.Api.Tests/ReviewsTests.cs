@@ -606,4 +606,37 @@ public sealed class ReviewsTests : IDisposable
         Assert.Equal(9_000_000_000L, Parse(",\"sequenceScope\":\"s\",\"sequence\":9000000000")!.Sequence);                              // beyond 32 bits
         Assert.Null(Parse(",\"sequenceScope\":\"s\",\"sequence\":\"7\"")!.Sequence);
     }
+
+    // ---------------------------------------------------------------- review of the merged stack (HIGH-1 and following)
+    [Fact]
+    public async Task A_staff_decision_on_a_reported_seller_reply_takes_down_that_reply_only_and_only_for_our_own_report_and_target()
+    {
+        var (a, ida) = await Buyer("h1a@example.com");
+        var (b, _) = await Buyer("h1b@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 4);
+        while (await _k.Dispatch() > 0) { }
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Reply("review.reply_posted", id, rid, "We are not sorry at all"));
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, $"/api/v1/reviews/{id}/reply/report", b, new { reason = "offensive" })).Status);
+        while (await _k.Dispatch() > 0) { }
+        var sent = JsonDocument.Parse(_k.F.Portal.VerifiedCalls.Single(x => x.PathAndQuery == "/api/internal/v1/content/reports").BodyText).RootElement;
+        Assert.Equal("review_reply", sent.GetProperty("kind").GetString());
+        var reportId = sent.GetProperty("reportId").GetString()!;
+
+        Assert.Equal("skipped", await Decided("review_reply", "RV-forged", rid, "removed"));                            // not a report we made
+        Assert.Equal("skipped", await Decided("review_reply", reportId, Guid.NewGuid().ToString(), "removed"));        // our report, another reply
+        Assert.Equal("skipped", await Decided("review_reply", reportId, id.ToString(), "removed"));                    // our report, the review's id is not the reply's
+        Assert.Equal("We are not sorry at all", await ReplyNow());
+        Assert.Equal("applied", await Decided("review_reply", reportId, rid, "removed", "Not allowed in a reply"));
+        Assert.Null(await ReplyNow());                                                                                   // gone from the page
+        var review = await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync());
+        Assert.Equal(ReviewStatus.Published, review.Status);                                                             // the REVIEW is untouched, and so are its figures
+        Assert.Equal(1, (await Agg("listing", Listing()))!.Count);
+        Assert.Equal("removed", (await _k.Db(db => db.ReviewReports.AsNoTracking().SingleAsync())).Decision);
+        // a decision that comes after the seller already posted another reply does not take that one down
+        var rid2 = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Reply("review.reply_posted", id, rid2, "A better answer"));
+        Assert.Equal("applied", await Decided("review_reply", reportId, rid, "hidden"));
+        Assert.Equal("A better answer", await ReplyNow());
+    }
 }

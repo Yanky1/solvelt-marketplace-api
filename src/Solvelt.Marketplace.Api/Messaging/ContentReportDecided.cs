@@ -25,8 +25,8 @@ public sealed class ContentReportDecidedHandler : IProjectionHandler
         switch (FulfilmentProjector.Str(d, "kind"))
         {
             case "message": return await MessageAsync(c, ct);
-            case "review" when ReviewDecision is not null: return await ReviewDecision(c, ct);
-            case "review": return HandlerOutcome.Skipped("review decisions are handled by the reviews workstream");
+            case "review" or "review_reply" when ReviewDecision is not null: return await ReviewDecision(c, ct);   // a seller's reply is reported and decided like a review (C17)
+            case "review" or "review_reply": return HandlerOutcome.Skipped("review decisions are handled by the reviews workstream");
             default: return HandlerOutcome.Skipped("not a message report");
         }
     }
