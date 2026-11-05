@@ -276,6 +276,54 @@ public sealed class M5ReviewTests : OrderFlowBase
         Assert.All(at, x => Assert.True(x <= _k.F.Clock.GetUtcNow().AddMinutes(6)));
     }
 
+    // ---------------------------------------------------------------- guest-link order view (decision M5-30)
+
+    private async Task<HttpResponseMessage> GuestGet(string number, string? token)
+    {
+        var r = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/guest-orders/{number}");
+        if (token is not null) r.Headers.Add("X-Guest-Order", token);
+        return await _k.Http.SendAsync(r);
+    }
+
+    [Fact]
+    public async Task Guest_a_guest_sees_the_progress_of_their_order_never_the_address_or_any_action_and_after_a_claim_only_the_frozen_shape()
+    {
+        var (o, g) = await Placed();
+        await Ship(o, g, 2);
+        await Evt("order.tracking_updated", o, g, new { shipmentId = "sh-1", carrier = "USPS", trackingNumber = "T-sh-1", status = "in_transit", position = new { lat = 40.693, lng = -73.99 } });
+        // make it a guest order: no account, the checkout address on the order
+        await _k.Db(async db => { await db.Orders.Where(x => x.Id == o.Id).ExecuteUpdateAsync(u => u.SetProperty(x => x.AccountId, (Guid?)null).SetProperty(x => x.GuestEmail, "guest@example.com")); return 0; });
+        string Token(Guid id) { using var sc = _k.F.Services.CreateScope(); return sc.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Auth.GuestLinks>().Make(id).Token; }
+        var token = Token(o.Id);
+
+        var res = await GuestGet(o.Number, token);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Contains("no-store", res.Headers.CacheControl!.ToString());
+        var text = await res.Content.ReadAsStringAsync();
+        var d = JsonDocument.Parse(text).RootElement;
+        Assert.False(d.GetProperty("claimed").GetBoolean());
+        var group = d.GetProperty("groups")[0];
+        Assert.Equal("shipped", group.GetProperty("status").GetString());
+        var ship = group.GetProperty("shipments")[0];
+        Assert.Equal(("USPS", "T-sh-1", "in_transit"), (ship.GetProperty("carrier").GetString(), ship.GetProperty("trackingNumber").GetString(), ship.GetProperty("trackingStatus").GetString()));
+        Assert.Equal(2, group.GetProperty("lines")[0].GetProperty("shippedQty").GetInt32());
+        // nothing personal and no action: no address, phone, gift note, driver position, proofs, returns, cancel/return buttons, guest email
+        foreach (var leak in new[] { o.ShipLine1, o.ShipName, "guest@example.com", "40.693", "-73.99", "position", "proofCount", "canCancel", "canReturn", "canConfirm", "shipTo", "giftMessage", "phone" })
+            Assert.DoesNotContain(leak, text, StringComparison.OrdinalIgnoreCase);
+
+        // credentials: none, a forged token, and a genuine token for ANOTHER order
+        Assert.Equal(HttpStatusCode.Unauthorized, (await GuestGet(o.Number, null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await GuestGet(o.Number, token + "x")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await GuestGet(o.Number, Token(Guid.NewGuid()))).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await GuestGet("MP-NOPE", token)).StatusCode);
+
+        // after a claim the link shows only the frozen shape
+        await _k.Db(async db => { await db.Orders.Where(x => x.Id == o.Id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ClaimedAt, (DateTimeOffset?)DateTimeOffset.UtcNow)); return 0; });
+        var frozen = JsonDocument.Parse(await (await GuestGet(o.Number, token)).Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(new[] { "claimed", "createdAt", "number", "status" }, frozen.EnumerateObject().Select(p => p.Name).Order().ToArray());
+        Assert.True(frozen.GetProperty("claimed").GetBoolean());
+    }
+
     // ---------------------------------------------------------------- portal C16 / N13: order reconcile
 
     private async Task<string> DeadEvt(string type, MarketplaceOrder o, OrderGroup g, object? extra, string id)

@@ -237,6 +237,7 @@ app.MapAccount();
 app.MapCart();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
+Solvelt.Marketplace.Api.Fulfilment.GuestOrderEndpoints.MapGuestOrders(app);
 Solvelt.Marketplace.Api.Fulfilment.ProofEndpoints.MapProofs(app);
 Solvelt.Marketplace.Api.Notifications.NotificationEndpoints.MapNotifications(app);
 Solvelt.Marketplace.Api.Messaging.MessageEndpoints.MapMessages(app);
