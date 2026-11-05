@@ -8,7 +8,7 @@ using Solvelt.Marketplace.Api.Tests.Infrastructure;
 namespace Solvelt.Marketplace.Api.Tests;
 
 /// <summary>
-/// InitialCreate (decisions M1-26, M1-83): the migrations apply on PostgreSQL and produce exactly the schema the model produces (EnsureCreated plus the search DDL), tables, columns, defaults,
+/// InitialCreate (decisions M1-26, M1-84): the migrations apply on PostgreSQL and produce exactly the schema the model produces (EnsureCreated plus the search DDL), tables, columns, defaults,
 /// keys, foreign keys, unique and partial indexes included. PostgreSQL only: without TEST_POSTGRES_CONNECTION (or on SQLite) these tests return at once; CI runs them in the PostgreSQL job.
 /// </summary>
 public class MigrationTests
@@ -138,7 +138,7 @@ public class MigrationTests
     }
 }
 
-/// <summary>Which of EnsureCreated and Migrate runs at start-up (M1-83).</summary>
+/// <summary>Which of EnsureCreated and Migrate runs at start-up (M1-84).</summary>
 public class DatabaseSetupTests
 {
     private static string? Admin => TestFactory.ResolveProvider(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER")) == "postgres" ? Environment.GetEnvironmentVariable("TEST_POSTGRES_CONNECTION") : null;
@@ -199,5 +199,70 @@ public class DatabaseSetupTests
             NpgsqlConnection.ClearAllPools();
             foreach (var n in new[] { n1, n2 }) { using var c = new NpgsqlConnection(admin); c.Open(); using var cmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{n}\" WITH (FORCE)", c); cmd.ExecuteNonQuery(); }
         }
+    }
+
+    // ---------- a database made earlier by EnsureCreated (a live test site) ----------
+
+    private static async Task<(MarketplaceDb Db, string Name)> OldDatabase(string admin)
+    {
+        var name = "mp_old_" + Guid.NewGuid().ToString("N");
+        using (var c = new NpgsqlConnection(admin)) { c.Open(); using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", c); cmd.ExecuteNonQuery(); }
+        var cs = new NpgsqlConnectionStringBuilder(admin) { Database = name }.ConnectionString;
+        var db = new MarketplaceDb(new DbContextOptionsBuilder<MarketplaceDb>().UseNpgsql(cs).Options);
+        await db.Database.EnsureCreatedAsync();                       // what the test site ran: tables from the model, no history, no search objects
+        db.BuyerAccounts.Add(new BuyerAccount { Id = Guid.NewGuid(), Email = "keep@example.test", DisplayName = "Keep", RelayEmail = "relay-keep@relay.test", CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync();
+        return (db, name);
+    }
+
+    private static void Drop(string admin, string name)
+    {
+        NpgsqlConnection.ClearAllPools();
+        using var c = new NpgsqlConnection(admin); c.Open();
+        using var cmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)", c); cmd.ExecuteNonQuery();
+    }
+
+    private static async Task<int> Scalar(MarketplaceDb db, string sql)
+        => await db.Database.SqlQueryRaw<int>(sql).SingleAsync();
+
+    [Fact]
+    public async Task A_database_that_matches_the_model_but_has_no_history_is_baselined_and_keeps_its_data()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await OldDatabase(admin);
+        try
+        {
+            using var _ = db;
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);
+            Assert.Equal(1, await db.BuyerAccounts.CountAsync(a => a.Email == "keep@example.test"));            // nothing dropped or recreated
+            Assert.Equal(1, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM \"__EFMigrationsHistory\""));
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+            Assert.Equal(1, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM pg_indexes WHERE indexname = 'ix_catalog_search_text_trgm'"));   // the search objects the old database lacked
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);                                  // a second start changes nothing
+            Assert.Equal(1, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM \"__EFMigrationsHistory\""));
+        }
+        finally { Drop(admin, name); }
+    }
+
+    [Theory]
+    [InlineData("ALTER TABLE buyer_accounts DROP COLUMN \"Phone\"", "Phone")]
+    [InlineData("ALTER TABLE buyer_accounts ALTER COLUMN \"DisplayName\" TYPE character varying(5)", "DisplayName")]
+    [InlineData("DROP INDEX \"IX_buyer_passkeys_AccountId\"", "IX_buyer_passkeys_AccountId")]
+    [InlineData("DROP TABLE webauthn_challenges", "webauthn_challenges")]
+    public async Task A_database_that_differs_from_the_model_stops_the_start_and_is_left_alone(string damage, string expectedInMessage)
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await OldDatabase(admin);
+        try
+        {
+            using var _ = db;
+            await db.Database.ExecuteSqlRawAsync(damage);
+            var ex = Assert.Throws<InvalidOperationException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));
+            Assert.Contains("Nothing was changed", ex.Message);
+            Assert.Contains(expectedInMessage, string.Join(";", DatabaseSetup.SchemaProblems(db)));
+            Assert.Equal(0, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM information_schema.tables WHERE table_name = '__EFMigrationsHistory'"));   // not marked as migrated
+            Assert.Equal(1, await db.BuyerAccounts.CountAsync());                                                // data intact
+        }
+        finally { Drop(admin, name); }
     }
 }

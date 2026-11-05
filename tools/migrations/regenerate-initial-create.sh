@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerates InitialCreate from the CURRENT model (the migration is generated once, last, from the final main: M1-26/M1-83) and re-adds the one hand-written call.
+# Regenerates InitialCreate from the CURRENT model (the migration is generated once, last, from the final main: M1-26/M1-84) and re-adds the one hand-written call.
 # Run from the repository root with dotnet-ef 10.0.0 on the PATH (dotnet tool install --global dotnet-ef --version 10.0.0).
 set -euo pipefail
 dir=src/Solvelt.Marketplace.Api/Data/Migrations

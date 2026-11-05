@@ -44,6 +44,8 @@ dotnet tool install --global dotnet-ef --version 10.0.0
 ./tools/migrations/regenerate-initial-create.sh           # BEFORE the first release only: rebuilds InitialCreate from the current model
 dotnet ef migrations add Name --project src/Solvelt.Marketplace.Api --startup-project tools/MigrationsTool --output-dir Data/Migrations   # after the first release
 ```
+A database made earlier by `EnsureCreated` (no migration history) is checked against the model at start and, if it matches, baselined without touching its data; if it differs the start stops with the list of differences and changes nothing.
+
 `MigrationTests` (PostgreSQL) fail when the model and the migrations differ (`HasPendingModelChanges`, and a table/column/index/constraint comparison against `EnsureCreated`). The search objects EF cannot model (pg_trgm, the tsvector function and column, GIN indexes) are the frozen `InitialCreate.SearchSchema.cs`; later changes to them are new migrations.
 
 ## Configuration (environment variables, `__` for nesting)
