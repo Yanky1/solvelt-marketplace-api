@@ -169,8 +169,23 @@ public sealed class BookingEventHandler(ILogger<BookingEventHandler> log) : IPro
             default:
                 return HandlerOutcome.Skipped("not a booking event we project");
         }
+        ApplyPolicy(b, data);
         Notify(c, b, data);
         return HandlerOutcome.Applied();
+    }
+
+    /// <summary>
+    /// Every <c>booking.*</c> event carries the booking's policy snapshot (portal C11): it is stored for the cancel preview and the booking pages. The snapshot never changes after creation, so any
+    /// event may bring it; a value it does not hold is null (unknown, never a guess), and implausible numbers are dropped like in the options reader.
+    /// </summary>
+    private static void ApplyPolicy(Booking b, JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("policy", out var p) || p.ValueKind != JsonValueKind.Object) return;
+        int? Num(string n, int max) => p.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i) && i >= 0 && i <= max ? i : null;
+        b.PolicyCancelFreeHours = Num("cancelFreeHours", 24 * 365);
+        b.PolicyCancelFeePercent = Num("cancelFeePercent", 100);
+        b.PolicyNoShowFeePercent = Num("noShowFeePercent", 100);
+        b.PolicyMaxReschedules = Num("maxReschedules", 100);
     }
 
     /// <summary>Reserves a refund of at most what is left of the booking's captured payment, reported to the portal as <c>refund.processed</c> (it recorded the sale). Idempotent per booking and reason.</summary>

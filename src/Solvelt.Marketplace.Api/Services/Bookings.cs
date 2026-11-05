@@ -18,7 +18,7 @@ public sealed record HoldRequest(Guid? ListingId, Guid? ProviderId, DateTimeOffs
 public sealed record BookingView(Guid Id, string? Number, Guid ListingId, string Status, string Location, DateTimeOffset? StartAt, DateTimeOffset? EndAt, int DurationMinutes,
     string Currency, long PriceCents, long AddOnsCents, long TravelFeeCents, long TotalCents, DateTimeOffset? HoldExpiresAt, bool HoldExpired, DateTimeOffset? ApprovalDeadline,
     DateTimeOffset? ProposedStartAt, long CancellationFeeCents, long RefundDueCents, long NoShowFeeCents, long AdditionalChargeCents, int RescheduleCount, IReadOnlyList<string> AddOnIds,
-    string? OnlineInstructions, string? FailureCode, DateTimeOffset CreatedAt, bool RequiresBuyerConsent = false, DateTimeOffset? RescheduleRequestedStartAt = null, string? ExtraChargeState = null);
+    string? OnlineInstructions, string? FailureCode, DateTimeOffset CreatedAt, bool RequiresBuyerConsent = false, DateTimeOffset? RescheduleRequestedStartAt = null, string? ExtraChargeState = null, PolicyView? Policy = null);
 
 public enum HoldStatus { Ok, NotFound, Invalid, IdempotencyConflict, TooManyHolds, SlotUnavailable, PortalRefused, Unavailable }
 public sealed record HoldResult(HoldStatus Status, BookingView? Booking = null, bool Created = false, string? Code = null, IReadOnlyDictionary<string, string>? Errors = null);
@@ -40,7 +40,7 @@ public static class BookingStatuses
     public static bool RevealsMeetingLink(string status) => status is BookingStatus.Confirmed or BookingStatus.Rescheduled or BookingStatus.InProgress;
 }
 
-public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal, Portal.Webhooks.PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingService> log)
+public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal, ServiceOptionsCache serviceOptions, Portal.Webhooks.PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingService> log)
 {
     private static readonly string[] Locations = ["online", "customer", "seller"];
     private const string IdAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -114,6 +114,15 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         }
         else
         {
+            // A provider may be named only when the service lets the buyer choose and the provider is one of its eligible ones (portal C12): with any other rule the portal assigns, and the
+            // marketplace must not send a providerId. Checked only for a NEW hold (a retry has its stored row), and only when a provider was named: no options are needed otherwise.
+            if (r.ProviderId is { } wanted)
+            {
+                var opts = await serviceOptions.GetAsync(listing.Id, ct);
+                if (opts is null) return new HoldResult(HoldStatus.Unavailable);
+                if (opts.Assignment != "buyerChoice") return new HoldResult(HoldStatus.Invalid, Errors: new Dictionary<string, string> { ["providerId"] = "This service assigns the provider; you cannot choose one." });
+                if (!opts.Providers.Any(p => p.ProviderId == wanted)) return new HoldResult(HoldStatus.Invalid, Errors: new Dictionary<string, string> { ["providerId"] = "That provider is not available for this service." });
+            }
             var open = await db.Bookings.CountAsync(b => b.AccountId == buyer.AccountId && (b.Status == BookingStatus.HoldPending || (b.Status == BookingStatus.Hold && (b.HoldExpiresAt == null || b.HoldExpiresAt > now))), ct);
             if (open >= Math.Clamp(options.Value.MaxActiveHolds, 1, 20)) return new HoldResult(HoldStatus.TooManyHolds);
             var loc = Clean(r.Location).ToLowerInvariant();
@@ -237,7 +246,12 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         b.TravelFeeCents, b.TotalCents, b.HoldExpiresAt, b.Status == BookingStatus.Expired || (b.Status == BookingStatus.Hold && b.HoldExpiresAt is { } h && h <= now), b.ApprovalDeadline, b.ProposedStartAt,
         b.CancellationFeeCents, b.RefundDueCents, b.NoShowFeeCents, b.AdditionalChargeCents, b.RescheduleCount, b.AddOnIds.Length == 0 ? [] : b.AddOnIds.Split(','),
         BookingStatuses.RevealsMeetingLink(b.Status) ? b.OnlineInstructions : null, b.Status == BookingStatus.Failed ? b.FailureCode : null, b.CreatedAt,
-        b.RequiresBuyerConsent, b.RescheduleRequestedStartAt, b.ExtraChargeState);
+        b.RequiresBuyerConsent, b.RescheduleRequestedStartAt, b.ExtraChargeState, PolicyOf(b));
+
+    /// <summary>The cancellation policy the portal froze on this booking (C11), or null while we have not been told any of it.</summary>
+    private static PolicyView? PolicyOf(Booking b)
+        => b.PolicyCancelFreeHours is null && b.PolicyCancelFeePercent is null && b.PolicyNoShowFeePercent is null && b.PolicyMaxReschedules is null ? null
+            : new PolicyView(b.PolicyCancelFreeHours, b.PolicyCancelFeePercent, b.PolicyNoShowFeePercent, b.PolicyMaxReschedules, null);
 
     /// <summary>The buyer's own booking, or null (another buyer's booking is a 404, never a 403).</summary>
     public async Task<BookingView?> GetAsync(Guid accountId, Guid id, CancellationToken ct)

@@ -40,6 +40,7 @@ public sealed class FakeBookingPortal
     /// <summary>The portal creates the hold but the answer is lost on the way (a timeout after the write): the case idempotency exists for.</summary>
     public bool LoseAnswer { get; set; }
     public int HoldCalls;
+    public List<string> HoldBodies { get; } = [];
     public int ConfirmCalls;
     /// <summary>Instant booking (Confirmed) when true, request-to-book (Requested) when false.</summary>
     public bool Instant { get; set; } = true;
@@ -53,6 +54,8 @@ public sealed class FakeBookingPortal
     public Action? OnConfirmed { get; set; }
     public List<string> ConfirmBodies { get; } = [];
     public List<string> PaymentEvents { get; } = [];
+    /// <summary>The body served for GET /services/{id}/options (C12); null answers 404 like a portal without the endpoint.</summary>
+    public string? OptionsJson { get; set; }
     /// <summary>The fee the portal charges when the buyer cancels (cents); the portal's policy is its own business.</summary>
     public long CancelFeeCents { get; set; }
     public bool RescheduleLimitReached { get; set; }
@@ -137,6 +140,7 @@ public sealed class FakeBookingPortal
 
     public HttpResponseMessage? Handle(ReceivedCall c)
     {
+        if (c.Method == "GET" && c.PathAndQuery.EndsWith("/options") && c.PathAndQuery.StartsWith("/api/internal/v1/services/") && OptionsJson is not null) return FakePortal.Json(HttpStatusCode.OK, OptionsJson);
         if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/bookings/holds") return HoldCall(c);
         if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/quote-requests") return QuoteRequestCall(c);
         if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/quotes/") && c.PathAndQuery.EndsWith("/accept")) return QuoteActionCall(c, c.PathAndQuery["/api/internal/v1/quotes/".Length..^"/accept".Length], true);
@@ -224,6 +228,7 @@ public sealed class FakeBookingPortal
     private HttpResponseMessage HoldCall(ReceivedCall c)
     {
         Interlocked.Increment(ref HoldCalls);
+        lock (_lock) HoldBodies.Add(c.BodyText);
         if (Down) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
         var j = JsonDocument.Parse(c.Body).RootElement;
         var mid = j.GetProperty("marketplaceBookingId").GetString()!;

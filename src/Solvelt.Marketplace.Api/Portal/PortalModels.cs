@@ -108,12 +108,12 @@ public sealed record QuoteCreatedResponse(bool Created, Guid QuoteId, string? Ma
 public sealed record QuoteAcceptBody(string MarketplaceBookingId, DateTimeOffset Start, IReadOnlyList<string>? AddOnIds, PortalBuyer? Buyer, IReadOnlyList<IntakeAnswerBody>? IntakeAnswers);
 public sealed record QuoteDeclineBody(string? Reason);
 
-// ---- GET /services/{id}/options (contract request M4-C1; the portal has not shipped it yet, so every field is optional and the reader degrades) ----
+// ---- GET /services/{id}/options (portal C12, SERVICES.md; every field is optional so a portal without it, or with fewer fields, still works; `version` is a number there, so it is read as a raw value) ----
 public sealed record ServiceAddOn(string? Id, string? Name, string? Description, long PriceCents, int ExtraMinutes);
 public sealed record IntakeQuestion(string? Id, string? Label, string? Kind, bool Required, IReadOnlyList<string>? Choices, int? MaxLength);
 public sealed record ServiceProviderInfo(Guid ProviderId, string? DisplayName, Guid? PhotoImageId);
 public sealed record ServiceTravel(long? FeeCents, IReadOnlyList<string>? ServiceAreaPostalCodes, double? ServiceRadiusKm);
-public sealed record ServiceOptionsDocument(Guid? ServiceId, string? Version, IReadOnlyList<ServiceAddOn>? AddOns, IReadOnlyList<IntakeQuestion>? IntakeQuestions,
+public sealed record ServiceOptionsDocument(Guid? ServiceId, System.Text.Json.JsonElement? Version, IReadOnlyList<ServiceAddOn>? AddOns, IReadOnlyList<IntakeQuestion>? IntakeQuestions,
     IReadOnlyList<ServiceProviderInfo>? Providers, string? Assignment, PortalBookingPolicy? Policy, ServiceTravel? Travel);
 public sealed record BookingCancelBody(string RequestId, string? Reason);
 public sealed record BookingRescheduleBody(string RequestId, DateTimeOffset NewStart);
