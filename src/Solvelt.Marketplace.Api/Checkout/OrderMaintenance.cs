@@ -103,6 +103,7 @@ public sealed class OrderWorker(IServiceScopeFactory scopes, ILogger<OrderWorker
                 await m.ExpirePendingAsync(stoppingToken);
                 await m.ReleaseHeldDisputesAsync(stoppingToken);
                 await m.PurgeAbandonedAsync(stoppingToken);
+                await OrdersAccountEraser.SweepDeletedAccountsAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), stoppingToken);   // orders of deleted accounts that have closed since (O-23)
                 await DisputeStateMaintenance.PurgeAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), scope.ServiceProvider.GetRequiredService<TimeProvider>(), stoppingToken);
                 await fulfilment.RunAsync(stoppingToken);
             }

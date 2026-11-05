@@ -110,6 +110,29 @@ public sealed class OrdersAccountEraserTests : OrderFlowBase
         Assert.Equal("1 Main St", sent.GetProperty("line1").GetString());   // the seller got a real, shippable address
         Assert.Equal("placed", o.Status);
         Assert.Equal(0, await _k.Db(db => db.Carts.CountAsync(c => c.AccountId == before.AccountId)));   // the carts are still deleted
+
+        // the sweep (decision O-23): while the order is open it changes nothing; once it is closed the sweep redacts it, once
+        Assert.Equal(0, await _k.Db(db => OrdersAccountEraser.SweepDeletedAccountsAsync(db, default)));
+        Assert.Equal("1 Main St", (await Order(number)).ShipLine1);
+        await CloseOrder(o);
+        Assert.Equal(1, await _k.Db(db => OrdersAccountEraser.SweepDeletedAccountsAsync(db, default)));
+        var swept = await Order(number);
+        Assert.Equal(("Redacted", "Redacted", "Redacted", "", OrdersAccountEraser.Tombstone(before.AccountId!.Value)), (swept.BuyerName, swept.ShipName, swept.ShipLine1, swept.ShipPostalCode, swept.RelayEmail));
+        Assert.Equal((before.TotalCents, before.TaxCents), (swept.TotalCents, swept.TaxCents));          // accounting stays
+        Assert.Equal(0, await _k.Db(db => OrdersAccountEraser.SweepDeletedAccountsAsync(db, default)));   // idempotent
+    }
+
+    [Fact]
+    public async Task The_sweep_never_touches_a_closed_order_of_a_live_account()
+    {
+        await Login("eraser6@example.com");
+        await AddToCart("challah-classic");
+        var (number, intent, total) = await Checkout(new { address = Address() });
+        await Pay(number, intent, total);
+        await Drain();
+        await CloseOrder(await Order(number));
+        Assert.Equal(0, await _k.Db(db => OrdersAccountEraser.SweepDeletedAccountsAsync(db, default)));   // the account is not deleted: its order keeps its address (the 90-day job redacts it later)
+        Assert.Equal("1 Main St", (await Order(number)).ShipLine1);
     }
 
     [Fact]
