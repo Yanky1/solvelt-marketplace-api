@@ -119,7 +119,7 @@ public static class ExtraChargeStates
     public const string Requested = "requested", Consented = "consented", Declined = "declined", Paid = "paid";
 }
 
-public enum ExtraChargeStatus { Ok, NotFound, NotRequested, AmountTooSmall, PaymentsUnavailable, PaymentRejected, AlreadyPaid, AmountChanged }
+public enum ExtraChargeStatus { Ok, NotFound, NotRequested, AmountTooSmall, PaymentsUnavailable, PaymentRejected, AlreadyPaid, AmountChanged, AmountRequired }
 
 /// <summary>
 /// An additional charge (hourly work that ran over, SERVICES.md §4) is a REQUEST from the provider. Nothing is charged until the buyer accepts here (decision M4-06). The amount is the one the
@@ -138,8 +138,10 @@ public sealed class ExtraChargeService(MarketplaceDb db, IPaymentProvider paymen
         if (b.ExtraChargeState == ExtraChargeStates.Paid) return (ExtraChargeStatus.AlreadyPaid, null, b.AdditionalChargeCents);
         if (b.ExtraChargeState is not (ExtraChargeStates.Requested or ExtraChargeStates.Consented) || b.AdditionalChargeCents <= 0 || !Payable.Contains(b.Status)) return (ExtraChargeStatus.NotRequested, null, 0);
         if (b.AdditionalChargeCents < 50) return (ExtraChargeStatus.AmountTooSmall, null, b.AdditionalChargeCents);
-        // The buyer consents to the amount they SAW: if the provider asked for another one meanwhile, nothing is consented or charged (the web shows the new amount and asks again).
-        if (expectedAmountCents is { } seen && seen != b.AdditionalChargeCents) return (ExtraChargeStatus.AmountChanged, null, b.AdditionalChargeCents);
+        // The buyer consents to the amount they SAW, so the amount is required (M4-29): a client that does not say which amount it showed (a stale tab, an old client) must not consent to a raised one.
+        // If the provider asked for another amount meanwhile, nothing is consented or charged (the web shows the new amount and asks again).
+        if (expectedAmountCents is not { } seen) return (ExtraChargeStatus.AmountRequired, null, 0);
+        if (seen != b.AdditionalChargeCents) return (ExtraChargeStatus.AmountChanged, null, b.AdditionalChargeCents);
         var now = time.GetUtcNow().ToUniversalTime();
         var amount = b.AdditionalChargeCents;
         var key = PaymentKey(b.MarketplaceBookingId, amount);
