@@ -353,6 +353,14 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
     /// given back, so it can be sent again; the portal was already told it succeeded, so a log error asks a person to settle that (review R6). A refund we do not know (a dashboard one) cannot be matched to
     /// an external row (the event names no cumulative figure): logged for a person; the next charge.refunded, which carries Stripe's cumulative figure, is the truth for the counters.
     /// </summary>
+    /// <summary>
+    /// Whether a failed-refund event is about this row, judged on the row as read under the order lock and independent of how it was found (review MED-1): a refund booked as succeeded under the same Stripe id
+    /// (the outbox retry may have finalized it between the lookup and the lock), or a reserved row that never learned its id and carries the event's refund_key.
+    /// </summary>
+    internal static bool RefundFailedMatch(OrderRefund row, string refundId, string? metadataKey) =>
+        (row.StripeRefundId == refundId && row.Status == RefundStatus.Succeeded)
+        || (!string.IsNullOrEmpty(metadataKey) && row.StripeRefundId is null && row.Status == RefundStatus.Reserved && row.Key == metadataKey);
+
     private async Task<StripeOutcome> RefundUpdatedAsync(StripeEnvelope evt, CancellationToken ct)
     {
         var status = evt.Str("status");
@@ -376,8 +384,9 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         if (row is null) return StripeOutcome.Ignored;
         // A match by the stored Stripe id is a refund we booked as succeeded; a match by the key alone is only for a reserved row that never learned its id. Anything else is another refund of the same key
         // (an older send) and is not this one.
-        var matches = keyFromMetadata is null ? row.StripeRefundId == refundId && row.Status == RefundStatus.Succeeded
-                                              : row.StripeRefundId is null && row.Status == RefundStatus.Reserved;
+        string? metadataKey = keyFromMetadata;
+        if (metadataKey is null && evt.Object.TryGetProperty("metadata", out var mdk) && mdk.ValueKind == JsonValueKind.Object && mdk.TryGetProperty("refund_key", out var rkk) && rkk.ValueKind == JsonValueKind.String) metadataKey = rkk.GetString();
+        var matches = RefundFailedMatch(row, refundId, metadataKey);
         if (!matches) return StripeOutcome.Ignored;
         // each send names its attempt in the metadata: an event about an OLDER send of a cut refund (same key) is not about the amount that is reserved now
         if (evt.Object.TryGetProperty("metadata", out var md2) && md2.ValueKind == JsonValueKind.Object && md2.TryGetProperty("refund_attempt", out var ra) && ra.ValueKind == JsonValueKind.String
