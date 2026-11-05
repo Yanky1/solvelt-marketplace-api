@@ -52,6 +52,9 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<BuyerQuote> Quotes => Set<BuyerQuote>();
     public DbSet<BookingPayment> BookingPayments => Set<BookingPayment>();
     public DbSet<BookingRefund> BookingRefunds => Set<BookingRefund>();
+    public DbSet<Wishlist> Wishlists => Set<Wishlist>();
+    public DbSet<WishlistItem> WishlistItems => Set<WishlistItem>();
+    public DbSet<RecentlyViewedItem> RecentlyViewed => Set<RecentlyViewedItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

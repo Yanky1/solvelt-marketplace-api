@@ -464,6 +464,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     EmailDelivered = table.Column<bool>(type: "boolean", nullable: false),
                     EmailMessages = table.Column<bool>(type: "boolean", nullable: false),
                     EmailBookings = table.Column<bool>(type: "boolean", nullable: false),
+                    EmailWishlist = table.Column<bool>(type: "boolean", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
                 },
                 constraints: table =>
@@ -744,6 +745,20 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "recently_viewed",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: false),
+                    ListingId = table.Column<Guid>(type: "uuid", nullable: false),
+                    ViewedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_recently_viewed", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "seller_order_states",
                 columns: table => new
                 {
@@ -851,6 +866,24 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_webauthn_challenges", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "wishlists",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Name = table.Column<string>(type: "character varying(240)", maxLength: 240, nullable: false),
+                    NameKey = table.Column<string>(type: "character varying(240)", maxLength: 240, nullable: false),
+                    ShareKeyHash = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: true),
+                    SharedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_wishlists", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -1104,6 +1137,29 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         name: "FK_message_attachments_thread_messages_MessageId",
                         column: x => x.MessageId,
                         principalTable: "thread_messages",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "wishlist_items",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    WishlistId = table.Column<Guid>(type: "uuid", nullable: false),
+                    ListingId = table.Column<Guid>(type: "uuid", nullable: false),
+                    AddedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    BaselinePriceCents = table.Column<long>(type: "bigint", nullable: false),
+                    BaselineCurrency = table.Column<string>(type: "character varying(3)", maxLength: 3, nullable: false),
+                    BaselineAvailable = table.Column<bool>(type: "boolean", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_wishlist_items", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_wishlist_items_wishlists_WishlistId",
+                        column: x => x.WishlistId,
+                        principalTable: "wishlists",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -1558,6 +1614,17 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 column: "PortalQuoteId");
 
             migrationBuilder.CreateIndex(
+                name: "IX_recently_viewed_AccountId_ListingId",
+                table: "recently_viewed",
+                columns: new[] { "AccountId", "ListingId" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_recently_viewed_AccountId_ViewedAt",
+                table: "recently_viewed",
+                columns: new[] { "AccountId", "ViewedAt" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_seller_order_states_OrderId",
                 table: "seller_order_states",
                 column: "OrderId");
@@ -1603,6 +1670,29 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 name: "IX_webauthn_challenges_ExpiresAt",
                 table: "webauthn_challenges",
                 column: "ExpiresAt");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_wishlist_items_ListingId",
+                table: "wishlist_items",
+                column: "ListingId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_wishlist_items_WishlistId_ListingId",
+                table: "wishlist_items",
+                columns: new[] { "WishlistId", "ListingId" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_wishlists_AccountId_NameKey",
+                table: "wishlists",
+                columns: new[] { "AccountId", "NameKey" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_wishlists_ShareKeyHash",
+                table: "wishlists",
+                column: "ShareKeyHash",
+                unique: true);
         
             CreateSearchSchema(migrationBuilder);
         }
@@ -1719,6 +1809,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 name: "quotes");
 
             migrationBuilder.DropTable(
+                name: "recently_viewed");
+
+            migrationBuilder.DropTable(
                 name: "seller_order_states");
 
             migrationBuilder.DropTable(
@@ -1734,6 +1827,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 name: "webauthn_challenges");
 
             migrationBuilder.DropTable(
+                name: "wishlist_items");
+
+            migrationBuilder.DropTable(
                 name: "carts");
 
             migrationBuilder.DropTable(
@@ -1747,6 +1843,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "order_returns");
+
+            migrationBuilder.DropTable(
+                name: "wishlists");
         
             DropSearchSchema(migrationBuilder);
         }

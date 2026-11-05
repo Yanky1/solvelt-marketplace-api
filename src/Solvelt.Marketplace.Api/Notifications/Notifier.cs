@@ -135,6 +135,7 @@ public static class NotificationEmails
     {
         string P(string key) { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : ""; } catch (JsonException) { return ""; } }
         long Money() { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty("amountCents", out var v) && v.TryGetInt64(out var x) ? x : 0; } catch (JsonException) { return 0; } }
+        long Cents(string key) { try { using var d = JsonDocument.Parse(n.ParamsJson ?? "{}"); return d.RootElement.TryGetProperty(key, out var v) && v.TryGetInt64(out var x) ? x : 0; } catch (JsonException) { return 0; } }
         var seller = P("sellerName") is { Length: > 0 } s ? s : "the seller";
         var order = n.OrderNumber ?? "your order";
         var (subject, line) = n.Kind switch
@@ -153,12 +154,14 @@ public static class NotificationEmails
             NotificationKinds.RefundIssued => ($"A refund for order {order}", $"{seller} refunded ${Money() / 100m:0.00} for order {order}. It returns to your original payment method."),
             NotificationKinds.DataExported => ("Your data was downloaded from Solvelt", "A download of your account data (profile, addresses, orders, messages and more) was started from your account. If this was not you, change your password now and contact support."),
             NotificationKinds.MessageReceived => ($"New message from {seller}", $"{seller} sent you a message about {(P("subject") is { Length: > 0 } sub ? sub : "your order")}. Open it in your Solvelt messages."),
+            NotificationKinds.WishlistPriceDrop => ($"Price drop: {P("title")}", $"{P("title")} on your wishlist is now {P("currency")} {Cents("priceCents") / 100m:0.00} (was {P("currency")} {Cents("previousPriceCents") / 100m:0.00})."),
+            NotificationKinds.WishlistBackInStock => ($"Back in stock: {P("title")}", $"{P("title")} on your wishlist is available again."),
             var k when k.StartsWith("booking_") => (BookingSubject(k, P("bookingNumber")), $"There is an update on your booking {P("bookingNumber")}: {BookingSubject(k, P("bookingNumber")).ToLowerInvariant()}."),
             _ => ($"Update on order {order}", $"There is an update on your order {order}."),
         };
         subject = System.Text.RegularExpressions.Regex.Replace(subject, @"[\p{Cc}\u2028\u2029]+", " ").Trim();   // a seller/listing name can never add a header line (review P7)
         if (subject.Length > 200) subject = subject[..(char.IsHighSurrogate(subject[199]) ? 199 : 200)];   // never cut a surrogate pair in half (review X7)
-        var link = n.Kind == NotificationKinds.DataExported ? $"{baseUrl}/account/privacy" : n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? (Guid.TryParse(P("bookingId"), out var bid) ? $"{baseUrl}/bookings/{bid}" : $"{baseUrl}/account/bookings") : $"{baseUrl}/account/orders/{n.OrderNumber}";
+        var link = n.Kind is NotificationKinds.WishlistPriceDrop or NotificationKinds.WishlistBackInStock ? $"{baseUrl}/account/wishlists" : n.Kind == NotificationKinds.DataExported ? $"{baseUrl}/account/privacy" : n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? (Guid.TryParse(P("bookingId"), out var bid) ? $"{baseUrl}/bookings/{bid}" : $"{baseUrl}/account/bookings") : $"{baseUrl}/account/orders/{n.OrderNumber}";
         var footer = unsubscribeCategory is null || unsubscribeAll is null
             ? $"This email is required for your orders and account, so it cannot be switched off. You can choose which other emails you get at {baseUrl}/account/notifications/preferences.\n"
             : $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";
