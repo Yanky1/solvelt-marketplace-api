@@ -36,6 +36,11 @@ public sealed class PortalInboundEvent
     public string? AggregateType { get; set; }
     public string? AggregateKey { get; set; }
     public string? Note { get; set; }
+    /// <summary>
+    /// The buyer account the event is about, found by the processor from the order, booking, quote or conversation the event names (<see cref="Portal.Webhooks.EventAccounts"/>),
+    /// whatever its status. Account erasure nulls the payloads of these rows (decision M1-82). Null for events about no account (guest orders, unknown types, unknown references).
+    /// </summary>
+    public Guid? AccountId { get; set; }
     public DateTimeOffset? AppliedAt { get; set; }
     /// <summary>The raw signed body. Nulled by retention (see the PII table in DECISIONS); parked events keep it until applied.</summary>
     public string? PayloadJson { get; set; }
@@ -61,6 +66,7 @@ internal sealed class PortalInboundEventConfiguration : IEntityTypeConfiguration
         b.Property(e => e.Version).IsConcurrencyToken();
         b.HasIndex(e => new { e.Status, e.AggregateType, e.AggregateKey, e.PortalCreatedAt });
         b.HasIndex(e => e.ReceivedAt);
+        b.HasIndex(e => e.AccountId);
         b.HasIndex(e => new { e.Status, e.LastReplayAt });
     }
 }
