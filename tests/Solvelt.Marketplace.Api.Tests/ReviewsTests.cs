@@ -301,4 +301,95 @@ public sealed class ReviewsTests : IDisposable
         var state = _k.F.Portal.VerifiedCalls.Where(c => c.PathAndQuery == $"/api/internal/v1/reviews/{mine}/state").Select(c => JsonDocument.Parse(c.BodyText).RootElement.Clone()).ToList();
         Assert.Equal("removed", Assert.Single(state).GetProperty("state").GetString());
     }
+
+    // ---------------------------------------------------------------- photos
+    private static byte[] Png(int w, int h)
+    {
+        using var bmp = new SkiaSharp.SKBitmap(w, h);
+        bmp.Erase(SkiaSharp.SKColors.CornflowerBlue);
+        using var img = SkiaSharp.SKImage.FromBitmap(bmp);
+        return img.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100).ToArray();
+    }
+
+    private async Task<(HttpStatusCode Status, JsonElement Body)> Upload(string? token, Guid review, byte[] bytes, string name = "photo.png", string type = "image/png")
+    {
+        await Ready();
+        var content = new MultipartFormDataContent { { new ByteArrayContent(bytes) { Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(type) } }, "file", name } };
+        var r = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/reviews/{review}/photos") { Content = content };
+        if (token is not null) r.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        var res = await _k.Http.SendAsync(r);
+        var text = await res.Content.ReadAsStringAsync();
+        return (res.StatusCode, text.Length == 0 ? default : JsonDocument.Parse(text).RootElement.Clone());
+    }
+
+    [Fact]
+    public async Task A_photo_is_decided_by_its_bytes_re_encoded_cut_to_size_served_only_while_published_and_capped_at_five_even_in_parallel()
+    {
+        var (a, ida) = await Buyer("p1a@example.com");
+        var (b, _) = await Buyer("p1b@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var big = Png(3200, 200);
+        var (st, ph) = await Upload(a, id, big, "evil.pdf", "application/pdf");                            // the name and the declared type are ignored
+        Assert.Equal(HttpStatusCode.Created, st);
+        Assert.Equal((1600, 100), (ph.GetProperty("width").GetInt32(), ph.GetProperty("height").GetInt32()));   // cut to 1600 on the long side
+        var photoId = ph.GetProperty("id").GetGuid();
+        var stored = await _k.Db(db => db.ReviewPhotoData.AsNoTracking().Select(d => d.Bytes).SingleAsync());
+        Assert.NotEqual(big, stored);                                                                      // a fresh image, not the upload
+        var served = await _k.Http.GetAsync($"/api/v1/reviews/photos/{photoId}");                          // public
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+        Assert.Equal("image/png", served.Content.Headers.ContentType!.MediaType);
+        Assert.Equal("nosniff", served.Headers.GetValues("X-Content-Type-Options").Single());
+        var (_, listed) = await Call(HttpMethod.Get, $"/api/v1/reviews?listingId={Listing()}", null);
+        Assert.Equal(photoId, listed.GetProperty("reviews")[0].GetProperty("photos")[0].GetProperty("id").GetGuid());
+
+        Assert.Equal(HttpStatusCode.NotFound, (await Upload(b, id, Png(10, 10))).Status);                  // not the author's review
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Upload(null, id, Png(10, 10))).Status);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Upload(a, id, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 })).Status);   // not a picture
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Upload(a, id, System.Text.Encoding.ASCII.GetBytes("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"), "x.png", "image/png")).Status);   // a PDF is no picture
+        var more = await Task.WhenAll(Enumerable.Range(0, 7).Select(_ => Upload(a, id, Png(20, 20))));    // 1 stored + 7 racing for 4 places
+        Assert.InRange(await _k.Db(db => db.ReviewPhotos.CountAsync()), 1, ReviewLimits.MaxPhotos);
+        Assert.Contains(more, r => r.Status == HttpStatusCode.Created);
+        Assert.All(more.Where(r => r.Status != HttpStatusCode.Created), r => Assert.Equal(HttpStatusCode.UnprocessableEntity, r.Status));
+        // only the author can delete; a hidden review's photos are not served
+        Assert.Equal(HttpStatusCode.NotFound, (await Call(HttpMethod.Delete, $"/api/v1/reviews/{id}/photos/{photoId}", b)).Status);
+        await _k.Db(async db => { await db.Reviews.Where(r => r.Id == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ReviewStatus.Hidden)); return 0; });
+        Assert.Equal(HttpStatusCode.NotFound, (await _k.Http.GetAsync($"/api/v1/reviews/photos/{photoId}")).StatusCode);
+        await _k.Db(async db => { await db.Reviews.Where(r => r.Id == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ReviewStatus.Published)); return 0; });
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Delete, $"/api/v1/reviews/{id}/photos/{photoId}", a)).Status);
+        Assert.Equal(0, await _k.Db(db => db.ReviewPhotoData.CountAsync(d => d.PhotoId == photoId)));
+        Assert.Equal(HttpStatusCode.NotFound, (await _k.Http.GetAsync($"/api/v1/reviews/photos/{photoId}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Photos_are_refused_after_the_edit_window_deleted_with_a_removed_review_and_with_the_account()
+    {
+        var (a, ida) = await Buyer("p2a@example.com");
+        var (c, idc) = await Buyer("p2c@example.com");
+        var id = await Reviewed(a, await Delivered(ida));
+        var id2 = await Reviewed(c, await Delivered(idc));
+        Assert.Equal(HttpStatusCode.Created, (await Upload(a, id, Png(30, 30))).Status);
+        Assert.Equal(HttpStatusCode.Created, (await Upload(c, id2, Png(30, 30))).Status);
+        // a removal decision deletes the pictures with the text
+        var (b, _) = await Buyer("p2b@example.com");
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, $"/api/v1/reviews/{id}/report", b, new { reason = "fake" })).Status);
+        while (await _k.Dispatch() > 0) { }
+        var reportId = JsonDocument.Parse(_k.F.Portal.VerifiedCalls.Single(x => x.PathAndQuery == "/api/internal/v1/content/reports").BodyText).RootElement.GetProperty("reportId").GetString()!;
+        Assert.Equal("applied", await Decided("review", reportId, id.ToString(), "removed"));
+        Assert.Equal(0, await _k.Db(db => db.ReviewPhotos.CountAsync(p => p.ReviewId == id)));
+        Assert.Equal(0, await _k.Db(db => db.ReviewPhotoData.CountAsync()) - await _k.Db(db => db.ReviewPhotos.CountAsync()));   // no orphan bytes
+        // the account's erasure takes the photos of its reviews
+        using (var scope = _k.F.Services.CreateScope())
+        {
+            var json = JsonSerializer.Serialize(await scope.ServiceProvider.GetServices<IAccountDataExporter>().Single(e => e.Section == "reviews").ExportAsync(idc, default));
+            Assert.Contains("image/png", json);
+            await scope.ServiceProvider.GetServices<IAccountEraser>().OfType<ReviewsAccountEraser>().Single().EraseAsync(idc, default);
+        }
+        Assert.Equal((0, 0), (await _k.Db(db => db.ReviewPhotos.CountAsync()), await _k.Db(db => db.ReviewPhotoData.CountAsync())));
+        // after the edit window nothing can be added
+        var late = await Reviewed(a, await Delivered(ida));
+        _k.F.Clock.Advance(TimeSpan.FromDays(31));
+        a = await Login("p2a@example.com");
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Upload(a, late, Png(10, 10))).Status);
+    }
 }
+

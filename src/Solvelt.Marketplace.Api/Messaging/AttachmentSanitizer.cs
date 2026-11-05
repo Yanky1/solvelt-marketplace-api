@@ -17,17 +17,25 @@ public static class AttachmentSanitizer
     public const long MaxPixels = 64_000_000;
     /// <summary>The most pixels ever decoded at once (about 64 MB of memory): a bigger JPEG or WebP is decoded at 1/2, 1/4 or 1/8 of its size, a PNG (which cannot be scaled while decoding) is refused (review P2).</summary>
     public const long DecodeBudgetPixels = 16_000_000;
-    public sealed record Result(string? ContentType, byte[]? Bytes, string? Rejected);
+    public sealed record Result(string? ContentType, byte[]? Bytes, string? Rejected, int Width = 0, int Height = 0);
 
     public static Result Process(byte[] input) => Process(input, DecodeBudgetPixels);
 
-    internal static Result Process(byte[] input, long decodeBudget)
+    /// <summary>A buyer's review photo (M6): the same checks and the same fresh re-encoding (no metadata survives), images only (JPEG, PNG, WebP; a PDF or anything else is refused) and the longer side is cut to <see cref="PhotoLongSide"/> pixels.</summary>
+    public const int PhotoLongSide = 1600;
+    public static Result ProcessPhoto(byte[] input)
+    {
+        var r = Process(input, DecodeBudgetPixels, PhotoLongSide);
+        return r.ContentType is "application/pdf" ? Reject("not_an_image") : r;
+    }
+
+    internal static Result Process(byte[] input, long decodeBudget, int maxLongSide = MaxLongSide)
     {
         if (input.Length == 0) return Reject("empty");
         if (input.Length > MaxBytes) return Reject("too_large");
-        if (input.Length >= 3 && input[0] == 0xFF && input[1] == 0xD8 && input[2] == 0xFF) return Image(input, "image/jpeg", SKEncodedImageFormat.Jpeg, decodeBudget);
-        if (input.Length >= 8 && input[0] == 0x89 && input[1] == 0x50 && input[2] == 0x4E && input[3] == 0x47 && input[4] == 0x0D && input[5] == 0x0A && input[6] == 0x1A && input[7] == 0x0A) return Image(input, "image/png", SKEncodedImageFormat.Png, decodeBudget);
-        if (input.Length >= 12 && input[0] == 'R' && input[1] == 'I' && input[2] == 'F' && input[3] == 'F' && input[8] == 'W' && input[9] == 'E' && input[10] == 'B' && input[11] == 'P') return Image(input, "image/webp", SKEncodedImageFormat.Webp, decodeBudget);
+        if (input.Length >= 3 && input[0] == 0xFF && input[1] == 0xD8 && input[2] == 0xFF) return Image(input, "image/jpeg", SKEncodedImageFormat.Jpeg, decodeBudget, maxLongSide);
+        if (input.Length >= 8 && input[0] == 0x89 && input[1] == 0x50 && input[2] == 0x4E && input[3] == 0x47 && input[4] == 0x0D && input[5] == 0x0A && input[6] == 0x1A && input[7] == 0x0A) return Image(input, "image/png", SKEncodedImageFormat.Png, decodeBudget, maxLongSide);
+        if (input.Length >= 12 && input[0] == 'R' && input[1] == 'I' && input[2] == 'F' && input[3] == 'F' && input[8] == 'W' && input[9] == 'E' && input[10] == 'B' && input[11] == 'P') return Image(input, "image/webp", SKEncodedImageFormat.Webp, decodeBudget, maxLongSide);
         if (input.Length >= 5 && input[0] == '%' && input[1] == 'P' && input[2] == 'D' && input[3] == 'F' && input[4] == '-') return HasActiveContent(input) ? Reject("pdf_active_content") : new Result("application/pdf", input, null);
         return Reject("unsupported_type");
     }
@@ -43,7 +51,7 @@ public static class AttachmentSanitizer
 
     private static Result Reject(string why) => new(null, null, why);
 
-    private static Result Image(byte[] input, string type, SKEncodedImageFormat format, long decodeBudget)
+    private static Result Image(byte[] input, string type, SKEncodedImageFormat format, long decodeBudget, int maxLongSide)
     {
         var malformed = Reject("malformed_" + type[6..]);
         try
@@ -69,7 +77,7 @@ public static class AttachmentSanitizer
             var origin = codec.EncodedOrigin;
             var swap = origin is SKEncodedOrigin.LeftTop or SKEncodedOrigin.RightTop or SKEncodedOrigin.RightBottom or SKEncodedOrigin.LeftBottom;
             int ow = swap ? h : w, oh = swap ? w : h;                       // size after the orientation is applied
-            var scale = Math.Max(ow, oh) > MaxLongSide ? (float)MaxLongSide / Math.Max(ow, oh) : 1f;
+            var scale = Math.Max(ow, oh) > maxLongSide ? (float)maxLongSide / Math.Max(ow, oh) : 1f;
             int dw = Math.Max(1, (int)Math.Round(ow * scale)), dh = Math.Max(1, (int)Math.Round(oh * scale));
             using var dest = new SKBitmap(new SKImageInfo(dw, dh, SKColorType.Rgba8888, format == SKEncodedImageFormat.Jpeg ? SKAlphaType.Opaque : SKAlphaType.Unpremul));
             using (var canvas = new SKCanvas(dest))
@@ -84,7 +92,7 @@ public static class AttachmentSanitizer
             using var encoded = fresh.Encode(format, 85);
             if (encoded is null) return malformed;
             var bytes = encoded.ToArray();
-            return bytes.Length > MaxBytes ? Reject("too_large") : new Result(type, bytes, null);
+            return bytes.Length > MaxBytes ? Reject("too_large") : new Result(type, bytes, null, dw, dh);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException) { return malformed; }
     }
