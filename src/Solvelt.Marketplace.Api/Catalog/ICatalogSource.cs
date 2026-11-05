@@ -25,7 +25,20 @@ public sealed record CategoryDto(Guid Id, Guid? ParentId, string Slug, string Na
 public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, Guid? LogoImageId);
 
 /// <summary>A page of the feed in ascending (version, id) order. <see cref="NextCursor"/> is opaque; pass it back as <c>since</c>.</summary>
-public sealed record ListingPage(IReadOnlyList<ListingSnapshot> Items, string? NextCursor, bool HasMore, IReadOnlyList<ListingTombstone>? Tombstones = null);
+public sealed record ListingPage(IReadOnlyList<ListingSnapshot> Items, string? NextCursor, bool HasMore, IReadOnlyList<ListingTombstone>? Tombstones = null, IReadOnlyList<UnreadableDocument>? Unreadable = null);
+
+/// <summary>A feed document that could not be read, with the SHORT CODE of why (<c>required_field</c>, <c>price</c>, <c>quote_price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>) and the id and version when they were readable. Never the document itself.</summary>
+public sealed record UnreadableDocument(Guid? Id, long? Version, string Reason);
+
+/// <summary>
+/// The portal answered a single-listing fetch with a document we cannot read. Deterministic: asking again returns the same document until the portal changes it, so the caller sets the listing aside
+/// (see <see cref="Data.CatalogQuarantine"/>) and tries later, instead of treating it like a portal outage. The message carries the code only, never the document.
+/// </summary>
+public sealed class UnreadableListingException(Guid id, string reason) : Exception($"The portal's listing document could not be read ({reason}).")
+{
+    public Guid Id { get; } = id;
+    public string Reason { get; } = reason;
+}
 
 /// <summary>The feed says a listing we may know is no longer public (portal tombstone). <see cref="Reason"/> is informational (an unknown reason is treated as "unlisted").</summary>
 public sealed record ListingTombstone(Guid Id, long Version, string Reason)

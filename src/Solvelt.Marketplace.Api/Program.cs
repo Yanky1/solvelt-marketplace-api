@@ -275,6 +275,8 @@ app.MapGet("/health", (ClientIpResolver forwarding, OpsCounters ops) => Results.
     outbox = new { deadLettered = ops.DeadLettered },
     admin = new { refused = ops.AdminDenied },
     staff = new { enrolRefused = ops.StaffEnrolRefused },
+    // Portal listing documents set aside as unreadable (they are hidden, not lost): alert when it rises.
+    catalog = new { unreadable = ops.CatalogQuarantined },
 }));
 app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateLimiting(RateLimitPolicies.Public);
 

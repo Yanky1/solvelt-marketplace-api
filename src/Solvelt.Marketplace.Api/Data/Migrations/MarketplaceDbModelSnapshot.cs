@@ -1113,6 +1113,33 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.ToTable("catalog_listings", (string)null);
                 });
 
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.CatalogQuarantine", b =>
+                {
+                    b.Property<Guid>("ListingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("FirstSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<int>("Seen")
+                        .HasColumnType("integer");
+
+                    b.Property<long?>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("ListingId");
+
+                    b.ToTable("catalog_quarantine", (string)null);
+                });
+
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.CatalogSearchRow", b =>
                 {
                     b.Property<Guid>("ListingId")
