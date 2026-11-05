@@ -347,8 +347,8 @@ public sealed class ReviewsTests : IDisposable
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Upload(a, id, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 })).Status);   // not a picture
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Upload(a, id, System.Text.Encoding.ASCII.GetBytes("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"), "x.png", "image/png")).Status);   // a PDF is no picture
         var more = await Task.WhenAll(Enumerable.Range(0, 7).Select(_ => Upload(a, id, Png(20, 20))));    // 1 stored + 7 racing for 4 places
-        Assert.InRange(await _k.Db(db => db.ReviewPhotos.CountAsync()), 1, ReviewLimits.MaxPhotos);
-        Assert.Contains(more, r => r.Status == HttpStatusCode.Created);
+        Assert.Equal(ReviewLimits.MaxPhotos, await _k.Db(db => db.ReviewPhotos.CountAsync()));                  // exactly the free places are filled, never more, never fewer
+        Assert.Equal(ReviewLimits.MaxPhotos - 1, more.Count(r => r.Status == HttpStatusCode.Created));
         Assert.All(more.Where(r => r.Status != HttpStatusCode.Created), r => Assert.Equal(HttpStatusCode.UnprocessableEntity, r.Status));
         // only the author can delete; a hidden review's photos are not served
         Assert.Equal(HttpStatusCode.NotFound, (await Call(HttpMethod.Delete, $"/api/v1/reviews/{id}/photos/{photoId}", b)).Status);

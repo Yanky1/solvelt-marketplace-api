@@ -133,7 +133,7 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
     // ---------------------------------------------------------------- photos
     /// <summary>
     /// Adds a photo to the buyer's own published review inside its edit window. The type is decided from the BYTES, the picture is decoded and re-encoded fresh (no metadata survives) and cut to
-    /// <see cref="AttachmentSanitizer.PhotoLongSide"/> pixels; at most <see cref="ReviewLimits.MaxPhotos"/> per review: the count is read after the insert and the photo that went over is removed again, so parallel uploads cannot pass the cap.
+    /// <see cref="AttachmentSanitizer.PhotoLongSide"/> pixels; at most <see cref="ReviewLimits.MaxPhotos"/> per review: the count is taken under a row lock on the review, so parallel uploads fill exactly the free places and cannot pass the cap.
     /// </summary>
     public async Task<(ReviewOutcome Outcome, ReviewPhoto? Photo)> AddPhotoAsync(Guid accountId, Guid reviewId, byte[] input, CancellationToken ct)
     {
@@ -146,16 +146,14 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
         if (clean.Bytes is null || clean.ContentType is null) return (ReviewOutcome.BadFile, null);
         var photo = new ReviewPhoto { Id = Guid.NewGuid(), ReviewId = reviewId, ContentType = clean.ContentType, Width = clean.Width, Height = clean.Height, Size = clean.Bytes.Length, SortOrder = 0, CreatedAt = now };
         await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // The review row is the lock: a no-op UPDATE takes the row lock (PostgreSQL) and queues parallel uploads for the same review, so the count below is exact (SQLite serialises writers anyway).
+        // Counting after an unlocked insert made every racer see more than the cap and remove its own photo, so none was accepted.
+        if (await db.Reviews.Where(x => x.Id == reviewId && x.AccountId == accountId).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount), ct) == 0) return (ReviewOutcome.NotFound, null);
+        if (await db.ReviewPhotos.CountAsync(p => p.ReviewId == reviewId, ct) >= ReviewLimits.MaxPhotos) return (ReviewOutcome.TooMany, null);
         db.ReviewPhotos.Add(photo);
         db.ReviewPhotoData.Add(new ReviewPhotoData { PhotoId = photo.Id, Bytes = clean.Bytes });
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        if (await db.ReviewPhotos.CountAsync(p => p.ReviewId == reviewId, ct) > ReviewLimits.MaxPhotos)
-        {
-            await db.ReviewPhotoData.Where(d => d.PhotoId == photo.Id).ExecuteDeleteAsync(ct);
-            await db.ReviewPhotos.Where(p => p.Id == photo.Id).ExecuteDeleteAsync(ct);
-            return (ReviewOutcome.TooMany, null);
-        }
         return (ReviewOutcome.Ok, photo);
     }
 
