@@ -754,4 +754,24 @@ public sealed class ReviewsTests : IDisposable
         var stale = new HttpRequestMessage(HttpMethod.Get, url); stale.Headers.IfNoneMatch.Add(etag!);
         Assert.Equal(HttpStatusCode.NotFound, (await _k.Http.SendAsync(stale)).StatusCode);                    // a cache that holds it is told it is gone, not "unchanged"
     }
+
+    [Fact]
+    public async Task A_fully_refunded_line_cannot_be_reviewed_a_partly_refunded_one_can_and_a_refund_after_the_review_leaves_the_review_as_it_is()
+    {
+        var (a, ida) = await Buyer("l1a@example.com");
+        var line = await Delivered(ida);
+        async Task Refunded(int quantity) => await _k.Db(async db => { await db.OrderLines.Where(l => l.Id == line).ExecuteUpdateAsync(s => s.SetProperty(l => l.Quantity, 2).SetProperty(l => l.RefundedQuantity, quantity)); return 0; });
+        async Task<int> Offered() => (await Call(HttpMethod.Get, $"/api/v1/reviews/eligible?listingId={Listing()}", a)).Body.GetProperty("items").GetArrayLength();
+        await Refunded(2);                                                                  // all of it refunded: nothing was kept to review
+        Assert.Equal(0, await Offered());
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Write(a, line, 5)).Status);
+        await Refunded(1);                                                                  // part of it kept: it can be reviewed
+        Assert.Equal(1, await Offered());
+        var id = await Reviewed(a, line, 5);
+        await Refunded(2);                                                                  // refunded AFTER the review: policy M6-09, the review stays (it is the buyer's honest account of what they received) and stays editable
+        var (_, listed) = await Call(HttpMethod.Get, $"/api/v1/reviews?listingId={Listing()}", null);
+        Assert.Equal(1, listed.GetProperty("total").GetInt32());
+        Assert.Equal(HttpStatusCode.OK, (await Call(HttpMethod.Patch, $"/api/v1/reviews/{id}", a, new { rating = 4, text = "Changed my mind after the refund." })).Status);
+        Assert.Equal(ReviewStatus.Published, (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).Status);
+    }
 }
