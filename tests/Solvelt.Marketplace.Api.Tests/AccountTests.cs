@@ -359,6 +359,8 @@ public class AccountTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, r.StatusCode);
         Assert.Equal("1", r.Headers.RetryAfter!.Delta!.Value.TotalSeconds.ToString());
         Assert.Equal("too_busy", JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.GetProperty("code").GetString());
+        Assert.Contains(k.F.Logs.Lines, l => l.Contains("Too busy on POST /api/v1/account/addresses") && l.Contains("SqliteException(19)"));   // the log names the kind of conflict (type and code only)
+        Assert.DoesNotContain(k.F.Logs.Lines, l => l.Contains("injected"));                                                                        // never the exception message
         hook.Remaining = 0;
         Assert.Empty(await Book(k, token));                                                             // nothing half-written
         Assert.Equal(HttpStatusCode.Created, (await k.Send(Post, "/api/v1/account/addresses", Us("Later"), token)).StatusCode);   // and the next request works

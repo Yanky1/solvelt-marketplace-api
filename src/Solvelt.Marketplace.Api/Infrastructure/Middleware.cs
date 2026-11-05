@@ -23,7 +23,7 @@ public sealed class SafeRequestLoggingMiddleware(RequestDelegate next, ILogger<S
 
 /// <summary>Unhandled exceptions become <c>{code, message}</c> 500s with no detail leaked.</summary>
 /// <summary>Thrown when a write kept hitting a retryable conflict (see <c>AccountService.IsRetryable</c>) until its attempts ran out; <see cref="ProblemExceptionMiddleware"/> answers it with 503 and Retry-After.</summary>
-public sealed class TooBusyException(string message) : Exception(message);
+public sealed class TooBusyException(string message, Exception? last = null) : Exception(message, last);
 
 public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<ProblemExceptionMiddleware> log)
 {
@@ -37,8 +37,12 @@ public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<Pro
                 await (ex.StatusCode == 413 ? Write(ctx, 413, "payload_too_large", "Request body too large.") : Write(ctx, 400, "bad_request", "The request could not be understood."));
         }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { }
-        catch (TooBusyException)
+        catch (TooBusyException busy)
         {
+            // only the types (the exception messages can carry data): enough to tell a unique violation from a lock timeout when it shows in a log
+            var chain = new List<string>();
+            for (var e = busy.InnerException; e is not null; e = e.InnerException) chain.Add(e.GetType().Name + (e is Microsoft.Data.Sqlite.SqliteException sq ? $"({sq.SqliteErrorCode})" : e is Npgsql.PostgresException pg ? $"({pg.SqlState})" : ""));
+            log.LogWarning("Too busy on {Method} {Path}: the write kept meeting {Conflict}", ctx.Request.Method, ctx.Request.Path.Value, chain.Count == 0 ? "a conflict" : string.Join(" > ", chain));
             // The database kept refusing a write after the retries (lock contention): the caller may try again, so it is a 503 with Retry-After, not a 500.
             if (!ctx.Response.HasStarted) await Write(ctx, 503, "too_busy", "The service is busy; try again in a moment.", null, r => r.Headers.RetryAfter = "1");
         }

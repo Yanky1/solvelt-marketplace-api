@@ -97,6 +97,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
     /// <summary>The first address is the default; later ones only when asked. At most <see cref="AccountValidation.MaxAddresses"/> per buyer.</summary>
     public async Task<(AddressView? Address, AccountOutcome Outcome)> CreateAddressAsync(Guid accountId, AddressBody body, CancellationToken ct)
     {
+        Exception? last = null;
         for (var attempt = 0; attempt < Attempts; attempt++)
         {
             db.ChangeTracker.Clear();
@@ -115,14 +116,15 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return (View(address), AccountOutcome.Ok);
             }
-            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }   // a default made by another request, or a lock conflict: look again
+            catch (Exception ex) when (IsRetryable(ex)) { last = ex; await BackOffAsync(attempt, ct); }   // a default made by another request, or a lock conflict: look again
         }
-        throw new TooBusyException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.", last);
     }
 
     /// <summary>Replaces the address. <c>isDefault: true</c> makes it the default; <c>false</c> on the default address is ignored (there is always one).</summary>
     public async Task<AddressView?> UpdateAddressAsync(Guid accountId, Guid id, AddressBody body, CancellationToken ct)
     {
+        Exception? last = null;
         for (var attempt = 0; attempt < Attempts; attempt++)
         {
             db.ChangeTracker.Clear();
@@ -143,13 +145,14 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return View(address);
             }
-            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }
+            catch (Exception ex) when (IsRetryable(ex)) { last = ex; await BackOffAsync(attempt, ct); }
         }
-        throw new TooBusyException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.", last);
     }
 
     public async Task<bool> SetDefaultAsync(Guid accountId, Guid id, CancellationToken ct)
     {
+        Exception? last = null;
         for (var attempt = 0; attempt < Attempts; attempt++)
         {
             db.ChangeTracker.Clear();
@@ -164,14 +167,15 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return true;
             }
-            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }
+            catch (Exception ex) when (IsRetryable(ex)) { last = ex; await BackOffAsync(attempt, ct); }
         }
-        throw new TooBusyException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.", last);
     }
 
     /// <summary>Deletes the address; when it was the default the oldest remaining one becomes the default.</summary>
     public async Task<bool> DeleteAddressAsync(Guid accountId, Guid id, CancellationToken ct)
     {
+        Exception? last = null;
         for (var attempt = 0; attempt < Attempts; attempt++)
         {
             db.ChangeTracker.Clear();
@@ -190,9 +194,9 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return true;
             }
-            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }
+            catch (Exception ex) when (IsRetryable(ex)) { last = ex; await BackOffAsync(attempt, ct); }
         }
-        throw new TooBusyException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.", last);
     }
 
     /// <summary>
