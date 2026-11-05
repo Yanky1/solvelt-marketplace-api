@@ -1027,7 +1027,7 @@ public sealed class RefundEventTests : OrderFlowBase
         await Stripe.RefundAsync(o.PaymentIntentId!, 6000, "dashboard", new Dictionary<string, string>(), default);
         Assert.Equal("applied", await RefundLines(o, g, "rf-race", line, 2, 9174));
         // worker 1 is refused by Stripe; before it takes the order lock, worker 2 (the redelivery after a lease expiry) does the whole refusal and cut
-        Stripe.OnRefusal = () => Assert.Equal(OutboxOutcome.Delivered, RunRefundHandler("portal:rf-race", 0).GetAwaiter().GetResult().Outcome);
+        Stripe.OnRefusal = async () => Assert.Equal(OutboxOutcome.Delivered, (await RunRefundHandler("portal:rf-race", 0)).Outcome);
         Assert.Equal(OutboxOutcome.Delivered, (await RunRefundHandler("portal:rf-race", 0)).Outcome);
         var cut = await Refund("portal:rf-race");
         Assert.Equal((8262L, 1, "reserved"), (cut.AmountCents, cut.Attempt, cut.Status));

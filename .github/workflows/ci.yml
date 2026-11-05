@@ -19,7 +19,8 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release -warnaserror
-      - run: dotnet test --no-build -c Release --logger "trx;LogFileName=results.trx"
+      # a test that runs longer than 5 minutes is a hang: the run stops there and names it (a PostgreSQL-only deadlock once held a job for 20+ minutes)
+      - run: dotnet test --no-build -c Release --blame-hang --blame-hang-timeout 5m --logger "trx;LogFileName=results.trx"
 
   test-postgres:
     name: Test (PostgreSQL)
@@ -47,4 +48,5 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release -warnaserror
-      - run: dotnet test --no-build -c Release
+      # same guard as above
+      - run: dotnet test --no-build -c Release --blame-hang --blame-hang-timeout 5m

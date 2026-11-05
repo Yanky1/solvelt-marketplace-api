@@ -205,8 +205,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
     public string? RejectCancelWith { get; set; }
     /// <summary>Test hook: the next refund is refused by the processor with this error code (one that moved no money, for example <c>api_key_expired</c>).</summary>
     public string? RejectRefundWith { get; set; }
-    /// <summary>Test hook: runs once, just before a refund is refused for exceeding what is left (a slow worker is overtaken here by a parallel one).</summary>
-    public Action? OnRefusal { get; set; }
+    /// <summary>Test hook: runs once, just before a refund is refused for exceeding what is left (a slow worker is overtaken here by a parallel one). It runs AFTER the fake's lock is released: its continuations may resume on other threads, which could never take a lock held by this one.</summary>
+    public Func<Task>? OnRefusal { get; set; }
 
     /// <summary>Test hook: Stripe now lists the refund with this metadata key under another status. failed and canceled refunds return the money (amount_refunded drops); pending ones stay counted.</summary>
     public void SetListedStatus(string refundKey, string status)
@@ -315,8 +315,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
             if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
             if (amountCents <= 0 || i.RefundedCents + amountCents > i.CapturedCents)
             {
-                var hook = OnRefusal; OnRefusal = null; hook?.Invoke();
-                throw new PaymentRejectedException("charge_exceeds_amount");   // never more than was paid
+                var hook = OnRefusal; OnRefusal = null;
+                return RefuseAfterAsync(hook);   // never more than was paid
             }
             i.RefundedCents += amountCents;
             var r = new RefundResult($"re_fake_{_refunds.Count + 1:D6}", "succeeded", amountCents);
@@ -326,6 +326,13 @@ public sealed class FakePaymentProvider : IPaymentProvider
             if (TimeoutAfterExecuteNext) { TimeoutAfterExecuteNext = false; throw new PaymentsUnavailableException("unreachable"); }
             return Task.FromResult(r);
         }
+    }
+
+    private static async Task<RefundResult> RefuseAfterAsync(Func<Task>? hook)
+    {
+        await Task.Yield();                                 // leave the caller's lock first
+        if (hook is not null) await hook();
+        throw new PaymentRejectedException("charge_exceeds_amount");
     }
 
     /// <summary>Test hook: the buyer paid (the whole amount). Stripe would send <c>payment_intent.succeeded</c>.</summary>
