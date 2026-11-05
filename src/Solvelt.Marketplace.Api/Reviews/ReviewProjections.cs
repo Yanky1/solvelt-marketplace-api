@@ -50,6 +50,11 @@ public static class ReviewModeration
             if (note is not null) review.ModerationNote = note;
             if (next == ReviewStatus.Removed) { review.Text = ""; review.ReplyText = null; review.ReplyId = null; review.ReplyAt = null; }
             await c.Db.SaveChangesAsync(ct);
+            if (next == ReviewStatus.Removed)
+            {
+                await c.Db.ReviewPhotoData.Where(d => c.Db.ReviewPhotos.Any(p => p.Id == d.PhotoId && p.ReviewId == review.Id)).ExecuteDeleteAsync(ct);   // removal is final: the pictures go too (a hidden review keeps them, unserved)
+                await c.Db.ReviewPhotos.Where(p => p.ReviewId == review.Id).ExecuteDeleteAsync(ct);
+            }
             if (wasPublished && next != ReviewStatus.Published) await Aggregates.ApplyAsync(c.Db, review, -1, ct);
             else if (!wasPublished && next == ReviewStatus.Published) await Aggregates.ApplyAsync(c.Db, review, +1, ct);
         }
@@ -104,6 +109,8 @@ public sealed class ReviewsAccountEraser(MarketplaceDb db, TimeProvider time) : 
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             if (r.Status == ReviewStatus.Published) await Aggregates.ApplyAsync(db, r, -1, ct);
             await outbox.TryEnqueueAsync(ReviewService.StateType, new ReviewService.StatePayload(r.Id, "removed", "account_deleted"), $"review-state:{r.Id:N}:removed", ct: ct);
+            await db.ReviewPhotoData.Where(d => db.ReviewPhotos.Any(p => p.Id == d.PhotoId && p.ReviewId == r.Id)).ExecuteDeleteAsync(ct);
+            await db.ReviewPhotos.Where(p => p.ReviewId == r.Id).ExecuteDeleteAsync(ct);
             await db.ReviewVotes.Where(v => v.ReviewId == r.Id).ExecuteDeleteAsync(ct);
             await db.ReviewReports.Where(x => x.ReviewId == r.Id).ExecuteDeleteAsync(ct);
             await db.Reviews.Where(x => x.Id == r.Id).ExecuteDeleteAsync(ct);
@@ -130,11 +137,13 @@ public sealed class ReviewsDataExporter(MarketplaceDb db) : IAccountDataExporter
     {
         var reviews = await db.Reviews.AsNoTracking().Where(r => r.AccountId == accountId).OrderBy(r => r.CreatedAt).ThenBy(r => r.Id).ToListAsync(ct);
         var titles = await db.CatalogListings.AsNoTracking().Where(l => db.Reviews.Any(r => r.ListingId == l.Id && r.AccountId == accountId)).ToDictionaryAsync(l => l.Id, l => l.Title, ct);
+        var photos = await db.ReviewPhotos.AsNoTracking().Where(p => db.Reviews.Any(r => r.Id == p.ReviewId && r.AccountId == accountId)).OrderBy(p => p.CreatedAt).Select(p => new { p.ReviewId, p.ContentType, p.Width, p.Height, bytes = p.Size, p.CreatedAt }).ToListAsync(ct);   // the files' details, not their bytes
         var votes = await db.ReviewVotes.AsNoTracking().Where(v => v.AccountId == accountId).OrderBy(v => v.CreatedAt).Select(v => new { v.ReviewId, v.CreatedAt }).ToListAsync(ct);
         var reports = await db.ReviewReports.AsNoTracking().Where(r => r.AccountId == accountId).OrderBy(r => r.CreatedAt).Select(r => new { r.ReviewId, r.Kind, r.Reason, r.Note, r.CreatedAt, r.Decision, r.DecidedAt }).ToListAsync(ct);
         return new
         {
             reviews = reviews.Select(r => new { item = titles.GetValueOrDefault(r.ListingId), r.Rating, r.Text, shownAs = r.DisplayName, r.Status, r.CreatedAt, r.EditedAt, r.HelpfulCount, moderationNote = r.ModerationNote, sellerReply = r.ReplyText }),
+            photos,
             helpfulVotes = votes,
             reportsMade = reports,
         };

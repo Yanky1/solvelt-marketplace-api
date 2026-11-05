@@ -12,7 +12,7 @@ namespace Solvelt.Marketplace.Api.Reviews;
 /// <summary>What a buyer can review: one entry per delivered order line or completed booking they have not reviewed yet.</summary>
 public sealed record Reviewable(string Kind, Guid Id, string Label, DateTimeOffset At);
 
-public enum ReviewOutcome { Ok, NotFound, NotEligible, AlreadyReviewed, Invalid, Locked, OwnReview }
+public enum ReviewOutcome { Ok, NotFound, NotEligible, AlreadyReviewed, Invalid, Locked, OwnReview, TooMany, BadFile }
 
 /// <summary>
 /// Reviews (M6). Decisions M6-04..: eligibility is read from OUR projections (a delivered seller order of this buyer, a completed booking of this buyer; demo rows never), one review per line/booking
@@ -128,6 +128,43 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
         await new OutboxWriter(db, time).TryEnqueueAsync(UpsertType, new UpsertPayload(r.Id, stamp), $"review-upsert:{r.Id:N}:{stamp}", ct: ct);
         await tx.CommitAsync(ct);
         return (ReviewOutcome.Ok, r);
+    }
+
+    // ---------------------------------------------------------------- photos
+    /// <summary>
+    /// Adds a photo to the buyer's own published review inside its edit window. The type is decided from the BYTES, the picture is decoded and re-encoded fresh (no metadata survives) and cut to
+    /// <see cref="AttachmentSanitizer.PhotoLongSide"/> pixels; at most <see cref="ReviewLimits.MaxPhotos"/> per review: the count is read after the insert and the photo that went over is removed again, so parallel uploads cannot pass the cap.
+    /// </summary>
+    public async Task<(ReviewOutcome Outcome, ReviewPhoto? Photo)> AddPhotoAsync(Guid accountId, Guid reviewId, byte[] input, CancellationToken ct)
+    {
+        var now = time.GetUtcNow().ToUniversalTime();
+        var r = await db.Reviews.AsNoTracking().Where(x => x.Id == reviewId && x.AccountId == accountId).Select(x => new { x.Status, x.CreatedAt }).FirstOrDefaultAsync(ct);
+        if (r is null) return (ReviewOutcome.NotFound, null);
+        if (r.Status != ReviewStatus.Published || now - r.CreatedAt > TimeSpan.FromDays(ReviewLimits.EditDays)) return (ReviewOutcome.Locked, null);
+        if (await db.ReviewPhotos.CountAsync(p => p.ReviewId == reviewId, ct) >= ReviewLimits.MaxPhotos) return (ReviewOutcome.TooMany, null);
+        var clean = AttachmentSanitizer.ProcessPhoto(input);
+        if (clean.Bytes is null || clean.ContentType is null) return (ReviewOutcome.BadFile, null);
+        var photo = new ReviewPhoto { Id = Guid.NewGuid(), ReviewId = reviewId, ContentType = clean.ContentType, Width = clean.Width, Height = clean.Height, Size = clean.Bytes.Length, SortOrder = 0, CreatedAt = now };
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        db.ReviewPhotos.Add(photo);
+        db.ReviewPhotoData.Add(new ReviewPhotoData { PhotoId = photo.Id, Bytes = clean.Bytes });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        if (await db.ReviewPhotos.CountAsync(p => p.ReviewId == reviewId, ct) > ReviewLimits.MaxPhotos)
+        {
+            await db.ReviewPhotoData.Where(d => d.PhotoId == photo.Id).ExecuteDeleteAsync(ct);
+            await db.ReviewPhotos.Where(p => p.Id == photo.Id).ExecuteDeleteAsync(ct);
+            return (ReviewOutcome.TooMany, null);
+        }
+        return (ReviewOutcome.Ok, photo);
+    }
+
+    public async Task<ReviewOutcome> DeletePhotoAsync(Guid accountId, Guid reviewId, Guid photoId, CancellationToken ct)
+    {
+        if (!await db.Reviews.AnyAsync(x => x.Id == reviewId && x.AccountId == accountId, ct)) return ReviewOutcome.NotFound;
+        await db.ReviewPhotoData.Where(d => d.PhotoId == photoId && db.ReviewPhotos.Any(p => p.Id == photoId && p.ReviewId == reviewId)).ExecuteDeleteAsync(ct);
+        await db.ReviewPhotos.Where(p => p.Id == photoId && p.ReviewId == reviewId).ExecuteDeleteAsync(ct);
+        return ReviewOutcome.Ok;
     }
 
     // ---------------------------------------------------------------- votes

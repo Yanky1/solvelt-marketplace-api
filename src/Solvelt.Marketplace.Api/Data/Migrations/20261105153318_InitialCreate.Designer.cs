@@ -13,10 +13,14 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
 <<<<<<<< HEAD:src/Solvelt.Marketplace.Api/Data/Migrations/20261105153318_InitialCreate.Designer.cs
+<<<<<<<< HEAD:src/Solvelt.Marketplace.Api/Data/Migrations/20261105153318_InitialCreate.Designer.cs
     [Migration("20261105153318_InitialCreate")]
 ========
     [Migration("20261105150828_InitialCreate")]
 >>>>>>>> d2404df (M6-04: reviews and ratings API (eligibility, one per line/booking, 30-day edit, atomic aggregates, votes, reports, moderation, seller reply relay, erasure/export)):src/Solvelt.Marketplace.Api/Data/Migrations/20261105150828_InitialCreate.Designer.cs
+========
+    [Migration("20261105151304_InitialCreate")]
+>>>>>>>> b370b16 (M6-05: review photos (sniffed, re-encoded, 1600 px, 5 per review, served only while published)):src/Solvelt.Marketplace.Api/Data/Migrations/20261105151304_InitialCreate.Designer.cs
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2537,6 +2541,55 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasIndex("ListingId", "Status", "CreatedAt");
 
                     b.ToTable("reviews", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.ReviewPhoto", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Height")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("ReviewId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Size")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Width")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ReviewId");
+
+                    b.ToTable("review_photos", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.ReviewPhotoData", b =>
+                {
+                    b.Property<Guid>("PhotoId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("Bytes")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.HasKey("PhotoId");
+
+                    b.ToTable("review_photo_data", (string)null);
                 });
 
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.ReviewReport", b =>

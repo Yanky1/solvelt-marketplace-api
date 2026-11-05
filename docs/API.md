@@ -428,3 +428,6 @@ Reading is public; writing needs a signed-in buyer (`Authorization: Bearer`, `Ca
 | `PUT` / `DELETE /api/v1/reviews/{id}/helpful` | `204`, one vote per buyer; `422 own_review` |
 | `POST /api/v1/reviews/{id}/report` `{ reason: spam\|personal_information\|offensive\|fake\|off_topic\|other, note? }` | `204`; `/reply/report` reports the seller's reply |
 | `GET /api/v1/account/reviews` | the buyer's own reviews with status, moderation note and listing title |
+| `POST /api/v1/reviews/{id}/photos` (multipart, one `file`) | `201 { id, width, height }`; `422 bad_photo` (not a JPEG/PNG/WebP, over 5 MB), `422 too_many_photos` (5), `422 review_locked` |
+| `DELETE /api/v1/reviews/{id}/photos/{photoId}` | `204`, the author only |
+| `GET /api/v1/reviews/photos/{photoId}` | public: the stored picture (`image/jpeg|png|webp`, `nosniff`, cached a day); `404` unless the review is published |

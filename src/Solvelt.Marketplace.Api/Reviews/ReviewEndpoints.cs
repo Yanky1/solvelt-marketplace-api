@@ -26,14 +26,18 @@ public static class ReviewEndpoints
         g.MapDelete("/{id:guid}/helpful", (Guid id, HttpContext c, ReviewService s, CancellationToken ct) => Vote(id, false, c, s, ct)).AddEndpointFilter<RequireBuyerFilter>();
         g.MapPost("/{id:guid}/report", (Guid id, ReviewReportBody? b, HttpContext c, ReviewService s, CancellationToken ct) => Report(id, b, false, c, s, ct)).AddEndpointFilter<RequireBuyerFilter>();
         g.MapPost("/{id:guid}/reply/report", (Guid id, ReviewReportBody? b, HttpContext c, ReviewService s, CancellationToken ct) => Report(id, b, true, c, s, ct)).AddEndpointFilter<RequireBuyerFilter>();
+        g.MapPost("/{id:guid}/photos", AddPhoto).AddEndpointFilter<RequireBuyerFilter>();
+        g.MapDelete("/{id:guid}/photos/{photoId:guid}", async (Guid id, Guid photoId, HttpContext c, ReviewService s, CancellationToken ct) => { var o = await s.DeletePhotoAsync(c.Buyer().AccountId, id, photoId, ct); return o == ReviewOutcome.Ok ? Private(Results.NoContent(), c) : Refuse(o, c); }).AddEndpointFilter<RequireBuyerFilter>();
+        g.MapGet("/photos/{photoId:guid}", Photo);
         app.MapGet("/api/v1/account/reviews", Mine).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Public);
         return app;
     }
 
     private static IResult Private(IResult r, HttpContext ctx) { ctx.Response.Headers.CacheControl = "private, no-store"; return r; }
 
-    private static object View(Review r, bool mine = false) => new
+    private static object View(Review r, bool mine = false, IReadOnlyList<ReviewPhoto>? photos = null) => new
     {
+        photos = (photos ?? []).Select(p => new { id = p.Id, width = p.Width, height = p.Height }),
         id = r.Id, listingId = r.ListingId, rating = r.Rating, text = r.Status == ReviewStatus.Published || mine ? r.Text : "", displayName = r.DisplayName, verified = true,
         createdAt = r.CreatedAt, editedAt = r.EditedAt, helpfulCount = r.HelpfulCount, status = mine ? r.Status : null, moderationNote = mine ? r.ModerationNote : null,
         canEdit = mine && r.Status == ReviewStatus.Published,
@@ -58,7 +62,9 @@ public static class ReviewEndpoints
         };
         var rows = await q.Skip((p - 1) * ReviewLimits.PageSize).Take(ReviewLimits.PageSize).ToListAsync(ct);
         var agg = await db.RatingAggregates.AsNoTracking().FirstOrDefaultAsync(a => a.Scope == "listing" && a.ScopeId == listingId, ct);
-        return Results.Json(new { summary = Aggregates.Summary(agg), reviews = rows.Select(r => View(r)), page = p, pageSize = ReviewLimits.PageSize, total });
+        var ids = rows.Select(r => r.Id).ToList();
+        var photos = (await db.ReviewPhotos.AsNoTracking().Where(x => ids.Contains(x.ReviewId)).OrderBy(x => x.CreatedAt).ThenBy(x => x.Id).ToListAsync(ct)).ToLookup(x => x.ReviewId);
+        return Results.Json(new { summary = Aggregates.Summary(agg), reviews = rows.Select(r => View(r, false, photos[r.Id].ToList())), page = p, pageSize = ReviewLimits.PageSize, total });
     }
 
     private static async Task<IResult> Eligible(Guid? listingId, HttpContext ctx, ReviewService s, CancellationToken ct)
@@ -75,6 +81,8 @@ public static class ReviewEndpoints
         ReviewOutcome.AlreadyReviewed => Problems.Json(409, "already_reviewed", "You have already reviewed this."),
         ReviewOutcome.Locked => Problems.Unprocessable("review_locked", "This review can't be changed any more."),
         ReviewOutcome.OwnReview => Problems.Unprocessable("own_review", "You can't do that to your own review."),
+        ReviewOutcome.TooMany => Problems.Unprocessable("too_many_photos", $"A review can have up to {ReviewLimits.MaxPhotos} photos."),
+        ReviewOutcome.BadFile => Problems.Unprocessable("bad_photo", "Use a JPEG, PNG or WebP picture of up to 5 MB."),
         _ => Problems.Validation(new Dictionary<string, string> { ["kind"] = "Choose what you are reviewing." }),
     }, ctx);
 
@@ -119,6 +127,44 @@ public static class ReviewEndpoints
         var id = ctx.Buyer().AccountId;
         var rows = await db.Reviews.AsNoTracking().Where(r => r.AccountId == id).OrderByDescending(r => r.CreatedAt).ThenBy(r => r.Id).Take(200).ToListAsync(ct);
         var titles = await db.CatalogListings.AsNoTracking().Where(l => rows.Select(r => r.ListingId).Contains(l.Id)).ToDictionaryAsync(l => l.Id, l => new { l.Title, l.Slug }, ct);
-        return Private(Results.Json(new { reviews = rows.Select(r => new { review = View(r, true), listing = titles.GetValueOrDefault(r.ListingId) }) }), ctx);
+        var rids = rows.Select(r => r.Id).ToList();
+        var mp = (await db.ReviewPhotos.AsNoTracking().Where(x => rids.Contains(x.ReviewId)).OrderBy(x => x.CreatedAt).ThenBy(x => x.Id).ToListAsync(ct)).ToLookup(x => x.ReviewId);
+        return Private(Results.Json(new { reviews = rows.Select(r => new { review = View(r, true, mp[r.Id].ToList()), listing = titles.GetValueOrDefault(r.ListingId) }) }), ctx);
+    }
+
+    private const int MaxUploadBytes = 6 * 1024 * 1024;
+
+    /// <summary><c>POST /{id}/photos</c>, multipart with ONE file part. The declared type and the file name are ignored: the bytes decide (see <see cref="ReviewService.AddPhotoAsync"/>).</summary>
+    private static async Task<IResult> AddPhoto(Guid id, HttpContext ctx, ReviewService s, CancellationToken ct)
+    {
+        if (ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } f) f.MaxRequestBodySize = MaxUploadBytes;
+        if (!ctx.Request.HasFormContentType) return Private(Problems.Unprocessable("bad_photo", "Send the picture as a file."), ctx);
+        byte[] bytes;
+        try
+        {
+            var form = await ctx.Request.ReadFormAsync(ct);
+            if (form.Files.Count != 1 || form.Files[0].Length is 0 or > MaxUploadBytes) return Private(Problems.Unprocessable("bad_photo", "Send one picture of up to 5 MB."), ctx);
+            await using var stream = form.Files[0].OpenReadStream();
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms, ct);
+            bytes = ms.ToArray();
+        }
+        catch (Exception ex) when (ex is InvalidDataException or Microsoft.AspNetCore.Http.BadHttpRequestException or IOException) { return Private(Problems.Unprocessable("bad_photo", "Send one picture of up to 5 MB."), ctx); }
+        var (outcome, photo) = await s.AddPhotoAsync(ctx.Buyer().AccountId, id, bytes, ct);
+        return outcome == ReviewOutcome.Ok ? Private(Results.Json(new { id = photo!.Id, width = photo.Width, height = photo.Height }, statusCode: 201), ctx) : Refuse(outcome, ctx);
+    }
+
+    /// <summary>The stored (re-encoded) picture of a PUBLISHED review: public, immutable, never sniffed; a photo of a hidden or removed review is 404.</summary>
+    private static async Task<IResult> Photo(Guid photoId, HttpContext ctx, MarketplaceDb db, CancellationToken ct)
+    {
+        var p = await (from x in db.ReviewPhotos.AsNoTracking() join r in db.Reviews.AsNoTracking() on x.ReviewId equals r.Id
+                       where x.Id == photoId && r.Status == ReviewStatus.Published select new { x.ContentType }).FirstOrDefaultAsync(ct);
+        if (p is null) return Problems.NotFound();
+        var bytes = await db.ReviewPhotoData.AsNoTracking().Where(d => d.PhotoId == photoId).Select(d => d.Bytes).FirstOrDefaultAsync(ct);
+        if (bytes is null) return Problems.NotFound();
+        ctx.Response.Headers.CacheControl = "public, max-age=86400";
+        ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        ctx.Response.Headers["Content-Security-Policy"] = "default-src 'none'";
+        return Results.File(bytes, p.ContentType);
     }
 }

@@ -779,6 +779,36 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "review_photo_data",
+                columns: table => new
+                {
+                    PhotoId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Bytes = table.Column<byte[]>(type: "bytea", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_review_photo_data", x => x.PhotoId);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "review_photos",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    ReviewId = table.Column<Guid>(type: "uuid", nullable: false),
+                    ContentType = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    Width = table.Column<int>(type: "integer", nullable: false),
+                    Height = table.Column<int>(type: "integer", nullable: false),
+                    Size = table.Column<int>(type: "integer", nullable: false),
+                    SortOrder = table.Column<int>(type: "integer", nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_review_photos", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "review_reports",
                 columns: table => new
                 {
@@ -1807,6 +1837,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "AccountId", "ViewedAt" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_review_photos_ReviewId",
+                table: "review_photos",
+                column: "ReviewId");
+
+            migrationBuilder.CreateIndex(
                 name: "IX_review_reports_ReportId",
                 table: "review_reports",
                 column: "ReportId",
@@ -2088,6 +2123,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "recently_viewed");
+
+            migrationBuilder.DropTable(
+                name: "review_photo_data");
+
+            migrationBuilder.DropTable(
+                name: "review_photos");
 
             migrationBuilder.DropTable(
                 name: "review_reports");

@@ -80,6 +80,44 @@ public sealed class RatingAggregate
     public int Stars5 { get; set; }
 }
 
+/// <summary>A photo of a review: metadata here, the checked bytes in <see cref="ReviewPhotoData"/> (so listing reviews never loads them). Only photos of published reviews are served.</summary>
+public sealed class ReviewPhoto
+{
+    public Guid Id { get; set; }
+    public Guid ReviewId { get; set; }
+    public string ContentType { get; set; } = "";
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public int Size { get; set; }
+    public int SortOrder { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed class ReviewPhotoData
+{
+    public Guid PhotoId { get; set; }
+    public byte[] Bytes { get; set; } = [];
+}
+
+internal sealed class ReviewPhotosConfiguration : IEntityTypeConfiguration<ReviewPhoto>, IEntityTypeConfiguration<ReviewPhotoData>
+{
+    public void Configure(EntityTypeBuilder<ReviewPhoto> b)
+    {
+        b.ToTable("review_photos");
+        b.HasKey(p => p.Id);
+        b.Property(p => p.Id).ValueGeneratedNever();
+        b.Property(p => p.ContentType).HasMaxLength(20).IsRequired();
+        b.HasIndex(p => p.ReviewId);
+    }
+
+    public void Configure(EntityTypeBuilder<ReviewPhotoData> b)
+    {
+        b.ToTable("review_photo_data");
+        b.HasKey(p => p.PhotoId);
+        b.Property(p => p.PhotoId).ValueGeneratedNever();
+    }
+}
+
 internal sealed class ReviewsConfiguration : IEntityTypeConfiguration<Review>, IEntityTypeConfiguration<ReviewVote>, IEntityTypeConfiguration<ReviewReport>, IEntityTypeConfiguration<RatingAggregate>
 {
     public void Configure(EntityTypeBuilder<Review> b)

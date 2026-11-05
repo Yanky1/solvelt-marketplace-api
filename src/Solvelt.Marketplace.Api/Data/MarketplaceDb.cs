@@ -64,6 +64,8 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<ReviewVote> ReviewVotes => Set<ReviewVote>();
     public DbSet<ReviewReport> ReviewReports => Set<ReviewReport>();
     public DbSet<RatingAggregate> RatingAggregates => Set<RatingAggregate>();
+    public DbSet<ReviewPhoto> ReviewPhotos => Set<ReviewPhoto>();
+    public DbSet<ReviewPhotoData> ReviewPhotoData => Set<ReviewPhotoData>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
