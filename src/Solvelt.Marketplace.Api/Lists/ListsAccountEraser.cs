@@ -32,7 +32,7 @@ public sealed class WishlistsDataExporter(MarketplaceDb db) : IAccountDataExport
             wishlists = lists.Select(l => new
             {
                 l.Name, l.CreatedAt, l.UpdatedAt, shared = l.ShareKeyHash != null, l.SharedAt,
-                items = items[l.Id].Select(i => new { item = titles.GetValueOrDefault(i.ListingId), listingId = i.ListingId, i.AddedAt, priceWhenLastCheckedCents = i.BaselinePriceCents, currency = i.BaselineCurrency }),
+                items = items[l.Id].Select(i => new { item = titles.GetValueOrDefault(i.ListingId), listingId = i.ListingId, i.AddedAt, priceWhenLastCheckedCents = i.BaselinePriceCents, currency = i.BaselineCurrency, lastPriceDropNotifiedAt = i.LastPriceNotifiedAt, lastBackInStockNotifiedAt = i.LastStockNotifiedAt }),
             }),
         };
     }

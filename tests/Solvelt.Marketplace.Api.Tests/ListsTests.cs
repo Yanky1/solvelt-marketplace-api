@@ -182,6 +182,9 @@ public sealed class ListsTests : IDisposable
         await SyncAndWatch();
         Assert.Equal(550, (await _k.Db(db => db.CatalogListings.AsNoTracking().FirstAsync(l => l.Id == Listing()))).PriceFromCents);   // the snapshot was applied (H1: it used to be skipped)
         Assert.Equal((1, 1, 0), (await Count(NotificationKinds.WishlistPriceDrop, a), await Count(NotificationKinds.WishlistPriceDrop, b), await Count(NotificationKinds.WishlistPriceDrop, c)));
+        var note = await _k.Db(db => db.Notifications.AsNoTracking().FirstAsync(n => n.AccountId == a && n.Kind == NotificationKinds.WishlistPriceDrop));
+        var prm = JsonDocument.Parse(note.ParamsJson!).RootElement;
+        Assert.Equal((550, 650), (prm.GetProperty("priceCents").GetInt64(), prm.GetProperty("previousPriceCents").GetInt64()));
         await SyncAndWatch();   // nothing new: no second notification
         Assert.Equal(2, await Count(NotificationKinds.WishlistPriceDrop));
         var mail = await _k.Mail("w1a@example.com");
@@ -297,6 +300,8 @@ public sealed class ListsTests : IDisposable
         var held = await _k.Db(db => db.WishlistItems.CountAsync(i => i.WishlistId == list));
         Assert.InRange(held, ListLimits.MaxItemsPerList - 5, ListLimits.MaxItemsPerList);   // the post-insert check is fail-closed: a race can leave a little room, never more than the cap (M6-01)
         Assert.All(rs.Where(r => r.Status != HttpStatusCode.NoContent), r => Assert.Equal(HttpStatusCode.UnprocessableEntity, r.Status));
+        Assert.True(rs.Any(r => r.Status == HttpStatusCode.NoContent), "some of the adds must succeed (a list that refuses every add would also keep the count in range)");
+        Assert.True(rs.Any(r => r.Status == HttpStatusCode.UnprocessableEntity), "and the ones over the cap are refused");
     }
 
     [Fact]
@@ -309,6 +314,39 @@ public sealed class ListsTests : IDisposable
         await SyncAndWatch();
         Assert.Equal(1, await Count(NotificationKinds.WishlistPriceDrop));
         Assert.All(await _k.Db(db => db.WishlistItems.AsNoTracking().ToListAsync()), i => Assert.Equal(550, i.BaselinePriceCents));
+    }
+
+    [Fact]
+    public async Task A_drop_that_comes_after_a_rise_is_announced_once_the_cooldown_has_passed()
+    {
+        var (_, a) = await Buyer("w8@example.com", "challah-classic");
+        Reprice(-100); await SyncAndWatch();
+        Assert.Equal(1, await Count(NotificationKinds.WishlistPriceDrop, a));
+        Reprice(+300); await SyncAndWatch();                                   // up: the baseline rises quietly
+        _k.F.Clock.Advance(WishlistWatchHandler.Cooldown + TimeSpan.FromHours(1));
+        Reprice(-200); await SyncAndWatch();                                   // down again, after the cooldown: announced
+        Assert.Equal(2, await Count(NotificationKinds.WishlistPriceDrop, a));
+        var last = await _k.Db(db => db.Notifications.AsNoTracking().Where(n => n.AccountId == a && n.Kind == NotificationKinds.WishlistPriceDrop).OrderByDescending(n => n.CreatedAt).FirstAsync());
+        var prm = JsonDocument.Parse(last.ParamsJson!).RootElement;
+        Assert.Equal((650, 850), (prm.GetProperty("priceCents").GetInt64(), prm.GetProperty("previousPriceCents").GetInt64()));
+        var item = await _k.Db(db => db.WishlistItems.AsNoTracking().SingleAsync());
+        Assert.NotNull(item.LastPriceNotifiedAt);
+    }
+
+    [Fact]
+    public async Task The_watch_message_exists_exactly_when_the_snapshot_is_saved_never_before()
+    {
+        await Buyer("w9@example.com", "challah-classic");
+        var fx = CatalogKit.Fixture(_k.F);
+        var snap = fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x with { PriceCents = x.PriceCents - 100 }).ToList() });
+        var key = $"wishlist-watch:{snap.Id:N}:{snap.Version}";
+        using var scope = _k.F.Services.CreateScope();
+        var sync = CatalogKit.Service(scope, fx, _k.F.Clock);
+        Assert.True(await sync.ApplySnapshotAsync(snap, default));
+        Assert.Equal(0, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.DedupeKey == key)));   // applied but not saved: no message a worker could act on against the old data
+        await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().SaveChangesAsync();
+        Assert.Equal(1, await _k.Db(db => db.OutboxMessages.CountAsync(m => m.DedupeKey == key)));   // saved together with the snapshot
+        Assert.Equal(550, (await _k.Db(db => db.CatalogListings.AsNoTracking().FirstAsync(l => l.Id == Listing()))).PriceFromCents);
     }
 
     [Fact]
