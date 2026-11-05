@@ -6,16 +6,33 @@ using Solvelt.Marketplace.Api.Infrastructure;
 
 namespace Solvelt.Marketplace.Api.Staff;
 
-/// <summary>Answers 404 to anything outside <c>Staff:AllowedIps</c> when the list is set: the staff area does not exist for those addresses.</summary>
-public sealed class StaffNetworkFilter(IOptions<StaffOptions> options, ClientIpResolver ips) : IEndpointFilter
+/// <summary>How a staff route is protected, as endpoint metadata (security review MED-3): every /api/v1/staff route must carry exactly one of these, or the group answers 403 (deny by default).</summary>
+public sealed record StaffPermissionMetadata(string Permission);
+public sealed class StaffPublicMetadata { public static readonly StaffPublicMetadata Instance = new(); }
+public sealed class StaffSelfMetadata { public static readonly StaffSelfMetadata Instance = new(); }
+public sealed class StaffAuthMetadata { public static readonly StaffAuthMetadata Instance = new(); }
+
+public static class StaffRouteExtensions
 {
-    private IpAllowList? _list;
+    /// <summary>The sign-in and enrolment routes: anonymous by design.</summary>
+    public static TBuilder StaffPublic<TBuilder>(this TBuilder b) where TBuilder : IEndpointConventionBuilder => b.WithMetadata(StaffPublicMetadata.Instance);
+    /// <summary>A signed-in staff member acting on THEIR OWN session or account (me, passkeys, step-up, sign-out): no permission needed, a staff session is.</summary>
+    public static TBuilder StaffSelf<TBuilder>(this TBuilder b) where TBuilder : IEndpointConventionBuilder => b.WithMetadata(StaffAuthMetadata.Instance, StaffSelfMetadata.Instance).AddEndpointFilter<TBuilder, RequireStaffFilter>();
+    /// <summary>A signed-in staff member whose role holds the permission (the matrix in docs/STAFF.md).</summary>
+    public static TBuilder StaffCan<TBuilder>(this TBuilder b, string permission) where TBuilder : IEndpointConventionBuilder
+        => b.WithMetadata(StaffAuthMetadata.Instance, new StaffPermissionMetadata(permission)).AddEndpointFilter<TBuilder, RequireStaffFilter>().AddEndpointFilter(new RequirePermissionFilter(permission));
+
+    /// <summary>The protection an endpoint declared, or null when it declared none (what the deny-by-default filter and the route-walking test both ask).</summary>
+    public static bool IsDeclared(EndpointMetadataCollection md)
+        => md.GetMetadata<StaffPublicMetadata>() is not null
+           || (md.GetMetadata<StaffAuthMetadata>() is not null && (md.GetMetadata<StaffSelfMetadata>() is not null != (md.GetMetadata<StaffPermissionMetadata>() is not null)));
+}
+
+/// <summary>An endpoint under /api/v1/staff that declared no protection gets 403 (a route added later cannot be open by accident).</summary>
+public sealed class StaffDenyByDefaultFilter : IEndpointFilter
+{
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
-    {
-        var list = _list ??= IpAllowList.From(options.Value.AllowedIps);
-        if (!list.Allows(ips.ResolveAddress(context.HttpContext))) return Problems.NotFound();
-        return await next(context);
-    }
+        => context.HttpContext.GetEndpoint() is { } e && StaffRouteExtensions.IsDeclared(e.Metadata) ? await next(context) : Problems.Json(403, "forbidden", "This route has no access rule.");
 }
 
 /// <summary>Requires <c>Authorization: Bearer stf_…</c>; otherwise 401. A buyer's token never passes (another table, another prefix).</summary>
@@ -53,39 +70,39 @@ public static class StaffEndpoints
 
     public static StaffPrincipal Staff(this HttpContext ctx) => (StaffPrincipal)ctx.Items[RequireStaffFilter.Key]!;
 
-    /// <summary>The group every staff endpoint hangs off: network allow-list first, then the staff rate limit.</summary>
+    /// <summary>The group every staff endpoint hangs off: deny by default, then the staff rate limit (the IP allow-list is a middleware that runs before all of it).</summary>
     public static RouteGroupBuilder StaffGroup(this IEndpointRouteBuilder app)
-        => app.MapGroup("/api/v1/staff").AddEndpointFilter<StaffNetworkFilter>().RequireRateLimiting(RateLimitPolicies.Staff);
+        => app.MapGroup("/api/v1/staff").AddEndpointFilter<StaffDenyByDefaultFilter>().RequireRateLimiting(RateLimitPolicies.Staff);
 
     public static IEndpointRouteBuilder MapStaff(this IEndpointRouteBuilder app)
     {
         var g = app.StaffGroup();
         var auth = g.MapGroup("/auth").RequireRateLimiting(RateLimitPolicies.Auth);
-        auth.MapPost("/enrol/options", EnrolOptions);
-        auth.MapPost("/enrol", Enrol);
-        auth.MapPost("/passkey/options", SignInOptions);
-        auth.MapPost("/passkey/sign-in", SignIn);
-        auth.MapPost("/reauthenticate/options", ReauthOptions).AddEndpointFilter<RequireStaffFilter>();
-        auth.MapPost("/reauthenticate", Reauth).AddEndpointFilter<RequireStaffFilter>();
-        auth.MapPost("/sign-out", SignOut).AddEndpointFilter<RequireStaffFilter>();
+        auth.MapPost("/enrol/options", EnrolOptions).StaffPublic();
+        auth.MapPost("/enrol", Enrol).StaffPublic();
+        auth.MapPost("/passkey/options", SignInOptions).StaffPublic();
+        auth.MapPost("/passkey/sign-in", SignIn).StaffPublic();
+        auth.MapPost("/reauthenticate/options", ReauthOptions).StaffSelf();
+        auth.MapPost("/reauthenticate", Reauth).StaffSelf();
+        auth.MapPost("/sign-out", SignOut).StaffSelf();
 
-        var me = g.MapGroup("/me").AddEndpointFilter<RequireStaffFilter>();
-        me.MapGet("", Me);
-        me.MapGet("/passkeys", ListPasskeys);
-        me.MapPost("/passkeys/options", AddPasskeyOptions);
-        me.MapPost("/passkeys", AddPasskey);
-        me.MapDelete("/passkeys/{id:guid}", RemovePasskey);
+        var me = g.MapGroup("/me");
+        me.MapGet("", Me).StaffSelf();
+        me.MapGet("/passkeys", ListPasskeys).StaffSelf();
+        me.MapPost("/passkeys/options", AddPasskeyOptions).StaffSelf();
+        me.MapPost("/passkeys", AddPasskey).StaffSelf();
+        me.MapDelete("/passkeys/{id:guid}", RemovePasskey).StaffSelf();
 
-        var accounts = g.MapGroup("/accounts").AddEndpointFilter<RequireStaffFilter>().AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.StaffManage));
-        accounts.MapGet("", ListAccounts);
-        accounts.MapPost("", CreateAccount);
-        accounts.MapPost("/{id:guid}/enrolment", Reissue);
-        accounts.MapPost("/{id:guid}/role", SetRole);
-        accounts.MapPost("/{id:guid}/disable", (Guid id, ReasonBody? b, HttpContext c, StaffService s, IOptions<StaffOptions> o, CancellationToken ct) => SetDisabled(id, b, true, c, s, o, ct));
-        accounts.MapPost("/{id:guid}/enable", (Guid id, ReasonBody? b, HttpContext c, StaffService s, IOptions<StaffOptions> o, CancellationToken ct) => SetDisabled(id, b, false, c, s, o, ct));
-        accounts.MapPost("/{id:guid}/sign-out", SignOutEverywhere);
+        var accounts = g.MapGroup("/accounts");
+        accounts.MapGet("", ListAccounts).StaffCan(StaffPermissions.StaffManage);
+        accounts.MapPost("", CreateAccount).StaffCan(StaffPermissions.StaffManage);
+        accounts.MapPost("/{id:guid}/enrolment", Reissue).StaffCan(StaffPermissions.StaffManage);
+        accounts.MapPost("/{id:guid}/role", SetRole).StaffCan(StaffPermissions.StaffManage);
+        accounts.MapPost("/{id:guid}/disable", (Guid id, ReasonBody? b, HttpContext c, StaffService s, IOptions<StaffOptions> o, CancellationToken ct) => SetDisabled(id, b, true, c, s, o, ct)).StaffCan(StaffPermissions.StaffManage);
+        accounts.MapPost("/{id:guid}/enable", (Guid id, ReasonBody? b, HttpContext c, StaffService s, IOptions<StaffOptions> o, CancellationToken ct) => SetDisabled(id, b, false, c, s, o, ct)).StaffCan(StaffPermissions.StaffManage);
+        accounts.MapPost("/{id:guid}/sign-out", SignOutEverywhere).StaffCan(StaffPermissions.StaffManage);
 
-        g.MapGet("/audit", ListAudit).AddEndpointFilter<RequireStaffFilter>().AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.AuditView));
+        g.MapGet("/audit", ListAudit).StaffCan(StaffPermissions.AuditView);
         return app;
     }
 
@@ -198,6 +215,7 @@ public static class StaffEndpoints
         StaffOutcome.NotFound => Problems.NotFound(),
         StaffOutcome.Conflict => Problems.Json(409, "email_in_use", "A staff account with that address exists."),
         StaffOutcome.LastAdmin => Problems.Json(409, "last_admin", "There must always be one active admin."),
+        StaffOutcome.RevokeRequired => Problems.Json(409, "revoke_required", "This member already has a working passkey: a new link must also remove their passkeys and end their sessions (tick \"lost device\")."),
         StaffOutcome.InvalidRole => Problems.Validation(new Dictionary<string, string> { ["role"] = "Use support, finance or admin." }),
         StaffOutcome.InvalidEmail => Problems.Validation(new Dictionary<string, string> { ["email"] = "Enter a valid email address." }),
         StaffOutcome.InvalidName => Problems.Validation(new Dictionary<string, string> { ["displayName"] = "Enter a name of up to 60 characters." }),

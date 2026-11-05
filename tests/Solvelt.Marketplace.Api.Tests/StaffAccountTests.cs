@@ -345,9 +345,11 @@ public class StaffAccountTests
         Assert.Equal(HttpStatusCode.OK, (await s.Get(Me, fresh)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await s.Get(Me, await s.SignIn(newKey))).StatusCode);
         Assert.Equal(1, await s.Db(db => db.StaffPasskeys.CountAsync(p => p.StaffId == id)));
-        // an earlier link dies when a newer one is made
-        var first = (await StaffKit.Json(await s.Post($"{Accounts}/{id}/enrolment", new { reason = R, revokePasskeys = false }, admin))).GetProperty("enrolmentToken").GetString()!;
-        await s.Post($"{Accounts}/{id}/enrolment", new { reason = R, revokePasskeys = false }, admin);
+        // an earlier link dies when a newer one is made (for a member who never enrolled: an enrolled one must revoke, see the review tests)
+        var fresh2 = await StaffKit.Json(await s.Post(Accounts, new { email = "never@example.com", displayName = "Never", role = "support", reason = R }, admin));
+        var neverId = fresh2.GetProperty("account").GetProperty("id").GetGuid();
+        var first = fresh2.GetProperty("enrolmentToken").GetString()!;
+        await s.Post($"{Accounts}/{neverId}/enrolment", new { reason = R, revokePasskeys = false }, admin);
         Assert.Equal(HttpStatusCode.BadRequest, (await s.Post("/api/v1/staff/auth/enrol/options", new { token = first })).StatusCode);
         // the only admin cannot revoke their own keys (they would be locked out)
         var admins = await s.Db(db => db.StaffAccounts.Where(a => a.Role == "admin").Select(a => a.Id).ToListAsync());

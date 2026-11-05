@@ -6,7 +6,7 @@ using Solvelt.Marketplace.Api.Data;
 
 namespace Solvelt.Marketplace.Api.Staff;
 
-public enum StaffOutcome { Ok, NotFound, Conflict, LastAdmin, InvalidRole, InvalidEmail, InvalidName, TooMany }
+public enum StaffOutcome { Ok, NotFound, Conflict, LastAdmin, InvalidRole, InvalidEmail, InvalidName, TooMany, RevokeRequired }
 
 /// <summary>
 /// Staff sessions and accounts (decisions M7-01..M7-04). Staff tokens are <c>stf_</c> + 256 random bits, kept only as a SHA-256 in <c>staff_sessions</c>: a buyer session token is a different
@@ -55,10 +55,15 @@ public sealed class StaffService(MarketplaceDb db, TimeProvider time, IOptions<S
         return new StaffPrincipal(row.StaffId, row.Id, row.Email, row.DisplayName, row.Role, row.AuthenticatedAt);
     }
 
+    /// <summary>Ends THIS session and records it (one transaction, like every staff action).</summary>
     public async Task SignOutAsync(StaffPrincipal who, CancellationToken ct)
     {
         var now = Now;
-        await db.StaffSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (await db.StaffSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct) == 0) return;
+        StaffAudit.Add(db, time, who, "staff.sign_out", "staff", who.StaffId.ToString("D"), "sign-out");
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>Ends every session of the account (the epoch moves, so one being made right now is dead too). Does not save: the caller's transaction does.</summary>
@@ -118,6 +123,9 @@ public sealed class StaffService(MarketplaceDb db, TimeProvider time, IOptions<S
         var now = Now;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         if (await db.StaffAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, now), ct) != 1) return new(StaffOutcome.NotFound);
+        // A link that ADDS a passkey to an account that already works would let one admin quietly put their own key on another admin's account (security review LOW 7): for an account that
+        // has enrolled, the old keys and sessions must go with it (the "lost device" case), which is visible to the member and in the audit log.
+        if (!revokePasskeys && await db.StaffAccounts.AnyAsync(a => a.Id == id && a.EnrolledAt != null, ct)) return new(StaffOutcome.RevokeRequired);
         await db.StaffEnrolments.Where(e => e.StaffId == id && e.UsedAt == null).ExecuteUpdateAsync(s => s.SetProperty(e => e.UsedAt, (DateTimeOffset?)now), ct);
         if (revokePasskeys)
         {
@@ -198,31 +206,38 @@ public sealed class StaffService(MarketplaceDb db, TimeProvider time, IOptions<S
     /// enrolled, no password: there is none), and, while that admin has no passkey, keeps one enrolment whose secret is the configured token, valid <c>Staff:EnrolmentHours</c> from this start
     /// (restart to open a new window). Once any passkey is registered the token does nothing, whatever the configuration still says. Never a default account or password.
     /// </summary>
+    /// <summary>The bootstrap admin has a FIXED id: two instances (or two restarts with different <c>Staff:BootstrapEmail</c> values) that both see "no staff yet" collide on the primary key, so only one admin can ever be made this way.</summary>
+    public static readonly Guid BootstrapAdminId = new("00000000-0000-0000-0000-00000000b007");
+
     public async Task<string> BootstrapAsync(CancellationToken ct)
     {
         var token = O.BootstrapToken;
         if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(O.BootstrapEmail) || token.Length < 32) return "off";
         var now = Now;
-        var admin = await db.StaffAccounts.OrderBy(a => a.CreatedAt).FirstOrDefaultAsync(ct);
+        var admin = await db.StaffAccounts.FirstOrDefaultAsync(a => a.Id == BootstrapAdminId, ct);
         if (admin is null)
         {
-            admin = new StaffAccount { Id = Guid.NewGuid(), Email = AuthValidation.NormaliseEmail(O.BootstrapEmail), DisplayName = AuthValidation.NormaliseText(O.BootstrapName), Role = StaffRoleNames.Admin, CreatedAt = now, UpdatedAt = now };
+            if (await db.StaffAccounts.AnyAsync(ct)) return "off";   // there are staff already (made another way): the bootstrap token is for an empty database only
+            admin = new StaffAccount { Id = BootstrapAdminId, Email = AuthValidation.NormaliseEmail(O.BootstrapEmail), DisplayName = AuthValidation.NormaliseText(O.BootstrapName), Role = StaffRoleNames.Admin, CreatedAt = now, UpdatedAt = now };
             db.StaffAccounts.Add(admin);
             StaffAudit.Add(db, time, null, "staff.bootstrap", "staff", admin.Id.ToString("D"), "first admin made from the bootstrap token", role: "system");
             try { await db.SaveChangesAsync(ct); }
             catch (DbUpdateException ex) when (AccountService.IsUniqueViolation(ex)) { db.ChangeTracker.Clear(); return "raced"; }   // another instance made it: fine
-            admin = await db.StaffAccounts.OrderBy(a => a.CreatedAt).FirstAsync(ct);
         }
         if (admin.EnrolledAt is not null || await db.StaffPasskeys.AnyAsync(ct)) return "used";
         var hash = Tokens.Hash(token);
+        // A bootstrap secret works ONCE EVER (security review LOW 5): a row that was used is never reopened, not even when the admin's keys were revoked later and the token is still configured.
+        var row = await db.StaffEnrolments.AsNoTracking().Where(e => e.TokenHash == hash).Select(e => new { e.UsedAt }).FirstOrDefaultAsync(ct);
+        if (row?.UsedAt is not null) return "used";
         var expires = now.AddHours(Math.Max(1, O.EnrolmentHours));
-        // one row per configured token: a restart reopens its window; a changed token is a new row and the old one dies
+        // one row per configured token: a restart before the first use extends its window; a changed token is a new row and the old one dies
         await db.StaffEnrolments.Where(e => e.StaffId == admin.Id && e.UsedAt == null && e.TokenHash != hash).ExecuteUpdateAsync(s => s.SetProperty(e => e.UsedAt, (DateTimeOffset?)now), ct);
-        if (await db.StaffEnrolments.Where(e => e.TokenHash == hash && e.StaffId == admin.Id && e.Bootstrap).ExecuteUpdateAsync(s => s.SetProperty(e => e.UsedAt, (DateTimeOffset?)null).SetProperty(e => e.ExpiresAt, expires), ct) == 0)
+        if (row is null)
         {
             try { db.StaffEnrolments.Add(new StaffEnrolment { Id = Guid.NewGuid(), StaffId = admin.Id, TokenHash = hash, CreatedAt = now, ExpiresAt = expires, Bootstrap = true }); await db.SaveChangesAsync(ct); }
             catch (DbUpdateException ex) when (AccountService.IsUniqueViolation(ex)) { db.ChangeTracker.Clear(); }   // another instance stored it first
         }
+        else await db.StaffEnrolments.Where(e => e.TokenHash == hash && e.UsedAt == null).ExecuteUpdateAsync(s => s.SetProperty(e => e.ExpiresAt, expires), ct);   // only while UNUSED
         return "open";
     }
 }

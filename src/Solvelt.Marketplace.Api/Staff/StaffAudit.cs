@@ -10,16 +10,17 @@ namespace Solvelt.Marketplace.Api.Staff;
 public static partial class StaffReason
 {
     [GeneratedRegex(@"\S+@\S+\.\S+")] private static partial Regex Email();
-    [GeneratedRegex(@"\d[\d\s\-]{7,}\d")] private static partial Regex LongNumber();
+    [GeneratedRegex(@"\d[\d\s().\-]{7,}\d")] private static partial Regex LongNumber();
+    [GeneratedRegex(@"\S+\s*[\(\[{<]\s*at\s*[\)\]}>]\s*\S+|\S+\s+(at|@)\s+\S+\s+(dot|\.)\s+\w+", RegexOptions.IgnoreCase)] private static partial Regex SpelledEmail();
 
-    /// <summary>Null when the reason is fine. Five to 300 characters; it is stored for years, so it must not hold what the audit log must never hold: an email address or a long number (phone, card).</summary>
+    /// <summary>Null when the reason is fine. BEST EFFORT: it catches an email address (also spelled "(at)"), phone and card numbers, not a name: staff are told to write a ticket number. Five to 300 characters; it is stored for years, so it must not hold what the audit log must never hold: an email address or a long number (phone, card).</summary>
     public static string? Problem(string? reason)
     {
         var r = AuthValidation.NormaliseText(reason);
         if (r.Length < 5) return "Say why, in at least 5 characters.";
         if (r.Length > 300) return "Use at most 300 characters.";
         if (AuthValidation.HasForbiddenCharacters(r)) return "That text has characters that are not allowed.";
-        if (Email().IsMatch(r) || LongNumber().IsMatch(r)) return "Do not write an email address, phone number or card number in the reason: use the ticket or order number.";
+        if (Email().IsMatch(r) || LongNumber().IsMatch(r) || SpelledEmail().IsMatch(r)) return "Do not write an email address, phone number or card number in the reason: use the ticket or order number.";
         return null;
     }
 

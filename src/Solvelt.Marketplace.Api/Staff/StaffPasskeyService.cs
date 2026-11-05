@@ -19,7 +19,7 @@ public sealed record StaffSignIn(string Token, StaffAccount Account);
 /// discoverable credential); what differs is that a challenge here has its own purposes (a buyer's challenge cannot be spent on a staff sign-in, nor the reverse), the credentials live in
 /// <c>staff_passkeys</c>, and there is no password to fall back on.
 /// </summary>
-public sealed class StaffPasskeyService(MarketplaceDb db, TimeProvider time, IOptions<StaffOptions> options, IOptions<AuthOptions> authOptions, IFido2 fido2, StaffService staff)
+public sealed class StaffPasskeyService(MarketplaceDb db, TimeProvider time, IOptions<StaffOptions> options, IOptions<AuthOptions> authOptions, IFido2 fido2, StaffService staff, Solvelt.Marketplace.Api.Outbox.OpsCounters ops)
 {
     public const string Enrol = "staff-enrol", SignInPurpose = "staff-signin", Reauth = "staff-reauth", AddKey = "staff-addkey";
     private StaffOptions O => options.Value;
@@ -93,7 +93,7 @@ public sealed class StaffPasskeyService(MarketplaceDb db, TimeProvider time, IOp
 
     public async Task<(StaffPasskeyOutcome Outcome, Guid ChallengeId, string? Options)> BeginEnrolmentAsync(string? token, CancellationToken ct)
     {
-        if (await FindEnrolmentAsync(token, ct) is not { } found) return (StaffPasskeyOutcome.InvalidToken, default, null);
+        if (await FindEnrolmentAsync(token, ct) is not { } found) { ops.StaffEnrolRefusedOnce(); return (StaffPasskeyOutcome.InvalidToken, default, null); }
         var existing = await db.StaffPasskeys.AsNoTracking().Where(p => p.StaffId == found.Account.Id).Select(p => p.CredentialId).ToListAsync(ct);
         if (existing.Count >= Math.Max(1, O.MaxPasskeys)) return (StaffPasskeyOutcome.TooMany, default, null);
         var json = await OptionsFor(found.Account, existing);
@@ -107,9 +107,9 @@ public sealed class StaffPasskeyService(MarketplaceDb db, TimeProvider time, IOp
     public async Task<(StaffPasskeyOutcome Outcome, StaffSignIn? Session)> CompleteEnrolmentAsync(string? token, Guid challengeId, string? name, JsonElement? credential, CancellationToken ct)
     {
         if (PasskeyService.NameProblem(name ?? "Passkey") is not null) return (StaffPasskeyOutcome.InvalidName, null);
-        if (await FindEnrolmentAsync(token, ct) is not { } found) return (StaffPasskeyOutcome.InvalidToken, null);
+        if (await FindEnrolmentAsync(token, ct) is not { } found) { ops.StaffEnrolRefusedOnce(); return (StaffPasskeyOutcome.InvalidToken, null); }
         var stored = await ConsumeChallengeAsync(challengeId, Enrol, found.Account.Id, found.Enrolment.Id, ct);
-        if (stored is null) return (StaffPasskeyOutcome.InvalidChallenge, null);
+        if (stored is null) { ops.StaffEnrolRefusedOnce(); return (StaffPasskeyOutcome.InvalidChallenge, null); }
         var response = Parse<AuthenticatorAttestationRawResponse>(credential);
         if (response is null) return (StaffPasskeyOutcome.InvalidCredential, null);
         var registered = await VerifyAttestationAsync(stored, response, ct);
@@ -159,10 +159,13 @@ public sealed class StaffPasskeyService(MarketplaceDb db, TimeProvider time, IOp
         if (account is null) return null;
         if (!await VerifyAssertionAsync(passkey, response, AssertionOptions.FromJson(stored), ct)) return null;
         var now = Now;
+        // the session, the sign-in time and the audit row commit together or not at all (security review MED-2)
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.StaffAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.LastSignInAt, (DateTimeOffset?)now), ct);
         var token = await staff.CreateSessionAsync(account.Id, account.SessionEpoch, ct);
         StaffAudit.Add(db, time, null, "staff.sign_in", "staff", account.Id.ToString("D"), "passkey sign-in", role: account.Role);
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return new StaffSignIn(token, account);
     }
 
@@ -186,9 +189,12 @@ public sealed class StaffPasskeyService(MarketplaceDb db, TimeProvider time, IOp
         var passkey = await db.StaffPasskeys.AsNoTracking().FirstOrDefaultAsync(p => p.CredentialId == rawId && p.StaffId == who.StaffId, ct);
         if (passkey is null || !await VerifyAssertionAsync(passkey, response, AssertionOptions.FromJson(stored), ct)) return StaffPasskeyOutcome.InvalidCredential;
         var now = Now;
+        // the new "recent" time and its audit row commit together (security review MED-2)
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.StaffSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.AuthenticatedAt, now), ct);
         StaffAudit.Add(db, time, who, "staff.step_up", "staff", who.StaffId.ToString("D"), "passkey re-check");
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return StaffPasskeyOutcome.Ok;
     }
 

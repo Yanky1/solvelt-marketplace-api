@@ -16,12 +16,12 @@ public sealed class StaffKit : IDisposable
     public AuthKit K { get; }
     public TestFactory F => K.F;
 
-    public StaffKit(Dictionary<string, string?>? config = null, bool bootstrap = true)
+    public StaffKit(Dictionary<string, string?>? config = null, bool bootstrap = true, Action<Microsoft.Extensions.DependencyInjection.IServiceCollection>? services = null)
     {
         var c = new Dictionary<string, string?> { ["RateLimits:StaffPerMinute"] = "100000", ["RateLimits:AuthPerMinute"] = "100000" };
         if (bootstrap) { c["Staff:BootstrapToken"] = BootstrapToken; c["Staff:BootstrapEmail"] = AdminEmail; }
         if (config != null) foreach (var kv in config) c[kv.Key] = kv.Value;
-        K = new AuthKit(c);
+        K = new AuthKit(c, services);
     }
 
     public void Dispose() => K.Dispose();

@@ -146,13 +146,13 @@ public static class StaffBuyerEndpoints
 
     public static IEndpointRouteBuilder MapStaffBuyers(this IEndpointRouteBuilder app)
     {
-        var g = app.StaffGroup().MapGroup("/buyers").AddEndpointFilter<RequireStaffFilter>();
-        g.MapGet("", Lookup).AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.BuyersView));
-        g.MapGet("/{id:guid}", Detail).AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.BuyersView));
-        g.MapPost("/{id:guid}/reveal", Reveal).AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.BuyersReveal));
-        g.MapPost("/{id:guid}/lock", (Guid id, StaffEndpoints.ReasonBody? b, HttpContext c, StaffBuyerService s, TimeProvider t, IOptions<StaffOptions> o, CancellationToken ct) => Lock(id, b, true, c, s, t, o, ct)).AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.BuyersLock));
-        g.MapPost("/{id:guid}/unlock", (Guid id, StaffEndpoints.ReasonBody? b, HttpContext c, StaffBuyerService s, TimeProvider t, IOptions<StaffOptions> o, CancellationToken ct) => Lock(id, b, false, c, s, t, o, ct)).AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.BuyersLock));
-        g.MapPost("/{id:guid}/sign-out", SignOutAll).AddEndpointFilter(new RequirePermissionFilter(StaffPermissions.BuyersSignOut));
+        var g = app.StaffGroup().MapGroup("/buyers");
+        g.MapGet("", Lookup).StaffCan(StaffPermissions.BuyersView);
+        g.MapGet("/{id:guid}", Detail).StaffCan(StaffPermissions.BuyersView);
+        g.MapPost("/{id:guid}/reveal", Reveal).StaffCan(StaffPermissions.BuyersReveal);
+        g.MapPost("/{id:guid}/lock", (Guid id, StaffEndpoints.ReasonBody? b, HttpContext c, StaffBuyerService s, TimeProvider t, IOptions<StaffOptions> o, CancellationToken ct) => Lock(id, b, true, c, s, t, o, ct)).StaffCan(StaffPermissions.BuyersLock);
+        g.MapPost("/{id:guid}/unlock", (Guid id, StaffEndpoints.ReasonBody? b, HttpContext c, StaffBuyerService s, TimeProvider t, IOptions<StaffOptions> o, CancellationToken ct) => Lock(id, b, false, c, s, t, o, ct)).StaffCan(StaffPermissions.BuyersLock);
+        g.MapPost("/{id:guid}/sign-out", SignOutAll).StaffCan(StaffPermissions.BuyersSignOut);
         return app;
     }
 

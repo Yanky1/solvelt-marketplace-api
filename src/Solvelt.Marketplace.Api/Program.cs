@@ -223,6 +223,7 @@ app.Use(async (ctx, next) =>
         ctx.Response.OnStarting(() => { ctx.Response.Headers.CacheControl = "private, no-store"; return Task.CompletedTask; });
     await next();
 });
+app.UseMiddleware<Solvelt.Marketplace.Api.Staff.StaffNetworkMiddleware>();   // M7-06: before routing, body limits and rate limits: outside the allow-list the staff area does not exist
 app.UseMiddleware<SafeRequestLoggingMiddleware>();
 app.UseMiddleware<ProblemExceptionMiddleware>();
 app.UseMiddleware<StatusProblemMiddleware>();
@@ -262,6 +263,7 @@ app.MapGet("/health", (ClientIpResolver forwarding, OpsCounters ops) => Results.
     // Counts since start-up: alert when either rises.
     outbox = new { deadLettered = ops.DeadLettered },
     admin = new { refused = ops.AdminDenied },
+    staff = new { enrolRefused = ops.StaffEnrolRefused },
 }));
 app.MapGet("/api/v1/ping", () => Results.Json(new { pong = true })).RequireRateLimiting(RateLimitPolicies.Public);
 
