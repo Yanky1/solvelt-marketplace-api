@@ -1,7 +1,7 @@
 // The buyer journey for a product, against the REAL portal, API and web (brief M8):
 //   seller (portal API) creates + activates a product -> the catalog syncs -> a buyer browses and searches -> adds to the cart as a GUEST -> signs up (mail from the sandbox) and
 //   signs in (the guest cart must survive) -> checks out -> pays -> the order appears in the seller portal -> the seller accepts and ships with tracking -> the buyer sees the
-//   tracking -> the order is delivered -> the buyer sees it delivered.   (The review step joins when M6's reviews merge.)
+//   tracking -> the order is delivered -> the buyer sees it delivered -> the buyer reviews the product (a verified purchase) and the review shows on the product page.
 import { readFileSync } from "node:fs";
 import * as L from "./lib.mjs";
 import { launch, watch, hydrated, go } from "./browser.mjs";
@@ -130,6 +130,24 @@ async function main() {
     await L.must(portal("POST", `/api/v1/seller/orders/${sellerOrder.id}/deliver`, { token: seller.token, body: { version: d.version } }), 200, "deliver");
     await until("the delivered status on the buyer's order page", async () => { await L.pumpPortal(); await page.reload({ waitUntil: "domcontentloaded" }); return /delivered/i.test(await page.locator("main").innerText()); }, { timeout: 60_000, every: 3000 });
     ok("the buyer sees the order delivered");
+
+    step("the buyer reviews the product they received (a verified purchase)");
+    await go(page, `/p/${listing.slug}`);
+    const write = page.getByRole("link", { name: /Write a review:/ });
+    await until("the write-a-review link for the delivered order", async () => { await L.pumpPortal(); if (await write.count()) return true; await page.reload({ waitUntil: "domcontentloaded" }); return false; }, { timeout: 60_000, every: 2000 });
+    await write.first().click();
+    await hydrated(page);
+    await page.getByLabel("5 stars").check();
+    const reviewText = `Sturdy, nicely finished and it arrived on time ${run}.`;
+    await page.getByLabel("Your review").fill(reviewText);
+    await page.getByRole("button", { name: "Publish review" }).click();
+    await page.getByText("Your review is published").waitFor({ timeout: 20_000 });
+    await go(page, `/p/${listing.slug}`);
+    const mine = page.getByTestId("review").filter({ hasText: reviewText });
+    await mine.waitFor({ timeout: 15_000 });
+    check(/Verified purchase/.test(await mine.innerText()), "the review is marked as a verified purchase");
+    check((await page.getByTestId("rating-summary").innerText()).includes("5"), "the rating summary on the product page shows the 5-star review");
+    ok("the review is published on the product page as a verified purchase");
   } catch (e) { await dumpPage(); throw e; } finally { await browser.close(); }
 
   step("no server errors on the way");
