@@ -359,3 +359,17 @@ Buyer routes need the session and answer `private, no-store`; another buyer's th
 * `POST /api/v1/messages/{messageId}/report` `{ reason, note? }` → 202, idempotent.
 * `GET /api/v1/messages/attachments/{id}` → the file as `Content-Disposition: attachment` (sniffed type, `nosniff`, CSP `default-src 'none'`, `private, no-store`); 404 unless it is the buyer's own, stored and not hidden.
 `GET /api/v1/checkout/orders/{number}`: the buyer's own order (Bearer) or, for a guest, `X-Guest-Order: <guestOrderToken>` (401 bad or expired, 404 another order). After the order has been claimed by an account the guest link answers only `{ number, status, createdAt, claimed: true }` (decision M3-32).
+
+## Demo data (test mode, M9)
+
+Only while `Demo:Enabled` is on (Development and Testing only; the API refuses to start with it on anywhere else). While it is off every `/api/v1/demo/*` route answers `404`, to everyone, before anything else is looked at.
+
+| Route | Auth | Answer |
+|---|---|---|
+| `GET /api/v1/config` | none | `{ "demoEnabled": bool }` (public, `Cache-Control: public, max-age=60`): the web shows a TEST MODE badge when true. Always available. |
+| `GET /api/v1/demo/status` | Bearer | `{ hasDemoData, counts: { addresses, carts, cartLines, orders, bookings, threads, messages, notifications } }` |
+| `POST /api/v1/demo/fill` | Bearer | `201 { batchId, created: true, counts, notes[] }` the first time; `200 { created: false, ... }` with the existing batch while one exists (idempotent). `notes` says what was skipped (no catalog, a real cart already there). |
+| `POST /api/v1/demo/remove` | Bearer | `200 { removed: counts }`: deletes only the demo rows of the signed-in account. |
+| `POST /api/v1/demo/verify` | none | `{ email, password }` -> `204`, the account is now verified. `401 invalid_credentials` for a wrong password and for an unknown address alike, `429` after too many tries (same budget as sign-in). Needed because an unverified account cannot sign in, so there is no session to take the account from. |
+
+The account is always the signed-in buyer's, never a value from the request. What a fill creates (all marked `IsDemo` with the batch id): one address (example street, `555` phone), a cart of 2 to 3 live items (only when the buyer has no cart), three paid orders (delivered, shipped, refunded; tracking; fake `pi_demo_*` and `re_demo_*` ids), two bookings (one upcoming, one completed), one seller thread with two messages, and matching notifications. Listings whose feed document says `demo: true` are used first. Nothing is sent to the portal, a payment provider or a mailbox, and no outbox row is written. Buyer actions on a demo order, booking or thread (cancel, return, confirm delivery, message, report, reschedule) answer `409 demo_data`. Listing cards and details carry `demo: bool`.

@@ -18,8 +18,8 @@ public static class MessageEndpoints
         g.MapGet("/threads", Threads).RequireRateLimiting(RateLimitPolicies.Public);
         g.MapGet("/threads/{id:guid}", Thread).RequireRateLimiting(RateLimitPolicies.Public);
         g.MapPost("/threads/{id:guid}/read", Read).RequireRateLimiting(RateLimitPolicies.Public);
-        g.MapPost("", Send).RequireRateLimiting(RateLimitPolicies.Public).AddEndpointFilter<MessageRateLimitFilter>();
-        g.MapPost("/{id:guid}/report", Report).RequireRateLimiting(RateLimitPolicies.Public).AddEndpointFilter<MessageRateLimitFilter>();
+        g.MapPost("", Send).RequireRateLimiting(RateLimitPolicies.Public).AddEndpointFilter<Demo.DemoMessageGuard>().AddEndpointFilter<MessageRateLimitFilter>();
+        g.MapPost("/{id:guid}/report", Report).RequireRateLimiting(RateLimitPolicies.Public).AddEndpointFilter<Demo.DemoMessageGuard>().AddEndpointFilter<MessageRateLimitFilter>();
         return app;
     }
 

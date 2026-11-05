@@ -30,8 +30,12 @@ public sealed class BuyerAccount
 }
 
 /// <summary>A saved address book entry (US and international). Exactly one per buyer is the default, enforced by a partial unique index.</summary>
-public sealed class BuyerAddress
+public sealed class BuyerAddress : Solvelt.Marketplace.Api.Demo.IDemoMarked
 {
+    /// <summary>Created by "Fill with demo data" (M9): removed by "Remove demo data", never sent to the portal, a payment provider or a mailbox.</summary>
+    public bool IsDemo { get; set; }
+    /// <summary>Which press of the button created it.</summary>
+    public Guid? DemoBatchId { get; set; }
     public Guid Id { get; set; }
     public Guid AccountId { get; set; }
     public string FullName { get; set; } = "";

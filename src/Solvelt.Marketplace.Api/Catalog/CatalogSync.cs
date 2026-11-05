@@ -415,6 +415,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.Version = s.Version;
         listing.KnownVersion = Math.Max(listing.KnownVersion, s.Version);
         listing.IsStub = false;
+        listing.IsDemoListing = s.Demo;
         listing.LengthMm = s.Dimensions?.L; listing.WidthMm = s.Dimensions?.W; listing.HeightMm = s.Dimensions?.H;
         listing.FetchAttempts = 0; listing.NextFetchAt = null;
         listing.Row++;

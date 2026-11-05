@@ -19,7 +19,7 @@ public sealed record ListingSnapshot(
     SellerRef Seller, BrandRef Brand, Guid CategoryId, string Currency,
     IReadOnlyList<VariantDto> Variants, IReadOnlyList<ImageDto> Images, IReadOnlyList<AttributeDto> Attributes, IReadOnlyList<FaqDto> Faqs,
     DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt,
-    IReadOnlyList<string>? SearchTerms = null, DimensionsMm? Dimensions = null);
+    IReadOnlyList<string>? SearchTerms = null, DimensionsMm? Dimensions = null, bool Demo = false);
 
 public sealed record CategoryDto(Guid Id, Guid? ParentId, string Slug, string Name, int SortOrder);
 public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, Guid? LogoImageId);

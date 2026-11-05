@@ -171,7 +171,7 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
             var updated = Time(d, "updatedAt") ?? now;
             return new ListingSnapshot(listingId, version, type, "Active", title, summary, description,
                 new SellerRef(sellerId, Str(seller, "displayName") ?? "", true), new BrandRef(brandId, Str(brand, "name") ?? ""), categoryId, currency.ToUpperInvariant(),
-                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d), Dimensions(d));
+                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d), Dimensions(d), d.TryGetProperty("demo", out var demoFlag) && demoFlag.ValueKind == JsonValueKind.True);
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
         {

@@ -370,6 +370,28 @@ public class HttpCatalogSourceTests
         Assert.Equal((500, null, null, null), (Assert.Single(c.Variants).WeightGrams, c.LengthMm, c.WidthMm, c.HeightMm));
     }
 
+    // ---------- demo listings (portal feed `demo: true`, M9) ----------
+    [Theory]
+    [InlineData(true, true)] [InlineData(false, false)] [InlineData(null, false)] [InlineData("true", false)] [InlineData(1, false)] [InlineData("yes", false)]
+    public void Only_a_real_boolean_true_marks_a_listing_as_demo(object? flag, bool expected)
+        => Assert.Equal(expected, Mapped(new Rig(), Doc(1, 10, d => { if (flag is not null) d["demo"] = flag; })).Demo);
+
+    [Fact]
+    public async Task A_demo_listing_is_stored_marked_and_shown_as_demo_by_the_api()
+    {
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        var rig = PortalFor(f, _ => Page([Doc(1, 10, d => d["demo"] = true), Doc(2, 10)], "10"));
+        await Run(f, rig.Source);
+        Assert.True(CatalogKit.Row(f, G(1)).IsDemoListing);
+        Assert.False(CatalogKit.Row(f, G(2)).IsDemoListing);
+        var list = await CatalogKit.Json(f.CreateClient(), "/api/v1/catalog/listings?pageSize=50");
+        var demoFlags = list.GetProperty("items").EnumerateArray().ToDictionary(i => i.GetProperty("title").GetString()!, i => i.GetProperty("demo").GetBoolean());
+        Assert.True(demoFlags["Mug 1"]);
+        Assert.False(demoFlags["Mug 2"]);
+        var detail = await CatalogKit.Json(f.CreateClient(), $"/api/v1/catalog/listings/{CatalogKit.Row(f, G(1)).Slug}");
+        Assert.True(detail.GetProperty("demo").GetBoolean());
+    }
+
     [Fact]
     public async Task The_synthetic_default_variant_is_stored_flagged_so_checkout_can_tell_it_from_a_portal_variant()
     {

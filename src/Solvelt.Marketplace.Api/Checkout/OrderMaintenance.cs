@@ -30,7 +30,7 @@ public sealed class OrderMaintenance(MarketplaceDb db, Outbox.OutboxWriter outbo
     {
         var now = time.GetUtcNow().ToUniversalTime();
         var cutoff = now - PendingLifetime;
-        var stale = await db.Orders.AsNoTracking().Where(o => o.Status == OrderStatus.PendingPayment && o.CreatedAt < cutoff).Select(o => new { o.Id, o.Number }).Take(200).ToListAsync(ct);
+        var stale = await db.Orders.AsNoTracking().Where(o => !o.IsDemo && o.Status == OrderStatus.PendingPayment && o.CreatedAt < cutoff).Select(o => new { o.Id, o.Number }).Take(200).ToListAsync(ct);
         var expired = 0;
         foreach (var o in stale)
         {

@@ -26,7 +26,7 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
         var stalePending = now.AddSeconds(-Math.Clamp(options.Value.PendingResolveAfterSeconds, 5, 3600));
         var overdueHold = now.AddMinutes(-2);
         var ids = await db.Bookings.AsNoTracking()
-            .Where(b => (b.Status == BookingStatus.HoldPending && b.UpdatedAt <= stalePending) || (b.Status == BookingStatus.Hold && b.HoldExpiresAt != null && b.HoldExpiresAt <= overdueHold))
+            .Where(b => !b.IsDemo && ((b.Status == BookingStatus.HoldPending && b.UpdatedAt <= stalePending) || (b.Status == BookingStatus.Hold && b.HoldExpiresAt != null && b.HoldExpiresAt <= overdueHold)))
             .OrderBy(b => b.UpdatedAt).Select(b => b.Id).Take(Batch).ToListAsync(ct);
         foreach (var id in ids)
         {
@@ -64,7 +64,7 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
     /// </summary>
     private async Task<int> CancelUnpaidQuoteBookingsAsync(DateTimeOffset now, CancellationToken ct)
     {
-        var ids = await db.Bookings.AsNoTracking().Where(b => b.PaymentDueAt != null && b.PaymentDueAt <= now && (b.Status == BookingStatus.Confirmed || b.Status == BookingStatus.Requested || b.Status == BookingStatus.Rescheduled))
+        var ids = await db.Bookings.AsNoTracking().Where(b => !b.IsDemo && b.PaymentDueAt != null && b.PaymentDueAt <= now && (b.Status == BookingStatus.Confirmed || b.Status == BookingStatus.Requested || b.Status == BookingStatus.Rescheduled))
             .OrderBy(b => b.PaymentDueAt).Select(b => b.Id).Take(Batch).ToListAsync(ct);
         var n = 0;
         foreach (var id in ids)

@@ -14,7 +14,7 @@ public sealed record ImageCard(Guid Id, int Width, int Height, string Alt);
 public sealed record CategoryNode(Guid Id, string Slug, string Name, int ListingCount, IReadOnlyList<CategoryNode> Children);
 public sealed record BrandItem(Guid Id, string Slug, string Name, SellerCard Seller, Guid? LogoImageId, int ListingCount);
 public sealed record ListingCardDto(Guid Id, string Slug, string Type, string Title, string Summary, long PriceFromCents, long PriceToCents,
-    long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, CategoryCard Category, ImageCard? Image);
+    long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, CategoryCard Category, ImageCard? Image, bool Demo = false);
 public sealed record Suggestion(string Kind, string Text, string Slug);
 public sealed record SuggestResponse(string Query, IReadOnlyList<Suggestion> Suggestions);
 public sealed record ListingsPage(IReadOnlyList<ListingCardDto> Items, int Page, int PageSize, int Total, int TotalPages, string? NextCursor,
@@ -25,7 +25,7 @@ public sealed record FaqItem(string Question, string Answer);
 public sealed record ListingDetailDto(Guid Id, string Slug, string Type, string Title, string Summary, string Description, long PriceFromCents, long PriceToCents,
     long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, IReadOnlyList<CategoryCard> CategoryPath,
     IReadOnlyList<VariantItem> Variants, IReadOnlyList<ImageCard> Images, IReadOnlyList<AttributeItem> Attributes, IReadOnlyList<FaqItem> Faqs,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, bool Demo = false);
 
 /// <summary>Public, anonymous catalog reads (docs/API.md). Only visible listings of active sellers are ever returned; everything else is a 404.</summary>
 public static class CatalogEndpoints
@@ -182,7 +182,7 @@ public static class CatalogEndpoints
             l.Variants.OrderBy(v => v.SortOrder).Select(v => new VariantItem(v.Id, v.Name, v.PriceCents, v.CompareAtCents, v.Available)).ToList(),
             l.Images.OrderBy(i => i.SortOrder).Select(i => new ImageCard(i.Id, i.Width, i.Height, i.Alt)).ToList(),
             l.Attributes.OrderBy(a => a.SortOrder).Select(a => new AttributeItem(a.Key, a.Value)).ToList(),
-            l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt));
+            l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt, l.IsDemoListing));
     }
 
     /// <summary>Autocomplete: listing titles from the search index, plus brands and categories whose name starts with the text. Nothing below two characters.</summary>
@@ -228,7 +228,7 @@ public static class CatalogEndpoints
             var img = firstImages.GetValueOrDefault(l.Id);
             return new ListingCardDto(l.Id, l.Slug, l.Type, l.Title, l.Summary, l.PriceFromCents, l.PriceToCents, l.CompareAtFromCents, l.Currency, l.Available,
                 new BrandCard(l.BrandId, b?.Slug ?? "", b?.Name ?? ""), new SellerCard(l.SellerId, s?.DisplayName ?? ""), new CategoryCard(l.CategoryId, c?.Slug ?? "", c?.Name ?? ""),
-                img is null ? null : new ImageCard(img.Id, img.Width, img.Height, img.Alt));
+                img is null ? null : new ImageCard(img.Id, img.Width, img.Height, img.Alt), l.IsDemoListing);
         }).ToList();
     }
 

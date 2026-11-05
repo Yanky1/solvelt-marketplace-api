@@ -19,10 +19,10 @@ public static class OrderEndpoints
         var g = app.MapGroup("/api/v1/orders").RequireRateLimiting(RateLimitPolicies.Public).AddEndpointFilter<RequireBuyerFilter>();
         g.MapGet("", List);
         g.MapGet("/{number}", Detail);
-        g.MapPost("/{number}/cancel-requests", Cancel);
-        g.MapPost("/{number}/return-requests", Return);
-        g.MapPost("/{number}/delivery-confirmations", Confirm);
-        g.MapPost("/{number}/returns/{returnId}/label-link", Label);
+        g.MapPost("/{number}/cancel-requests", Cancel).AddEndpointFilter<Demo.DemoOrderGuard>();
+        g.MapPost("/{number}/return-requests", Return).AddEndpointFilter<Demo.DemoOrderGuard>();
+        g.MapPost("/{number}/delivery-confirmations", Confirm).AddEndpointFilter<Demo.DemoOrderGuard>();
+        g.MapPost("/{number}/returns/{returnId}/label-link", Label).AddEndpointFilter<Demo.DemoOrderGuard>();
         return app;
     }
 

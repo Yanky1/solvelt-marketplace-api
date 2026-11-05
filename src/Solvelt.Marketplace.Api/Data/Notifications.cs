@@ -42,8 +42,12 @@ public static class NotificationKinds
 /// One entry of the buyer's notification centre. Holds ids and a few non-personal parameters (seller name, carrier, amount), never an address or free text. <see cref="DedupeKey"/>
 /// (portal event id + kind) is unique, so an event produces each notification once.
 /// </summary>
-public sealed class Notification
+public sealed class Notification : Solvelt.Marketplace.Api.Demo.IDemoMarked
 {
+    /// <summary>Created by "Fill with demo data" (M9): removed by "Remove demo data", never sent to the portal, a payment provider or a mailbox.</summary>
+    public bool IsDemo { get; set; }
+    /// <summary>Which press of the button created it.</summary>
+    public Guid? DemoBatchId { get; set; }
     public Guid Id { get; set; }
     public Guid AccountId { get; set; }
     public string Kind { get; set; } = "";

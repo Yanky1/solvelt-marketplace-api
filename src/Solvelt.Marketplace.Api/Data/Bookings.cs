@@ -27,8 +27,12 @@ public static class BookingStatus
 /// A buyer's booking (<c>BK-…</c>, our idempotency id towards the portal). The row is inserted BEFORE the portal is called (decision M4-02), so a crash or retry
 /// finds it and asks the portal about the same id instead of creating another. Every amount is a <c>long</c> in cents and is the portal's, never the client's.
 /// </summary>
-public sealed class Booking
+public sealed class Booking : Solvelt.Marketplace.Api.Demo.IDemoMarked
 {
+    /// <summary>Created by "Fill with demo data" (M9): removed by "Remove demo data", never sent to the portal, a payment provider or a mailbox.</summary>
+    public bool IsDemo { get; set; }
+    /// <summary>Which press of the button created it.</summary>
+    public Guid? DemoBatchId { get; set; }
     public Guid Id { get; set; }
     /// <summary><c>BK-…</c> (at most 64 characters from the portal's id alphabet).</summary>
     public string MarketplaceBookingId { get; set; } = "";

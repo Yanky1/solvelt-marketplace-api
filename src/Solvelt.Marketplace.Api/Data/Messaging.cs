@@ -12,8 +12,12 @@ public static class ThreadKinds
 /// One buyer ⇄ seller conversation (M5 messaging relay): about one seller order, about a listing (a pre-sale question) or, later, about a booking. <see cref="ConversationKey"/> is OUR
 /// conversation id towards the portal (<c>conversationId</c>), created once. Both sides only ever see relay identities: the seller sees the buyer's display name, the buyer sees the seller's.
 /// </summary>
-public sealed class MessageThread
+public sealed class MessageThread : Solvelt.Marketplace.Api.Demo.IDemoMarked
 {
+    /// <summary>Created by "Fill with demo data" (M9): removed by "Remove demo data", never sent to the portal, a payment provider or a mailbox.</summary>
+    public bool IsDemo { get; set; }
+    /// <summary>Which press of the button created it.</summary>
+    public Guid? DemoBatchId { get; set; }
     public Guid Id { get; set; }
     public string ConversationKey { get; set; } = "";
     public Guid AccountId { get; set; }

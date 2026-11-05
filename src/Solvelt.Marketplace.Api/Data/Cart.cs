@@ -7,8 +7,12 @@ namespace Solvelt.Marketplace.Api.Data;
 /// A server-side cart: one per signed-in buyer (<see cref="AccountId"/>) or one per guest (<see cref="GuestTokenHash"/>, the SHA-256 of an opaque token the
 /// web server keeps in its own cookie). The cart holds ids and quantities only; every price, name and availability is read from the catalog each time.
 /// </summary>
-public sealed class Cart
+public sealed class Cart : Solvelt.Marketplace.Api.Demo.IDemoMarked
 {
+    /// <summary>Created by "Fill with demo data" (M9): removed by "Remove demo data", never sent to the portal, a payment provider or a mailbox.</summary>
+    public bool IsDemo { get; set; }
+    /// <summary>Which press of the button created it.</summary>
+    public Guid? DemoBatchId { get; set; }
     public Guid Id { get; set; }
     public Guid? AccountId { get; set; }
     public string? GuestTokenHash { get; set; }
