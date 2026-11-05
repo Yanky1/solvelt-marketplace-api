@@ -362,6 +362,7 @@ public static class BookingEndpoints
             ExtraChargeStatus.Ok => Results.Json(new { amountCents = amount, payment }),
             ExtraChargeStatus.NotFound => Problems.NotFound(),
             ExtraChargeStatus.AlreadyPaid => Problems.Json(409, "already_paid", "This charge is already paid."),
+            ExtraChargeStatus.AmountRequired => Problems.Validation(new Dictionary<string, string> { ["expectedAmountCents"] = "Say which amount the buyer saw (in cents)." }),
             ExtraChargeStatus.AmountChanged => Problems.Json(409, "amount_changed", "The provider changed the amount. Please look at it again."),
             ExtraChargeStatus.AmountTooSmall => Problems.Unprocessable("amount_too_small", "The amount is below the minimum we can charge."),
             ExtraChargeStatus.PaymentRejected => Problems.Unprocessable("payment_rejected", "The payment provider could not start this payment."),
