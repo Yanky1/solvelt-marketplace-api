@@ -81,6 +81,7 @@ builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outb
 builder.Services.Configure<DemoOptions>(builder.Configuration.GetSection("Demo"));
 builder.Services.AddScoped<DemoService>();
 builder.Services.AddScoped<DemoVerifier>();
+builder.Services.AddSingleton<DemoActionLimiter>();
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
 builder.Services.AddSingleton(TimeProvider.System);

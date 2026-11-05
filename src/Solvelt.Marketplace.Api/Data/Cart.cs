@@ -32,6 +32,8 @@ public sealed class CartLine
     public long SeenUnitPriceCents { get; set; }
     /// <summary>Unix milliseconds (our clock) the line was added: keeps the order stable.</summary>
     public long AddedAtMs { get; set; }
+    /// <summary>Created by "Fill with demo data" (M9, security review M2): "Remove demo data" deletes only marked lines, so a real line the buyer added to the same cart stays. Cleared never; a line is demo or it is not.</summary>
+    public bool IsDemo { get; set; }
 }
 
 internal sealed class CartConfiguration : IEntityTypeConfiguration<Cart>, IEntityTypeConfiguration<CartLine>

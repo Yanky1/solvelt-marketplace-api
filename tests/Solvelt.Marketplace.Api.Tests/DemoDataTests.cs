@@ -195,6 +195,8 @@ public sealed class DemoDataTests : IDisposable
         var portal = _k.F.Portal.Calls.Count;
         var number = await _k.Db(db => db.Orders.Where(o => o.AccountId == account).Select(o => o.Number).FirstAsync());
         var booking = await _k.Db(db => db.Bookings.Where(b => b.AccountId == account && b.Status == BookingStatus.Confirmed).Select(b => b.Id).FirstAsync());
+        var marketplaceBookingId = await _k.Db(db => db.Bookings.Where(b => b.Id == booking).Select(b => b.MarketplaceBookingId).FirstAsync());
+        var sellerOrderNumber = await _k.Db(db => db.OrderGroups.Where(g => g.SellerOrderNumber != null && db.Orders.Any(o => o.Id == g.OrderId && o.AccountId == account && o.IsDemo)).Select(g => g.SellerOrderNumber).FirstAsync());
         var (thread, listing) = await _k.Db(async db => { var t = await db.MessageThreads.FirstAsync(x => x.AccountId == account); return (t.Id, t.ListingId!.Value); });
         var message = await _k.Db(db => db.ThreadMessages.Where(m => m.ThreadId == thread).Select(m => m.Id).FirstAsync());
         var calls = new (string Path, object Body)[]
@@ -205,6 +207,11 @@ public sealed class DemoDataTests : IDisposable
             ($"/api/v1/bookings/{booking}/cancel", new { reason = "x" }),
             ($"/api/v1/bookings/{booking}/proposal", new { accept = true }),
             ($"/api/v1/bookings/{booking}/acknowledge-reschedule", new { }),
+            ($"/api/v1/bookings/{booking}/extra-charge/accept", new { }),
+            ($"/api/v1/bookings/{booking}/extra-charge/decline", new { }),
+            ($"/api/v1/bookings/{booking}/checkout", new { }),
+            ("/api/v1/messages", new { sellerOrderNumber, text = "About my seller order" }),
+            ("/api/v1/messages", new { marketplaceBookingId, text = "About my booking" }),
             ("/api/v1/messages", new { threadId = thread, text = "Hello?" }),
             ("/api/v1/messages", new { listingId = listing, text = "Hello again?" }),
             ($"/api/v1/messages/{message}/report", new { reason = "spam" }),
@@ -282,12 +289,29 @@ public sealed class DemoDataTests : IDisposable
         var (tokenB, b) = await Buyer("demob@example.com");
         var now = _k.F.Clock.GetUtcNow();
         // account A also has real rows of every kind
-        var realOrder = Guid.NewGuid();
+        var realOrder = Guid.NewGuid(); var realGroup = Guid.NewGuid(); var realLine = Guid.NewGuid(); var realShipment = Guid.NewGuid();
         await _k.Db(async db =>
         {
             db.BuyerAddresses.Add(new BuyerAddress { Id = Guid.NewGuid(), AccountId = a, FullName = "Real", Line1 = "1 Real Rd", City = "Town", PostalCode = "10001", Country = "US", CreatedAt = now, UpdatedAt = now });
             db.Notifications.Add(new Notification { Id = Guid.NewGuid(), AccountId = a, Kind = NotificationKinds.OrderShipped, DedupeKey = "real-1", CreatedAt = now });
             db.Orders.Add(new MarketplaceOrder { Id = realOrder, Number = "REAL-1", AccountId = a, Status = OrderStatus.Placed, BuyerName = "Real", RelayEmail = "real@relay.test", ShipName = "Real", ShipLine1 = "1 Real Rd", ShipCity = "Town", ShipPostalCode = "10001", ShipCountry = "US", CreatedAt = now, UpdatedAt = now });
+            // the real order is a whole order: group, line, seller state, shipment, line fulfilment and a refund (security review L1), none of which Remove may touch
+            var anySeller = Guid.NewGuid();
+            db.OrderGroups.Add(new OrderGroup { Id = realGroup, OrderId = realOrder, SellerId = anySeller, BrandId = Guid.NewGuid(), SellerName = "Real seller", BrandName = "Real brand", DeliveryKind = "carrier", ShippingSpeed = "standard", ItemsCents = 1000, ShippingCents = 500, TotalCents = 1500, SellerOrderId = Guid.NewGuid(), SellerOrderNumber = "REAL-SO-1", RefundedCents = 200 });
+            db.OrderLines.Add(new OrderLine { Id = realLine, OrderId = realOrder, GroupId = realGroup, MarketplaceLineId = "real-1-1", ListingId = Guid.NewGuid(), VariantId = Guid.NewGuid(), SellerId = anySeller, BrandId = Guid.NewGuid(), Title = "Real thing", VariantName = "One", Quantity = 1, UnitPriceCents = 1000, LineTotalCents = 1000 });
+            db.SellerOrderStates.Add(new SellerOrderState { GroupId = realGroup, OrderId = realOrder, Status = FulfilmentStatus.Shipped, AcceptedAt = now, ShippedAt = now, UpdatedAt = now });
+            db.OrderShipments.Add(new OrderShipment { Id = realShipment, GroupId = realGroup, PortalShipmentId = "real-sh-1", Method = "carrier", Carrier = "Real Express", Service = "Ground", TrackingNumber = "REAL123", ShippedAt = now, TrackingStatus = "in_transit", UpdatedAt = now, TrackingEventsJson = "[]" });
+            db.OrderLineFulfilments.Add(new OrderLineFulfilment { LineId = realLine, ShippedQty = 1, RefundedQty = 0 });
+            db.OrderRefunds.Add(new OrderRefund { Id = Guid.NewGuid(), Key = "real-refund-1", OrderId = realOrder, GroupId = realGroup, AmountCents = 200, ShippingCents = 0, Reason = "Real refund", Attempt = 1, Status = RefundStatus.Succeeded, StripeRefundId = "re_real_1", ReportToPortal = false, CreatedAt = now, UpdatedAt = now });
+            await db.SaveChangesAsync(); return 0;
+        });
+        var (_, realCartAccount) = await Buyer("demorealcart@example.com");
+        await _k.Db(async db =>
+        {
+            var cart = new Cart { Id = Guid.NewGuid(), AccountId = realCartAccount, CreatedAt = now, UpdatedAt = now };
+            db.Carts.Add(cart);
+            var picks = await db.CatalogVariants.Select(v => new { v.Id, v.ListingId }).Take(2).ToListAsync();
+            foreach (var p in picks) db.CartLines.Add(new CartLine { Id = Guid.NewGuid(), CartId = cart.Id, ListingId = p.ListingId, VariantId = p.Id, Quantity = 1, SeenUnitPriceCents = 100, AddedAtMs = now.ToUnixTimeMilliseconds() });
             await db.SaveChangesAsync(); return 0;
         });
         await Fill(tokenA); await Fill(tokenB);
@@ -301,6 +325,10 @@ public sealed class DemoDataTests : IDisposable
             Assert.Equal(0, await db.BuyerAddresses.CountAsync(x => x.AccountId == a && x.IsDemo) + await db.Notifications.CountAsync(n => n.AccountId == a && n.IsDemo) + await db.Bookings.CountAsync(x => x.AccountId == a && x.IsDemo)
                 + await db.MessageThreads.CountAsync(t => t.AccountId == a && t.IsDemo) + await db.Carts.CountAsync(c => c.AccountId == a && c.IsDemo));
             Assert.Equal(1, await db.Orders.CountAsync(o => o.Id == realOrder && !o.IsDemo));                              // the real order is still there
+            Assert.Equal((1, 1, 1, 1, 1, 1), (await db.OrderGroups.CountAsync(g => g.Id == realGroup), await db.OrderLines.CountAsync(l => l.Id == realLine), await db.SellerOrderStates.CountAsync(x => x.GroupId == realGroup),
+                await db.OrderShipments.CountAsync(x => x.Id == realShipment), await db.OrderLineFulfilments.CountAsync(x => x.LineId == realLine), await db.OrderRefunds.CountAsync(x => x.Key == "real-refund-1")));   // all of it survived
+            Assert.Equal(1, await db.Carts.CountAsync(c => c.AccountId == realCartAccount && !c.IsDemo));                    // a real cart of somebody else
+            Assert.Equal(2, await db.CartLines.CountAsync(l => db.Carts.Any(c => c.Id == l.CartId && c.AccountId == realCartAccount)));
             Assert.Equal(1, await db.BuyerAddresses.CountAsync(x => x.AccountId == a && x.FullName == "Real"));
             Assert.Equal(1, await db.Notifications.CountAsync(n => n.DedupeKey == "real-1"));
             // no orphans of the removed orders
@@ -309,6 +337,62 @@ public sealed class DemoDataTests : IDisposable
             return 0;
         });
         Assert.Equal(bBefore, await Totals(b));                                                                           // another account's demo data is untouched
+    }
+
+    [Fact]
+    public async Task Remove_keeps_a_real_line_the_buyer_added_to_the_demo_cart_and_hands_the_cart_back_to_the_buyer()
+    {
+        await SyncCatalog();
+        var (token, a) = await Buyer("demoe@example.com");
+        Assert.Equal(HttpStatusCode.Created, (await Fill(token)).StatusCode);
+        var now = _k.F.Clock.GetUtcNow();
+        var real = Guid.NewGuid();
+        await _k.Db(async db =>
+        {
+            var cart = await db.Carts.SingleAsync(c => c.AccountId == a);
+            Assert.True(cart.IsDemo);
+            var used = await db.CartLines.Where(l => l.CartId == cart.Id).Select(l => l.VariantId).ToListAsync();
+            var spare = await db.CatalogVariants.Where(v => !used.Contains(v.Id)).Select(v => new { v.Id, v.ListingId }).FirstAsync();   // a variant the demo cart does not hold
+            db.CartLines.Add(new CartLine { Id = real, CartId = cart.Id, ListingId = spare.ListingId, VariantId = spare.Id, Quantity = 2, SeenUnitPriceCents = 100, AddedAtMs = now.ToUnixTimeMilliseconds() });
+            await db.SaveChangesAsync(); return 0;
+        });
+        var res = await Remove(token);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        await _k.Db(async db =>
+        {
+            var cart = await db.Carts.AsNoTracking().SingleAsync(c => c.AccountId == a);                                   // the cart stays: it holds a real line
+            Assert.False(cart.IsDemo); Assert.Null(cart.DemoBatchId);                                                       // and it is the buyer's own now
+            var lines = await db.CartLines.AsNoTracking().Where(l => l.CartId == cart.Id).ToListAsync();
+            var only = Assert.Single(lines);
+            Assert.Equal((real, 2, false), (only.Id, only.Quantity, only.IsDemo));
+            return 0;
+        });
+        // a second Remove finds nothing marked and changes nothing; a second Fill adds no demo cart over the buyer's cart
+        Assert.Equal(HttpStatusCode.OK, (await Remove(token)).StatusCode);
+        Assert.Equal(1, await _k.Db(db => db.CartLines.CountAsync(l => l.Id == real)));
+        // with only demo lines left the cart is removed as before
+        await Remove(token);
+        await _k.Db(async db => { await db.CartLines.Where(l => l.Id == real).ExecuteDeleteAsync(); await db.Carts.Where(c => c.AccountId == a).ExecuteDeleteAsync(); return 0; });
+        Assert.Equal(HttpStatusCode.Created, (await Fill(token)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Remove(token)).StatusCode);
+        Assert.Equal(0, await _k.Db(db => db.Carts.CountAsync(c => c.AccountId == a) ));
+        Assert.Equal(0, await _k.Db(db => db.CartLines.CountAsync(l => !db.Carts.Any(c => c.Id == l.CartId))));
+    }
+
+    [Fact]
+    public async Task Editing_a_demo_address_makes_it_the_buyers_own_and_Remove_leaves_it()
+    {
+        await SyncCatalog();
+        var (token, a) = await Buyer("demof@example.com");
+        Assert.Equal(HttpStatusCode.Created, (await Fill(token)).StatusCode);
+        var id = await _k.Db(db => db.BuyerAddresses.Where(x => x.AccountId == a && x.IsDemo).Select(x => x.Id).SingleAsync());
+        var edit = await _k.Send(HttpMethod.Put, $"/api/v1/account/addresses/{id}", new { fullName = "Dana Real", line1 = "9 Real Street", city = "Brooklyn", region = "NY", postalCode = "11201", country = "US", phone = "+1 718 555 0199" }, token);
+        Assert.Equal(HttpStatusCode.OK, edit.StatusCode);
+        var row = await _k.Db(db => db.BuyerAddresses.AsNoTracking().SingleAsync(x => x.Id == id));
+        Assert.False(row.IsDemo); Assert.Null(row.DemoBatchId);
+        Assert.Equal(HttpStatusCode.OK, (await Remove(token)).StatusCode);
+        var kept = await _k.Db(db => db.BuyerAddresses.AsNoTracking().SingleAsync(x => x.Id == id));                          // still there, with the buyer's words
+        Assert.Equal("9 Real Street", kept.Line1);
     }
 
     // ---------- access ----------
@@ -391,6 +475,76 @@ public sealed class DemoDataTests : IDisposable
     }
 
     [Fact]
+    public async Task Verify_never_claims_a_guest_order_and_refuses_an_address_that_has_one_the_attacker_cannot_take_the_victims_order()
+    {
+        await SyncCatalog();
+        // the victim placed a guest order with victim@example.com (an order of another account, turned into a guest order)
+        var (seedToken, _) = await Buyer("demoseed@example.com");
+        Assert.Equal(HttpStatusCode.Created, (await Fill(seedToken)).StatusCode);
+        var guest = await _k.Db(async db =>
+        {
+            var o = await db.Orders.Where(x => x.IsDemo).OrderBy(x => x.Number).FirstAsync();
+            await db.Orders.Where(x => x.Id == o.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.AccountId, (Guid?)null).SetProperty(x => x.GuestEmail, "victim@example.com"));
+            return o.Id;
+        });
+        // the attacker signs up as victim@example.com with their own password and tries the test-only verify
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("victim@example.com")).StatusCode);
+        var attempt = await _k.Post("/api/v1/demo/verify", new { email = "victim@example.com", password = AuthKit.Password });
+        var wrong = await _k.Post("/api/v1/demo/verify", new { email = "victim@example.com", password = "wrong password here" });
+        Assert.Equal(HttpStatusCode.Unauthorized, attempt.StatusCode);
+        Assert.Equal(await wrong.Content.ReadAsStringAsync(), await attempt.Content.ReadAsStringAsync());                    // the generic refusal: nothing says an order exists
+        await _k.Db(async db =>
+        {
+            var order = await db.Orders.AsNoTracking().SingleAsync(o => o.Id == guest);
+            Assert.Null(order.AccountId); Assert.Null(order.ClaimedAt);                                                         // the order is still the guest's
+            Assert.Null((await db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Email == "victim@example.com")).EmailVerifiedAt);   // and the account is still unverified
+            return 0;
+        });
+        Assert.Equal(HttpStatusCode.Forbidden, (await _k.Post("/api/v1/auth/sign-in", new { email = "victim@example.com", password = AuthKit.Password })).StatusCode);
+        // an address without guest orders still verifies, and verifying changes only the verification time: a guest order placed later is not claimed by it either
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("clean@example.com")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/demo/verify", new { email = "clean@example.com", password = AuthKit.Password })).StatusCode);
+        await _k.Db(async db =>
+        {
+            await db.Orders.Where(o => o.Id == guest).ExecuteUpdateAsync(s => s.SetProperty(x => x.GuestEmail, "clean@example.com"));
+            return 0;
+        });
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/demo/verify", new { email = "clean@example.com", password = AuthKit.Password })).StatusCode);   // already verified: harmless
+        Assert.Null((await _k.Db(db => db.Orders.AsNoTracking().SingleAsync(o => o.Id == guest))).AccountId);
+    }
+
+    [Fact]
+    public async Task Fill_and_Remove_share_a_per_account_limit_that_resets_with_time_and_does_not_touch_other_accounts()
+    {
+        await SyncCatalog();
+        var (token, _) = await Buyer("demol1@example.com");
+        var (other, _) = await Buyer("demol2@example.com");
+        for (var i = 0; i < DemoActionLimiter.Limit; i++)
+            Assert.Equal(HttpStatusCode.OK, (await Remove(token)).StatusCode);                                              // nothing to remove: cheap, but counted
+        var refused = await Remove(token);
+        Assert.Equal(HttpStatusCode.TooManyRequests, refused.StatusCode);
+        Assert.True(int.Parse(refused.Headers.GetValues("Retry-After").Single()) is >= 1 and <= 60);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await Fill(token)).StatusCode);                                       // fill and remove count together
+        Assert.Equal(0, (await Totals()).Orders);                                                                           // and the refused fill created nothing
+        Assert.Equal(HttpStatusCode.OK, (await Remove(other)).StatusCode);                                                  // another account has its own budget
+        Assert.Equal(HttpStatusCode.OK, (await _k.Send(HttpMethod.Get, "/api/v1/demo/status", null, token)).StatusCode);   // reading is never limited
+        _k.F.Clock.Advance(DemoActionLimiter.Window + TimeSpan.FromSeconds(1));
+        Assert.Equal(HttpStatusCode.Created, (await Fill(token)).StatusCode);                                               // the window passed
+    }
+
+    [Fact]
+    public async Task A_failed_verify_is_logged_with_a_hash_of_the_client_and_never_the_address_or_password()
+    {
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("demologged@example.com")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _k.Post("/api/v1/demo/verify", new { email = "demologged@example.com", password = "wrong password here" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _k.Post("/api/v1/demo/verify", new { email = "nobodylogged@example.com", password = "wrong password here" })).StatusCode);
+        var lines = _k.F.Logs.Lines.Where(l => l.Contains("Demo verify failed")).ToList();
+        Assert.Equal(2, lines.Count);                                                                                       // known and unknown address are logged alike
+        Assert.All(lines, l => Assert.Matches(@"ClientHash=[0-9a-f]{12}", l));
+        Assert.DoesNotContain(_k.F.Logs.Lines, l => l.Contains("demologged@example.com") || l.Contains("nobodylogged@example.com") || l.Contains("wrong password here"));
+    }
+
+    [Fact]
     public async Task Verify_goes_through_the_sign_in_budget_so_it_cannot_be_used_to_guess_a_password()
     {
         Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("demoi@example.com")).StatusCode);
@@ -416,6 +570,16 @@ public sealed class DemoDisabledTests : IDisposable
         var token = await _k.VerifiedSession("demoz@example.com");
         Assert.Equal(HttpStatusCode.NotFound, (await _k.Send(new HttpMethod(method), path, new { email = "x@example.com", password = "x" }, token)).StatusCode);
         Assert.Equal(0, await _k.Db(db => db.Orders.CountAsync(o => o.IsDemo)));
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/v1/demo/fill")] [InlineData("GET", "/api/v1/demo/remove")] [InlineData("GET", "/api/v1/demo/verify")] [InlineData("POST", "/api/v1/demo/status")]
+    [InlineData("DELETE", "/api/v1/demo/fill")] [InlineData("GET", "/api/v1/demo/nothing/here")] [InlineData("POST", "/api/v1/demo/anything")] [InlineData("PUT", "/api/v1/demo")]
+    public async Task Any_other_method_or_path_under_demo_is_a_plain_404_never_a_405_while_it_is_off(string method, string path)
+    {
+        var token = await _k.VerifiedSession("demow@example.com");
+        Assert.Equal(HttpStatusCode.NotFound, (await _k.Send(new HttpMethod(method), path, null, null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _k.Send(new HttpMethod(method), path, null, token)).StatusCode);
     }
 
     [Fact]

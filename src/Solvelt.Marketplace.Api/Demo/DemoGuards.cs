@@ -62,6 +62,10 @@ public sealed class DemoMessageGuard : IEndpointFilter
             if (send.ThreadId is { } tid && await db.MessageThreads.AsNoTracking().AnyAsync(t => t.Id == tid && t.AccountId == account && t.IsDemo, ct)) return DemoRefusal.Result();
             if (send.ListingId is { } lid && await db.MessageThreads.AsNoTracking().AnyAsync(t => t.ListingId == lid && t.AccountId == account && t.IsDemo, ct)) return DemoRefusal.Result();
             if (!string.IsNullOrWhiteSpace(send.OrderNumber) && await db.Orders.AsNoTracking().AnyAsync(o => o.Number == send.OrderNumber && o.AccountId == account && o.IsDemo, ct)) return DemoRefusal.Result();
+            if (!string.IsNullOrWhiteSpace(send.SellerOrderNumber)
+                && await (from g in db.OrderGroups.AsNoTracking() join o in db.Orders.AsNoTracking() on g.OrderId equals o.Id where g.SellerOrderNumber == send.SellerOrderNumber && o.AccountId == account && o.IsDemo select g.Id).AnyAsync(ct))
+                return DemoRefusal.Result();
+            if (!string.IsNullOrWhiteSpace(send.MarketplaceBookingId) && await db.Bookings.AsNoTracking().AnyAsync(b => b.MarketplaceBookingId == send.MarketplaceBookingId && b.AccountId == account && b.IsDemo, ct)) return DemoRefusal.Result();
         }
         if (http.Request.RouteValues["id"] is string raw && Guid.TryParse(raw, out var id)
             && await (from m in db.ThreadMessages.AsNoTracking() join t in db.MessageThreads.AsNoTracking() on m.ThreadId equals t.Id where m.Id == id && t.AccountId == account && t.IsDemo select m.Id).AnyAsync(ct))
