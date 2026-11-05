@@ -143,7 +143,7 @@ public sealed class BookingPayTests : IDisposable
         Assert.Empty(_portal.PaymentEvents);                           // no sale is reported for a booking the portal has not confirmed
         Assert.Empty(Stripe.Refunds);                                  // and an outage is not a reason to refund
         _portal.ConfirmDown = false;
-        _k.F.Clock.Advance(TimeSpan.FromHours(1));
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(2));                   // inside the 10 minute hold: the portal (like the real one) refuses a lapsed hold with 409 hold_expired, which is the next test's case
         await Drain();
         Assert.Equal(BookingStatus.Confirmed, (await Row(b.Id)).Status);
         Assert.Single(_portal.PaymentEvents);
@@ -172,6 +172,74 @@ public sealed class BookingPayTests : IDisposable
         Assert.Empty(_portal.PaymentEvents);                           // not a sale, so no payment.captured and no refund.processed either
         var mail = (await _k.Mail("jane@example.com")).Last();
         Assert.Contains("refund", mail.TextBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ---- review MED-2: a 2xx is never a refusal ------------------------------------------------------------------------------------------------------------------------
+    private async Task<Booking> PaidWithConfirmAnswer(string? body)
+    {
+        await Ready();
+        var b = await NewHold();
+        Assert.True((await Checkout(b.Id)).IsSuccessStatusCode);
+        var intent = IntentOf(b.MarketplaceBookingId);
+        _portal.ConfirmBodyOverride = body;
+        Stripe.Capture(intent.Id);
+        await PostStripe(StripeEvent("payment_intent.succeeded", intent.Id, b.MarketplaceBookingId, 24000));
+        await _k.Dispatch();
+        return b;
+    }
+
+    [Theory]
+    [InlineData("{}")]                                                                                       // no booking in the answer
+    [InlineData("{\"created\":false,\"booking\":{\"marketplaceBookingId\":\"BK-SOMEONE-ELSE\",\"bookingId\":\"00000000-0000-4000-8000-000000000001\",\"status\":\"Confirmed\"}}")]   // another booking
+    [InlineData("not json at all")]
+    public async Task A_2xx_confirm_answer_that_cannot_be_used_never_refunds_the_payment(string body)
+    {
+        var b = await PaidWithConfirmAnswer(body);
+        var pay = await Pay(b.Id);
+        Assert.Equal(BookingPaymentStatus.Captured, pay.Status);          // not voided
+        Assert.Equal(0, pay.RefundedCents);
+        Assert.Empty(Stripe.Refunds);                                      // no money moved
+        Assert.Equal(BookingStatus.Hold, (await Row(b.Id)).Status);        // not failed, not expired: it will be asked again
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("could not be read or does not name this booking"));
+        // the next attempt gets the real answer and the booking is confirmed
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(2));
+        await Drain();
+        Assert.Equal(BookingStatus.Confirmed, (await Row(b.Id)).Status);
+        Assert.Empty(Stripe.Refunds);
+    }
+
+    // ---- the fakes now answer like the real portal (ConfirmHoldAsync): final or lapsed holds are a 409, never a 200 ---------------------------------------------------------
+    [Fact]
+    public async Task A_hold_that_ran_out_in_the_portal_answers_409_hold_expired_and_the_payment_is_refunded()
+    {
+        await Ready();
+        var b = await NewHold();
+        Assert.True((await Checkout(b.Id)).IsSuccessStatusCode);
+        var intent = IntentOf(b.MarketplaceBookingId);
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(12));                  // no ConfirmFailNext: the fake itself knows the hold lapsed
+        Stripe.Capture(intent.Id);
+        await PostStripe(StripeEvent("payment_intent.succeeded", intent.Id, b.MarketplaceBookingId, 24000));
+        await Drain();
+        Assert.Equal("Expired", _portal.Find(b.MarketplaceBookingId)!.Status);
+        Assert.Equal(BookingPaymentStatus.Void, (await Pay(b.Id)).Status);
+        Assert.Equal(24000, Assert.Single(Stripe.Refunds).AmountCents);
+        Assert.Empty(_portal.PaymentEvents);                           // never a sale
+    }
+
+    [Fact]
+    public async Task A_booking_the_portal_already_cancelled_answers_409_hold_not_confirmable_and_the_payment_is_refunded()
+    {
+        await Ready();
+        var b = await NewHold();
+        Assert.True((await Checkout(b.Id)).IsSuccessStatusCode);
+        var intent = IntentOf(b.MarketplaceBookingId);
+        _portal.Find(b.MarketplaceBookingId)!.Status = "CancelledByBuyer";    // the portal's own state; our row has not heard yet
+        Stripe.Capture(intent.Id);
+        await PostStripe(StripeEvent("payment_intent.succeeded", intent.Id, b.MarketplaceBookingId, 24000));
+        await Drain();
+        Assert.Equal(BookingPaymentStatus.Void, (await Pay(b.Id)).Status);
+        Assert.Equal(24000, Assert.Single(Stripe.Refunds).AmountCents);
+        Assert.Empty(_portal.PaymentEvents);
     }
 
     [Fact]

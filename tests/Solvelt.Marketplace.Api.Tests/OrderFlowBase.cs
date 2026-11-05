@@ -56,7 +56,7 @@ public abstract class OrderFlowBase : IDisposable
                 Interlocked.Increment(ref _orderCalls);
                 return _onOrder is not null ? _onOrder(c) : Created(c, 201, true);
             }
-            if (path == "/api/internal/v1/payment-events") return _onPaymentEvent?.Invoke(c) ?? FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\"}");
+            if (path == "/api/internal/v1/payment-events") return _onPaymentEvent?.Invoke(c) ?? FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\",\"result\":null}");
             if (_onOther?.Invoke(c) is { } other) return other;
             return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
         });

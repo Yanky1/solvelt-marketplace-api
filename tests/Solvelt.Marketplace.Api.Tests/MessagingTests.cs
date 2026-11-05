@@ -21,8 +21,8 @@ public sealed class MessagingTests : OrderFlowBase
     {
         _onOther = c =>
         {
-            if (c.PathAndQuery == "/api/internal/v1/messages") return FakePortal.Json(_messageAnswer, _messageAnswer is HttpStatusCode.Created or HttpStatusCode.OK ? "{\"duplicate\":false}" : "{\"code\":\"not_found\"}");
-            if (c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/messages")) return FakePortal.Json(HttpStatusCode.Created, "{\"duplicate\":false}");
+            if (c.PathAndQuery == "/api/internal/v1/messages") return FakePortal.Json(_messageAnswer, _messageAnswer is HttpStatusCode.Created or HttpStatusCode.OK ? "{\"duplicate\":false,\"conversationId\":\"00000000-0000-4000-8000-0000000000c1\",\"messageId\":\"00000000-0000-4000-8000-0000000000e1\"}" : "{\"code\":\"not_found\"}");
+            if (c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/messages")) return FakePortal.Json(HttpStatusCode.Created, "{\"duplicate\":false,\"conversationId\":\"00000000-0000-4000-8000-0000000000c1\",\"messageId\":\"00000000-0000-4000-8000-0000000000e1\"}");
             if (c.PathAndQuery.EndsWith("/receipts")) return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"delivered\"}");
             if (c.PathAndQuery == "/api/internal/v1/content/reports") return FakePortal.Json(_reportAnswer, "{\"status\":\"open\"}", r => { if (_reportAnswer == HttpStatusCode.TooManyRequests) r.Headers.RetryAfter = new(TimeSpan.FromSeconds(60)); });
             return null;
