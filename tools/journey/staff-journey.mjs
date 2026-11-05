@@ -81,7 +81,8 @@ async function main() {
     const rows = page.locator("table.table tbody tr");
     await rows.first().waitFor({ timeout: 15_000 });
     const audit = await page.locator("main").innerText();
-    check(/lock/i.test(audit) && /unlock/i.test(audit), `the audit log does not list the lock and the unlock: ${audit.replace(/\s+/g, " ").slice(0, 300)}`);
+    check(/unlock/i.test(audit), `the audit log does not list the unlock: ${audit.replace(/\s+/g, " ").slice(0, 300)}`);
+    check(/lock/i.test(audit.replace(/unlock/gi, "")), `the audit log does not list the lock (only an unlock is there): ${audit.replace(/\s+/g, " ").slice(0, 300)}`);   // "unlock" contains "lock": the lock must be found without it
     check(!audit.includes(buyer.email), "the audit log shows the buyer's full email");
     ok("the audit log lists the lock and the unlock");
   } catch (e) { await dumpPage(); throw e; } finally { await browser.close(); }
