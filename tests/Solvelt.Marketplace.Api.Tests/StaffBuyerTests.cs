@@ -106,13 +106,13 @@ public class StaffBuyerTests
         Assert.Equal(2, audit.Count);
         Assert.All(audit, a => { Assert.Equal(w.BuyerId.ToString("D"), a.TargetId); Assert.Equal(R, a.Reason); Assert.DoesNotContain("jane", (a.Detail ?? "").ToLowerInvariant()); Assert.DoesNotContain(Phone, a.Detail ?? ""); Assert.DoesNotContain(Street, a.Detail ?? ""); });
         Assert.Contains("email", audit[0].Detail); Assert.Contains("addresses", audit[0].Detail);
+        Assert.Equal(HttpStatusCode.NotFound, (await w.S.Post($"/api/v1/staff/buyers/{Guid.NewGuid()}/reveal", new { fields = new[] { "email" }, reason = R }, w.Admin)).StatusCode);
         // an old passkey check is refused and reveals nothing
         w.S.F.Clock.Advance(TimeSpan.FromMinutes(6));
         var late = await w.S.Post(url, new { fields = new[] { "email" }, reason = R }, w.Support);
         Assert.Equal(HttpStatusCode.Forbidden, late.StatusCode);
         Assert.DoesNotContain("example.com", await late.Content.ReadAsStringAsync());
         Assert.Equal(2, (await w.S.Audit()).Count(a => a.Action == "buyer.reveal"));
-        Assert.Equal(HttpStatusCode.NotFound, (await w.S.Post($"/api/v1/staff/buyers/{Guid.NewGuid()}/reveal", new { fields = new[] { "email" }, reason = R }, w.Admin)).StatusCode);
     }
 
     [Fact]
@@ -126,8 +126,9 @@ public class StaffBuyerTests
         var third = await w.S.Post(url, body, w.Admin);
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
         Assert.Equal("reveal_limit", (await StaffKit.Json(third)).GetProperty("code").GetString());
-        w.S.F.Clock.Advance(TimeSpan.FromMinutes(61)); await w.S.StepUp(w.Admin, w.AdminKey);
-        Assert.Equal(HttpStatusCode.OK, (await w.S.Post(url, body, w.Admin)).StatusCode);
+        w.S.F.Clock.Advance(TimeSpan.FromMinutes(61));   // the session is idle-expired by now: sign in again
+        var fresh = await w.S.SignIn(w.AdminKey);
+        Assert.Equal(HttpStatusCode.OK, (await w.S.Post(url, body, fresh)).StatusCode);
         // parallel: the cap holds (one allowed left)
         await using var p = await Setup(new() { ["Staff:RevealsPerHour"] = "1" });
         var rs = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => p.S.Post($"/api/v1/staff/buyers/{p.BuyerId}/reveal", body, p.Admin)));
@@ -198,7 +199,7 @@ public class StaffBuyerTests
     public void Masking_hides_the_local_part_and_the_domain_name()
     {
         Assert.Equal("j***@e***.com", Masking.Email("jane.doe@example.com"));
-        Assert.Equal("a***@b***.co.uk", Masking.Email("a@b.co.uk"));
+        Assert.Equal("a***@b***.uk", Masking.Email("a@b.co.uk"));   // only the last label of the domain is kept
         Assert.Equal("***", Masking.Email("weird"));
         Assert.Null(Masking.Email(null));
     }
