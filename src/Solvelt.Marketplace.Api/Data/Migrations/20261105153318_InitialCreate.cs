@@ -684,6 +684,25 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "product_questions",
+                columns: table => new
+                {
+                    Id = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: false),
+                    ListingId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Text = table.Column<string>(type: "character varying(4000)", maxLength: 4000, nullable: false),
+                    DisplayName = table.Column<string>(type: "character varying(240)", maxLength: 240, nullable: false),
+                    Status = table.Column<string>(type: "character varying(12)", maxLength: 12, nullable: false),
+                    RejectedReason = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    SentAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_product_questions", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "projection_states",
                 columns: table => new
                 {
@@ -1804,6 +1823,16 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "Status", "LastReplayAt" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_product_questions_AccountId_CreatedAt",
+                table: "product_questions",
+                columns: new[] { "AccountId", "CreatedAt" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_product_questions_AccountId_ListingId_CreatedAt",
+                table: "product_questions",
+                columns: new[] { "AccountId", "ListingId", "CreatedAt" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_quotes_AccountId_IdempotencyKey",
                 table: "quotes",
                 columns: new[] { "AccountId", "IdempotencyKey" },
@@ -2111,6 +2140,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "portal_inbound_events");
+
+            migrationBuilder.DropTable(
+                name: "product_questions");
 
             migrationBuilder.DropTable(
                 name: "projection_states");

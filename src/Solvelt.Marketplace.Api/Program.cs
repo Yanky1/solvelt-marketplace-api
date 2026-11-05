@@ -176,6 +176,9 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.ContentReportDec
 builder.Services.AddSingleton<IProjectionHandler>(sp => { var h = sp.GetRequiredService<Solvelt.Marketplace.Api.Messaging.ContentReportDecidedHandler>(); h.ReviewDecision = Solvelt.Marketplace.Api.Reviews.ReviewModeration.ApplyAsync; return h; });   // M6: kind review / review_reply
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Reviews.ReviewReplyHandler>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Reviews.ReviewService>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Reviews.QuestionSendOutboxHandler>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Reviews.QuestionsAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Reviews.QuestionsDataExporter>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Reviews.ReviewUpsertOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Reviews.ReviewStateOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Reviews.ReviewReportOutboxHandler>();
@@ -287,6 +290,7 @@ app.MapCart();
 Solvelt.Marketplace.Api.Lists.WishlistEndpoints.MapWishlists(app);
 Solvelt.Marketplace.Api.Lists.RecentlyViewedEndpoints.MapRecentlyViewed(app);
 Solvelt.Marketplace.Api.Reviews.ReviewEndpoints.MapReviews(app);
+Solvelt.Marketplace.Api.Reviews.QuestionEndpoints.MapQuestions(app);
 app.MapDemo();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
