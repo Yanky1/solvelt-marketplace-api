@@ -21,12 +21,14 @@ public sealed record DemoFillResult(Guid BatchId, bool Created, DemoCounts Count
 public sealed class DemoService(MarketplaceDb db, TimeProvider time, ILogger<DemoService> log)
 {
     // One press at a time per account in this process. Demo data is a test-mode feature: a second instance racing the same account would at worst be caught by the unique keys below.
-    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> Locks = new();
+    /// <summary>One lock per account, from a fixed set (security review L4): the old dictionary of one semaphore per account ever seen only grew. Two accounts that share a slot just take turns.</summary>
+    private static readonly SemaphoreSlim[] Locks = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    private static SemaphoreSlim LockFor(Guid accountId) => Locks[(int)((uint)accountId.GetHashCode() % (uint)Locks.Length)];
 
     public async Task<DemoCounts> CountAsync(Guid accountId, CancellationToken ct) => new(
         await db.BuyerAddresses.CountAsync(a => a.AccountId == accountId && a.IsDemo, ct),
         await db.Carts.CountAsync(c => c.AccountId == accountId && c.IsDemo, ct),
-        await (from l in db.CartLines join c in db.Carts on l.CartId equals c.Id where c.AccountId == accountId && c.IsDemo select l.Id).CountAsync(ct),
+        await (from l in db.CartLines join c in db.Carts on l.CartId equals c.Id where c.AccountId == accountId && l.IsDemo select l.Id).CountAsync(ct),
         await db.Orders.CountAsync(o => o.AccountId == accountId && o.IsDemo, ct),
         await db.Bookings.CountAsync(b => b.AccountId == accountId && b.IsDemo, ct),
         await db.MessageThreads.CountAsync(t => t.AccountId == accountId && t.IsDemo, ct),
@@ -49,7 +51,7 @@ public sealed class DemoService(MarketplaceDb db, TimeProvider time, ILogger<Dem
 
     public async Task<DemoFillResult> FillAsync(Guid accountId, CancellationToken ct)
     {
-        var gate = Locks.GetOrAdd(accountId, _ => new SemaphoreSlim(1, 1));
+        var gate = LockFor(accountId);
         await gate.WaitAsync(ct);
         try
         {
@@ -84,7 +86,7 @@ public sealed class DemoService(MarketplaceDb db, TimeProvider time, ILogger<Dem
                     var cart = new Cart { Id = Guid.NewGuid(), AccountId = accountId, CreatedAt = now, UpdatedAt = now, IsDemo = true, DemoBatchId = batch };
                     db.Carts.Add(cart);
                     foreach (var (l, v) in products.Take(3))
-                        db.CartLines.Add(new CartLine { Id = Guid.NewGuid(), CartId = cart.Id, ListingId = l.Id, VariantId = v.Id, Quantity = 1, SeenUnitPriceCents = v.PriceCents, AddedAtMs = now.ToUnixTimeMilliseconds() });
+                        db.CartLines.Add(new CartLine { Id = Guid.NewGuid(), CartId = cart.Id, ListingId = l.Id, VariantId = v.Id, Quantity = 1, SeenUnitPriceCents = v.PriceCents, AddedAtMs = now.ToUnixTimeMilliseconds(), IsDemo = true });
                 }
             }
 
@@ -119,7 +121,7 @@ public sealed class DemoService(MarketplaceDb db, TimeProvider time, ILogger<Dem
     /// <summary>Deletes the demo rows of this account and nothing else: children first, then the marked parents, each scoped by account AND the marker.</summary>
     public async Task<DemoCounts> RemoveAsync(Guid accountId, CancellationToken ct)
     {
-        var gate = Locks.GetOrAdd(accountId, _ => new SemaphoreSlim(1, 1));
+        var gate = LockFor(accountId);
         await gate.WaitAsync(ct);
         try
         {
@@ -149,9 +151,12 @@ public sealed class DemoService(MarketplaceDb db, TimeProvider time, ILogger<Dem
         await db.OrderGroups.Where(g => orderIds.Contains(g.OrderId)).ExecuteDeleteAsync(ct);
         await db.Orders.Where(o => o.AccountId == accountId && o.IsDemo).ExecuteDeleteAsync(ct);
 
-        var cartIds = db.Carts.Where(c => c.AccountId == accountId && c.IsDemo).Select(c => c.Id);
-        await db.CartLines.Where(l => cartIds.Contains(l.CartId)).ExecuteDeleteAsync(ct);
-        await db.Carts.Where(c => c.AccountId == accountId && c.IsDemo).ExecuteDeleteAsync(ct);
+        // Only the MARKED lines go (security review M2): a real line the buyer added to the demo cart stays. A cart left with real lines is the buyer's own cart now (marker cleared);
+        // one left empty was the demo cart and goes.
+        var cartIds = db.Carts.Where(c => c.AccountId == accountId).Select(c => c.Id);
+        await db.CartLines.Where(l => l.IsDemo && cartIds.Contains(l.CartId)).ExecuteDeleteAsync(ct);
+        await db.Carts.Where(c => c.AccountId == accountId && c.IsDemo && !db.CartLines.Any(l => l.CartId == c.Id)).ExecuteDeleteAsync(ct);
+        await db.Carts.Where(c => c.AccountId == accountId && c.IsDemo).ExecuteUpdateAsync(s => s.SetProperty(c => c.IsDemo, false).SetProperty(c => c.DemoBatchId, (Guid?)null), ct);
 
         var threadIds = db.MessageThreads.Where(t => t.AccountId == accountId && t.IsDemo).Select(t => t.Id);
         await db.ThreadMessages.Where(m => threadIds.Contains(m.ThreadId)).ExecuteDeleteAsync(ct);

@@ -32,6 +32,8 @@ public sealed class CartLine
     public long SeenUnitPriceCents { get; set; }
     /// <summary>Unix milliseconds (our clock) the line was added: keeps the order stable.</summary>
     public long AddedAtMs { get; set; }
+    /// <summary>Created by "Fill with demo data" (M9, security review M2): "Remove demo data" deletes only marked lines, so a real line the buyer added to the same cart stays. Cleared never; a line is demo or it is not.</summary>
+    public bool IsDemo { get; set; }
 }
 
 internal sealed class CartConfiguration : IEntityTypeConfiguration<Cart>, IEntityTypeConfiguration<CartLine>
@@ -52,6 +54,7 @@ internal sealed class CartConfiguration : IEntityTypeConfiguration<Cart>, IEntit
         b.ToTable("cart_lines");
         b.HasKey(l => l.Id);
         b.Property(l => l.Id).ValueGeneratedNever();
+        b.Property(l => l.IsDemo).HasDefaultValue(false);              // the cart service's raw upserts do not name the column: the database default makes it false (M9-05)
         b.HasIndex(l => new { l.CartId, l.VariantId }).IsUnique();   // the same variant is one line; parallel adds merge
         b.HasOne<Cart>().WithMany().HasForeignKey(l => l.CartId).OnDelete(DeleteBehavior.Cascade);
     }

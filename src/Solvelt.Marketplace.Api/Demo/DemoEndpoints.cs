@@ -19,6 +19,7 @@ public static class DemoEndpoints
         g.MapPost("/fill", Fill).AddEndpointFilter<RequireBuyerFilter>();
         g.MapPost("/remove", Remove).AddEndpointFilter<RequireBuyerFilter>();
         g.MapPost("/verify", Verify).RequireRateLimiting(RateLimitPolicies.Auth);   // not signed in (an unverified account has no session): the credentials are the proof, and the sign-in budget applies
+        g.Map("/{**rest}", () => Results.NotFound());                              // last: any other path or method is a plain 404 (never a 405 that would say the feature exists while it is off)
         return app;
     }
 
@@ -34,14 +35,23 @@ public static class DemoEndpoints
         return Private(Results.Json(new { hasDemoData = counts.Total > 0, counts = Shape(counts) }), ctx);
     }
 
-    private static async Task<IResult> Fill(HttpContext ctx, DemoService demo, CancellationToken ct)
+    private static IResult? Throttled(HttpContext ctx, DemoActionLimiter limiter)
     {
+        if (limiter.TryAcquire(ctx.Buyer().AccountId) is not { } retry) return null;
+        ctx.Response.Headers.RetryAfter = retry.ToString();
+        return Private(Problems.Json(429, "too_many_attempts", "Too many requests. Please wait a moment and try again."), ctx);
+    }
+
+    private static async Task<IResult> Fill(HttpContext ctx, DemoService demo, DemoActionLimiter limiter, CancellationToken ct)
+    {
+        if (Throttled(ctx, limiter) is { } slow) return slow;
         var r = await demo.FillAsync(ctx.Buyer().AccountId, ct);
         return Private(Results.Json(new { batchId = r.BatchId, created = r.Created, counts = Shape(r.Counts), notes = r.Notes }, statusCode: r.Created ? 201 : 200), ctx);
     }
 
-    private static async Task<IResult> Remove(HttpContext ctx, DemoService demo, CancellationToken ct)
+    private static async Task<IResult> Remove(HttpContext ctx, DemoService demo, DemoActionLimiter limiter, CancellationToken ct)
     {
+        if (Throttled(ctx, limiter) is { } slow) return slow;
         var removed = await demo.RemoveAsync(ctx.Buyer().AccountId, ct);
         return Private(Results.Json(new { removed = Shape(removed) }), ctx);
     }

@@ -114,6 +114,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 var address = await db.BuyerAddresses.FirstOrDefaultAsync(a => a.Id == id && a.AccountId == accountId, ct);
                 if (address is null) return null;
                 Apply(address, body, Now);
+                if (address.IsDemo) { address.IsDemo = false; address.DemoBatchId = null; }   // the buyer's own words now: "Remove demo data" must not delete their edit (M9 security review M2)
                 if (body.IsDefault == true && !address.IsDefault)
                 {
                     await UnsetDefaultsAsync(accountId, id, ct);

@@ -295,9 +295,9 @@ public static class BookingEndpoints
         g.MapPost("/holds", Hold);
         g.MapBookingActions();
         g.MapGet("/{id:guid}/calendar.ics", BookingCalendar.Get);
-        g.MapPost("/{id:guid}/extra-charge/accept", ExtraAccept);
-        g.MapPost("/{id:guid}/extra-charge/decline", ExtraDecline);
-        g.MapPost("/{id:guid}/checkout", Checkout);
+        g.MapPost("/{id:guid}/extra-charge/accept", ExtraAccept).AddEndpointFilter<Demo.DemoBookingGuard>();   // a demo booking never reaches the portal or a payment provider (M9 review L2)
+        g.MapPost("/{id:guid}/extra-charge/decline", ExtraDecline).AddEndpointFilter<Demo.DemoBookingGuard>();   // a demo booking never reaches the portal or a payment provider (M9 review L2)
+        g.MapPost("/{id:guid}/checkout", Checkout).AddEndpointFilter<Demo.DemoBookingGuard>();   // a demo booking never reaches the portal or a payment provider (M9 review L2)
         g.MapGet("", async (HttpContext ctx, BookingService svc, CancellationToken ct) => Private(ctx, Results.Json(new { bookings = await svc.ListAsync(ctx.Buyer().AccountId, ct) })));
         g.MapGet("/{id:guid}", async (Guid id, HttpContext ctx, BookingService svc, CancellationToken ct)
             => await svc.GetAsync(ctx.Buyer().AccountId, id, ct) is { } v ? Private(ctx, Results.Json(v)) : Problems.NotFound());
