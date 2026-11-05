@@ -106,11 +106,15 @@ public static class AccountEndpoints
         => PasskeyOutcomeToResult(await passkeys.RenameAsync(ctx.Buyer().AccountId, id, body?.Name, ct));
 
     private static async Task<IResult> RemovePasskey(Guid id, HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
-        => PasskeyOutcomeToResult(await passkeys.RemoveAsync(ctx.Buyer(), id, ct));
+        => RotatedOrProblem(await passkeys.RemoveAsync(ctx.Buyer(), id, ct));
 
     /// <summary>Removes every passkey of the account (a recent sign-in; refused when the account has no password, so it is never left without a way in). The answer to "I do not recognise one of them".</summary>
     private static async Task<IResult> RemoveAllPasskeys(HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
-        => PasskeyOutcomeToResult(await passkeys.RemoveAllAsync(ctx.Buyer(), ct));
+        => RotatedOrProblem(await passkeys.RemoveAllAsync(ctx.Buyer(), ct));
+
+    /// <summary>A passkey removal ends every session and opens a new one (M1-87): <c>200 { token }</c>.</summary>
+    private static IResult RotatedOrProblem((PasskeyOutcome Outcome, string? Token) r)
+        => r.Outcome == PasskeyOutcome.Ok && r.Token is { } token ? Results.Json(new { token }) : PasskeyProblem(r.Outcome);
 
     private static IResult PasskeyOutcomeToResult(PasskeyOutcome outcome) => outcome == PasskeyOutcome.Ok ? Results.NoContent() : PasskeyProblem(outcome);
 
@@ -143,7 +147,7 @@ public static class AccountEndpoints
         }
     }
 
-    /// <summary><c>204</c>; <c>403 reauthentication_required</c> when the last sign-in is older than 10 minutes (the web asks for the password and calls <c>/auth/reauthenticate</c>, then retries); <c>401</c> for a wrong current password.</summary>
+    /// <summary><c>200 { token }</c>: every session ended, this one too, and the token is the new one (M1-87); <c>403 reauthentication_required</c> when the last sign-in is older than 10 minutes (the web asks for the password and calls <c>/auth/reauthenticate</c>, then retries); <c>401</c> for a wrong current password.</summary>
     private static async Task<IResult> ChangePassword(ChangePasswordBody? body, HttpContext ctx, AccountService a, ClientIpResolver ips, CancellationToken ct)
     {
         var errors = new Dictionary<string, string>();
@@ -151,7 +155,8 @@ public static class AccountEndpoints
         if (string.IsNullOrEmpty(body?.NewPassword)) errors["newPassword"] = "Enter a new password.";
         if (errors.Count > 0) return Problems.Validation(errors);
         if (body!.CurrentPassword!.Length > 128) return Problems.Json(401, "invalid_credentials", "The password is not correct.");
-        return Map(await a.ChangePasswordAsync(ctx.Buyer(), body.CurrentPassword, body.NewPassword!, ips.Resolve(ctx), ct, body.RemovePasskeys == true), ctx, "newPassword");
+        var result = await a.ChangePasswordAsync(ctx.Buyer(), body.CurrentPassword, body.NewPassword!, ips.Resolve(ctx), ct, body.RemovePasskeys == true);
+        return result is { Outcome: AccountOutcome.Ok, Token: { } token } ? Results.Json(new { token }) : Map(result, ctx, "newPassword");
     }
 
     /// <summary>Deletes the account (soft delete now, erasure by the redaction job). Needs a recent sign-in and the password.</summary>

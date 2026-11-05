@@ -498,9 +498,10 @@ public class PasskeyTests
         Assert.Equal("reauthentication_required", (await Problem(late)).GetProperty("code").GetString());
         Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));
         await k.Post("/api/v1/auth/reauthenticate", new { password = Pw }, token);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Delete, $"{AccountPasskeys}/{id}", null, token)).StatusCode);       // the password is still there, so this is not the last way in
+        var fresh = await AccountTests.FreshToken(await k.Send(Delete, $"{AccountPasskeys}/{id}", null, token));                  // the password is still there, so this is not the last way in; every session ends, a fresh token comes back (M1-87)
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await SignInWith(k, authn)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await k.Send(Delete, $"{AccountPasskeys}/{id}", null, token)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await k.Send(Delete, $"{AccountPasskeys}/{id}", null, fresh)).StatusCode);
     }
 
     [Fact]
@@ -511,8 +512,8 @@ public class PasskeyTests
         var (_, first) = await AddPasskey(k, token);
         var (_, second) = await AddPasskey(k, token);
         await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, (string?)null)); return 0; });   // an account with passkeys only
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Delete, $"{AccountPasskeys}/{first}", null, token)).StatusCode);
-        var r = await k.Send(Delete, $"{AccountPasskeys}/{second}", null, token);
+        var fresh = await AccountTests.FreshToken(await k.Send(Delete, $"{AccountPasskeys}/{first}", null, token));
+        var r = await k.Send(Delete, $"{AccountPasskeys}/{second}", null, fresh);
         Assert.Equal(HttpStatusCode.Conflict, r.StatusCode);
         Assert.Equal("last_sign_in_method", (await Problem(r)).GetProperty("code").GetString());
         Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));
@@ -524,18 +525,23 @@ public class PasskeyTests
         // The account-row lock is what keeps this true; SQLite's BEGIN IMMEDIATE serialises writers anyway, so the interleaving that needs the lock can only happen on PostgreSQL (CI's PG job): there the
         // race is run many times (a removal that counts without the lock lets both succeed in some round), on SQLite twice.
         using var k = new AuthKit(Open());
-        var token = await k.VerifiedSession(Email);
+        await k.VerifiedSession(Email);
+        var passwordHash = (await k.Account(Email)).PasswordHash;
         var rounds = k.F.Provider == "postgres" ? 25 : 2;
         for (var round = 0; round < rounds; round++)
         {
+            // a removal now ends every session (M1-87), so each round signs in again
+            var token = (await (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).Content.ReadFromJsonAsync<AuthKit.SignInResponse>())!.Token;
             await k.Db(async db => { await db.BuyerPasskeys.ExecuteDeleteAsync(); return 0; });
             var (_, first) = await AddPasskey(k, token);
             var (_, second) = await AddPasskey(k, token);
             await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, (string?)null)); return 0; });
             var results = await Task.WhenAll(new[] { first, second }.Select(id => k.Send(Delete, $"{AccountPasskeys}/{id}", null, token)));
-            Assert.Equal(new[] { HttpStatusCode.NoContent, HttpStatusCode.Conflict }, results.Select(r => r.StatusCode).Order().ToArray());
+            // exactly one removal succeeds; the other is refused as the last way in (409), or, when the first one's session rotation already ended the token it carried, as signed out (401)
+            Assert.Equal(1, results.Count(r => r.StatusCode == HttpStatusCode.OK));
+            Assert.Single(results, r => r.StatusCode is HttpStatusCode.Conflict or HttpStatusCode.Unauthorized);
             Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));
-            await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, "x")); return 0; });   // a password again, so the next round starts from two passkeys with no password only by the update above
+            await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, passwordHash)); return 0; });   // the real password again, so the next round can sign in
         }
     }
 
@@ -851,7 +857,9 @@ public class PasskeyTests
         await k.Post("/api/v1/auth/reauthenticate", new { password = Pw }, token);
         await k.Dispatch();
         var before = (await k.Mail(Email)).Count(m => m.Subject.Contains("removed"));
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Delete, AccountPasskeys, null, token)).StatusCode);
+        var fresh = await AccountTests.FreshToken(await k.Send(Delete, AccountPasskeys, null, token));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);       // the token that asked is dead (M1-87) ...
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);                 // ... the fresh one works
         Assert.Equal(0, await k.Db(db => db.BuyerPasskeys.CountAsync()));
         await k.Dispatch();
         Assert.Equal(before + 1, (await k.Mail(Email)).Count(m => m.Subject.Contains("removed")));
@@ -877,12 +885,12 @@ public class PasskeyTests
         using var k = new AuthKit(Open());
         var token = await k.VerifiedSession(Email);
         await AddPasskey(k, token);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = NewPw }, token)).StatusCode);
+        var next = await AccountTests.FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = NewPw }, token));
         Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));                           // kept by default
         await k.Dispatch();
         var mail = (await k.Mail(Email)).Last(m => m.Subject.Contains("password was changed"));
         Assert.Contains("Passkeys on your account were not changed", mail.TextBody);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/password", new { currentPassword = NewPw, newPassword = Pw, removePasskeys = true }, token)).StatusCode);
+        Assert.False(string.IsNullOrEmpty(await AccountTests.FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = NewPw, newPassword = Pw, removePasskeys = true }, next))));
         Assert.Equal(0, await k.Db(db => db.BuyerPasskeys.CountAsync()));                           // removed in the same step when asked
     }
 }
