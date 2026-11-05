@@ -36,7 +36,7 @@ public sealed class BookingExtraChargeTests : BookingFlowBase
         Assert.Equal(HttpStatusCode.NotFound, (await Accept(b.Id, _joe)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await Send(HttpMethod.Post, $"/api/v1/bookings/{b.Id}/extra-charge/accept", null)).StatusCode);
 
-        var all = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Accept(b.Id, body: new { amountCents = 1, amount = 1 })));
+        var all = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Accept(b.Id, body: new { expectedAmountCents = 3750, amountCents = 1, amount = 1 })));
         Assert.All(all, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
         var intent = ExtraIntent(b.MarketplaceBookingId);                   // exactly one, for the portal's amount, whatever the client sent
         Assert.Equal(3750, intent.AmountCents);
@@ -69,7 +69,7 @@ public sealed class BookingExtraChargeTests : BookingFlowBase
         Assert.Single(Stripe.Intents);
         await RequestExtra(b, 5000, minute: 8);
         Assert.Equal("requested", (await Row(b.Id)).ExtraChargeState);
-        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id, body: new { expectedAmountCents = 5000 })).StatusCode);
         Assert.Equal(5000, ExtraIntent(b.MarketplaceBookingId).AmountCents);
         Assert.Equal(HttpStatusCode.NotFound, (await Send(HttpMethod.Post, $"/api/v1/bookings/{b.Id}/extra-charge/decline", _joe)).StatusCode);
     }
@@ -79,7 +79,7 @@ public sealed class BookingExtraChargeTests : BookingFlowBase
     {
         var b = await Completed();
         await RequestExtra(b, 3750);
-        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id, body: new { expectedAmountCents = 3750 })).StatusCode);
         var intent = ExtraIntent(b.MarketplaceBookingId);
         await RequestExtra(b, 2000, minute: 8);                                   // the provider lowered the request after the buyer consented
         Stripe.Capture(intent.Id);
@@ -89,7 +89,7 @@ public sealed class BookingExtraChargeTests : BookingFlowBase
         Assert.DoesNotContain(_portal.PaymentEvents, e => e.Contains("booking_extra_charge"));
         Assert.NotEqual("paid", (await Row(b.Id)).ExtraChargeState);
         // the new, lower request is a fresh consent and a fresh intent
-        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id, body: new { expectedAmountCents = 2000 })).StatusCode);
         Assert.Equal(2, Stripe.Intents.Count(i => i.Metadata["kind"] == "booking_extra_charge"));
     }
 
@@ -131,5 +131,25 @@ public sealed class BookingExtraChargeTests : BookingFlowBase
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
         Assert.Equal(5200, (await Json(ok)).GetProperty("amountCents").GetInt64());
         Assert.Equal(5200, ExtraIntent(b.MarketplaceBookingId).AmountCents);
+    }
+
+    [Fact]
+    public async Task M4_29_Consent_without_the_amount_the_buyer_saw_is_refused_and_nothing_is_consented_or_charged()
+    {
+        var b = await Completed();
+        await RequestExtra(b, 3750);
+        foreach (var body in new object[] { new { }, new { expectedAmountCents = (long?)null }, new { amountCents = 3750 } })
+        {
+            var r = await Accept(b.Id, body: body);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, r.StatusCode);
+            Assert.True((await Json(r)).GetProperty("errors").TryGetProperty("expectedAmountCents", out _));
+        }
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Send(HttpMethod.Post, $"/api/v1/bookings/{b.Id}/extra-charge/accept", _jane)).StatusCode);   // no body at all
+        Assert.DoesNotContain(Stripe.Intents, i => i.Metadata["kind"] == "booking_extra_charge");
+        Assert.Equal("requested", (await Row(b.Id)).ExtraChargeState);
+        await RequestExtra(b, 5200, minute: 9);                                          // the raised amount is not consented by a client that names none
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Accept(b.Id)).StatusCode);
+        Assert.Equal("requested", (await Row(b.Id)).ExtraChargeState);
+        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id, body: new { expectedAmountCents = 5200 })).StatusCode);
     }
 }
