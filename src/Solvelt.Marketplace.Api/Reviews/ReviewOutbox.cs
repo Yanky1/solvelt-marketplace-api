@@ -69,6 +69,8 @@ public sealed class ReviewReportOutboxHandler(ISignedPortalClient portal) : IOut
             var res = await portal.ReportContentAsync(new ContentReportBody(p.ReportId, p.Kind, p.TargetId, p.Reason, p.Note, p.ReporterRef), ct);
             if (res.Status == 429) return OutboxResult.Retry("portal_429", TimeSpan.FromSeconds(60));
             if (res.Status == 409 && res.Error?.Code == "already_resolved") return OutboxResult.Delivered();
+            // C17: a reply that is unknown or already removed at the portal is 404 (the seller deleted it, or staff removed it, a moment ago): the thing reported is gone, so there is nothing left to moderate.
+            if (res.Status == 404 && p.Kind == "review_reply") return OutboxResult.Delivered();
             return PortalOutcome.From(res);
         }
         catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException) { return OutboxResult.Retry("portal_unavailable"); }

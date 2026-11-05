@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Solvelt.Marketplace.Api.Account;
 using Solvelt.Marketplace.Api.Data;
+using Solvelt.Marketplace.Api.Fulfilment;
+using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Reviews;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
 using static Solvelt.Marketplace.Api.Tests.Infrastructure.WebhookTestKit;
@@ -246,9 +248,9 @@ public sealed class ReviewsTests : IDisposable
     }
 
     // ---------------------------------------------------------------- seller reply
-    private async Task<string> Reply(string type, Guid reviewId, string replyId, string? text, string? at = null)
+    private async Task<string> Reply(string type, Guid reviewId, string replyId, string? text, string? at = null, string reason = "seller_deleted")
     {
-        var data = new Dictionary<string, object?> { ["reviewId"] = reviewId.ToString(), ["replyId"] = replyId, ["text"] = text, ["repliedAt"] = _k.F.Clock.GetUtcNow(), ["editedAt"] = at, ["removedAt"] = _k.F.Clock.GetUtcNow(), ["reason"] = "seller_deleted" };
+        var data = new Dictionary<string, object?> { ["reviewId"] = reviewId.ToString(), ["replyId"] = replyId, ["text"] = text, ["repliedAt"] = _k.F.Clock.GetUtcNow(), ["editedAt"] = at, ["removedAt"] = _k.F.Clock.GetUtcNow(), ["reason"] = reason };
         var (status, json) = await Post(_k.Http, Request(_k.F, Body($"rr-{++_n:D3}", type, _k.F.Clock.GetUtcNow().AddSeconds(_n), data)));
         Assert.Equal(HttpStatusCode.OK, status);
         return StatusOf(json);
@@ -391,5 +393,112 @@ public sealed class ReviewsTests : IDisposable
         a = await Login("p2a@example.com");
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Upload(a, late, Png(10, 10))).Status);
     }
-}
 
+    // ---------------------------------------------------------------- C17 as the portal really answers (portal docs/REVIEWS.md, merged in dccead1)
+    private async Task<OutboxMessage> TheOutbox(string type) => (await _k.Db(db => db.OutboxMessages.AsNoTracking().Where(m => m.Type == type).ToListAsync())).Single();
+    private void Script(int status, string body) { for (var i = 0; i < 10; i++) _k.F.Portal.Respond((HttpStatusCode)status, body); }   // a retry inside the client takes the next answer too
+
+    [Theory]
+    [InlineData(201, "{\"reviewId\":\"x\",\"id\":\"6f0c5d2e-0000-0000-0000-000000000001\",\"duplicate\":false,\"updated\":false,\"state\":\"visible\"}", "delivered", null)]
+    [InlineData(200, "{\"reviewId\":\"x\",\"id\":\"6f0c5d2e-0000-0000-0000-000000000001\",\"duplicate\":true,\"updated\":false,\"state\":\"visible\"}", "delivered", null)]
+    [InlineData(200, "{\"reviewId\":\"x\",\"duplicate\":false,\"updated\":true,\"state\":\"visible\"}", "delivered", null)]
+    [InlineData(422, "{\"code\":\"invalid_review\",\"message\":\"The review is not valid.\",\"errors\":{\"listingId\":\"not a product of that seller\"}}", "dead", "portal_422_invalid_review")]
+    [InlineData(429, "{\"code\":\"rate_limited\",\"message\":\"slow down\"}", "pending", "portal_429")]
+    [InlineData(503, "{}", "pending", "portal_503")]
+    [InlineData(401, "{\"code\":\"bad_signature\"}", "dead", "portal_401")]
+    public async Task The_review_send_follows_the_portals_real_answers(int status, string body, string expected, string? error)
+    {
+        var (a, ida) = await Buyer("c17a@example.com", "Jane Brown");
+        var line = await Delivered(ida);
+        while (await _k.Dispatch() > 0) { }
+        var id = await Reviewed(a, line, 4);
+        Script(status, body);
+        await _k.Dispatch();
+        var m = await TheOutbox(ReviewService.UpsertType);
+        Assert.Equal(expected, m.Status);
+        if (error is not null) Assert.Equal(error, m.LastError);
+        var sent = JsonDocument.Parse(_k.F.Portal.VerifiedCalls.First(c => c.PathAndQuery == "/api/internal/v1/reviews").BodyText).RootElement;   // a 503 is tried again inside the client, the body is the same each time
+        // exactly the contract's fields: of the buyer only the short display name crosses (no account id, e-mail, order or photos)
+        var allowed = new[] { "reviewId", "listingId", "sellerId", "rating", "text", "buyerDisplayName", "createdAt", "editedAt" };
+        var keys = sent.EnumerateObject().Select(x => x.Name).ToList();
+        Assert.Empty(keys.Except(allowed));
+        Assert.All(allowed.Where(k => k != "editedAt"), k => Assert.Contains(k, keys));
+        Assert.Equal((id.ToString(), "Jane B.", 4), (sent.GetProperty("reviewId").GetString(), sent.GetProperty("buyerDisplayName").GetString(), sent.GetProperty("rating").GetInt32()));
+        Assert.InRange(sent.GetProperty("reviewId").GetString()!.Length, 1, 50);
+        Assert.Equal(Listing(), sent.GetProperty("listingId").GetGuid());
+    }
+
+    [Theory]
+    [InlineData(200, "{\"reviewId\":\"x\",\"state\":\"hidden\",\"changed\":true}", "delivered", null)]
+    [InlineData(200, "{\"reviewId\":\"x\",\"state\":\"hidden\",\"changed\":false}", "delivered", null)]
+    [InlineData(404, "{\"code\":\"not_found\"}", "delivered", null)]
+    [InlineData(422, "{\"code\":\"invalid_state\",\"message\":\"bad state\"}", "dead", "portal_422_invalid_state")]
+    [InlineData(409, "{\"code\":\"review_removed\",\"message\":\"final\"}", "dead", "portal_409_review_removed")]
+    [InlineData(429, "{\"code\":\"rate_limited\"}", "pending", "portal_429")]
+    [InlineData(500, "{}", "pending", "portal_500")]
+    public async Task The_state_send_follows_the_portals_real_answers(int status, string body, string expected, string? error)
+    {
+        var id = Guid.NewGuid();
+        using (var scope = _k.F.Services.CreateScope())
+            await new OutboxWriter(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), _k.F.Clock).TryEnqueueAsync(ReviewService.StateType, new ReviewService.StatePayload(id, "hidden", "Under review"), $"review-state:{id:N}:hidden");
+        Script(status, body);
+        await _k.Dispatch();
+        var m = await TheOutbox(ReviewService.StateType);
+        Assert.Equal(expected, m.Status);
+        if (error is not null) Assert.Equal(error, m.LastError);
+        var call = _k.F.Portal.VerifiedCalls.First(c => c.PathAndQuery == $"/api/internal/v1/reviews/{id}/state");
+        var sent = JsonDocument.Parse(call.BodyText).RootElement;
+        Assert.Equal(("hidden", "Under review"), (sent.GetProperty("state").GetString(), sent.GetProperty("reason").GetString()));
+    }
+
+    [Theory]
+    [InlineData(200, "{\"reportId\":\"x\",\"status\":\"recorded\"}", "delivered")]
+    [InlineData(404, "{\"code\":\"not_found\",\"message\":\"No active reply with that id.\"}", "delivered")]   // the reply was removed a moment ago: nothing left to moderate
+    [InlineData(422, "{\"code\":\"invalid_target\",\"message\":\"targetId must be a reply id.\"}", "dead")]
+    public async Task A_report_of_a_reply_names_the_reply_id_and_a_reply_that_is_already_gone_is_not_dead_lettered(int status, string body, string expected)
+    {
+        var (a, ida) = await Buyer("c17b@example.com");
+        var (b, _) = await Buyer("c17c@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        while (await _k.Dispatch() > 0) { }
+        var replyId = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Reply("review.reply_posted", id, replyId, "Thank you!"));
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, $"/api/v1/reviews/{id}/reply/report", b, new { reason = "offensive" })).Status);
+        Script(status, body);
+        await _k.Dispatch();
+        Assert.Equal(expected, (await TheOutbox(ReviewService.ReportType)).Status);
+        var sent = JsonDocument.Parse(_k.F.Portal.VerifiedCalls.First(c => c.PathAndQuery == "/api/internal/v1/content/reports").BodyText).RootElement;
+        Assert.Equal(("review_reply", replyId), (sent.GetProperty("kind").GetString(), sent.GetProperty("targetId").GetString()));
+    }
+
+    [Theory]
+    [InlineData("seller_deleted")]
+    [InlineData("review_removed")]
+    [InlineData("staff_removed")]
+    public async Task Every_removal_reason_of_a_reply_takes_it_down(string reason)
+    {
+        var (a, ida) = await Buyer("c17d@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var replyId = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Reply("review.reply_posted", id, replyId, "Thank you!"));
+        Assert.Equal(replyId, (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).ReplyId);
+        Assert.Equal("applied", await Reply("review.reply_removed", id, replyId, null, reason: reason));
+        Assert.Null((await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).ReplyId);
+    }
+
+    [Fact]
+    public async Task A_reply_event_flagged_predecessorDead_is_applied_without_the_seller_order_alarm_or_a_reconcile()
+    {
+        var (a, ida) = await Buyer("c17e@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var data = new Dictionary<string, object?> { ["reviewId"] = id.ToString(), ["replyId"] = Guid.NewGuid().ToString(), ["text"] = "Thank you!", ["repliedAt"] = _k.F.Clock.GetUtcNow(), ["editedAt"] = null };
+        var body = Body("rd-dead", "review.reply_posted", _k.F.Clock.GetUtcNow().AddSeconds(1), data).Insert(1, "\"predecessorDead\":true,");
+        var (status, json) = await Post(_k.Http, Request(_k.F, body));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("applied", StatusOf(json));
+        Assert.Equal("Thank you!", (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).ReplyText);   // a reply event is a full snapshot: the later one says it all
+        var row = await _k.Db(db => db.PortalInboundEvents.AsNoTracking().SingleAsync(e => e.Id == "rd-dead"));
+        Assert.DoesNotContain("predecessor_dead", row.Note ?? "");
+        Assert.Empty(await _k.Db(db => db.OutboxMessages.AsNoTracking().Where(m => m.Type == OrderReconcileHandler.Type).ToListAsync()));
+    }
+}
