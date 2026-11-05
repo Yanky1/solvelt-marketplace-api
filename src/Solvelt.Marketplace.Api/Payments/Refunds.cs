@@ -306,8 +306,13 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
 
         var ours = all.Where(r => r.Reason != "external" && r.Status == RefundStatus.Succeeded).Sum(r => r.AmountCents);
         var known = all.Where(r => r.Reason == "external" && r.Status == RefundStatus.Succeeded).Sum(r => r.AmountCents);
-        var confirmed = read ?? ours + known;
-        var unknown = confirmed - ours - known;
+        // MONEY IN FLIGHT (review H1): a still-reserved refund of OURS that Stripe lists as pending (or requires_action) is already inside Stripe's amount_refunded, but it is in neither `ours` (not
+        // finished) nor `known` (not external). Only a refund WITHOUT one of our keys can be unknown, so these are taken out of `unknown` (else A's amount became an "external" row, the caps were
+        // consumed twice, and A was counted a third time when it finished) and out of `others` below (its reservation is already inside `confirmed`).
+        var reservedByKey = all.Where(r => r.Reason != "external" && r.Status == RefundStatus.Reserved).ToDictionary(r => r.Key);
+        var inFlight = listed.Where(l => l.RefundKey is not null && reservedByKey.ContainsKey(l.RefundKey) && l.Status is not ("failed" or "canceled")).GroupBy(l => l.RefundKey!).ToDictionary(g => g.Key, g => g.Sum(l => l.AmountCents));
+        var confirmed = read ?? ours + known + inFlight.Values.Sum();
+        var unknown = confirmed - ours - known - inFlight.Values.Sum();
         if (unknown > 0)
         {
             // money that left through Stripe's dashboard and we had not heard of: it is real, so it takes its place in the counters now (keyed by this refund and send, never by a cumulative figure that can come back)
@@ -315,7 +320,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
             await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents + unknown), ct);
             log?.LogError("Order {Number}: Stripe has refunded {Confirmed} cents, {Unknown} of them outside this system (dashboard); recorded as external money", order.Number, confirmed, unknown);
         }
-        var others = all.Where(r => r.Id != refund.Id && r.Reason != "external" && r.Status == RefundStatus.Reserved).Sum(r => r.AmountCents);
+        var others = all.Where(r => r.Id != refund.Id && r.Reason != "external" && r.Status == RefundStatus.Reserved && !inFlight.ContainsKey(r.Key)).Sum(r => r.AmountCents);   // a reservation already in flight at Stripe is inside `confirmed`
         var usable = Math.Max(0, order.PaidCents - confirmed - others);          // what can still go back to the card, after the refunds already queued ahead of this one
         if (refund.AmountCents > usable && usable > 0)
         {

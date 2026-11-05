@@ -1155,4 +1155,31 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal("duplicate", JsonDocument.Parse(again).RootElement.GetProperty("status").GetString());
         Assert.Single(await _k.Db(db => db.OrderRefunds.Where(r => r.Key == "portal:rf-dead").ToListAsync()));
     }
+
+    // ---- review of 1725a68..c859113 (H1 and following; decision M3-40) ----
+
+    [Fact]
+    public async Task H1_a_pending_refund_of_ours_is_money_in_flight_and_never_becomes_an_external_row_when_another_refund_is_refused()
+    {
+        var (o, g, line) = await Three();                                                    // paid 14262
+        Stripe.TimeoutAfterExecuteNext = true;                                               // A reaches Stripe, the answer is lost
+        Assert.Equal("applied", await RefundLines(o, g, "rf-A", line, 1, 4587));
+        await Drain();
+        Stripe.SetListedStatus("portal:rf-A", "pending");                                    // Stripe lists A as pending: inside amount_refunded, not yet succeeded
+        Stripe.RejectRefundWith = "charge_disputed";                                         // B is refused for an unrelated reason
+        Assert.Equal("applied", await RefundLines(o, g, "rf-B", line, 1, 4587));
+        await Drain();
+        Assert.Equal("rejected", (await Refund("portal:rf-B")).Status);
+        Assert.Equal(0, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external")));   // A's 4587 is NOT an unknown dashboard refund
+        var mid = await Order(o.Number);
+        Assert.Equal((4587L, 4587L, 1), (mid.RefundedCents, mid.Groups.Single().RefundedCents, mid.Lines.Single().RefundedQuantity));   // A once, B given back
+        // A finishes later (Stripe now says succeeded): still counted exactly once
+        Stripe.SetListedStatus("portal:rf-A", "succeeded");
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(5));
+        await Drain();
+        Assert.Equal("succeeded", (await Refund("portal:rf-A")).Status);
+        var done = await Order(o.Number);
+        Assert.Equal((4587L, 1), (done.RefundedCents, done.Lines.Single().RefundedQuantity));
+        Assert.Equal(0, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external")));
+    }
 }
