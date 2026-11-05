@@ -190,3 +190,21 @@ export async function newBuyer(tag = "buyer") {
   const s = await must(api("POST", "/api/v1/auth/sign-in", { body: { email, password: BUYER_PASSWORD } }), 200, "buyer sign-in");
   return { email, token: s.body.token };
 }
+
+// ---- a buyer's checkout through the API (the browser journeys cover the pages; this is the same API contract without the clicking) ---------------------------------------------------
+export const ADDRESS = { name: "Dana Buyer", line1: "1 Main St", city: "Brooklyn", region: "NY", postalCode: "11201", country: "US" };
+
+/** Adds the listing's first variant to the buyer's cart, quotes, checks out and "pays" with Stripe's signed webhook. Returns { number, totalCents, intentId }. */
+export async function apiCheckoutAndPay(buyer, listingSlug, quantity = 1) {
+  const detail = (await must(api("GET", `/api/v1/catalog/listings/${listingSlug}`), 200, "listing detail")).body;
+  const variantId = detail.variants[0].id ?? detail.variants[0].variantId;
+  await must(api("POST", "/api/v1/cart/lines", { token: buyer.token, body: { variantId, quantity } }), 200, "add to cart");
+  const quote = (await must(api("POST", "/api/v1/checkout/quote", { token: buyer.token, body: { address: { country: "US", region: "NY", postalCode: "11201" } } }), 200, "quote")).body;
+  check(quote.canPay, "the quote says the cart can be paid");
+  const placed = (await must(api("POST", "/api/v1/checkout", { token: buyer.token, body: { address: ADDRESS, quoteHash: quote.quoteHash ?? quote.quote?.quoteHash } }), 200, "checkout")).body;
+  const intentId = placed.payment.clientSecret.split("_secret_")[0];
+  const total = (await must(api("GET", `/api/v1/checkout/orders/${placed.orderNumber}`, { token: buyer.token }), 200, "read the order")).body.totalCents;
+  const r = await stripeEvent("payment_intent.succeeded", { id: intentId, amount: total, amount_received: total, currency: "usd", metadata: { marketplace_order_id: placed.orderNumber } });
+  check(r.status === 200, `the Stripe webhook answered ${r.status}`);
+  return { number: placed.orderNumber, totalCents: total, intentId };
+}
