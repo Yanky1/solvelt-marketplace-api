@@ -29,6 +29,7 @@ public sealed class AllowAllAttachmentScanner : IAttachmentScanner
 public sealed class AttachmentFetchOutboxHandler(MarketplaceDb db, ISignedPortalClient portal, IAttachmentScanner scanner) : IOutboxHandler
 {
     public const string Type = "portal.attachment-fetch";
+    private static readonly SemaphoreSlim Gate = new(1, 1);
     public IReadOnlyCollection<string> Types { get; } = [Type];
 
     public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
@@ -47,7 +48,11 @@ public sealed class AttachmentFetchOutboxHandler(MarketplaceDb db, ISignedPortal
         catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException) { return OutboxResult.Retry("portal_unavailable"); }
         if (!res.IsSuccess)
             return res.Retryable ? OutboxResult.Retry($"portal_{res.Status}") : res.Status == 404 ? await Reject(a, "gone", ct) : OutboxResult.Dead($"portal_{res.Status}");
-        var r = AttachmentSanitizer.Process(res.Body!);
+        // one picture at a time: decoding is the memory-hungry step, and a drain may hold several files (review P2)
+        AttachmentSanitizer.Result r;
+        await Gate.WaitAsync(ct);
+        try { r = AttachmentSanitizer.Process(res.Body!); }
+        finally { Gate.Release(); }
         if (r.Rejected is not null) return await Reject(a, r.Rejected, ct);
         // the seam for a virus scanner (decision M5-22): nothing is Stored before it has said yes
         if (!await scanner.AllowsAsync(r.Bytes!, r.ContentType!, ct)) return await Reject(a, "scanner_refused", ct);

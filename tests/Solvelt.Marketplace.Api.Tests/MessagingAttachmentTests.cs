@@ -505,6 +505,21 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         => Assert.True(AttachmentSanitizer.SelfTest());
 
     [Fact]
+    public void P2_A_picture_over_the_decode_budget_is_decoded_at_a_reduced_size_or_refused_when_its_format_cannot_be_reduced()
+    {
+        // budget 2000 pixels: a 64 x 64 JPEG (4096 px) is decoded at 1/2 (32 x 32 = 1024 px), a 64 x 64 PNG cannot be reduced and is refused
+        var jpg = AttachmentSanitizer.Process(Jpeg(false, 64, 64), 2000);
+        Assert.Equal("image/jpeg", jpg.ContentType);
+        using (var bmp = SKBitmap.Decode(jpg.Bytes!)) Assert.Equal((32, 32), (bmp.Width, bmp.Height));
+        Assert.Equal("image_too_large", AttachmentSanitizer.Process(Png(false, 64, 64), 2000).Rejected);
+        // within the budget nothing is reduced
+        using (var same = SKBitmap.Decode(AttachmentSanitizer.Process(Jpeg(false, 64, 64), 5000).Bytes!)) Assert.Equal((64, 64), (same.Width, same.Height));
+        // a JPEG too big even at 1/8 is refused
+        Assert.Equal("image_too_large", AttachmentSanitizer.Process(Jpeg(false, 64, 64), 10).Rejected);
+        Assert.True(AttachmentSanitizer.DecodeBudgetPixels <= 16_000_000);                                  // about 64 MB decoded at once, never 160 MB
+    }
+
+    [Fact]
     public void G2_A_huge_picture_is_refused_from_its_header_and_a_big_one_is_scaled_down()
     {
         // a PNG that says it is 20000 x 20000 (400 MP): refused before any pixel is decoded
