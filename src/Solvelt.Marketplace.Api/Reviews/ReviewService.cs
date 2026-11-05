@@ -202,7 +202,7 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
         if (r is null) return ReviewOutcome.NotFound;
         if (r.AccountId == accountId) return ReviewOutcome.OwnReview;
         var now = time.GetUtcNow().ToUniversalTime();
-        var report = new ReviewReport { Id = Guid.NewGuid(), ReviewId = reviewId, AccountId = accountId, Kind = reply ? "review_reply" : "review", ReportId = $"RV-{reviewId:N}-{Guid.NewGuid():N}"[..60], Reason = reason, Note = note, CreatedAt = now };
+        var report = new ReviewReport { Id = Guid.NewGuid(), ReviewId = reviewId, AccountId = accountId, Kind = reply ? "review_reply" : "review", TargetId = reply ? r.ReplyId : reviewId.ToString(), ReportId = $"RV-{reviewId:N}-{Guid.NewGuid():N}"[..60], Reason = reason, Note = note, CreatedAt = now };
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         db.ReviewReports.Add(report);
         try { await db.SaveChangesAsync(ct); }

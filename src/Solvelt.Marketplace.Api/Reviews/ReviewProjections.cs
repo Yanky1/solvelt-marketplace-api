@@ -27,8 +27,7 @@ public static class ReviewModeration
         if (report is null) return HandlerOutcome.Skipped("not a report we made");
         var review = await c.Db.Reviews.FirstOrDefaultAsync(x => x.Id == report.ReviewId, ct);
         if (review is null) return HandlerOutcome.Skipped("unknown reported review");
-        var ours = kind == "review" ? target == review.Id.ToString() : review.ReplyId == target;
-        if (!ours) return HandlerOutcome.Skipped("target does not match the report");
+        if (report.TargetId is null || !string.Equals(report.TargetId, target, StringComparison.Ordinal)) return HandlerOutcome.Skipped("target does not match the report");   // the target WE reported, whether or not the reply is still there
         if (!await c.AdvanceAsync("review-report", reportId, "decision", ct: ct)) return HandlerOutcome.Skipped("older than the applied decision");
         var now = c.Time.GetUtcNow().ToUniversalTime();
         report.Decision = decision; report.DecidedAt = now;
@@ -37,7 +36,8 @@ public static class ReviewModeration
 
         if (kind == "review_reply")
         {
-            if (decision is "hidden" or "removed") { review.ReplyText = null; review.ReplyId = null; review.ReplyAt = null; await c.Db.SaveChangesAsync(ct); }
+            // only the reply that was reported goes: a newer reply of the seller (another id) is not what staff decided on
+            if (decision is "hidden" or "removed" && review.ReplyId == target) { review.ReplyText = null; review.ReplyId = null; review.ReplyAt = null; await c.Db.SaveChangesAsync(ct); }
             return HandlerOutcome.Applied();
         }
 
