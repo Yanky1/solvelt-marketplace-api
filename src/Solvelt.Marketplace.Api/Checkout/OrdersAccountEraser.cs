@@ -18,7 +18,7 @@ public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser, IAcc
     /// <summary>Runs inside the delete transaction, while the address is still known (M1 frees it at once): a guest order placed with it loses it. Guest orders are matched by the lower-cased address they stored.</summary>
     public async Task OnDeletingAsync(Guid accountId, string email, CancellationToken ct)
     {
-        var lower = email.Trim().ToLowerInvariant();
+        var lower = Auth.AuthValidation.NormaliseEmail(email);
         await db.Orders.Where(o => o.AccountId == null && o.GuestEmail == lower).ExecuteUpdateAsync(s => s.SetProperty(o => o.GuestEmail, (string?)null), ct);
     }
 
