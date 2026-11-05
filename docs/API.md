@@ -424,7 +424,7 @@ Orders, payments and queues (M7-10..14):
 | `POST /orders/{id}/refunds/{refundId}/retry {reason}` | `refunds.retry` | Reserved refund with a dead message; `409 not_retryable` / `already_queued` |
 | `GET /ingests`, `POST /ingests/{orderId}/retry {reason}` | `ingests.view` / `ingests.retry` | Paid orders the portal has not taken |
 | `GET /outbox?status&type&limit&before`, `POST /outbox/{id}/retry {reason}` | `outbox.view` / `outbox.retry` | No payload ever |
-| `GET /dead-letters`, `POST /dead-letters/retry {eventId, reason}` | `deadletters.view` / `deadletters.retry` | Parked inbound events |
+| `GET /dead-letters`, `POST /dead-letters/retry {eventId, reason}` | `deadletters.view` / `deadletters.retry` | Parked inbound events, plus `bookingConfirms`: dead `portal.booking-confirm` messages with booking, payment, amount and the operator steps (M7-16); replay them with `POST /outbox/{id}/retry` |
 | `GET /stripe/failures?before&limit` | `stripe.view` | Unmatched and failed Stripe events (ids and types only) |
 
 ## Reviews and ratings (M6)
