@@ -47,7 +47,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         for (var e = ex; e is not null; e = e.InnerException!)
         {
             if (e is Npgsql.PostgresException { SqlState: "23505" }) return true;
-            if (e is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 19 }) return true;
+            if (e is Microsoft.Data.Sqlite.SqliteException { SqliteExtendedErrorCode: 2067 or 1555 }) return true;   // SQLITE_CONSTRAINT_UNIQUE or _PRIMARYKEY: code 19 alone covers every constraint (not null, check, foreign key), which must not be retried
             if (e.InnerException is null) break;
         }
         return false;

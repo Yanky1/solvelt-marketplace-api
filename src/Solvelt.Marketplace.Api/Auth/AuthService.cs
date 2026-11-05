@@ -16,7 +16,7 @@ public sealed record SignInResult(SignInStatus Status, string? Token = null, Buy
 /// difference is only in what we email. Unknown and known accounts share rate limits and the same time cost.
 /// </summary>
 public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<AuthOptions> authOptions, IOptions<MarketplaceOptions> marketplace,
-    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links, SignInGate gate, GateKeys gateKeys, GuestClaims guestClaims)
+    OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links, SignInGate gate, GateKeys gateKeys, GuestClaims guestClaims, Demo.DemoService demo)
 {
     private AuthOptions O => authOptions.Value;
     private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
@@ -204,15 +204,15 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
     /// Makes a session. A caller that has just checked a credential against an account row passes that row's epoch: reading it again here would let a reset that
     /// landed in between give a session made with the OLD password the NEW epoch (E1).
     /// </summary>
-    public async Task<string> CreateSessionAsync(Guid accountId, CancellationToken ct, long? knownEpoch = null)
+    public async Task<string> CreateSessionAsync(Guid accountId, CancellationToken ct, long? knownEpoch = null, DateTimeOffset? authenticatedAt = null, DateTimeOffset? absoluteExpiresAt = null)
     {
         var now = Now;
         var token = Tokens.New();
-        var absolute = now.AddDays(Math.Max(1, O.SessionAbsoluteDays));
+        var absolute = absoluteExpiresAt ?? now.AddDays(Math.Max(1, O.SessionAbsoluteDays));
         var epoch = knownEpoch ?? await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId).Select(a => a.SessionEpoch).FirstOrDefaultAsync(ct);
         db.BuyerSessions.Add(new BuyerSession
         {
-            Id = Guid.NewGuid(), AccountId = accountId, TokenHash = Tokens.Hash(token), CreatedAt = now, LastSeenAt = now, AuthenticatedAt = now, Epoch = epoch,
+            Id = Guid.NewGuid(), AccountId = accountId, TokenHash = Tokens.Hash(token), CreatedAt = now, LastSeenAt = now, AuthenticatedAt = authenticatedAt ?? now, Epoch = epoch,
             ExpiresAt = Min(now.AddDays(Math.Max(1, O.SessionIdleDays)), absolute), AbsoluteExpiresAt = absolute,
         });
         await db.SaveChangesAsync(ct);
@@ -224,12 +224,20 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
     /// For the actions a buyer takes because they fear someone else holds a session: changing the password, removing a passkey. The caller holds the account row lock and runs this in its transaction,
     /// so the epoch read here is the one this call wrote.
     /// </summary>
-    public async Task<string> RotateSessionsAsync(Guid accountId, CancellationToken ct)
+    public async Task<string> RotateSessionsAsync(Guid accountId, CancellationToken ct, BuyerPrincipal? carryClocksOf = null)
     {
         var now = Now;
+        // A passkey removal must not buy the caller anything (decision M1-89): the fresh session keeps the caller's own step-up time (AuthenticatedAt) and absolute expiry, read BEFORE the rows are revoked,
+        // so a removal does not restart the 10-minute recency clock or push the session 30 days further. Only a password change (the caller just proved the password) starts both afresh.
+        DateTimeOffset? authenticatedAt = null, absolute = null;
+        if (carryClocksOf is not null)
+        {
+            authenticatedAt = carryClocksOf.AuthenticatedAt;
+            absolute = await db.BuyerSessions.AsNoTracking().Where(s => s.Id == carryClocksOf.SessionId).Select(s => (DateTimeOffset?)s.AbsoluteExpiresAt).FirstOrDefaultAsync(ct);
+        }
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.SessionEpoch, x => x.SessionEpoch + 1), ct);
         await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
-        return await CreateSessionAsync(accountId, ct);
+        return await CreateSessionAsync(accountId, ct, authenticatedAt: authenticatedAt, absoluteExpiresAt: absolute);
     }
 
     /// <summary>The signed-in buyer for a bearer token, or null. Slides the idle expiry (at most every 5 minutes, to spare the database).</summary>
@@ -302,6 +310,8 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         // The mailbox is proven by the link, so the address counts as verified too, and the sign-in gate forgets the address (a person who can read the mailbox is not an attacker).
         // An account that was only "demo verified" (M9-07) was never proven to be its address's owner: what whoever registered it typed (name, phone, saved addresses) is not kept either
         // when the real owner takes it over by a reset. Read before the update clears the marker.
+        // The row lock first (a no-op UPDATE), then the read: a verification landing between the read and the update below could otherwise be missed (review LOW-2).
+        await db.BuyerAccounts.Where(a => a.Id == accountId).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct);
         var wasDemoVerified = await db.BuyerAccounts.AnyAsync(a => a.Id == accountId && a.DemoVerifiedAt != null, ct);
         var changed = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s
             .SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, a => a.SessionEpoch + 1)
@@ -313,7 +323,13 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         // a reset is account recovery: whatever got in (a stolen session that added a passkey) must not survive it, so every passkey goes and the owner adds theirs again (M1-80)
         await db.BuyerPasskeys.Where(p => p.AccountId == accountId).ExecuteDeleteAsync(ct);
-        if (wasDemoVerified) await db.BuyerAddresses.Where(a => a.AccountId == accountId).ExecuteDeleteAsync(ct);
+        if (wasDemoVerified)
+        {
+            await db.BuyerAddresses.Where(a => a.AccountId == accountId).ExecuteDeleteAsync(ct);
+            // and what the squatter made while in demo mode (decision M1-89): the MARKED demo rows (orders, threads and their messages, bookings, notifications, demo cart lines and addresses), through the demo
+            // module's own delete. Real, unmarked rows (an order is a financial record kept for 7 years) stay.
+            await demo.RemoveRowsAsync(accountId.Value, ct);
+        }
         await gate.ClearAddressAsync(gateKeys.Address(peek.Email!), ct);
         await tx.CommitAsync(ct);
         await guestClaims.ClaimAsync(peek.Id, peek.Email!, ct);   // a reset proves the mailbox too
