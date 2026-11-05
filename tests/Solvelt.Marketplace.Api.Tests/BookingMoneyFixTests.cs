@@ -118,7 +118,7 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
     }
 
     private Task Request(Booking b, long amount, int minute) => PortalEvent("booking.additional_charge_requested", Now.AddMinutes(minute), b, new { amountCents = amount, extraMinutes = 30, currency = "USD" });
-    private Task<HttpResponseMessage> Accept(Guid id) => Send(HttpMethod.Post, $"/api/v1/bookings/{id}/extra-charge/accept", _jane, new { });
+    private Task<HttpResponseMessage> Accept(Guid id, long seen) => Send(HttpMethod.Post, $"/api/v1/bookings/{id}/extra-charge/accept", _jane, new { expectedAmountCents = seen });
     private List<FakePaymentProvider.Intent> Extras(string mid) => Stripe.Intents.Where(i => i.Metadata["marketplace_booking_id"] == mid && i.Metadata["kind"] == "booking_extra_charge").OrderBy(i => i.AmountCents).ToList();
 
     private Task PayExtra(FakePaymentProvider.Intent i, string mid)
@@ -132,10 +132,10 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
     {
         var b = await Completed();
         await Request(b, 3000, 3);
-        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id)).StatusCode);          // intent A for 30.00
+        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id, 3000)).StatusCode);          // intent A for 30.00
         await Request(b, 4000, 9);                                                 // the provider changes the request: a new consent is needed
         Assert.Equal("requested", (await Row(b.Id)).ExtraChargeState);
-        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id)).StatusCode);          // intent B for 40.00
+        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id, 4000)).StatusCode);          // intent B for 40.00
         var (a, bb) = (Extras(b.MarketplaceBookingId)[0], Extras(b.MarketplaceBookingId)[1]);
         Assert.Equal((3000, 4000), (a.AmountCents, bb.AmountCents));
         await PayExtra(a, b.MarketplaceBookingId);                                 // the old page is still open and gets paid
@@ -153,7 +153,7 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
     {
         var b = await Completed();
         await Request(b, 3000, 3);
-        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Accept(b.Id, 3000)).StatusCode);
         Assert.Equal(HttpStatusCode.NoContent, (await Send(HttpMethod.Post, $"/api/v1/bookings/{b.Id}/extra-charge/decline", _jane)).StatusCode);
         var intent = Extras(b.MarketplaceBookingId).Single();
         await PayExtra(intent, b.MarketplaceBookingId);                            // paid from a page that was open before the decline
@@ -168,11 +168,11 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
     {
         var b = await Completed();
         await Request(b, 3000, 3);
-        await Accept(b.Id);
+        await Accept(b.Id, 3000);
         await Request(b, 4000, 9);
         await Drain();
         Assert.True(Extras(b.MarketplaceBookingId).Single().Cancelled);            // intent A is no longer payable
-        await Accept(b.Id);
+        await Accept(b.Id, 4000);
         await Send(HttpMethod.Post, $"/api/v1/bookings/{b.Id}/extra-charge/decline", _jane);
         await Drain();
         Assert.All(Extras(b.MarketplaceBookingId), i => Assert.True(i.Cancelled));
@@ -225,9 +225,9 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
     {
         var b = await Completed();
         await Request(b, 3000, 3);
-        var first = await Accept(b.Id);
+        var first = await Accept(b.Id, 3000);
         Stripe.ForgetIdempotencyKeys();
-        var again = await Accept(b.Id);
+        var again = await Accept(b.Id, 3000);
         Assert.Equal(HttpStatusCode.OK, again.StatusCode);
         Assert.Equal((await Json(first)).GetProperty("payment").GetProperty("clientSecret").GetString(), (await Json(again)).GetProperty("payment").GetProperty("clientSecret").GetString());
         Assert.Single(Extras(b.MarketplaceBookingId));
@@ -235,7 +235,7 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         await Send(HttpMethod.Post, $"/api/v1/bookings/{b.Id}/extra-charge/decline", _jane);
         await Drain();
         await Request(b, 3000, 9);
-        var third = await Accept(b.Id);
+        var third = await Accept(b.Id, 3000);
         Assert.Equal(HttpStatusCode.OK, third.StatusCode);
         var intents = Extras(b.MarketplaceBookingId);
         Assert.Equal(2, intents.Count);
