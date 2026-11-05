@@ -64,6 +64,19 @@ public sealed class QuestionsTests : IDisposable
     }
 
     [Fact]
+    public async Task The_question_throttle_holds_under_parallel_requests_of_one_buyer()
+    {
+        var t = await _k.VerifiedSession("q3p@example.com");
+        for (var round = 0; round < 2; round++)
+        {
+            var answers = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Ask(t, new { listingId = Listing(), text = $"Parallel question {round}-{i}" })));
+            Assert.Equal(round == 0 ? QuestionEndpoints.PerListingPerDay : 0, answers.Count(a => a.Status == HttpStatusCode.Accepted));   // the first wave fills the three places, the second finds none
+            Assert.All(answers.Where(a => a.Status != HttpStatusCode.Accepted), a => Assert.Equal(HttpStatusCode.TooManyRequests, a.Status));
+        }
+        Assert.Equal(QuestionEndpoints.PerListingPerDay, await _k.Db(db => db.ProductQuestions.CountAsync()));
+    }
+
+    [Fact]
     public async Task An_unknown_or_demo_listing_is_404_and_a_buyer_is_throttled_per_listing_and_per_day()
     {
         var t = await _k.VerifiedSession("q3@example.com");
