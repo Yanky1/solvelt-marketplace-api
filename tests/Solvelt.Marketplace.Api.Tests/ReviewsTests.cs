@@ -639,4 +639,61 @@ public sealed class ReviewsTests : IDisposable
         Assert.Equal("applied", await Decided("review_reply", reportId, rid, "hidden"));
         Assert.Equal("A better answer", await ReplyNow());
     }
+
+    /// <summary>The figures of every listing, seller and brand are exactly what the published reviews add up to (a lost or doubled update, or a hidden review left in, shows here).</summary>
+    private async Task AssertFiguresAreWhatThePublishedReviewsAddUp()
+    {
+        var published = await _k.Db(db => db.Reviews.AsNoTracking().Where(r => r.Status == ReviewStatus.Published).ToListAsync());
+        var rows = await _k.Db(db => db.RatingAggregates.AsNoTracking().ToListAsync());
+        var expected = published.SelectMany(r => new[] { ("listing", r.ListingId, r.Rating), ("seller", r.SellerId, r.Rating), ("brand", r.BrandId, r.Rating) })
+            .GroupBy(x => (x.Item1, x.Item2)).ToDictionary(g => g.Key, g => (Count: g.Count(), Sum: g.Sum(x => (long)x.Item3), Stars: Enumerable.Range(1, 5).Select(n => g.Count(x => x.Item3 == n)).ToArray()));
+        foreach (var a in rows)
+        {
+            var e = expected.GetValueOrDefault((a.Scope, a.ScopeId), (Count: 0, Sum: 0L, Stars: new int[5]));
+            Assert.Equal((e.Count, e.Sum), (a.Count, a.Sum));
+            Assert.Equal(e.Stars, new[] { a.Stars1, a.Stars2, a.Stars3, a.Stars4, a.Stars5 });
+        }
+        Assert.All(expected.Keys, k => Assert.Contains(rows, a => (a.Scope, a.ScopeId) == k));
+    }
+
+    [Fact]
+    public async Task Parallel_edits_of_the_same_review_leave_the_figures_equal_to_the_rating_that_won()
+    {
+        var (a, ida) = await Buyer("m1a@example.com");
+        var (c, idc) = await Buyer("m1c@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 3);
+        await Reviewed(c, await Delivered(idc), 4);
+        for (var round = 0; round < 3; round++)
+        {
+            var edits = await Task.WhenAll(new[] { 5, 1, 2, 4, 1, 5, 2, 4 }.Select((r, i) => Call(HttpMethod.Patch, $"/api/v1/reviews/{id}", a, new { rating = r, text = $"Edit {round}-{i} of the same review." })));
+            Assert.All(edits, e => Assert.Equal(HttpStatusCode.OK, e.Status));
+            await AssertFiguresAreWhatThePublishedReviewsAddUp();
+        }
+        Assert.Equal(2, (await Agg("listing", Listing()))!.Count);
+    }
+
+    [Fact]
+    public async Task An_edit_racing_a_moderation_decision_never_puts_a_hidden_review_back_into_the_figures_or_loses_its_rating()
+    {
+        var (reporter, _) = await Buyer("m1r@example.com");
+        var authors = new List<(string Token, Guid Review)>();
+        for (var i = 0; i < 5; i++)
+        {
+            var (t, acc) = await Buyer($"m1x{i}@example.com");
+            authors.Add((t, await Reviewed(t, await Delivered(acc), 3)));
+        }
+        foreach (var (_, rv) in authors) Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, $"/api/v1/reviews/{rv}/report", reporter, new { reason = "spam" })).Status);
+        while (await _k.Dispatch() > 0) { }
+        var reportIds = _k.F.Portal.VerifiedCalls.Where(x => x.PathAndQuery == "/api/internal/v1/content/reports").Select(x => JsonDocument.Parse(x.BodyText).RootElement.Clone())
+            .ToDictionary(j => j.GetProperty("targetId").GetString()!, j => j.GetProperty("reportId").GetString()!);
+        var work = authors.SelectMany((x, i) => new Func<Task>[]
+        {
+            async () => await Call(HttpMethod.Patch, $"/api/v1/reviews/{x.Review}", x.Token, new { rating = 5, text = "Edited while it is being decided." }),   // may be refused (Locked) when the decision came first
+            async () => Assert.Equal("applied", await Decided("review", reportIds[x.Review.ToString()], x.Review.ToString(), "hidden")),
+        }).Select(f => f());
+        await Task.WhenAll(work);
+        await AssertFiguresAreWhatThePublishedReviewsAddUp();
+        Assert.All(await _k.Db(db => db.Reviews.AsNoTracking().ToListAsync()), r => Assert.Equal(ReviewStatus.Hidden, r.Status));
+        Assert.Equal(0, (await Agg("listing", Listing()))!.Count);
+    }
 }
