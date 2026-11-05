@@ -230,7 +230,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         try
         {
             result = await payments.RefundAsync(order.PaymentIntentId, refund.AmountCents, "refund:" + refund.Key + (p.Attempt > 0 ? ":" + p.Attempt : ""),
-                new Dictionary<string, string> { ["marketplace_order_id"] = order.Number, ["refund_key"] = refund.Key }, ct);
+                new Dictionary<string, string> { ["marketplace_order_id"] = order.Number, ["refund_key"] = refund.Key, ["refund_attempt"] = p.Attempt.ToString(System.Globalization.CultureInfo.InvariantCulture) }, ct);
         }
         catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
         catch (PaymentRejectedException ex) { return await RefusedAsync(refund, order, p, ex.Code, ct); }
