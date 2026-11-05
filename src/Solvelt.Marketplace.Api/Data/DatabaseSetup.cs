@@ -31,9 +31,27 @@ public static class DatabaseSetup
         }
         else if (migrateOnStart && db.Database.IsNpgsql())
         {
+            RefuseUnknownHistory(db, log);
             BaselineIfNeeded(db, log);
             db.Database.Migrate();
         }
+    }
+
+    /// <summary>
+    /// A history row for a migration this build does not have means the database was migrated by another build: an older one whose migrations were later regenerated (InitialCreate is regenerated until the
+    /// first release, decision M1-84; its id is a timestamp, so a regenerated one is a different id), or a NEWER one (this build was rolled back). Migrate() would ignore the stranger and try to create
+    /// tables that already exist, ending in a database error nobody can read. Instead the start stops with the ids and the fix, and changes nothing.
+    /// </summary>
+    private static void RefuseUnknownHistory(MarketplaceDb db, ILogger? log)
+    {
+        var applied = db.Database.GetAppliedMigrations().ToList();
+        if (applied.Count == 0) return;
+        var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
+        var unknown = applied.Where(a => !known.Contains(a)).ToList();
+        if (unknown.Count == 0) return;
+        var ids = string.Join(", ", unknown);
+        log?.LogCritical("The migration history lists migration(s) this build does not have: {Ids}. The database was migrated by another build (an older one whose migrations were regenerated, or a newer one), so nothing was changed. See README, Database schema (migrations), for the one-line fix.", ids);
+        throw new InvalidOperationException($"The migration history lists migration(s) this build does not have: {ids}. The database was migrated by another build: an older one whose InitialCreate was regenerated before the first release, or a NEWER build (this one was rolled back). Nothing was changed. If it was an older build, clear the history with DELETE FROM \"__EFMigrationsHistory\"; and start again: the start then compares the schema with the migrations and baselines it, or lists what differs (tools/SchemaTool prints the SQL that adds what is missing). If it was a newer build, deploy that build again. See README, Database schema (migrations).");
     }
 
     private static void BaselineIfNeeded(MarketplaceDb db, ILogger? log)
