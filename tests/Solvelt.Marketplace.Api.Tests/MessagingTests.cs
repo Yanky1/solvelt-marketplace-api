@@ -286,6 +286,60 @@ public sealed class MessagingTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task L4_Booking_a_redacted_booking_gets_no_seller_reply_closes_its_thread_and_takes_no_buyer_message()
+    {
+        await Login();
+        var (id, mid, portalId) = await BookingFor("ing1@example.com");
+        Assert.Equal(HttpStatusCode.Accepted, (await Call(HttpMethod.Post, "/api/v1/messages", new { marketplaceBookingId = mid, text = "Hello" })).StatusCode);
+        await Drain();
+        var thread = await _k.Db(db => db.MessageThreads.AsNoTracking().SingleAsync());
+        await _k.Db(db => db.Bookings.Where(b => b.Id == id).ExecuteUpdateAsync(s => s.SetProperty(b => b.RedactedAt, (DateTimeOffset?)_k.F.Clock.GetUtcNow())));   // the booking's personal data is gone
+        // the seller's late reply is not stored and makes no notification
+        Assert.Equal("skipped", await BookingReply(mid, portalId, "Late reply", "pm-late", conv: thread.ConversationKey));
+        Assert.Equal(0, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "seller")));
+        Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == "message_received")));
+        // the buyer cannot write to it any more, by thread id or by booking id (even before the maintenance job has closed the thread)
+        Assert.Equal(HttpStatusCode.Conflict, (await Call(HttpMethod.Post, "/api/v1/messages", new { threadId = thread.Id, text = "Still there?" })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Call(HttpMethod.Post, "/api/v1/messages", new { marketplaceBookingId = mid, text = "Still there?" })).StatusCode);
+        Assert.Equal(1, await _k.Db(db => db.ThreadMessages.CountAsync()));
+        // and the maintenance job closes the thread and empties its texts, long before the 90 days of silence
+        using (var sc = _k.F.Services.CreateScope()) Assert.True((await sc.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>().RunAsync()).ThreadsRedacted >= 1);
+        Assert.NotNull(await _k.Db(db => db.MessageThreads.Where(t => t.Id == thread.Id).Select(t => t.RedactedAt).SingleAsync()));
+        Assert.All(await _k.Db(db => db.ThreadMessages.AsNoTracking().ToListAsync()), m => Assert.Equal("", m.Text));
+    }
+
+    [Fact]
+    public async Task L5_Booking_a_seller_reply_for_a_deleted_account_is_skipped_and_opens_no_thread()
+    {
+        await Login();
+        var (_, mid, portalId) = await BookingFor("ing1@example.com");
+        await _k.Db(db => db.BuyerAccounts.Where(a => a.Email == "ing1@example.com").ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)_k.F.Clock.GetUtcNow())));
+        Assert.Equal("skipped", await BookingReply(mid, portalId, "Hello?", "pm-gone"));
+        Assert.Equal(0, await _k.Db(db => db.MessageThreads.CountAsync()));
+        Assert.Equal(0, await _k.Db(db => db.ThreadMessages.CountAsync()));
+        Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync()));
+    }
+
+    [Fact]
+    public async Task L6_Booking_a_demo_booking_takes_no_message_by_booking_id_or_by_thread_id()
+    {
+        await Login();
+        var (id, mid, portalId) = await BookingFor("ing1@example.com");
+        Assert.Equal("applied", await BookingReply(mid, portalId, "Hello, what time suits you?", "pm-first"));       // a thread exists (the seller started it)
+        var thread = await _k.Db(db => db.MessageThreads.AsNoTracking().SingleAsync());
+        await _k.Db(db => db.Bookings.Where(b => b.Id == id).ExecuteUpdateAsync(s => s.SetProperty(b => b.IsDemo, true)));
+        var byBooking = await Call(HttpMethod.Post, "/api/v1/messages", new { marketplaceBookingId = mid, text = "Hi" });
+        var byThread = await Call(HttpMethod.Post, "/api/v1/messages", new { threadId = thread.Id, text = "Hi" });
+        Assert.Equal((HttpStatusCode.Conflict, HttpStatusCode.Conflict), (byBooking.StatusCode, byThread.StatusCode));
+        Assert.Contains("demo_data", await byBooking.Content.ReadAsStringAsync());
+        Assert.Contains("demo_data", await byThread.Content.ReadAsStringAsync());
+        Assert.Equal(0, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "buyer")));
+        // a real booking is not affected
+        await _k.Db(db => db.Bookings.Where(b => b.Id == id).ExecuteUpdateAsync(s => s.SetProperty(b => b.IsDemo, false)));
+        Assert.Equal(HttpStatusCode.Accepted, (await Call(HttpMethod.Post, "/api/v1/messages", new { threadId = thread.Id, text = "Hi" })).StatusCode);
+    }
+
+    [Fact]
     public async Task G3_An_order_message_without_the_sellers_order_number_is_skipped_even_for_a_single_seller_order()
     {
         var (o, g) = await Placed();

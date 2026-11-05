@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using Solvelt.Marketplace.Api.Tests.Infrastructure;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +22,13 @@ public sealed class DataExportReviewTests : OrderFlowBase
         var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/account/data-export");
         r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session ?? _session);
         return await _k.Http.SendAsync(r);
+    }
+
+    private async Task<string> SignInAgain()
+    {
+        var r = await _k.Http.PostAsJsonAsync("/api/v1/auth/sign-in", new { email = Email, password = AuthKit.Password });
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        return (await r.Content.ReadFromJsonAsync<AuthKit.SignInResponse>())!.Token;
     }
 
     private static async Task<JsonElement> Sections(HttpResponseMessage res) => JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement.GetProperty("sections");
@@ -70,6 +79,22 @@ public sealed class DataExportReviewTests : OrderFlowBase
         // the limit is per account: another buyer is not held back
         var other = await _k.VerifiedSession("other-export@example.com");
         Assert.Equal(HttpStatusCode.OK, (await Export(other)).StatusCode);
+    }
+
+    [Fact]
+    public async Task MED2_the_limit_is_ten_minutes_from_the_last_export_also_across_the_edge_of_a_ten_minute_window()
+    {
+        await Placed();
+        _k.F.Clock.Advance(TimeSpan.FromSeconds(9 * 60 + 30 - 0));                           // still inside the sign-in window, at the end of the first ten-minute window
+        Assert.Equal(HttpStatusCode.OK, (await Export()).StatusCode);
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(1));                                          // the next window; a new sign-in (the old one is eleven minutes old)
+        var again = await SignInAgain();
+        var res = await Export(again);
+        Assert.Equal((HttpStatusCode)429, res.StatusCode);                                    // one minute after the last export: still refused
+        Assert.InRange(res.Headers.RetryAfter!.Delta!.Value.TotalSeconds, 1, 540);            // and it says how long is left, not a full window
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(9));
+        var later = await SignInAgain();
+        Assert.Equal(HttpStatusCode.OK, (await Export(later)).StatusCode);                    // ten minutes after the first: allowed again
     }
 
     [Fact]

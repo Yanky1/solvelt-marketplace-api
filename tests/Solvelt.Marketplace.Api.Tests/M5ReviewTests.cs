@@ -324,6 +324,20 @@ public sealed class M5ReviewTests : OrderFlowBase
         Assert.True(frozen.GetProperty("claimed").GetBoolean());
     }
 
+    [Fact]
+    public async Task L9_Guest_an_order_that_belongs_to_an_account_is_frozen_even_when_no_claim_time_is_set()
+    {
+        var (o, _) = await Placed();                                                   // placed by a signed-in buyer: AccountId is set, ClaimedAt is not
+        Assert.NotNull(o.AccountId);
+        Assert.Null(o.ClaimedAt);
+        string token; using (var sc = _k.F.Services.CreateScope()) token = sc.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Auth.GuestLinks>().Make(o.Id).Token;
+        var res = await GuestGet(o.Number, token);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var d = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(new[] { "claimed", "createdAt", "number", "status" }, d.EnumerateObject().Select(p => p.Name).Order().ToArray());      // none of the owner's order is readable through the link
+        Assert.True(d.GetProperty("claimed").GetBoolean());
+    }
+
     // ---------------------------------------------------------------- portal C16 / N13: order reconcile
 
     private async Task<string> DeadEvt(string type, MarketplaceOrder o, OrderGroup g, object? extra, string id)
