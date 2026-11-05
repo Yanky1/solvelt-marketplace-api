@@ -16,7 +16,7 @@ public static class PiiRegistry
     [
         new("account", "M1", [typeof(BuyerAddress), typeof(BuyerSession), typeof(EmailToken)], null),   // erased by AccountService.RedactAsync itself
         new("messaging", "M5", [typeof(Notification), typeof(NotificationPreference), typeof(MessageThread)], typeof(Messaging.MessagingAccountEraser)),
-        new("orders-and-carts", "M3", [typeof(MarketplaceOrder), typeof(Cart)], null),
+        new("orders-and-carts", "M3", [typeof(MarketplaceOrder), typeof(Cart)], typeof(Checkout.OrdersAccountEraser)),   // decision M3-35
         new("order-cancellations-and-returns", "M5", [typeof(OrderCancelRequest), typeof(OrderReturn)], null),
         new("bookings", "M4", [typeof(Booking), typeof(BuyerQuote)], typeof(Services.BookingsAccountEraser)),
     ];

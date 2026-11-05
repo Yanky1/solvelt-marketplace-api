@@ -45,7 +45,9 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Notifications.UnsubscribeT
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Infrastructure.MessageRateLimiter>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner, Solvelt.Marketplace.Api.Messaging.AllowAllAttachmentScanner>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Messaging.MessagingAccountEraser>();
-builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>());
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDeletionHook>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>());
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Notifications.NotificationMailHandler>();
 builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();

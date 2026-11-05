@@ -10,10 +10,17 @@ namespace Solvelt.Marketplace.Api.Checkout;
 /// <c>deleted-&lt;id&gt;@relay.invalid</c>, which can never receive mail). The buyer's carts are deleted. Guest orders (no account) whose guest address equals the deleted account's address lose that
 /// address. It runs before the account's own address is erased, so the guest match still has the address to compare. Idempotent: a second run changes nothing.
 /// </summary>
-public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser
+public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser, IAccountDeletionHook
 {
     public const string Redacted = "Redacted";
-    public static string Tombstone(Guid accountId) => $"deleted-{accountId:N}@relay.invalid";
+    public static string Tombstone(Guid accountId) => Auth.RelayIdentity.Tombstone(accountId);   // M1's, so both agree
+
+    /// <summary>Runs inside the delete transaction, while the address is still known (M1 frees it at once): a guest order placed with it loses it. Guest orders are matched by the lower-cased address they stored.</summary>
+    public async Task OnDeletingAsync(Guid accountId, string email, CancellationToken ct)
+    {
+        var lower = email.Trim().ToLowerInvariant();
+        await db.Orders.Where(o => o.AccountId == null && o.GuestEmail == lower).ExecuteUpdateAsync(s => s.SetProperty(o => o.GuestEmail, (string?)null), ct);
+    }
 
     public async Task EraseAsync(Guid accountId, CancellationToken ct)
     {
@@ -26,12 +33,5 @@ public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser
         var cartIds = db.Carts.Where(c => c.AccountId == accountId).Select(c => c.Id);
         await db.CartLines.Where(l => cartIds.Contains(l.CartId)).ExecuteDeleteAsync(ct);
         await db.Carts.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);
-        var email = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId).Select(a => a.Email).FirstOrDefaultAsync(ct);
-        if (!string.IsNullOrEmpty(email))
-        {
-            var lower = email.ToLowerInvariant();
-            await db.Orders.Where(o => o.AccountId == null && o.GuestEmail == lower)
-                .ExecuteUpdateAsync(s => s.SetProperty(o => o.GuestEmail, (string?)null), ct);
-        }
     }
 }
