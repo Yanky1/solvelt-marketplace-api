@@ -7,19 +7,18 @@ public static class StaffOpsEndpoints
 {
     public static IEndpointRouteBuilder MapStaffOps(this IEndpointRouteBuilder app)
     {
-        var g = app.StaffGroup().AddEndpointFilter<RequireStaffFilter>();
-        static RequirePermissionFilter Can(string p) => new(p);
+        var g = app.StaffGroup();
 
-        g.MapGet("/orders", FindOrder).AddEndpointFilter(Can(StaffPermissions.OrdersView));
-        g.MapGet("/buyers/{id:guid}/orders", BuyerOrders).AddEndpointFilter(Can(StaffPermissions.OrdersView));
-        g.MapPost("/orders/{id:guid}/refunds/{refundId:guid}/retry", RetryRefund).AddEndpointFilter(Can(StaffPermissions.RefundsRetry));
-        g.MapGet("/ingests", (StaffOpsService s, CancellationToken ct) => s.StuckIngestsAsync(ct).ContinueWith(t => Results.Json(t.Result), ct)).AddEndpointFilter(Can(StaffPermissions.IngestsView));
-        g.MapPost("/ingests/{orderId:guid}/retry", RetryIngest).AddEndpointFilter(Can(StaffPermissions.IngestsRetry));
-        g.MapGet("/outbox", (StaffOpsService s, string? status, string? type, int? limit, string? before, CancellationToken ct) => s.OutboxAsync(status, type, limit, before, ct)).AddEndpointFilter(Can(StaffPermissions.OutboxView));
-        g.MapPost("/outbox/{id:guid}/retry", RetryOutbox).AddEndpointFilter(Can(StaffPermissions.OutboxRetry));
-        g.MapGet("/dead-letters", (StaffOpsService s, int? limit, CancellationToken ct) => s.DeadLettersAsync(limit, ct).ContinueWith(t => Results.Json(t.Result), ct)).AddEndpointFilter(Can(StaffPermissions.DeadLettersView));
-        g.MapPost("/dead-letters/retry", RetryDeadLetter).AddEndpointFilter(Can(StaffPermissions.DeadLettersRetry));
-        g.MapGet("/stripe/failures", (StaffOpsService s, string? before, int? limit, CancellationToken ct) => s.StripeFailuresAsync(before, limit, ct)).AddEndpointFilter(Can(StaffPermissions.StripeFailuresView));
+        g.MapGet("/orders", FindOrder).StaffCan(StaffPermissions.OrdersView);
+        g.MapGet("/buyers/{id:guid}/orders", BuyerOrders).StaffCan(StaffPermissions.OrdersView);
+        g.MapPost("/orders/{id:guid}/refunds/{refundId:guid}/retry", RetryRefund).StaffCan(StaffPermissions.RefundsRetry);
+        g.MapGet("/ingests", (StaffOpsService s, CancellationToken ct) => s.StuckIngestsAsync(ct).ContinueWith(t => Results.Json(t.Result), ct)).StaffCan(StaffPermissions.IngestsView);
+        g.MapPost("/ingests/{orderId:guid}/retry", RetryIngest).StaffCan(StaffPermissions.IngestsRetry);
+        g.MapGet("/outbox", (StaffOpsService s, string? status, string? type, int? limit, string? before, CancellationToken ct) => s.OutboxAsync(status, type, limit, before, ct)).StaffCan(StaffPermissions.OutboxView);
+        g.MapPost("/outbox/{id:guid}/retry", RetryOutbox).StaffCan(StaffPermissions.OutboxRetry);
+        g.MapGet("/dead-letters", (StaffOpsService s, int? limit, CancellationToken ct) => s.DeadLettersAsync(limit, ct).ContinueWith(t => Results.Json(t.Result), ct)).StaffCan(StaffPermissions.DeadLettersView);
+        g.MapPost("/dead-letters/retry", RetryDeadLetter).StaffCan(StaffPermissions.DeadLettersRetry);
+        g.MapGet("/stripe/failures", (StaffOpsService s, string? before, int? limit, CancellationToken ct) => s.StripeFailuresAsync(before, limit, ct)).StaffCan(StaffPermissions.StripeFailuresView);
         return app;
     }
 

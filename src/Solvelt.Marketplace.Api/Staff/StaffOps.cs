@@ -211,10 +211,12 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
     {
         var e = await db.PortalInboundEvents.AsNoTracking().Where(x => x.Id == eventId && x.Status == InboundStatus.Parked && x.PayloadJson != null).Select(x => new { x.AggregateType, x.AggregateKey, x.Type }).FirstOrDefaultAsync(ct);
         if (e?.AggregateType is null || e.AggregateKey is null) return (OpsOutcome.NotRetryable, 0);
+        // The intent is recorded FIRST and saved on its own: the replay commits in transactions of its own (one per parked event), so it cannot share one with the audit row, and a replay that
+        // happened without a record must not be possible (security review MED-2). If this save fails, nothing is replayed.
+        StaffAudit.Add(db, time, who, "deadletter.retry", "inbound_event", eventId.Length > 80 ? eventId[..80] : eventId, reason, new { type = e.Type });
+        await db.SaveChangesAsync(ct);
         // the existing replay applies every parked event of the aggregate in order, each once (its row version is the guard), so a second click or a parallel replay changes nothing
         var applied = await replay.ReplayParkedAsync(e.AggregateType, e.AggregateKey, ct);
-        StaffAudit.Add(db, time, who, "deadletter.retry", "inbound_event", eventId.Length > 80 ? eventId[..80] : eventId, reason, new { type = e.Type, replayed = applied });
-        await db.SaveChangesAsync(ct);
         return (OpsOutcome.Ok, applied);
     }
 
