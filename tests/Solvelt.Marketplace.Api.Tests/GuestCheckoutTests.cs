@@ -78,6 +78,21 @@ public sealed class GuestCheckoutTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task A_guest_address_typed_in_decomposed_form_is_stored_in_the_same_form_as_the_accounts_and_is_erased_with_it()
+    {
+        const string nfd = "Jose\u0301.Perez@Example.COM";                                         // e + combining acute, mixed case
+        const string nfc = "jos\u00e9.perez@example.com";                                          // what M1 stores for the account (NFC, lower-case)
+        await GuestCart("kiddush-cup-pewter");
+        var placed = await GuestCheckout("  " + nfd + " ");
+        var order = await Order(placed.GetProperty("orderNumber").GetString()!);
+        Assert.Equal(nfc, order.GuestEmail);                                                      // so a verified account with the NFC address claims it, and the claim matches
+        Assert.Equal(nfc, Solvelt.Marketplace.Api.Auth.AuthValidation.NormaliseEmail(nfd));
+        // deleting the account that owned the mailbox erases the guest order's address (the hook is handed the account's NFC address)
+        await _k.Db(async db => { await new Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser(db).OnDeletingAsync(Guid.NewGuid(), nfc, default); return 0; });
+        Assert.Null((await Order(order.Number)).GuestEmail);
+    }
+
+    [Fact]
     public async Task The_guest_link_opens_only_its_own_order_and_a_missing_forged_or_expired_one_opens_nothing()
     {
         await GuestCart("kiddush-cup-pewter");

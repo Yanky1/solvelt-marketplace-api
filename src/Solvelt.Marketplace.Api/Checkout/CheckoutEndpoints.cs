@@ -64,7 +64,7 @@ public static class CheckoutEndpoints
         {
             var token = ctx.Request.Headers[CartEndpoints.GuestHeader].ToString();
             if (token.Length == 0) return Problems.Json(401, "unauthorized", "Sign in or check out as a guest to continue.");
-            var email = body?.Email?.Trim().ToLowerInvariant();
+            var email = body?.Email is { } rawEmail ? AuthValidation.NormaliseEmail(rawEmail) : null;   // NFC, trimmed, lower-cased: the same function as the account address (M1-81)
             if (AuthValidation.EmailProblem(email) is { } problem) errors["email"] = problem;
             if (errors.Count == 0)
                 actor = new CheckoutActor(null, token, email, body!.Address!.Name!.Trim(), RelayIdentity.NewRelayEmail(marketplace.Value.RelayDomain ?? throw new InvalidOperationException("Marketplace:RelayDomain is not configured.")));
