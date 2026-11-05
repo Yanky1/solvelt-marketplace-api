@@ -28,7 +28,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
     public async Task SignUpAsync(string email, string password, string displayName, CancellationToken ct)
     {
         var normal = AuthValidation.NormaliseEmail(email);
-        var name = displayName.Trim();
+        var name = AuthValidation.NormaliseText(displayName);
         // Mail-bombing guard: past 3 sign-ups an hour for one address nothing more is sent (and the caller still sees the same answer).
         if (!limiter.TryAcquire("signup-email", normal, 3, Hour)) { passwords.BurnTime(password); return; }
 

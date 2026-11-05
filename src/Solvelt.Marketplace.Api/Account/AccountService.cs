@@ -44,8 +44,8 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
 
     public async Task<ProfileView?> UpdateProfileAsync(Guid accountId, string displayName, string? phone, CancellationToken ct)
     {
-        var name = displayName.Trim();
-        var number = string.IsNullOrWhiteSpace(phone) ? null : phone.Trim();
+        var name = AuthValidation.NormaliseText(displayName);
+        var number = string.IsNullOrWhiteSpace(phone) ? null : AuthValidation.NormaliseText(phone);
         var now = Now;
         var rows = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.DisplayName, name).SetProperty(a => a.Phone, number).SetProperty(a => a.UpdatedAt, now), ct);
@@ -58,13 +58,13 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
 
     private static void Apply(BuyerAddress a, AddressBody b, DateTimeOffset now)
     {
-        a.FullName = b.FullName!.Trim(); a.Line1 = b.Line1!.Trim();
-        a.Line2 = string.IsNullOrWhiteSpace(b.Line2) ? null : b.Line2.Trim();
-        a.City = b.City!.Trim();
-        a.Region = string.IsNullOrWhiteSpace(b.Region) ? null : b.Region.Trim();
-        a.PostalCode = b.PostalCode!.Trim();
+        a.FullName = AuthValidation.NormaliseText(b.FullName); a.Line1 = AuthValidation.NormaliseText(b.Line1);
+        a.Line2 = string.IsNullOrWhiteSpace(b.Line2) ? null : AuthValidation.NormaliseText(b.Line2);
+        a.City = AuthValidation.NormaliseText(b.City);
+        a.Region = string.IsNullOrWhiteSpace(b.Region) ? null : AuthValidation.NormaliseText(b.Region);
+        a.PostalCode = AuthValidation.NormaliseText(b.PostalCode);
         a.Country = b.Country!.Trim().ToUpperInvariant();
-        a.Phone = string.IsNullOrWhiteSpace(b.Phone) ? null : b.Phone.Trim();
+        a.Phone = string.IsNullOrWhiteSpace(b.Phone) ? null : AuthValidation.NormaliseText(b.Phone);
         a.Lat = b.Lat; a.Lng = b.Lng;
         a.UpdatedAt = now;
     }

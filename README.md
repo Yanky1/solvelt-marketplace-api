@@ -58,3 +58,6 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 Logging never contains URLs, query strings or paths (filters are enforced in code, see decision M1-29).
 Outside Development/Testing (any other environment name, Staging included) the app refuses to start when a required value is missing, a key is short, any two keys are equal, or a dev default is used in any slot.
 No secrets are stored in the repository.
+
+## Tools
+- `tools/unicode/generate_normalization.py` regenerates the Unicode tables of the managed normaliser (decision M1-81); `dotnet run -c Release --project tools/NormalizationCheck` compares the normaliser with the runtime's ICU-backed one (needs ICU installed).
