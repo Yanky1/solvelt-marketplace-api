@@ -83,7 +83,7 @@ Outside Development/Testing (any other environment name, Staging included) the a
 
 ### Test site (demo data)
 
-`Demo__Enabled=true` turns on test mode (M9): the public config says so (the web shows a TEST MODE badge), buyers get a "Fill with demo data" button, and an unverified account can be verified without email. **The API refuses to start with it on in Production, with no override.** A test site therefore runs with `ASPNETCORE_ENVIRONMENT=Staging` (every production check still applies in Staging) and the web with `APP_ENV=staging` and `DEMO_ENABLED=true`. A production build with `Demo__Enabled` off or unset starts normally. Details: docs/API.md "Demo data", docs/DECISIONS.md M9-01 to M9-03.
+`Demo__Enabled=true` turns on test mode (M9): the public config says so (the web shows a TEST MODE badge), buyers get a "Fill with demo data" button, and an unverified account can be verified without email. **The API refuses to start with it on unless `ASPNETCORE_ENVIRONMENT` is exactly Development, Testing or Staging (trimmed, case-insensitive; an allowlist, so "Prod", " Production" and "Live" are refused too), with no override.** A test site therefore runs with `ASPNETCORE_ENVIRONMENT=Staging` (every production check still applies in Staging) and the web with `APP_ENV=staging` and `DEMO_ENABLED=true`. A production build with `Demo__Enabled` off or unset starts normally. Details: docs/API.md "Demo data", docs/DECISIONS.md M9-01 to M9-07.
 No secrets are stored in the repository.
 
 ## Tools

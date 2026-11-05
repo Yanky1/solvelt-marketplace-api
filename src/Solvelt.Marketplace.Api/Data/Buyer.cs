@@ -12,6 +12,12 @@ public sealed class BuyerAccount
     public string DisplayName { get; set; } = "";
     public string? PasswordHash { get; set; }
     public DateTimeOffset? EmailVerifiedAt { get; set; }
+    /// <summary>
+    /// Set when the test-only "Verify this account" (M9) marked the address verified WITHOUT a mailbox proof. While it is set no guest order is ever attached to the account (the
+    /// address was never proven, so an order placed later by whoever owns that mailbox must not move to this account); a real proof (the verification link) or a password reset
+    /// through the mailbox clears it. Null for every ordinary account.
+    /// </summary>
+    public DateTimeOffset? DemoVerifiedAt { get; set; }
     /// <summary>Optional contact number (profile). Personal data: erased with the account.</summary>
     public string? Phone { get; set; }
     /// <summary><c>relay-&lt;random&gt;@&lt;relay domain&gt;</c>, generated once, unique, the only address the portal and sellers see.</summary>

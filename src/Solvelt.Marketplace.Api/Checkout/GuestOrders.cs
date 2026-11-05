@@ -25,7 +25,8 @@ public sealed class GuestOrderClaimer(MarketplaceDb db, TimeProvider time) : IGu
     {
         if (string.IsNullOrWhiteSpace(normalisedEmail)) return Task.FromResult(0);
         var now = time.GetUtcNow().ToUniversalTime();
-        return db.Orders.Where(o => o.AccountId == null && o.GuestEmail == normalisedEmail)
+        // An account whose address was only "demo verified" (no mailbox proof) never receives a guest order, on any path (sign-in, passkey, reset, link): the guard is part of the one UPDATE.
+        return db.Orders.Where(o => o.AccountId == null && o.GuestEmail == normalisedEmail && !db.BuyerAccounts.Any(a => a.Id == accountId && a.DemoVerifiedAt != null))
             .ExecuteUpdateAsync(s => s.SetProperty(o => o.AccountId, (Guid?)accountId).SetProperty(o => o.ClaimedAt, (DateTimeOffset?)now).SetProperty(o => o.UpdatedAt, now), ct);
     }
 }

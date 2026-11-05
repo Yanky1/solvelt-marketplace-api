@@ -30,12 +30,15 @@ public static class CheckoutEndpoints
         {
             QuoteStatus.Ok => Results.Json(view),
             QuoteStatus.InvalidAddress => Problems.Validation(new Dictionary<string, string> { ["address"] = "Enter a delivery country (2 letters), a postal code and, for the US, a state." }),
+            QuoteStatus.DemoCart => DemoCartRefusal,
             QuoteStatus.EmptyOrUnavailableCart => Problems.Json(409, "cart_not_ready", "Your cart is empty or has items that are no longer available."),
             QuoteStatus.InvalidSelection => Problems.Unprocessable("invalid_selection", detail ?? "That delivery choice is not available."),
             QuoteStatus.TotalTooLarge => Problems.Unprocessable("amount_too_large", "The total is above the maximum we can charge. Split the order."),
             _ => Problems.Json(503, "shipping_unavailable", "Delivery options are unavailable right now. Please try again in a moment."),
         };
     }
+
+    private static IResult DemoCartRefusal => Problems.Json(409, "demo_data", "Your cart holds demo items, so checkout is not available. Remove the demo data from your account first.");
 
     /// <summary>The header that carries a guest's order-access link (decision M3-24): it names ONE order and is mailed to the checkout address only.</summary>
     public const string GuestOrderHeader = "X-Guest-Order";
@@ -75,6 +78,7 @@ public static class CheckoutEndpoints
         return status switch
         {
             CheckoutStatus.Ok => Results.Json(await WithGuestTokenAsync(result!, actor, db, links, ct)),
+            CheckoutStatus.Quote when detail is not null && detail.StartsWith("DemoCart") => DemoCartRefusal,
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("InvalidAddress") => Problems.Validation(new Dictionary<string, string> { ["address"] = "Enter a delivery country, postal code and, for the US, a state." }),
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("InvalidSelection") => Problems.Unprocessable("invalid_selection", "That delivery choice is not available."),
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("ShippingUnavailable") => Problems.Json(503, "shipping_unavailable", "Delivery options are unavailable right now. Please try again in a moment."),

@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105070854_InitialCreate")]
+    [Migration("20261105081436_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -377,6 +377,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("DemoVerifiedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DisplayName")

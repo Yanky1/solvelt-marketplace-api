@@ -108,6 +108,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         if (accountId is null) return false;
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.EmailVerifiedAt == null && a.DeletedAt == null)
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.EmailVerifiedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
+        await db.BuyerAccounts.Where(a => a.Id == accountId && a.DemoVerifiedAt != null).ExecuteUpdateAsync(s => s.SetProperty(a => a.DemoVerifiedAt, (DateTimeOffset?)null), ct);   // a real mailbox proof replaces a test-only verification (M9-07)
         await gate.SucceededAsync(addressKey, ipKey, ct);
         await guestClaims.ClaimAsync(row.Id, row.Email!, ct);   // the address is now proven: guest orders placed with it become this account's
         return true;
@@ -289,7 +290,8 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var changed = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s
             .SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, a => a.SessionEpoch + 1)
             .SetProperty(a => a.DisplayName, a => a.EmailVerifiedAt == null ? "Buyer" : a.DisplayName)   // a name typed by whoever registered an unverified address first is not kept
-            .SetProperty(a => a.EmailVerifiedAt, a => a.EmailVerifiedAt ?? now), ct);
+            .SetProperty(a => a.EmailVerifiedAt, a => a.EmailVerifiedAt ?? now)
+            .SetProperty(a => a.DemoVerifiedAt, (DateTimeOffset?)null), ct);   // the reset link proves the mailbox: a test-only verification is replaced by it (M9-07)
         if (changed == 0) return new ResetOutcome(false);
         await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         // a reset is account recovery: whatever got in (a stolen session that added a passkey) must not survive it, so every passkey goes and the owner adds theirs again (M1-80)

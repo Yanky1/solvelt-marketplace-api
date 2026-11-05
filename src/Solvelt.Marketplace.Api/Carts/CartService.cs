@@ -57,6 +57,10 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
         return await db.Carts.Where(c => c.Id == cartId).ExecuteUpdateAsync(s => s.SetProperty(c => c.UpdatedAt, now), ct) == 1;
     }
 
+    /// <summary>True when the owner's cart has any line created by "Fill with demo data" (M9-04): checkout and the quote refuse such a cart.</summary>
+    public Task<bool> HasDemoLinesAsync(CartOwner o, CancellationToken ct)
+        => db.CartLines.AsNoTracking().AnyAsync(l => l.IsDemo && Find(o).Select(c => c.Id).Contains(l.CartId), ct);
+
     private IQueryable<Data.Cart> Find(CartOwner o)
         => o.AccountId is { } a ? db.Carts.Where(c => c.AccountId == a)
          : o.GuestToken is { Length: > 0 and <= 100 } t ? db.Carts.Where(c => c.GuestTokenHash == Tokens.Hash(t)) : db.Carts.Where(_ => false);
@@ -119,7 +123,8 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
                 VALUES ({Guid.NewGuid()}, {cart.Id}, {item.ListingId}, {variantId}, {quantity}, {item.PriceCents}, {Now.ToUnixTimeMilliseconds()})
                 ON CONFLICT ("CartId", "VariantId") DO UPDATE SET
                   "Quantity" = CASE WHEN cart_lines."Quantity" + {quantity} > {max} THEN {max} ELSE cart_lines."Quantity" + {quantity} END,
-                  "SeenUnitPriceCents" = {item.PriceCents}
+                  "SeenUnitPriceCents" = {item.PriceCents},
+                  "IsDemo" = FALSE   -- the buyer chose these units themselves: a demo line is demo only while nobody touches it (M9-07)
                 """, ct);
             if (changed != 1) { await tx.RollbackAsync(ct); continue; }   // never answer 200 for a line that was not stored
             await tx.CommitAsync(ct);
@@ -147,7 +152,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
             var price = await db.CatalogVariants.Where(v => v.Id == line.VariantId).Select(v => (long?)v.PriceCents).FirstOrDefaultAsync(ct);
             var q = Math.Min(quantity, CartLimits.MaxQuantityPerLine);
             touched = await db.CartLines.Where(l => l.Id == lineId && l.CartId == cart.Id)
-                .ExecuteUpdateAsync(s => s.SetProperty(l => l.Quantity, q).SetProperty(l => l.SeenUnitPriceCents, price ?? line.SeenUnitPriceCents), ct);   // seeing the cart again accepts the current price
+                .ExecuteUpdateAsync(s => s.SetProperty(l => l.Quantity, q).SetProperty(l => l.SeenUnitPriceCents, price ?? line.SeenUnitPriceCents).SetProperty(l => l.IsDemo, false), ct);   // seeing the cart again accepts the current price
         }
         if (touched != 1) { await tx.RollbackAsync(ct); return null; }   // never a 200 for a change that was not stored
         await tx.CommitAsync(ct);
@@ -185,7 +190,8 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
                             INSERT INTO cart_lines ("Id", "CartId", "ListingId", "VariantId", "Quantity", "SeenUnitPriceCents", "AddedAtMs")
                             VALUES ({Guid.NewGuid()}, {mine.Id}, {l.ListingId}, {l.VariantId}, {l.Quantity}, {l.SeenUnitPriceCents}, {l.AddedAtMs})
                             ON CONFLICT ("CartId", "VariantId") DO UPDATE SET
-                              "Quantity" = CASE WHEN cart_lines."Quantity" + {l.Quantity} > {max} THEN {max} ELSE cart_lines."Quantity" + {l.Quantity} END
+                              "Quantity" = CASE WHEN cart_lines."Quantity" + {l.Quantity} > {max} THEN {max} ELSE cart_lines."Quantity" + {l.Quantity} END,
+                              "IsDemo" = FALSE   -- merged units are the buyer's own
                             """, ct);
                     }
                 }

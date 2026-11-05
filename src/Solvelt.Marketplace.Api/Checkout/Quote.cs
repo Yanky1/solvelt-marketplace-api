@@ -69,7 +69,7 @@ public sealed class QuoteSigner(IOptions<CheckoutOptions> options)
     }
 }
 
-public enum QuoteStatus { Ok, EmptyOrUnavailableCart, InvalidAddress, InvalidSelection, ShippingUnavailable, TotalTooLarge }
+public enum QuoteStatus { Ok, EmptyOrUnavailableCart, InvalidAddress, InvalidSelection, ShippingUnavailable, TotalTooLarge, DemoCart }
 
 /// <summary>
 /// The server-side price of a checkout: items from the catalog (re-read now), shipping from the portal's settings, tax from <see cref="ITaxCalculator"/>.
@@ -81,6 +81,9 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
 {
     public async Task<(QuoteStatus Status, QuoteView? View, string? Detail)> QuoteAsync(CartOwner owner, QuoteRequest req, CancellationToken ct)
     {
+        // A cart with a demo line is never priced or paid (M9-04): a payment for demo goods would be real money for nothing, and an order the portal would then be asked to fulfil.
+        // It is decided by the LINES, not the cart's own marker (a buyer's real cart that picked up one demo line is as refused as a pure demo cart; Remove hands the cart back).
+        if (await carts.HasDemoLinesAsync(owner, ct)) return (QuoteStatus.DemoCart, null, null);
         var a = req.Address;
         var country = a?.Country?.Trim().ToUpperInvariant();
         if (country is not { Length: 2 } || !country.All(char.IsAsciiLetterUpper) || string.IsNullOrWhiteSpace(a?.PostalCode) || a.PostalCode.Length > 20
