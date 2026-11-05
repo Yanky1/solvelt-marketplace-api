@@ -309,6 +309,22 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "catalog_quarantine",
+                columns: table => new
+                {
+                    ListingId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Reason = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
+                    Version = table.Column<long>(type: "bigint", nullable: true),
+                    FirstSeenAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    LastSeenAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Seen = table.Column<int>(type: "integer", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_catalog_quarantine", x => x.ListingId);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "catalog_sellers",
                 columns: table => new
                 {
@@ -2077,6 +2093,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "catalog_images");
+
+            migrationBuilder.DropTable(
+                name: "catalog_quarantine");
 
             migrationBuilder.DropTable(
                 name: "catalog_search");

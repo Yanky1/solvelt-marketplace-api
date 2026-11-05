@@ -249,6 +249,46 @@ public class HttpCatalogSourceTests
         Assert.Equal(("99", true), (page.NextCursor, page.HasMore));
     }
 
+    // ---------- documents we cannot read (Azure issue #4) ----------
+    private static Dictionary<string, object?> QuoteService(int n, string model = "quote") => Doc(n, 10, d =>
+    {
+        d["type"] = "service"; d["title"] = "Secret title that must never reach a log";
+        d["price"] = new { amountMinor = (long?)null, currency = "USD" };
+        d["service"] = new { pricingModel = model, priceMinor = (long?)null, minMinutes = 60, maxMinutes = 120, incrementMinutes = 30, defaultDurationMinutes = 60, online = true, atCustomer = false, atSeller = false, bookingMode = "request", travelFeeMinor = 0 };
+    });
+
+    [Fact]
+    public async Task A_feed_page_reports_each_unreadable_document_with_a_short_reason_and_still_returns_the_readable_ones()
+    {
+        var rig = new Rig().Feed(Page([Doc(1), Doc(2, 10, d => d["category"] = null), QuoteService(3, "Quote"), Doc(4, 10, d => d.Remove("price")), Doc(5, 10, d => d.Remove("brand")), Doc(6, 10, d => d.Remove("seller")), "junk", Doc(7)]));
+        var page = await rig.Source.GetListingsAsync(null, 100, CancellationToken.None);
+        Assert.Equal(new[] { G(1), G(7) }, page.Items.Select(i => i.Id));
+        Assert.Equal(new (Guid?, long?, string)[] { (G(2), 10, "category"), (G(3), 10, "quote_price"), (G(4), 10, "price"), (G(5), 10, "brand"), (G(6), 10, "seller"), (null, null, "required_field") },
+            page.Unreadable!.Select(u => (u.Id, u.Version, u.Reason)));
+        Assert.DoesNotContain(rig.Logs, l => l.Contains("Secret title"));                      // ids and codes only, never the document
+    }
+
+    [Fact]
+    public async Task A_single_fetch_of_an_unreadable_document_throws_the_typed_exception_with_the_reason_and_no_document_text()
+    {
+        var rig = new Rig();
+        foreach (var (doc, reason) in new (Dictionary<string, object?>, string)[] { (Doc(1, 10, d => d["category"] = null), "category"), (QuoteService(1), "quote_price"), (Doc(1, 10, d => d.Remove("price")), "price") })
+        {
+            rig.Portal.Respond(HttpStatusCode.OK, JsonSerializer.Serialize(doc));
+            var ex = await Assert.ThrowsAsync<UnreadableListingException>(() => rig.Source.GetListingAsync(G(1), CancellationToken.None));
+            Assert.Equal((G(1), reason), (ex.Id, ex.Reason));
+            Assert.DoesNotContain("Secret title", ex.Message);
+        }
+    }
+
+    [Fact]
+    public async Task A_service_with_an_ordinary_hourly_price_still_maps_so_only_a_missing_amount_is_unreadable()
+    {
+        var rig = new Rig();
+        var hourly = Mapped(rig, Doc(1, 10, d => { d["type"] = "service"; d["service"] = new { pricingModel = "hourly", priceMinor = 6000L, minMinutes = 60, maxMinutes = 120, incrementMinutes = 30, defaultDurationMinutes = 60, online = true, atCustomer = false, atSeller = false, bookingMode = "instant", travelFeeMinor = 0 }; }));
+        Assert.Equal((2000L, "hourly"), (hourly.Variants.Single().PriceCents, hourly.Attributes.Single(a => a.Key == "pricing-model").Value));
+    }
+
     // ---------- failures ----------
     [Fact]
     public async Task A_missing_listing_is_null_but_a_portal_failure_or_a_garbled_answer_is_never_taken_as_removed()
@@ -259,7 +299,8 @@ public class HttpCatalogSourceTests
         rig.Portal.Respond(HttpStatusCode.ServiceUnavailable, "{}");
         await Assert.ThrowsAsync<PortalUnavailableException>(() => rig.Source.GetListingAsync(G(1), CancellationToken.None));
         rig.Portal.Respond(HttpStatusCode.OK, "{\"listingId\":\"" + G(1) + "\",\"title\":\"no price\"}");
-        await Assert.ThrowsAsync<InvalidDataException>(() => rig.Source.GetListingAsync(G(1), CancellationToken.None));
+        var unreadable = await Assert.ThrowsAsync<UnreadableListingException>(() => rig.Source.GetListingAsync(G(1), CancellationToken.None));   // a document we cannot read is its own, typed condition (the sync sets it aside); a non-JSON answer below stays an InvalidDataException
+        Assert.Equal((G(1), "required_field"), (unreadable.Id, unreadable.Reason));
         rig.Portal.Respond(HttpStatusCode.OK, "not json");
         await Assert.ThrowsAsync<InvalidDataException>(() => rig.Source.GetListingAsync(G(1), CancellationToken.None));
         await Assert.ThrowsAsync<PortalUnavailableException>(async () => { rig.Portal.Respond(HttpStatusCode.TooManyRequests, "{\"code\":\"rate_limited\"}"); await rig.Source.GetListingsAsync(null, 10, CancellationToken.None); });
