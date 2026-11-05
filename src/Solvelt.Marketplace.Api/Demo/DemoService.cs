@@ -193,7 +193,7 @@ public sealed class DemoService(MarketplaceDb db, TimeProvider time, ILogger<Dem
         var group = new OrderGroup
         {
             Id = Guid.NewGuid(), OrderId = order.Id, SellerId = l.SellerId, BrandId = l.BrandId, SellerName = seller, BrandName = brand, DeliveryKind = "carrier", ShippingSpeed = "standard",
-            ItemsCents = items, ShippingCents = shipping, ShippingTaxCents = 0, TaxCents = tax, TotalCents = total, SellerOrderNumber = $"DEMO-{order.Number}", RefundedCents = refunded ? total : 0,
+            ItemsCents = items, ShippingCents = shipping, ShippingTaxCents = 0, TaxCents = tax, TotalCents = total, SellerOrderId = Guid.NewGuid(), SellerOrderNumber = $"DEMO-{order.Number}", RefundedCents = refunded ? total : 0,
             RefundedShippingCents = refunded ? shipping : 0,
         };
         var line = new OrderLine

@@ -92,6 +92,22 @@ public sealed class DemoDataTests : IDisposable
     }
 
     [Fact]
+    public async Task The_buyers_own_order_list_and_detail_show_the_demo_orders_in_their_real_states_and_with_tracking()
+    {
+        await SyncCatalog();
+        var (token, _) = await Buyer("demo10@example.com");
+        await Fill(token);
+        var list = await Body(await _k.Get("/api/v1/orders", token));
+        var orders = list.GetProperty("orders").EnumerateArray().ToList();
+        Assert.Equal(3, orders.Count);
+        var statuses = orders.SelectMany(o => o.GetProperty("groups").EnumerateArray()).Select(g => g.GetProperty("status").GetString()).ToList();
+        Assert.Equivalent(new[] { "delivered", "shipped", "refunded" }, statuses);                                             // never "processing": a group without a seller order id would read as "being placed"
+        var shipped = orders.First(o => o.GetProperty("groups").EnumerateArray().Any(g => g.GetProperty("status").GetString() == "shipped"));
+        var detail = await Body(await _k.Get($"/api/v1/orders/{shipped.GetProperty("number").GetString()}", token));
+        Assert.Contains("DEMO", detail.GetRawText());                                                                          // the tracking number is there
+    }
+
+    [Fact]
     public async Task A_second_press_does_nothing_while_a_batch_exists()
     {
         await SyncCatalog();
