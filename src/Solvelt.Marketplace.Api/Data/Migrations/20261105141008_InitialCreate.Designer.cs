@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105140559_InitialCreate")]
+    [Migration("20261105141008_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -412,6 +412,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<long>("SessionEpoch")
                         .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("StaffLockedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");

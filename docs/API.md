@@ -409,3 +409,9 @@ Everything is under `/api/v1/staff`, bearer `stf_…` token, `private, no-store`
 | `GET /me`, `GET /me/passkeys`, `POST /me/passkeys/options`, `POST /me/passkeys`, `DELETE /me/passkeys/{id}` | signed in | `me` has `role`, `permissions[]`, `stepUpUntil`; adding and removing need a recent check; the last passkey stays (`409 last_passkey`) |
 | `GET /accounts`, `POST /accounts {email, displayName, role, reason}` (`201 { account, enrolmentToken, expiresAt }`), `POST /accounts/{id}/enrolment {reason, revokePasskeys}`, `/role {role, reason}`, `/disable`, `/enable`, `/sign-out {reason}` | `staff.manage` | `409 last_admin` when no active admin would remain, `409 email_in_use` |
 | `GET /audit?action&actor&targetType&target&limit&before` | `audit.view` | `{ entries[], next }`, newest first |
+| `GET /buyers?email=\|order=\|id=&reason=`, `GET /buyers/{id}?reason=` | `buyers.view` | One buyer, masked (M7-07); `reason` required; `404` when none |
+| `POST /buyers/{id}/reveal {fields[], reason}` | `buyers.reveal` | Break-glass (M7-08): real email/name/phone/addresses, passkey check, `429 reveal_limit` |
+| `POST /buyers/{id}/lock`, `/unlock {reason}` | `buyers.lock` | M7-09; `204`, idempotent |
+| `POST /buyers/{id}/sign-out {reason}` | `buyers.sign_out` | Ends every buyer session |
+
+A buyer locked by staff gets `403 account_locked` from `POST /api/v1/auth/sign-in` (after the right password) and `401` from every token.

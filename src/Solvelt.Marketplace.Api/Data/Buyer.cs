@@ -33,6 +33,10 @@ public sealed class BuyerAccount
     public DateTimeOffset? DeletedAt { get; set; }
     /// <summary>When the personal data of a deleted account was erased (email, name, phone, password hash, addresses, links). The row stays as an opaque id for orders.</summary>
     public DateTimeOffset? RedactedAt { get; set; }
+    /// <summary>
+    /// Set by staff (M7-07): sign-in, passkey sign-in and every session stop at once; unlocking clears it (old sessions stay dead). Holds no reason: the reason lives in the staff audit log.
+    /// </summary>
+    public DateTimeOffset? StaffLockedAt { get; set; }
 }
 
 /// <summary>A saved address book entry (US and international). Exactly one per buyer is the default, enforced by a partial unique index.</summary>
