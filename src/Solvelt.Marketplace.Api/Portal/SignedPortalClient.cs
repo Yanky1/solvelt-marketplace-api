@@ -471,7 +471,19 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
     {
         if (text.Length == 0) return new PortalError(null, null);
         try { return JsonSerializer.Deserialize<PortalError>(text, PortalJson.Options) ?? new PortalError(null, null); }
-        catch (JsonException) { return new PortalError(null, null); }
+        catch (JsonException)
+        {
+            // The portal's answers are not all shaped like the orders' error list: C17's 422 invalid_review carries "errors" as an OBJECT of field -> message. The code and the message are what the callers
+            // use (an outbox maps the code to a final or a retryable failure), so keep them when the rest does not fit.
+            try
+            {
+                using var doc = JsonDocument.Parse(text);
+                if (doc.RootElement.ValueKind != JsonValueKind.Object) return new PortalError(null, null);
+                string? Str(string n) => doc.RootElement.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                return new PortalError(Str("code"), Str("message"));
+            }
+            catch (JsonException) { return new PortalError(null, null); }
+        }
     }
 }
 

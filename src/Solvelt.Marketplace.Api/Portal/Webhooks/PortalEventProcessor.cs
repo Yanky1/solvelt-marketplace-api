@@ -55,6 +55,9 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
     private void MarkPredecessorDead(PortalInboundEvent row, PortalEvent evt)
     {
         if (!evt.PredecessorDead || evt.Type.StartsWith("booking.", StringComparison.Ordinal)) return;
+        // A review's reply events (C17) are full snapshots of ONE reply (the text, or its removal), applied by the portal's order: whatever an earlier dead event said, the later one already says it
+        // all, and there is no read endpoint to reconcile with. So there is nothing for a person to do, and the "seller order" alarm below would only mislead.
+        if (evt.Type.StartsWith("review.", StringComparison.Ordinal)) { log.LogInformation("Portal event of type {Type} says an earlier reply event went dead; it is a full snapshot, nothing to reconcile", evt.Type); return; }
         row.Note = PredecessorDeadNote(row.Note);
         log.LogError("Portal event of type {Type} says an earlier event of its seller order went dead; the order view may have a gap and needs a person to reconcile", evt.Type);
     }
