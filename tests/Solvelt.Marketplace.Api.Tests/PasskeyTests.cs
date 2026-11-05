@@ -743,4 +743,138 @@ public class PasskeyTests
         Assert.Equal(HttpStatusCode.OK, r.StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", await TokenOf(r))).StatusCode);
     }
+
+    // ---------- security review of c0fb1bc (decision M1-85) ----------
+
+    [Fact]
+    public async Task The_recency_holds_at_completion_and_the_challenge_survives_the_refusal()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        k.F.Clock.Advance(TimeSpan.FromMinutes(9));                                               // options asked for inside the 10 minutes ...
+        var (cid, opts) = await Opts(k, AccountOptions, token);
+        var authn = new VirtualAuthenticator();
+        var credential = authn.Register(opts);
+        k.F.Clock.Advance(TimeSpan.FromMinutes(4));                                               // ... completed after them, while the challenge (5 minutes) is still alive
+        var late = await k.Send(Post, AccountPasskeys, new { challengeId = cid, name = "Late", credential }, token);
+        Assert.Equal(HttpStatusCode.Forbidden, late.StatusCode);
+        Assert.Equal("reauthentication_required", (await Problem(late)).GetProperty("code").GetString());
+        Assert.Equal(0, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Post("/api/v1/auth/reauthenticate", new { password = Pw }, token)).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await k.Send(Post, AccountPasskeys, new { challengeId = cid, name = "Late", credential }, token)).StatusCode);   // the same challenge still works
+    }
+
+    [Fact]
+    public async Task The_cap_is_counted_under_the_account_lock_so_a_completion_that_raced_cannot_pass_it()
+    {
+        var hook = new BeforeStatement();
+        var config = Open(); config["Auth:MaxPasskeys"] = "2";
+        using var k = new AuthKit(config, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)));
+        var token = await k.VerifiedSession(Email);
+        await AddPasskey(k, token);                                                                // one of two
+        var (cidA, optsA) = await Opts(k, AccountOptions, token);
+        var (cidB, optsB) = await Opts(k, AccountOptions, token);
+        var credA = new VirtualAuthenticator().Register(optsA);
+        var credB = new VirtualAuthenticator().Register(optsB);
+        HttpStatusCode inner = default;
+        // the first completion has read "one of two" and is verifying the attestation (the credential-id uniqueness check inside it is the second read of that column); the second runs through completely and takes the second place
+        var seen = 0;
+        hook.When = sql => sql.Contains("buyer_passkeys") && sql.Contains("CredentialId") && sql.TrimStart().StartsWith("SELECT", StringComparison.OrdinalIgnoreCase) && ++seen == 2;
+        hook.Then = async () => inner = (await k.Send(Post, AccountPasskeys, new { challengeId = cidB, name = "B", credential = credB }, token)).StatusCode;
+        var outer = await k.Send(Post, AccountPasskeys, new { challengeId = cidA, name = "A", credential = credA }, token);
+        Assert.Null(hook.When);
+        Assert.Equal(HttpStatusCode.Created, inner);
+        Assert.Equal(HttpStatusCode.Conflict, outer.StatusCode);                                   // counted again under the lock: two already
+        Assert.Equal("too_many_passkeys", (await Problem(outer)).GetProperty("code").GetString());
+        Assert.Equal(2, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+    }
+
+    [Fact]
+    public async Task A_discoverable_sign_in_needs_the_user_handle_and_it_must_be_the_owners()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        var (authn, _) = await AddPasskey(k, token);
+        authn.IncludeUserHandle = false;
+        Assert.Equal(HttpStatusCode.Unauthorized, (await SignInWith(k, authn)).StatusCode);       // no handle: refused
+        authn.IncludeUserHandle = true;
+        var real = authn.UserHandle;
+        authn.UserHandle = Guid.NewGuid().ToByteArray();                                           // someone else's handle
+        Assert.Equal(HttpStatusCode.Unauthorized, (await SignInWith(k, authn)).StatusCode);
+        authn.UserHandle = real;
+        Assert.Equal(HttpStatusCode.OK, (await SignInWith(k, authn)).StatusCode);                  // the owner's: signed in
+    }
+
+    [Fact]
+    public async Task The_passkey_endpoints_of_the_account_have_the_small_body_cap()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        var big = new { challengeId = Guid.NewGuid(), name = "x", credential = new { padding = new string('a', 40_000) } };
+        var r = await k.Send(Post, AccountPasskeys, big, token);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, r.StatusCode);
+        Assert.Equal("too_large", (await Problem(r)).GetProperty("code").GetString());
+    }
+
+    [Theory]
+    [InlineData("co.uk", false)]
+    [InlineData("github.io", false)]
+    [InlineData("herokuapp.com", false)]
+    [InlineData("solvelt.co.uk", true)]
+    [InlineData("solvelt.com", true)]
+    [InlineData("myshop.github.io", true)]
+    public void A_public_suffix_is_not_an_acceptable_relying_party_id_in_production(string rpId, bool acceptable)
+    {
+        var problems = Problems(new Dictionary<string, string?> { ["Auth:WebAuthnRpId"] = rpId, ["Auth:WebAuthnOrigins:0"] = $"https://www.{rpId}" }, "Production");
+        Assert.Equal(acceptable, problems.Count == 0);
+        if (!acceptable) Assert.Contains(problems, p => p.Contains("public suffix"));
+    }
+
+    [Fact]
+    public async Task Remove_all_removes_every_passkey_with_one_mail_and_needs_a_recent_sign_in_and_a_password()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        Assert.Equal("no_passkeys", (await Problem(await k.Send(Delete, AccountPasskeys, null, token))).GetProperty("code").GetString());
+        await AddPasskey(k, token); await AddPasskey(k, token);
+        k.F.Clock.Advance(TimeSpan.FromMinutes(20));
+        Assert.Equal("reauthentication_required", (await Problem(await k.Send(Delete, AccountPasskeys, null, token))).GetProperty("code").GetString());
+        Assert.Equal(2, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+        await k.Post("/api/v1/auth/reauthenticate", new { password = Pw }, token);
+        await k.Dispatch();
+        var before = (await k.Mail(Email)).Count(m => m.Subject.Contains("removed"));
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Delete, AccountPasskeys, null, token)).StatusCode);
+        Assert.Equal(0, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+        await k.Dispatch();
+        Assert.Equal(before + 1, (await k.Mail(Email)).Count(m => m.Subject.Contains("removed")));
+    }
+
+    [Fact]
+    public async Task Remove_all_is_refused_when_the_passkeys_are_the_only_way_in()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        await AddPasskey(k, token);
+        await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, (string?)null)); return 0; });
+        var r = await k.Send(Delete, AccountPasskeys, null, token);
+        Assert.Equal(HttpStatusCode.Conflict, r.StatusCode);
+        Assert.Equal("last_sign_in_method", (await Problem(r)).GetProperty("code").GetString());
+        Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+    }
+
+    [Fact]
+    public async Task A_password_change_keeps_the_passkeys_unless_asked_and_the_mail_says_so()
+    {
+        const string NewPw = "a brand new passphrase";
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        await AddPasskey(k, token);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = NewPw }, token)).StatusCode);
+        Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));                           // kept by default
+        await k.Dispatch();
+        var mail = (await k.Mail(Email)).Last(m => m.Subject.Contains("password was changed"));
+        Assert.Contains("Passkeys on your account were not changed", mail.TextBody);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/password", new { currentPassword = NewPw, newPassword = Pw, removePasskeys = true }, token)).StatusCode);
+        Assert.Equal(0, await k.Db(db => db.BuyerPasskeys.CountAsync()));                           // removed in the same step when asked
+    }
 }

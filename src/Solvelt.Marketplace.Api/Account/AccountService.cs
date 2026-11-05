@@ -189,9 +189,9 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
 
     /// <summary>
     /// Needs a sign-in in the last 10 minutes (O-11) AND the current password, checked through the same gate as sign-in. Every OTHER session ends; this one goes on.
-    /// A mail tells the owner (ids only in the outbox).
+    /// <paramref name="removePasskeys"/> also removes every passkey in the same transaction (the account has a password now, so it keeps a way in). A mail tells the owner (ids only in the outbox).
     /// </summary>
-    public async Task<AccountResult> ChangePasswordAsync(BuyerPrincipal who, string currentPassword, string newPassword, string clientIp, CancellationToken ct)
+    public async Task<AccountResult> ChangePasswordAsync(BuyerPrincipal who, string currentPassword, string newPassword, string clientIp, CancellationToken ct, bool removePasskeys = false)
     {
         if (!Recent(who)) return new AccountResult(AccountOutcome.ReauthenticationRequired);
         if (AuthValidation.PasswordProblem(newPassword, who.Email, authOptions.Value.PasswordMinLength) is { } problem) return new AccountResult(AccountOutcome.WeakPassword, problem);
@@ -211,6 +211,8 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         // this session joins the new epoch, but only if it was still on the one the check saw
         await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null && s.Epoch == checkedEpoch).ExecuteUpdateAsync(s => s.SetProperty(x => x.Epoch, checkedEpoch + 1), ct);
         await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.Id != who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        // passkeys are a way in of their own and survive a password change unless the owner asks otherwise (M1-85): a buyer who fears one was added from a stolen session ticks "remove my passkeys" here
+        if (removePasskeys) await db.BuyerPasskeys.Where(p => p.AccountId == who.AccountId).ExecuteDeleteAsync(ct);
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasswordChanged, who.AccountId));
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
