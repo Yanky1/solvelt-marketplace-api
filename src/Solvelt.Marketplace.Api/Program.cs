@@ -222,12 +222,9 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-if (devLike)
 {
     using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
-    db.Database.EnsureCreated();
-    SearchSchema.Ensure(db);
+    DatabaseSetup.Prepare(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), devLike, builder.Configuration.GetValue("Database:MigrateOnStart", true));
 }
 if (!builder.Environment.IsEnvironment("Testing"))
 {

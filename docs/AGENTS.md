@@ -16,7 +16,7 @@
 **Ownership (2026-11-04 08:00):** M2 owns the catalog read model and sync plus all catalog, search and listing pages in the web repo. W1 owns the shell, the design system and auth/account. M1 owns auth/accounts, the portal client, the receiver and the outbox.
 
 **Open items across workstreams**
-- PostgreSQL production schema: the first EF migration must run SearchSchema.PostgresDdl and `CREATE EXTENSION IF NOT EXISTS pg_trgm` (M2-02); the DB role needs the permission, or an operator pre-creates it. Owner: M1. Launch gate.
+- PostgreSQL production schema: the first EF migration must run SearchSchema.PostgresDdl and `CREATE EXTENSION IF NOT EXISTS pg_trgm` (M2-02); the DB role needs the permission, or an operator pre-creates it. Owner: M1. Launch gate. **Done in InitialCreate (M1-83): `InitialCreate.SearchSchema.cs`; from now on every model change needs the migration regenerated (see README, Database schema).**
 - Email provider: production start-up fails until one is configured (M1 review of af8d339). Owner action before launch.
 - M8 needs a read-only `BACKEND_REPO_TOKEN` secret (the portal backend repo is private). Owner action.
 - Public-page caching vs the visitor cookie (W1-23): M2 decides with its first web slice.
