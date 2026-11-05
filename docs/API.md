@@ -5,7 +5,7 @@ Rate limited endpoints answer `429 { code: "rate_limited" }` with `Retry-After`.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/health` | none | Liveness: `{ "status": "ok", "forwarding": { "invalid": n }, "outbox": { "deadLettered": n }, "admin": { "refused": n } }`; counts since start-up, for a monitor to alert on a rise |
+| GET | `/health` | none | Liveness: `{ "status": "ok", "forwarding": { "invalid": n }, "outbox": { "deadLettered": n }, "admin": { "refused": n }, "catalog": { "unreadable": n } }`; counts since start-up, for a monitor to alert on a rise |
 | POST | `/api/portal/webhooks` | portal signature | Portal -> marketplace events; see below |
 | GET | `/api/v1/catalog/categories` | none | Category tree with visible-listing counts; see Catalog |
 | GET | `/api/v1/catalog/brands` | none | Brands that have visible listings |

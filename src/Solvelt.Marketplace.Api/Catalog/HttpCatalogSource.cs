@@ -28,19 +28,23 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
                 var root = Ok(await portal.GetCatalogListingsAsync(since, size, ct), "listings");
                 if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
                     throw new InvalidDataException("The catalog feed page has no items array.");
-                var listings = new List<ListingSnapshot>(); var tombstones = new List<ListingTombstone>();
+                var listings = new List<ListingSnapshot>(); var tombstones = new List<ListingTombstone>(); var unreadable = new List<UnreadableDocument>();
                 foreach (var item in items.EnumerateArray())
                 {
                     if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("listed", out var l) && l.ValueKind == JsonValueKind.False)
                     {
                         if (Tombstone(item) is { } t) tombstones.Add(t); else log.LogWarning("Skipping an unreadable catalog tombstone in the feed");
                     }
-                    else if (Map(item, time.GetUtcNow()) is { } s) listings.Add(s);
-                    // one document we cannot read never blocks the page: it is logged by id inside Map and the cursor moves on
+                    else
+                    {
+                        var (s, bad) = MapCore(item, time.GetUtcNow());
+                        if (s is not null) listings.Add(s); else if (bad is not null) unreadable.Add(bad);
+                        // one document we cannot read never blocks the page: it is logged by id inside MapCore, handed to the sync to be set aside, and the cursor moves on
+                    }
                 }
                 var next = root.TryGetProperty("nextCursor", out var nc) && nc.ValueKind == JsonValueKind.String ? nc.GetString() : since;
                 var more = root.TryGetProperty("hasMore", out var hm) && hm.ValueKind == JsonValueKind.True;
-                return new ListingPage(listings, next, more, tombstones);
+                return new ListingPage(listings, next, more, tombstones, unreadable);
             }
             catch (PortalResponseTooLargeException) when (size > 1) { size = Math.Max(1, size / 2); }
         }
@@ -52,7 +56,8 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
         if (result.Status == 404) return null;                       // not visible: unknown, draft, hidden, moderated and unlisted all look the same
         var root = Ok(result, "listing");
         if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("listed", out var l) && l.ValueKind == JsonValueKind.False) return null;
-        return Map(root, time.GetUtcNow()) ?? throw new InvalidDataException("The portal's listing document could not be read.");   // not "removed": retried with backoff
+        var (snapshot, bad) = MapCore(root, time.GetUtcNow());
+        return snapshot ?? throw new UnreadableListingException(id, bad?.Reason ?? "required_field");   // not "removed" and not an outage: the sync sets it aside and asks again later (with backoff)
     }
 
     public async Task<IReadOnlyList<CategoryDto>> GetCategoriesAsync(CancellationToken ct)
@@ -93,18 +98,25 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
     // ---------- mapping (the one place that knows the portal's document shape) ----------
 
     /// <summary>The snapshot for one feed document, or null (logged by listing id only) when it cannot be read. Sale prices are judged on <paramref name="now"/> (our clock).</summary>
-    public ListingSnapshot? Map(JsonElement d, DateTimeOffset now)
+    public ListingSnapshot? Map(JsonElement d, DateTimeOffset now) => MapCore(d, now).Snapshot;
+
+    /// <summary>
+    /// Like <see cref="Map"/>, and says WHY when the document cannot be read: a short code (<c>required_field</c>, <c>price</c>, <c>quote_price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>) with the listing id and version when
+    /// they were readable. <c>quote_price</c> is a service the portal prices by quote (<c>service.pricingModel</c> is <c>quote</c>, so <c>price.amountMinor</c> is null): the read model has no price for it yet.
+    /// </summary>
+    public (ListingSnapshot? Snapshot, UnreadableDocument? Unreadable) MapCore(JsonElement d, DateTimeOffset now)
     {
-        if (d.ValueKind != JsonValueKind.Object) return null;
+        if (d.ValueKind != JsonValueKind.Object) return (null, new UnreadableDocument(null, null, "required_field"));
         var id = Guid_(d, "listingId");
+        (ListingSnapshot?, UnreadableDocument?) Bad(string code) { log.LogWarning("Skipping a catalog document that could not be read ({Why}) for listing {ListingId}", code, id); return (null, new UnreadableDocument(id, Long(d, "version"), code)); }
         try
         {
             var type = Str(d, "type");
-            if (id is not { } listingId || Long(d, "version") is not { } version || Str(d, "title") is not { } title || type is not ("product" or "service")) return Fail(id, "required field");
-            if (!d.TryGetProperty("price", out var price) || price.ValueKind != JsonValueKind.Object || Long(price, "amountMinor") is not { } amount || Str(price, "currency") is not { } currency) return Fail(id, "price");
-            if (!d.TryGetProperty("seller", out var seller) || Guid_(seller, "sellerId") is not { } sellerId) return Fail(id, "seller");
-            if (!d.TryGetProperty("brand", out var brand) || Guid_(brand, "brandId") is not { } brandId) return Fail(id, "brand");
-            if (!d.TryGetProperty("category", out var category) || Guid_(category, "id") is not { } categoryId) return Fail(id, "category");
+            if (id is not { } listingId || Long(d, "version") is not { } version || Str(d, "title") is not { } title || type is not ("product" or "service")) return Bad("required_field");
+            if (!d.TryGetProperty("price", out var price) || price.ValueKind != JsonValueKind.Object || Long(price, "amountMinor") is not { } amount || Str(price, "currency") is not { } currency) return Bad(QuotePriced(d, type) ? "quote_price" : "price");
+            if (!d.TryGetProperty("seller", out var seller) || Guid_(seller, "sellerId") is not { } sellerId) return Bad("seller");
+            if (!d.TryGetProperty("brand", out var brand) || Guid_(brand, "brandId") is not { } brandId) return Bad("brand");
+            if (!d.TryGetProperty("category", out var category) || Guid_(category, "id") is not { } categoryId) return Bad("category");
 
             // sale and compare-at, on our clock: a window that has not started or has ended does not apply
             var compareAt = Long(price, "compareAtMinor");
@@ -169,15 +181,19 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
                 foreach (var f in qs.EnumerateArray().Take(MaxQuestions)) if (Str(f, "question") is { } q && Str(f, "answer") is { } ans) faqs.Add(new FaqDto(q, ans));   // published answers only; the asker is never named
 
             var updated = Time(d, "updatedAt") ?? now;
-            return new ListingSnapshot(listingId, version, type, "Active", title, summary, description,
+            return (new ListingSnapshot(listingId, version, type, "Active", title, summary, description,
                 new SellerRef(sellerId, Str(seller, "displayName") ?? "", true), new BrandRef(brandId, Str(brand, "name") ?? ""), categoryId, currency.ToUpperInvariant(),
-                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d), Dimensions(d), d.TryGetProperty("demo", out var demoFlag) && demoFlag.ValueKind == JsonValueKind.True);
+                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d), Dimensions(d), d.TryGetProperty("demo", out var demoFlag) && demoFlag.ValueKind == JsonValueKind.True), null);
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
         {
-            return Fail(id, ex.GetType().Name);
+            return Bad("required_field");
         }
     }
+
+    /// <summary>A service the portal prices by quote: <c>service.pricingModel</c> is <c>quote</c> (any case), so the document has no amount to read.</summary>
+    private static bool QuotePriced(JsonElement d, string? type)
+        => type == "service" && d.TryGetProperty("service", out var svc) && svc.ValueKind == JsonValueKind.Object && string.Equals(Str(svc, "pricingModel"), "quote", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The seller's keywords, cut per term, in number and in total (the portal sends what was typed).</summary>
     private static IReadOnlyList<string> SearchTerms(JsonElement d)
@@ -233,7 +249,6 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
         return new ListingTombstone(id, ListingTombstone.UnknownVersion, reason);
     }
 
-    private ListingSnapshot? Fail(Guid? id, string why) { log.LogWarning("Skipping a catalog document that could not be read ({Why}) for listing {ListingId}", why, id); return null; }
 
     // ---------- small readers ----------
     private static JsonElement Ok(PortalResult<JsonElement> r, string what)

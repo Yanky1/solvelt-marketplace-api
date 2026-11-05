@@ -5,7 +5,7 @@ using Solvelt.Marketplace.Api.Infrastructure;
 
 namespace Solvelt.Marketplace.Api.Catalog;
 
-public sealed class SyncCounts { public int Applied, Skipped, Fetched, Pending; }
+public sealed class SyncCounts { public int Applied, Skipped, Fetched, Pending, Quarantined; }
 
 public sealed record CatalogSyncResult(bool Ran, int Applied, int Skipped, int Pending, int Fetched, string? Error);
 
@@ -29,7 +29,7 @@ public static class SnapshotLimits
 /// care about order (CONTRACT.md §2). One instance runs at a time (a lease row with an owner token, renewed per page). The cursor moves in the
 /// same transaction as the page, and only a <b>deterministic</b> failure skips a record (see <see cref="SyncErrors"/>).
 /// </summary>
-public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, TimeProvider time, IOptions<CatalogOptions> options, ILogger<CatalogSyncService> log)
+public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, TimeProvider time, IOptions<CatalogOptions> options, ILogger<CatalogSyncService> log, Outbox.OpsCounters? ops = null)
 {
     public const string StateKey = "listings";
     private static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
@@ -82,7 +82,8 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
                     .SetProperty(x => x.LastSuccessAt, x => err == null ? now : x.LastSuccessAt), CancellationToken.None);
             }
         }
-        log.LogInformation("Catalog sync: {Applied} applied, {Skipped} skipped, {Fetched} fetched, {Pending} still pending", counts.Applied, counts.Skipped, counts.Fetched, counts.Pending);
+        try { ops?.SetCatalogQuarantined(await db.CatalogQuarantine.CountAsync(CancellationToken.None)); } catch (Exception ex) when (ex is not OperationCanceledException) { /* the gauge is best effort: /health must not make a run fail */ }
+        log.LogInformation("Catalog sync: {Applied} applied, {Skipped} skipped, {Fetched} fetched, {Pending} still pending, {Quarantined} set aside this run", counts.Applied, counts.Skipped, counts.Fetched, counts.Pending, counts.Quarantined);
         return new(true, counts.Applied, counts.Skipped, counts.Pending, counts.Fetched, error);
     }
 
@@ -227,6 +228,8 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             await RenewLeaseAsync(ct);
             var page = await source.GetListingsAsync(cursor, Math.Clamp(o.PageSize, 1, 500), ct);
             var next = page.NextCursor ?? cursor;
+            // Documents the feed gave us that cannot be read are set aside FIRST (idempotent: a crash re-polls the page), so the page and its cursor still commit and one bad document never stops the run.
+            foreach (var bad in page.Unreadable ?? []) await QuarantineAsync(bad.Id, bad.Version, bad.Reason, counts, ct);
             await ApplyPageAsync(page, next, counts, ct);
             cursor = next;
             if (!page.HasMore) break;
@@ -308,7 +311,16 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         foreach (var item in due)
         {
             await RenewLeaseAsync(ct);
-            var snapshot = await source.GetListingAsync(item.Id, ct);     // a portal that is down throws: the run fails and the rows stay pending
+            ListingSnapshot? snapshot;
+            try { snapshot = await source.GetListingAsync(item.Id, ct); }     // a portal that is down throws: the run fails and the rows stay pending
+            catch (UnreadableListingException bad)
+            {
+                // The portal answered, with a document we cannot read: that is not an outage and asking at once again changes nothing. Set it aside, back off (the portal may fix it), and go on with the others.
+                db.ChangeTracker.Clear();
+                await QuarantineAsync(item.Id, null, bad.Reason, counts, ct);
+                await BackOffIfStillPendingAsync(item.Id, item.FetchAttempts, ct);
+                continue;
+            }
             db.ChangeTracker.Clear();
             if (snapshot is null) { await MarkRemovedAsync(item.Id, ct); continue; }
             try
@@ -327,6 +339,28 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         counts.Pending = await db.CatalogListings.CountAsync(l => l.KnownVersion > l.Version, ct);
     }
 
+    /// <summary>
+    /// Sets a listing document we cannot read aside (see <see cref="CatalogQuarantine"/>): one row per listing with the short reason, and a listing we already hold is HIDDEN (status <c>Quarantined</c>) until a readable
+    /// version arrives, because its newer document cannot be shown and the old one may be wrong. Never the document, only the id and the code, in the log. No id means nothing to record: it is only counted.
+    /// </summary>
+    private async Task QuarantineAsync(Guid? id, long? version, string reason, SyncCounts counts, CancellationToken ct)
+    {
+        counts.Quarantined++; counts.Skipped++;
+        if (id is not { } listingId) { log.LogWarning("Set aside a catalog document without a readable id ({Reason})", reason); return; }
+        var now = time.GetUtcNow().ToUniversalTime();
+        var row = await db.CatalogQuarantine.FirstOrDefaultAsync(q => q.ListingId == listingId, ct);
+        if (row is null) db.CatalogQuarantine.Add(new CatalogQuarantine { ListingId = listingId, Reason = reason, Version = version, FirstSeenAt = now, LastSeenAt = now, Seen = 1 });
+        else { row.Reason = reason; row.Version = version ?? row.Version; row.LastSeenAt = now; row.Seen++; }
+        var listing = await db.CatalogListings.FirstOrDefaultAsync(l => l.Id == listingId, ct);
+        if (listing is { Visible: true }) { listing.Status = "Quarantined"; listing.RecomputeVisibility(); listing.Row++; }
+        await db.SaveChangesAsync(ct);
+        db.ChangeTracker.Clear();
+        log.LogWarning("Set aside catalog listing {ListingId}: its document cannot be read ({Reason})", listingId, reason);
+    }
+
+    /// <summary>A listing that applied readable, or was removed, is no longer set aside.</summary>
+    private Task ClearQuarantineAsync(Guid id, CancellationToken ct) => db.CatalogQuarantine.Where(q => q.ListingId == id).ExecuteDeleteAsync(ct);
+
     /// <summary>The wait before the next try of a pending fetch: 1, 2, 4 ... minutes, at most 6 hours.</summary>
     public static TimeSpan Backoff(int attempts) => TimeSpan.FromMinutes(Math.Min(360, Math.Pow(2, Math.Clamp(attempts, 1, 10) - 1)));
 
@@ -342,6 +376,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     private async Task MarkRemovedAsync(Guid id, CancellationToken ct)
     {
         var l = await db.CatalogListings.FirstOrDefaultAsync(x => x.Id == id, ct);
+        await ClearQuarantineAsync(id, ct);   // gone at the portal: nothing left to set aside
         if (l is null || l.KnownVersion <= l.Version) return;
         l.Status = "Removed";
         l.Version = l.KnownVersion;
@@ -358,6 +393,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     private async Task<bool> ApplyTombstoneAsync(ListingTombstone t, CancellationToken ct)
     {
         if (t.Version < 0) return false;
+        await ClearQuarantineAsync(t.Id, ct);   // unlisted or gone at the portal: nothing left to set aside
         var l = await db.CatalogListings.FirstOrDefaultAsync(x => x.Id == t.Id, ct);
         if (l is null) return false;
         if (t.Version == ListingTombstone.UnknownVersion)
@@ -442,6 +478,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         SyncVariants(listing, s);
         if (listing.Visible) await Lists.WishlistWatchQueue.QueueAsync(db, time, listing.Id, listing.Version, ct);
         SyncImages(listing, s);
+        await ClearQuarantineAsync(s.Id, ct);   // readable now
         db.CatalogAttributes.RemoveRange(listing.Attributes);
         listing.Attributes = s.Attributes.Where(a => !string.IsNullOrWhiteSpace(a.Key) && !string.IsNullOrWhiteSpace(a.Value)).Take(SnapshotLimits.MaxAttributes)
             .Select((a, i) => new CatalogAttribute { ListingId = s.Id, Key = SnapshotLimits.Clip(a.Key, SnapshotLimits.AttributeKey), Value = SnapshotLimits.Clip(a.Value, SnapshotLimits.AttributeValue), SortOrder = i }).ToList();

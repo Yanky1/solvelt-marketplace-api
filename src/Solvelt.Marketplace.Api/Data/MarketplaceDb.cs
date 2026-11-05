@@ -8,6 +8,7 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
 {
     public DbSet<PortalInboundEvent> PortalInboundEvents => Set<PortalInboundEvent>();
     public DbSet<ProjectionState> ProjectionStates => Set<ProjectionState>();
+    public DbSet<CatalogQuarantine> CatalogQuarantine => Set<CatalogQuarantine>();
     public DbSet<CatalogSeller> CatalogSellers => Set<CatalogSeller>();
     public DbSet<CatalogBrand> CatalogBrands => Set<CatalogBrand>();
     public DbSet<CatalogCategory> CatalogCategories => Set<CatalogCategory>();
