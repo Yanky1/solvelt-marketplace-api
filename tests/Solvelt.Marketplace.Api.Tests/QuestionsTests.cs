@@ -67,11 +67,13 @@ public sealed class QuestionsTests : IDisposable
     public async Task The_question_throttle_holds_under_parallel_requests_of_one_buyer()
     {
         var t = await _k.VerifiedSession("q3p@example.com");
+        Assert.Equal(HttpStatusCode.NotFound, (await Ask(t, new { listingId = Guid.NewGuid(), text = "Warm-up: syncs the catalog before the parallel requests (the helper does it lazily)" })).Status);
         for (var round = 0; round < 2; round++)
         {
             var answers = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Ask(t, new { listingId = Listing(), text = $"Parallel question {round}-{i}" })));
-            Assert.Equal(round == 0 ? QuestionEndpoints.PerListingPerDay : 0, answers.Count(a => a.Status == HttpStatusCode.Accepted));   // the first wave fills the three places, the second finds none
-            Assert.All(answers.Where(a => a.Status != HttpStatusCode.Accepted), a => Assert.Equal(HttpStatusCode.TooManyRequests, a.Status));
+            var statuses = string.Join(",", answers.Select(a => (int)a.Status));
+            Assert.True((round == 0 ? QuestionEndpoints.PerListingPerDay : 0) == answers.Count(a => a.Status == HttpStatusCode.Accepted), $"the first wave fills the three places, the second finds none; statuses: {statuses}");
+            Assert.True(answers.Where(a => a.Status != HttpStatusCode.Accepted).All(a => a.Status == HttpStatusCode.TooManyRequests), $"the others are refused with 429; statuses: {statuses}");
         }
         Assert.Equal(QuestionEndpoints.PerListingPerDay, await _k.Db(db => db.ProductQuestions.CountAsync()));
     }
