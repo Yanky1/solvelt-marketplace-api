@@ -20,8 +20,27 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
 {
     /// <summary>How recently the buyer must have proven who they are for a sensitive change (decision O-11).</summary>
     public static readonly TimeSpan RecentSignIn = TimeSpan.FromMinutes(10);
-    private const int Attempts = 8;
+    private const int Attempts = 12;
     private DateTimeOffset Now => time.GetUtcNow().ToUniversalTime();
+
+    /// <summary>
+    /// A conflict worth another try: a unique violation (another request made a default first), a SQLite lock that was not freed in time (SQLITE_BUSY 5, SQLITE_LOCKED 6) or a PostgreSQL serialization failure or
+    /// deadlock (40001, 40P01). Anything else is a real error and is not retried. After the attempts the caller gets <see cref="TooBusyException"/>: a 503 with Retry-After, never a 500.
+    /// </summary>
+    public static bool IsRetryable(Exception ex)
+    {
+        if (IsUniqueViolation(ex)) return true;
+        for (var e = ex; e is not null; e = e.InnerException!)
+        {
+            if (e is Npgsql.PostgresException { SqlState: "40001" or "40P01" }) return true;
+            if (e is Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 5 or 6 }) return true;
+            if (e.InnerException is null) break;
+        }
+        return false;
+    }
+
+    /// <summary>A short random pause that grows with the attempt, so requests that collided do not collide again in step.</summary>
+    private static Task BackOffAsync(int attempt, CancellationToken ct) => Task.Delay(Random.Shared.Next(2, 12) * (attempt + 1), ct);
 
     public static bool IsUniqueViolation(Exception ex)
     {
@@ -96,9 +115,9 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return (View(address), AccountOutcome.Ok);
             }
-            catch (Exception ex) when (IsUniqueViolation(ex)) { /* another request made a default first: look again */ }
+            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }   // a default made by another request, or a lock conflict: look again
         }
-        throw new InvalidOperationException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.");
     }
 
     /// <summary>Replaces the address. <c>isDefault: true</c> makes it the default; <c>false</c> on the default address is ignored (there is always one).</summary>
@@ -124,9 +143,9 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return View(address);
             }
-            catch (Exception ex) when (IsUniqueViolation(ex)) { }
+            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }
         }
-        throw new InvalidOperationException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.");
     }
 
     public async Task<bool> SetDefaultAsync(Guid accountId, Guid id, CancellationToken ct)
@@ -145,9 +164,9 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return true;
             }
-            catch (Exception ex) when (IsUniqueViolation(ex)) { }
+            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }
         }
-        throw new InvalidOperationException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.");
     }
 
     /// <summary>Deletes the address; when it was the default the oldest remaining one becomes the default.</summary>
@@ -171,9 +190,9 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
                 await tx.CommitAsync(ct);
                 return true;
             }
-            catch (Exception ex) when (IsUniqueViolation(ex)) { }
+            catch (Exception ex) when (IsRetryable(ex)) { await BackOffAsync(attempt, ct); }
         }
-        throw new InvalidOperationException("The address book is too busy; try again.");
+        throw new TooBusyException("The address book is too busy; try again.");
     }
 
     /// <summary>
