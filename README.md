@@ -26,6 +26,14 @@ TEST_POSTGRES_CONNECTION="Host=localhost;Username=postgres;Password=postgres;Dat
 CI (`.github/workflows/ci.yml`) restores, builds with warnings as errors, runs the tests on SQLite, and runs them again against a PostgreSQL service container.
 It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 
+## Database schema (existing databases)
+Development and Testing build the schema from the model with `EnsureCreated`, which creates a database once and never alters it. A database made by an earlier build therefore lacks the tables and columns added since, and the first request that touches one answers 500. At start the API compares the database with the model and logs ONE critical line naming the differences (it does not stop). To see them and get the SQL that adds what is missing (read-only; review it and run it in a transaction on a copy first):
+```bash
+dotnet run --project tools/SchemaTool -- "Data Source=marketplace-dev.db" sqlite
+dotnet run --project tools/SchemaTool -- "Host=...;Database=...;Username=...;Password=..." postgres
+```
+Or recreate the development database (delete the file) when its data does not matter.
+
 ## Configuration (environment variables, `__` for nesting)
 | Key | Required in Production | Notes |
 |---|---|---|

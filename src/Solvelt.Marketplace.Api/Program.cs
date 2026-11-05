@@ -217,6 +217,12 @@ if (devLike)
     db.Database.EnsureCreated();
     SearchSchema.Ensure(db);
 }
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    // M1-83: EnsureCreated never alters an existing database, so one made by an earlier build lacks what was added since; say so once, clearly (it does not stop the start).
+    using var scope = app.Services.CreateScope();
+    SchemaCheck.LogAtStartup(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), app.Logger);
+}
 
 app.MapGet("/health", (ClientIpResolver forwarding, OpsCounters ops) => Results.Json(new
 {

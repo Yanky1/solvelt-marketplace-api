@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Prints what an existing database lacks compared with the model (decision M1-83); read-only. Never deployed. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Solvelt.Marketplace.Api\Solvelt.Marketplace.Api.csproj" />
+  </ItemGroup>
+</Project>
