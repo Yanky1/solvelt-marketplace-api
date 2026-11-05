@@ -112,11 +112,12 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
     public async Task<(ReviewOutcome Outcome, Review? Review)> EditAsync(Guid accountId, Guid reviewId, int rating, string text, CancellationToken ct)
     {
         var now = time.GetUtcNow().ToUniversalTime();
-        var r = await db.Reviews.FirstOrDefaultAsync(x => x.Id == reviewId && x.AccountId == accountId, ct);
-        if (r is null) return (ReviewOutcome.NotFound, null);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // Everything that decides the figures is read UNDER the row lock: a parallel edit (3 -> 5 and 3 -> 1) or a moderation decision must see the rating and status the other one left, never the ones read before it ran.
+        if (!await LockAsync(db, reviewId, accountId, ct)) return (ReviewOutcome.NotFound, null);
+        var r = await db.Reviews.FirstAsync(x => x.Id == reviewId, ct);
         if (r.Status != ReviewStatus.Published || now - r.CreatedAt > TimeSpan.FromDays(ReviewLimits.EditDays)) return (ReviewOutcome.Locked, null);
         var oldRating = r.Rating;
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
         r.Rating = rating; r.Text = text; r.EditedAt = now;
         await db.SaveChangesAsync(ct);
         if (oldRating != rating)
@@ -129,6 +130,13 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
         await tx.CommitAsync(ct);
         return (ReviewOutcome.Ok, r);
     }
+
+    /// <summary>
+    /// Takes the review's row lock with a no-op UPDATE inside the caller's transaction (PostgreSQL queues every other writer of the row behind it; SQLite serialises writers anyway) and says whether the row exists
+    /// (and belongs to <paramref name="accountId"/> when one is given). Re-read the review AFTER this call: what was read before it may be stale. Used by edits, moderation, erasure and photos.
+    /// </summary>
+    public static async Task<bool> LockAsync(MarketplaceDb db, Guid reviewId, Guid? accountId, CancellationToken ct)
+        => await db.Reviews.Where(x => x.Id == reviewId && (accountId == null || x.AccountId == accountId)).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount), ct) > 0;
 
     // ---------------------------------------------------------------- photos
     /// <summary>
@@ -148,7 +156,9 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         // The review row is the lock: a no-op UPDATE takes the row lock (PostgreSQL) and queues parallel uploads for the same review, so the count below is exact (SQLite serialises writers anyway).
         // Counting after an unlocked insert made every racer see more than the cap and remove its own photo, so none was accepted.
-        if (await db.Reviews.Where(x => x.Id == reviewId && x.AccountId == accountId).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount), ct) == 0) return (ReviewOutcome.NotFound, null);
+        if (!await LockAsync(db, reviewId, accountId, ct)) return (ReviewOutcome.NotFound, null);
+        var cur = await db.Reviews.AsNoTracking().Where(x => x.Id == reviewId).Select(x => new { x.Status, x.CreatedAt }).FirstAsync(ct);   // read again under the lock: a hide or a removal may have come in since the first look
+        if (cur.Status != ReviewStatus.Published || now - cur.CreatedAt > TimeSpan.FromDays(ReviewLimits.EditDays)) return (ReviewOutcome.Locked, null);
         if (await db.ReviewPhotos.CountAsync(p => p.ReviewId == reviewId, ct) >= ReviewLimits.MaxPhotos) return (ReviewOutcome.TooMany, null);
         db.ReviewPhotos.Add(photo);
         db.ReviewPhotoData.Add(new ReviewPhotoData { PhotoId = photo.Id, Bytes = clean.Bytes });

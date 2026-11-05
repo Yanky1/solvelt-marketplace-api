@@ -41,6 +41,9 @@ public static class ReviewModeration
             return HandlerOutcome.Applied();
         }
 
+        // The status and the rating that decide the figures are read under the review's row lock: an edit (or a second decision) that ran a moment ago has changed them since `review` was loaded.
+        await ReviewService.LockAsync(c.Db, review.Id, null, ct);
+        await c.Db.Entry(review).ReloadAsync(ct);
         var decisions = await c.Db.ReviewReports.AsNoTracking().Where(x => x.ReviewId == review.Id && x.Kind == "review" && x.Decision != null).Select(x => x.Decision!).ToListAsync(ct);
         var next = review.Status == ReviewStatus.Removed || decisions.Contains("removed") ? ReviewStatus.Removed : decisions.Contains("hidden") ? ReviewStatus.Hidden : ReviewStatus.Published;
         if (next != review.Status)
@@ -108,7 +111,9 @@ public sealed class ReviewsAccountEraser(MarketplaceDb db, TimeProvider time) : 
         foreach (var r in mine)
         {
             await using var tx = await db.Database.BeginTransactionAsync(ct);
-            if (r.Status == ReviewStatus.Published) await Aggregates.ApplyAsync(db, r, -1, ct);
+            if (!await ReviewService.LockAsync(db, r.Id, null, ct)) { await tx.RollbackAsync(ct); continue; }
+            var cur = await db.Reviews.AsNoTracking().FirstAsync(x => x.Id == r.Id, ct);   // the status and rating NOW, not those listed before the lock
+            if (cur.Status == ReviewStatus.Published) await Aggregates.ApplyAsync(db, cur, -1, ct);
             await outbox.TryEnqueueAsync(ReviewService.StateType, new ReviewService.StatePayload(r.Id, "removed", "account_deleted"), $"review-state:{r.Id:N}:removed", ct: ct);
             await db.ReviewPhotoData.Where(d => db.ReviewPhotos.Any(p => p.Id == d.PhotoId && p.ReviewId == r.Id)).ExecuteDeleteAsync(ct);
             await db.ReviewPhotos.Where(p => p.ReviewId == r.Id).ExecuteDeleteAsync(ct);
