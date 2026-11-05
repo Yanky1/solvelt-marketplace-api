@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105141008_InitialCreate")]
+    [Migration("20261105153318_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
