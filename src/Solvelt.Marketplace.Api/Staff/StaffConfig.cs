@@ -22,6 +22,8 @@ public sealed class StaffOptions
     public int MaxPasskeys { get; set; } = 5;
     /// <summary>Audit entries are deleted after this many days.</summary>
     public int AuditRetentionDays { get; set; } = 730;
+    /// <summary>Break-glass reveals one staff member may make per hour (counted from the audit log).</summary>
+    public int RevealsPerHour { get; set; } = 20;
 }
 
 public static class StaffConfig

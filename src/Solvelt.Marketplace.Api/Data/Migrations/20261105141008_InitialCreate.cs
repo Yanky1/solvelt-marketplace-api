@@ -142,7 +142,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     SessionEpoch = table.Column<long>(type: "bigint", nullable: false),
                     DeletedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    RedactedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                    RedactedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    StaffLockedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
                 },
                 constraints: table =>
                 {

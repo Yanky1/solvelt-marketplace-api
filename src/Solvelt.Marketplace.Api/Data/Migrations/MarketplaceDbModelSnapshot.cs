@@ -410,6 +410,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<long>("SessionEpoch")
                         .HasColumnType("bigint");
 
+                    b.Property<DateTimeOffset?>("StaffLockedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 

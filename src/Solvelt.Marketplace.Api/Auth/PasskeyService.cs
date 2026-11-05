@@ -201,7 +201,7 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         var passkey = await db.BuyerPasskeys.AsNoTracking().FirstOrDefaultAsync(p => p.CredentialId == rawId, ct);
         if (passkey is null) return fail;
         if (response.Response.UserHandle is not { Length: > 0 } handle || !handle.AsSpan().SequenceEqual(passkey.AccountId.ToByteArray())) return fail;
-        var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Id == passkey.AccountId && a.DeletedAt == null && a.EmailVerifiedAt != null && a.Email != null, ct);
+        var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Id == passkey.AccountId && a.DeletedAt == null && a.EmailVerifiedAt != null && a.Email != null && a.StaffLockedAt == null, ct);
         if (account is null) return fail;
         if (!await VerifyAssertionAsync(passkey, response, AssertionOptions.FromJson(stored), ct)) return fail;
         var token = await auth.CreateSessionAsync(account.Id, ct, account.SessionEpoch);

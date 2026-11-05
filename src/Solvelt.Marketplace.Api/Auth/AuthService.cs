@@ -8,7 +8,7 @@ namespace Solvelt.Marketplace.Api.Auth;
 
 public sealed record BuyerPrincipal(Guid AccountId, Guid SessionId, string DisplayName, string Email, DateTimeOffset AuthenticatedAt);
 public sealed record ResetOutcome(bool Ok, string? PasswordProblem = null);
-public enum SignInStatus { Ok, InvalidCredentials, EmailNotVerified, TooManyAttempts }
+public enum SignInStatus { Ok, InvalidCredentials, EmailNotVerified, TooManyAttempts, Locked }
 public sealed record SignInResult(SignInStatus Status, string? Token = null, BuyerAccount? Account = null, int? RetryAfterSeconds = null, string? CheckedHash = null, long CheckedEpoch = 0);
 
 /// <summary>
@@ -144,6 +144,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         await gate.SucceededAsync(addressKey, ipKey, ct);
         // The password was right: only now is it safe to say the address is not verified.
         if (account.EmailVerifiedAt is null) return new SignInResult(SignInStatus.EmailNotVerified);
+        if (account.StaffLockedAt is not null) return new SignInResult(SignInStatus.Locked);   // locked by staff (M7-07); said only after the password was right
 
         if (rehash)
         {
@@ -249,7 +250,7 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var row = await (from s in db.BuyerSessions.AsNoTracking()
                          join a in db.BuyerAccounts.AsNoTracking() on s.AccountId equals a.Id
                          where s.TokenHash == hash && s.RevokedAt == null && s.ExpiresAt > now && s.AbsoluteExpiresAt > now && s.Epoch == a.SessionEpoch
-                               && a.DeletedAt == null && a.EmailVerifiedAt != null
+                               && a.DeletedAt == null && a.EmailVerifiedAt != null && a.StaffLockedAt == null
                          select new { s.Id, s.LastSeenAt, s.AuthenticatedAt, s.AbsoluteExpiresAt, AccountId = a.Id, a.DisplayName, a.Email }).FirstOrDefaultAsync(ct);
         if (row is null) return null;
         if (now - row.LastSeenAt > TimeSpan.FromMinutes(5))

@@ -79,6 +79,8 @@ public static class AuthEndpoints
                 return Results.Json(new { token = r.Token, user = new { id = r.Account!.Id, displayName = r.Account.DisplayName } });
             case SignInStatus.EmailNotVerified:
                 return Problems.Json(403, "email_not_verified", "Confirm your email address first. You can ask for a new link.");
+            case SignInStatus.Locked:
+                return Problems.Json(403, "account_locked", "This account is locked. Contact support.");
             case SignInStatus.TooManyAttempts:
                 ctx.Response.Headers.RetryAfter = (r.RetryAfterSeconds ?? 60).ToString();
                 return Problems.Json(429, "rate_limited", "Too many attempts. Try again later.");
