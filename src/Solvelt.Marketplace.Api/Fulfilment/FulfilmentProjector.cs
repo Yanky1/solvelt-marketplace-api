@@ -75,6 +75,8 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
         if (group is null)
             return order.Groups.Any(g => g.SellerOrderId is null) ? HandlerOutcome.Parked("order", order.Number, "seller orders not stored yet") : HandlerOutcome.Skipped("no such seller order on this order");
 
+        // portal C14/N12: an earlier event of this seller order was given up on, so our view may have a gap: read the portal's view of the order (once per event)
+        if (c.Event.PredecessorDead) await new OutboxWriter(c.Db, c.Time).TryEnqueueAsync(OrderReconcileHandler.Type, new OrderReconcileHandler.Payload(order.Number), OrderReconcileHandler.DedupeKey(c.Event.Id), ct: ct);
         var key = AggregateKey(order.Number, group.SellerOrderId!.Value);
         var state = await c.Db.SellerOrderStates.FindAsync([group.Id], ct);
         if (state is null)

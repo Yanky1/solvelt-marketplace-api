@@ -55,6 +55,8 @@ public interface ISignedPortalClient
     Task<PortalResult<PortalBookingSummary>> RespondToProposalAsync(string marketplaceBookingId, BookingProposalBody body, CancellationToken ct = default);
     /// <summary><c>GET /bookings/{mid}</c>.</summary>
     Task<PortalResult<PortalBookingSummary>> GetBookingAsync(string marketplaceBookingId, CancellationToken ct = default);
+    /// <summary>The portal's own view of an order, per seller order (C16 / N13). 404 unknown order; 501 / 405 / 404 also mean "the portal cannot do this yet": callers log and alert, never fail the buyer.</summary>
+    Task<PortalResult<PortalOrderState>> GetOrderStateAsync(string marketplaceOrderId, CancellationToken ct = default);
 
     // The catalog feed (docs/CATALOG.md in the portal). The documents come back as raw JSON: the one file that reads them is Catalog/HttpCatalogSource.cs.
     Task<PortalResult<JsonElement>> GetCatalogListingsAsync(string? since, int limit, CancellationToken ct = default);
@@ -188,6 +190,9 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<PortalBookingSummary>> RespondToProposalAsync(string mid, BookingProposalBody b, CancellationToken ct = default)
         => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/proposal-responses", b, Retry.Standard, ct);
+
+    public Task<PortalResult<PortalOrderState>> GetOrderStateAsync(string mid, CancellationToken ct = default)
+        => Call<PortalOrderState>(HttpMethod.Get, $"{ApiBase}/orders/{Id(mid)}", null, Retry.Standard, ct);
 
     public Task<PortalResult<PortalBookingSummary>> GetBookingAsync(string mid, CancellationToken ct = default)
         => Call<PortalBookingSummary>(HttpMethod.Get, $"{ApiBase}/bookings/{Id(mid)}", null, Retry.Standard, ct);
