@@ -216,7 +216,7 @@ public sealed class FakePaymentProvider : IPaymentProvider
                 if (_listed[n].Refund.RefundKey == refundKey)
                 {
                     var was = _listed[n].Refund;
-                    if (was.Status == "succeeded" && status is "failed" or "canceled") _intents[_listed[n].IntentId].RefundedCents -= was.AmountCents;
+                    if (was.Status is "succeeded" or "pending" && status is "failed" or "canceled") _intents[_listed[n].IntentId].RefundedCents -= was.AmountCents;
                     _listed[n] = (_listed[n].IntentId, was with { Status = status });
                 }
     }

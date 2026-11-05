@@ -25,11 +25,24 @@ public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser, IAcc
     public async Task EraseAsync(Guid accountId, CancellationToken ct)
     {
         var tombstone = Tombstone(accountId);
-        await db.Orders.Where(o => o.AccountId == accountId).ExecuteUpdateAsync(s => s
+        // Only CLOSED orders are redacted now (review M1). An open order (not yet paid, paid but not yet sent to the portal, or with a seller order still to be delivered) still needs its real address, phone
+        // and name: the portal ingest sends them to the seller, and the seller must be able to ship; the relay address must keep working for seller messages and refund mail. Those orders are redacted by the
+        // retention job 90 days after the last seller order closes (M5-05), which also reaches orders of a deleted account. The decision is M3-40.
+        string[] closedStates = [FulfilmentStatus.Delivered, FulfilmentStatus.Cancelled, FulfilmentStatus.Refunded];
+        string[] openReturns = [ReturnStatus.Pending, ReturnStatus.Requested, ReturnStatus.Approved];
+        var closed = db.Orders.Where(o => o.AccountId == accountId
+            && (o.Status == OrderStatus.Failed || o.Status == OrderStatus.Expired || o.Status == OrderStatus.Superseded
+                || (o.Status == OrderStatus.Placed
+                    && db.OrderGroups.Any(g => g.OrderId == o.Id)
+                    && db.OrderGroups.Where(g => g.OrderId == o.Id).All(g => db.SellerOrderStates.Any(st => st.GroupId == g.Id && closedStates.Contains(st.Status)))
+                    && !db.OrderReturns.Any(r => r.OrderId == o.Id && openReturns.Contains(r.Status)))));
+        await closed.ExecuteUpdateAsync(s => s
             .SetProperty(o => o.BuyerName, Redacted).SetProperty(o => o.Phone, (string?)null).SetProperty(o => o.GiftMessage, (string?)null)
             .SetProperty(o => o.ShipName, Redacted).SetProperty(o => o.ShipLine1, Redacted).SetProperty(o => o.ShipLine2, (string?)null).SetProperty(o => o.ShipCity, Redacted)
             .SetProperty(o => o.ShipRegion, (string?)null).SetProperty(o => o.ShipPostalCode, "").SetProperty(o => o.ShipLat, (double?)null).SetProperty(o => o.ShipLng, (double?)null)
             .SetProperty(o => o.RelayEmail, tombstone).SetProperty(o => o.GuestEmail, (string?)null), ct);
+        // A guest address on any order of the account (a claimed guest order) is dropped at once, open or closed: nothing sends to it after the account is gone.
+        await db.Orders.Where(o => o.AccountId == accountId && o.GuestEmail != null).ExecuteUpdateAsync(s => s.SetProperty(o => o.GuestEmail, (string?)null), ct);
         var cartIds = db.Carts.Where(c => c.AccountId == accountId).Select(c => c.Id);
         await db.CartLines.Where(l => cartIds.Contains(l.CartId)).ExecuteDeleteAsync(ct);
         await db.Carts.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);
