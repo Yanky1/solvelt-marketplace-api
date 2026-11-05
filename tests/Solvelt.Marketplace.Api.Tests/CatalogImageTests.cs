@@ -157,22 +157,27 @@ public class CatalogImageTests
 
     // ---------- the seed fixture has no portal: a generated placeholder ----------
     [Fact]
-    public async Task With_the_seed_fixture_the_placeholder_is_a_picture_of_the_right_shape_made_from_the_id_alone()
+    public async Task With_the_seed_fixture_the_placeholder_is_a_raster_picture_of_the_right_shape_made_from_the_id_alone()
     {
         using var f = new TestFactory();
         await Sync(f);
-        var image = Row(f, ListingId("babka-chocolate")).Images.OrderBy(i => i.SortOrder).First();
+        var images = Row(f, ListingId("babka-chocolate")).Images.OrderBy(i => i.SortOrder).ToList();
+        var image = images.First();
         var c = f.CreateClient();
         var res = await c.GetAsync($"/api/v1/catalog/images/{image.Id}");
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-        Assert.Equal("image/svg+xml", res.Content.Headers.ContentType!.MediaType);
-        var svg = await res.Content.ReadAsStringAsync();
-        Assert.Contains($"width=\"{image.Width}\" height=\"{image.Height}\"", svg);
-        Assert.DoesNotContain(image.Alt, svg);                                                                          // nothing from the catalog's text goes into it
-        Assert.DoesNotContain("<script", svg);
-        Assert.Equal(svg, await (await c.GetAsync($"/api/v1/catalog/images/{image.Id}")).Content.ReadAsStringAsync());      // the same id, the same picture
+        Assert.Equal("image/png", res.Content.Headers.ContentType!.MediaType);                                          // a raster: the web resizer refuses SVG on purpose (a 502 on every fixture image otherwise)
+        var bytes = await res.Content.ReadAsByteArrayAsync();
+        Assert.Equal(new byte[] { 0x89, 0x50, 0x4E, 0x47 }, bytes[..4]);                                               // really a PNG, not a mislabelled something else
+        using (var decoded = SkiaSharp.SKBitmap.Decode(bytes))
+        {
+            Assert.NotNull(decoded);
+            Assert.Equal((Math.Min(image.Width, 1200), Math.Min(image.Height, 1200)), (decoded.Width, decoded.Height)); // the stored shape (a very large one is drawn smaller)
+        }
+        Assert.DoesNotContain(image.Alt, System.Text.Encoding.Latin1.GetString(bytes));   // nothing from the catalog's text goes into it
+        Assert.Equal(bytes, await (await c.GetAsync($"/api/v1/catalog/images/{image.Id}")).Content.ReadAsByteArrayAsync());   // the same id, the same picture
         Assert.DoesNotContain(f.Portal.Calls, x => x.PathAndQuery.Contains("/catalog/images/"));                           // and no portal
-        Assert.NotEqual(svg, await (await c.GetAsync($"/api/v1/catalog/images/{Row(f, ListingId("babka-chocolate")).Images.OrderBy(i => i.SortOrder).Last().Id}")).Content.ReadAsStringAsync());
+        Assert.NotEqual(bytes, await (await c.GetAsync($"/api/v1/catalog/images/{images.Last().Id}")).Content.ReadAsByteArrayAsync());
     }
 
     [Fact]

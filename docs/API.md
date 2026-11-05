@@ -158,7 +158,7 @@ The original bytes of an image of a **visible** listing, for the web tier's resi
 | `502 bad_image` | the portal's answer is not a raster picture (any other type, **SVG included**, or empty) or is over 10 MB |
 | `503 image_unavailable` | the portal could not be reached; `Retry-After: 30`, `no-store` |
 
-Bytes come from the portal (`GET /catalog/images/{id}`, signed, server-side only) and are kept in a bounded memory cache (64 MB, 10 minutes). With the seed fixture there is no portal: the endpoint serves a generated placeholder (SVG of the stored width and height, made from the id alone).
+Bytes come from the portal (`GET /catalog/images/{id}`, signed, server-side only) and are kept in a bounded memory cache (64 MB, 10 minutes). With the seed fixture there is no portal: the endpoint serves a generated placeholder (a PNG of the stored width and height, at most 1200 px a side, made from the id alone; a raster, because the web resizer refuses SVG).
 
 ### `GET /api/v1/catalog/suggest?q=&limit=`
 Autocomplete for the header search box. Below two characters (after normalising) the answer is an empty list. `limit` is 1 to 10 (default 8, else `400`); `q` at most 100 characters.
