@@ -147,7 +147,9 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         if (rehash)
         {
             var newHash = passwords.Hash(password);
-            await db.BuyerAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, newHash), ct);
+            // only while the account is still what the password was checked against: a reset that landed meanwhile must not get the OLD password's hash written back over it
+            var checkedHash = account.PasswordHash; var checkedEpoch = account.SessionEpoch;
+            await db.BuyerAccounts.Where(a => a.Id == account.Id && a.PasswordHash == checkedHash && a.SessionEpoch == checkedEpoch).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, newHash), ct);
         }
         var token = await CreateSessionAsync(account.Id, ct, account.SessionEpoch);   // the epoch of the row whose password was just checked (E1)
         await guestClaims.ClaimAsync(account.Id, normal, ct);   // orders placed as a guest since the last sign-in
