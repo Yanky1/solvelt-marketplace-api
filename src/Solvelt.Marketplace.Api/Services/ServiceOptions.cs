@@ -23,11 +23,14 @@ public static class ServiceOptionsReader
     private static readonly string[] Assignments = ["leastBusy", "roundRobin", "buyerChoice"];
     private static string Clip(string? s, int max) { s = (s ?? "").Trim(); return s.Length <= max ? s : s[..max]; }
     private static bool SafeId(string? id) => !string.IsNullOrEmpty(id) && id.Length <= 100 && id.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.');
+    /// <summary>The portal's version is a number (a string in older documents): kept as short text, nothing else.</summary>
+    private static string? VersionText(System.Text.Json.JsonElement? v)
+        => v is { } e ? (e.ValueKind switch { System.Text.Json.JsonValueKind.String => Clip(e.GetString(), 100), System.Text.Json.JsonValueKind.Number => Clip(e.GetRawText(), 40), _ => "" }) is { Length: > 0 } t ? t : null : null;
     private static int? Pct(int? v) => v is >= 0 and <= 100 ? v : null;
     private static int? Pos(int? v, int max) => v is >= 0 and <= 100_000 && v <= max ? v : null;
 
     /// <summary>The portal's document, cut down to what we show: bounded lists and strings, whitelisted kinds, plausible numbers. Nothing the portal sends is passed through unchecked.</summary>
-    public static ServiceOptionsView From(ServiceOptionsDocument d) => new(true, Clip(d.Version, 100) is { Length: > 0 } v ? v : null,
+    public static ServiceOptionsView From(ServiceOptionsDocument d) => new(true, VersionText(d.Version),
         (d.AddOns ?? []).Where(a => SafeId(a.Id) && !string.IsNullOrWhiteSpace(a.Name) && a.PriceCents is >= 0 and <= 100_000_000 && a.ExtraMinutes is >= 0 and <= 24 * 60).Take(50)
             .Select(a => new AddOnView(a.Id!, Clip(a.Name, 120), a.Description is null ? null : Clip(a.Description, 500), a.PriceCents, a.ExtraMinutes)).ToList(),
         (d.IntakeQuestions ?? []).Where(q => SafeId(q.Id) && !string.IsNullOrWhiteSpace(q.Label)).Take(30)
