@@ -55,6 +55,10 @@ public static class QuestionEndpoints
         if (!await CatalogEndpoints.Visible(db).AnyAsync(l => l.Id == listingId && !l.IsDemoListing, ct)) return Private(Problems.NotFound("That item is not available."), ctx);   // a demo listing never reaches the portal
         var now = time.GetUtcNow().ToUniversalTime();
         var since = now.AddDays(-1);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // The throttle counts and then inserts, so parallel requests of one buyer would all count the same few and all insert. The buyer's account row is the lock (a no-op UPDATE: PostgreSQL queues the account's other
+        // writers behind it, SQLite serialises writers anyway): the count below is taken under it and the insert commits before the next request counts (M6 review L3).
+        if (await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(a => a.SetProperty(x => x.DisplayName, x => x.DisplayName), ct) == 0) return Private(Problems.NotFound(), ctx);
         if (await db.ProductQuestions.CountAsync(q => q.AccountId == accountId && q.CreatedAt > since, ct) >= PerDay
             || await db.ProductQuestions.CountAsync(q => q.AccountId == accountId && q.ListingId == listingId && q.CreatedAt > since, ct) >= PerListingPerDay)
             return Private(Problems.Json(429, "too_many_questions", "You have asked a lot of questions today. Please try again tomorrow."), ctx);
@@ -64,6 +68,7 @@ public static class QuestionEndpoints
         db.ProductQuestions.Add(q);
         outbox.Enqueue(SendType, new SendPayload(q.Id), "question-send:" + q.Id);
         await db.SaveChangesAsync(ct);   // the question and its message commit together
+        await tx.CommitAsync(ct);
         return Private(Results.Json(new { id = q.Id, status = q.Status, createdAt = q.CreatedAt }, statusCode: 202), ctx);
     }
 
