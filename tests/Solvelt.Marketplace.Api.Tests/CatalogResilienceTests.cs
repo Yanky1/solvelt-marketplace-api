@@ -84,10 +84,10 @@ public sealed class CatalogResilienceTests : IDisposable
     private static Dictionary<string, object?> NoPrice(int n, long version = 10) => Doc(n, version, d => d.Remove("price"));
 
     private static string Page(IEnumerable<object?> items, string cursor = "10:z") => JsonSerializer.Serialize(new { items, nextCursor = cursor, hasMore = false });
-    private Task<CatalogSyncResult> Run(OpsCounters? ops = null, int maxPending = 100)
+    private async Task<CatalogSyncResult> Run(OpsCounters? ops = null, int maxPending = 100)
     {
         using var scope = _f.Services.CreateScope();
-        return new CatalogSyncService(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), _source, _clock,
+        return await new CatalogSyncService(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), _source, _clock,
             Options.Create(new CatalogOptions { PageSize = 100, MaxPendingFetchesPerRun = maxPending }), NullLogger<CatalogSyncService>.Instance, ops).RunAsync();
     }
     private List<CatalogQuarantine> Quarantined() => WithDb(_f, db => db.CatalogQuarantine.AsNoTracking().OrderBy(q => q.Reason).ToList());
@@ -120,10 +120,12 @@ public sealed class CatalogResilienceTests : IDisposable
         // two listings we hold; the portal announced a newer version of each. The first (lower version, so first in line) now has no category: this used to end the run, every run, before the second was reached.
         _feed = Page([Doc(1, 10), Doc(2, 10)]);
         Assert.Equal(2, (await Run()).Applied);
-        await _f.Services.GetRequiredService<IServiceScopeFactory>().CreateScope().ServiceProvider.GetRequiredService<MarketplaceDb>().CatalogListings
-            .Where(l => l.Id == G(1)).ExecuteUpdateAsync(s => s.SetProperty(l => l.KnownVersion, 11L));
-        await _f.Services.GetRequiredService<IServiceScopeFactory>().CreateScope().ServiceProvider.GetRequiredService<MarketplaceDb>().CatalogListings
-            .Where(l => l.Id == G(2)).ExecuteUpdateAsync(s => s.SetProperty(l => l.KnownVersion, 12L));
+        using (var scope = _f.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+            await db.CatalogListings.Where(l => l.Id == G(1)).ExecuteUpdateAsync(s => s.SetProperty(l => l.KnownVersion, 11L));    // the portal announced newer versions
+            await db.CatalogListings.Where(l => l.Id == G(2)).ExecuteUpdateAsync(s => s.SetProperty(l => l.KnownVersion, 12L));
+        }
         _feed = Page([]);
         _single[G(1)] = JsonSerializer.Serialize(NoCategory(1, 11));
         _single[G(2)] = JsonSerializer.Serialize(Doc(2, 12, d => d["title"] = "Mug 2, second edition"));
