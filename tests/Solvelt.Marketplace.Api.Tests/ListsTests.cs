@@ -283,9 +283,16 @@ public sealed class ListsTests : IDisposable
 
         var fx = CatalogKit.Fixture(_k.F);
         var proto = fx.All()[0];
-        var ids = Enumerable.Range(0, ListLimits.MaxItemsPerList + 5).Select(i => fx.Add(CatalogKit.Copy(proto, Guid.NewGuid(), "Cap " + i)).Id).ToList();
+        var ids = Enumerable.Range(0, 12).Select(i => fx.Add(CatalogKit.Copy(proto, Guid.NewGuid(), "Cap " + i)).Id).ToList();
         await CatalogKit.Sync(_k.F);
         var list = await NewList(t, "Big");
+        // 195 items are put in directly (the cap itself is what is tested, not 200 requests: that would exhaust the database's connections), then 12 parallel adds race for the last 5 places
+        await _k.Db(async db =>
+        {
+            for (var i = 0; i < ListLimits.MaxItemsPerList - 5; i++) db.WishlistItems.Add(new WishlistItem { Id = Guid.NewGuid(), WishlistId = list, ListingId = Guid.NewGuid(), AddedAt = _k.F.Clock.GetUtcNow(), BaselinePriceCents = 1, BaselineCurrency = "USD", BaselineAvailable = true });
+            await db.SaveChangesAsync();
+            return 0;
+        });
         var rs = await Task.WhenAll(ids.Select(id => Call(HttpMethod.Put, $"/api/v1/wishlists/{list}/items/{id}", t)));
         var held = await _k.Db(db => db.WishlistItems.CountAsync(i => i.WishlistId == list));
         Assert.InRange(held, ListLimits.MaxItemsPerList - 5, ListLimits.MaxItemsPerList);   // the post-insert check is fail-closed: a race can leave a little room, never more than the cap (M6-01)
