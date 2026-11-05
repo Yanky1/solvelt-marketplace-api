@@ -229,6 +229,8 @@ public sealed class BookingPayTests : IDisposable
     [InlineData(HttpStatusCode.BadRequest, "{}")]                                                 // a 400 with no portal code
     [InlineData(HttpStatusCode.NotFound, "{\"code\":\"order_not_found\"}")]                         // a portal code, but not the one a confirm refusal carries
     [InlineData(HttpStatusCode.UnprocessableEntity, "<html>proxy</html>")]                        // a 422 without a portal code is a proxy
+    [InlineData(HttpStatusCode.Conflict, "<html>conflict</html>")]                                // a 409 that is not the portal's (a proxy)
+    [InlineData(HttpStatusCode.Conflict, "{\"code\":\"quote_not_open\"}")]                        // a portal code, but not one a confirm refusal carries
     public async Task An_answer_that_is_not_a_portal_refusal_never_refunds_and_is_retried(HttpStatusCode status, string body)
     {
         var b = await PaidWithRawConfirmAnswer(status, body);
@@ -266,6 +268,8 @@ public sealed class BookingPayTests : IDisposable
         Assert.Equal(BookingPaymentStatus.Void, (await Pay(b.Id)).Status);
         Assert.Equal(24000, Assert.Single(Stripe.Refunds).AmountCents);
         Assert.Empty(_portal.PaymentEvents);                               // never a sale
+        var code = System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("code").GetString();
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("refused to confirm booking") && l.Contains(((int)status).ToString()) && l.Contains(code!));   // the safety net of a wide 422 arm: the refund names status and code (M8-14)
     }
 
     // ---- the fakes now answer like the real portal (ConfirmHoldAsync): final or lapsed holds are a 409, never a 200 ---------------------------------------------------------
