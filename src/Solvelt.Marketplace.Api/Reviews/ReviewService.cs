@@ -179,7 +179,8 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
     /// <summary>One helpful vote per buyer, never on their own review. The vote row and the counter change together; a parallel duplicate is a no-op (unique key).</summary>
     public async Task<ReviewOutcome> VoteAsync(Guid accountId, Guid reviewId, bool on, CancellationToken ct)
     {
-        var r = await db.Reviews.AsNoTracking().Where(x => x.Id == reviewId && x.Status == ReviewStatus.Published).Select(x => new { x.AccountId }).FirstOrDefaultAsync(ct);
+        // Voting needs a published review; taking a vote BACK works on any review that exists (a hidden one too), or the vote row and the count would stay for good (M6 review L5).
+        var r = await db.Reviews.AsNoTracking().Where(x => x.Id == reviewId && (!on || x.Status == ReviewStatus.Published)).Select(x => new { x.AccountId }).FirstOrDefaultAsync(ct);
         if (r is null) return ReviewOutcome.NotFound;
         if (r.AccountId == accountId) return ReviewOutcome.OwnReview;
         await using var tx = await db.Database.BeginTransactionAsync(ct);

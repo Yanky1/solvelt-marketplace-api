@@ -274,7 +274,10 @@ public sealed class ReviewsTests : IDisposable
         var (b, idb) = await Buyer("r8b@example.com");
         var id2 = await Reviewed(b, await Delivered(idb), 1);
         await _k.Db(async db => { await db.Reviews.Where(r => r.Id == id2).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ReviewStatus.Hidden)); return 0; });
-        Assert.Equal("skipped", await Reply("review.reply_posted", id2, "RP-2", "We are sorry"));
+        Assert.Equal("applied", await Reply("review.reply_posted", id2, "RP-2", "We are sorry"));      // kept (M6 review L4: the portal will not send it again), but not shown: the list holds published reviews only
+        Assert.Equal(1, (await Call(HttpMethod.Get, $"/api/v1/reviews?listingId={Listing()}", null)).Body.GetProperty("total").GetInt32());   // the first review only
+        await _k.Db(async db => { await db.Reviews.Where(r => r.Id == id2).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ReviewStatus.Removed)); return 0; });
+        Assert.Equal("skipped", await Reply("review.reply_posted", id2, "RP-3", "A removed review keeps nothing"));
     }
 
     // ---------------------------------------------------------------- erasure and export
@@ -790,5 +793,42 @@ public sealed class ReviewsTests : IDisposable
         var refused = await _k.Send(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", null, b);
         Assert.Equal("60", refused.Headers.RetryAfter!.ToString());
         Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", c)).Status);   // another buyer, the same address: its own bucket
+    }
+
+    [Fact]
+    public async Task A_review_hidden_before_its_first_send_reaches_the_portal_when_it_is_restored_and_a_reply_that_came_meanwhile_is_there()
+    {
+        var (a, ida) = await Buyer("l4a@example.com");
+        var (b, _) = await Buyer("l4b@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 2);
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, $"/api/v1/reviews/{id}/report", b, new { reason = "spam" })).Status);
+        var reportId = (await _k.Db(db => db.ReviewReports.AsNoTracking().SingleAsync())).ReportId;
+        Assert.Equal("applied", await Decided("review", reportId, id.ToString(), "hidden"));                      // hidden BEFORE the first send
+        while (await _k.Dispatch() > 0) { }
+        Assert.DoesNotContain(_k.F.Portal.VerifiedCalls, c => c.PathAndQuery == "/api/internal/v1/reviews");      // staff know it; the seller was not told
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Reply("review.reply_posted", id, rid, "We would like to make it right"));     // the portal's reply arrives while it is hidden
+        Assert.Equal(0, (await Call(HttpMethod.Get, $"/api/v1/reviews?listingId={Listing()}", null)).Body.GetProperty("total").GetInt32());
+        Assert.Equal("applied", await Decided("review", reportId, id.ToString(), "dismissed"));                   // staff change their mind: restored
+        while (await _k.Dispatch() > 0) { }
+        var sent = JsonDocument.Parse(Assert.Single(_k.F.Portal.VerifiedCalls, c => c.PathAndQuery == "/api/internal/v1/reviews").BodyText).RootElement;   // now the seller is told, once
+        Assert.Equal((id.ToString(), 2), (sent.GetProperty("reviewId").GetString(), sent.GetProperty("rating").GetInt32()));
+        var listed = (await Call(HttpMethod.Get, $"/api/v1/reviews?listingId={Listing()}", null)).Body.GetProperty("reviews")[0];
+        Assert.Equal("We would like to make it right", listed.GetProperty("reply").GetProperty("text").GetString());   // and the reply that came while it was hidden is shown
+    }
+
+    [Fact]
+    public async Task A_helpful_vote_can_be_taken_back_from_a_review_that_has_since_been_hidden()
+    {
+        var (a, ida) = await Buyer("l5a@example.com");
+        var (b, _) = await Buyer("l5b@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 4);
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", b)).Status);
+        Assert.Equal(1, (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).HelpfulCount);
+        await _k.Db(async db => { await db.Reviews.Where(r => r.Id == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ReviewStatus.Hidden)); return 0; });
+        Assert.Equal(HttpStatusCode.NotFound, (await Call(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", b)).Status);       // no new votes on it
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Delete, $"/api/v1/reviews/{id}/helpful", b)).Status);   // but the one cast can be taken back
+        Assert.Equal(0, await _k.Db(db => db.ReviewVotes.CountAsync()));
+        Assert.Equal(0, (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).HelpfulCount);
     }
 }

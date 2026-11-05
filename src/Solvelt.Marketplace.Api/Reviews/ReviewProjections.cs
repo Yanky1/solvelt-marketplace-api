@@ -59,7 +59,13 @@ public static class ReviewModeration
                 await c.Db.ReviewPhotos.Where(p => p.ReviewId == review.Id).ExecuteDeleteAsync(ct);
             }
             if (wasPublished && next != ReviewStatus.Published) await Aggregates.ApplyAsync(c.Db, review, -1, ct);
-            else if (!wasPublished && next == ReviewStatus.Published) await Aggregates.ApplyAsync(c.Db, review, +1, ct);
+            else if (!wasPublished && next == ReviewStatus.Published)
+            {
+                await Aggregates.ApplyAsync(c.Db, review, +1, ct);
+                // Restored: the portal may never have been told (a review hidden before its first send is not sent) and the seller must see it; sending again is safe (idempotent on the review id, the newest edit wins).
+                var stamp = "r" + now.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                await new OutboxWriter(c.Db, c.Time).TryEnqueueAsync(ReviewService.UpsertType, new ReviewService.UpsertPayload(review.Id, stamp), $"review-upsert:{review.Id:N}:{stamp}", ct: ct);
+            }
         }
         return HandlerOutcome.Applied();
     }
@@ -89,7 +95,9 @@ public sealed class ReviewReplyHandler : IProjectionHandler
             if (review.ReplyId == replyId) { review.ReplyText = null; review.ReplyId = null; review.ReplyAt = null; }
             return HandlerOutcome.Applied();
         }
-        if (review.Status != ReviewStatus.Published) return HandlerOutcome.Skipped("no reply on a review that is not shown");
+        // A reply that comes while the review is HIDDEN is kept (it is not shown: the public list holds published reviews only), because the order watermark has advanced and the portal will not send it again; when staff
+        // restore the review the reply is there. A removed review is final and keeps nothing (M6 review L4).
+        if (review.Status == ReviewStatus.Removed) return HandlerOutcome.Skipped("no reply on a removed review");
         var text = FulfilmentProjector.Cap(FulfilmentProjector.Str(d, "text"), MaxReplyLength);
         if (text is null) return HandlerOutcome.Skipped("empty reply");
         review.ReplyText = text; review.ReplyId = replyId;
