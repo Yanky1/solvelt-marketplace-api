@@ -144,3 +144,13 @@ public static class PortalJson
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 }
+
+// ---- GET /orders/{marketplaceOrderId}: the portal's own view of an order (C16 / N13), for reconciliation. No personal data. ----
+public sealed record PortalOrderLine(string? MarketplaceLineId, string? Sku, int Quantity, int ShippedQty, int CancelledQty, int RefundedQty, int ReturnedQty);
+public sealed record PortalOrderRefund(string? RefundId, long AmountCents, long TaxCents, long ShippingCents, long ShippingTaxCents, string? Reason, DateTimeOffset? CreatedAt);
+public sealed record PortalOrderShipment(string? ShipmentId, string? Method, string? Carrier, string? TrackingNumber, string? Status, DateTimeOffset? ShippedAt, DateTimeOffset? DeliveredAt);
+public sealed record PortalOrderReturn(string? ReturnId, string? Status, DateTimeOffset? CreatedAt, DateTimeOffset? UpdatedAt);
+public sealed record PortalSellerOrderState(Guid SellerOrderId, string? SellerOrderNumber, Guid? SellerId, Guid? BrandId, string? Status, DateTimeOffset? UpdatedAt, string? Currency,
+    long TotalCents, long TaxCents, long ShippingCents, long ShippingTaxCents, long RefundedCents,
+    List<PortalOrderLine>? Lines, List<PortalOrderRefund>? Refunds, List<PortalOrderShipment>? Shipments, List<PortalOrderReturn>? Returns, long? LastEventSequence);
+public sealed record PortalOrderState(string? MarketplaceOrderId, List<PortalSellerOrderState>? SellerOrders);

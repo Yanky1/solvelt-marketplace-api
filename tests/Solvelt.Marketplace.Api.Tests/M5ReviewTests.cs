@@ -18,6 +18,8 @@ public sealed class M5ReviewTests : OrderFlowBase
 {
     private int _n;
     private string _labelAnswer = "";
+    private int _orderReads;
+    private Func<ReceivedCall, HttpResponseMessage>? _orderState;
 
     public M5ReviewTests()
     {
@@ -26,6 +28,7 @@ public sealed class M5ReviewTests : OrderFlowBase
             string Ok() => JsonSerializer.Serialize(new { orders = _sellerOrders.Values.Select(v => new { number = v.Number, result = "requested" }) });
             if (c.PathAndQuery.EndsWith("/return-requests") || c.PathAndQuery.EndsWith("/cancel-requests")) return FakePortal.Json(HttpStatusCode.OK, Ok());
             if (c.PathAndQuery.EndsWith("/label-link")) return FakePortal.Json(HttpStatusCode.OK, _labelAnswer);
+            if (c.Method == "GET" && c.PathAndQuery.StartsWith("/api/internal/v1/orders/MP-")) { _orderReads++; return _orderState?.Invoke(c) ?? FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}"); }
             return null;
         };
     }
@@ -271,6 +274,90 @@ public sealed class M5ReviewTests : OrderFlowBase
         var at = await _k.Db(db => db.ProjectionStates.AsNoTracking().Where(x => x.LastEventId == "re-future").Select(x => x.LastAppliedAt).ToListAsync());
         Assert.NotEmpty(at);
         Assert.All(at, x => Assert.True(x <= _k.F.Clock.GetUtcNow().AddMinutes(6)));
+    }
+
+    // ---------------------------------------------------------------- portal C16 / N13: order reconcile
+
+    private async Task<string> DeadEvt(string type, MarketplaceOrder o, OrderGroup g, object? extra, string id)
+    {
+        var data = new Dictionary<string, object?> { ["order"] = new { sellerOrderId = g.SellerOrderId, sellerOrderNumber = g.SellerOrderNumber, marketplaceOrderId = o.Number } };
+        if (extra is not null) foreach (var p in extra.GetType().GetProperties()) data[char.ToLowerInvariant(p.Name[0]) + p.Name[1..]] = p.GetValue(extra);
+        var body = Body(id, type, _k.F.Clock.GetUtcNow().AddSeconds(-30 + ++_n), data);
+        body = "{\"predecessorDead\":true," + body.TrimStart()[1..];
+        var (status, json) = await Post(_k.Http, Request(_k.F, body));
+        Assert.Equal(HttpStatusCode.OK, status);
+        return StatusOf(json);
+    }
+
+    private HttpResponseMessage State(MarketplaceOrder o, OrderGroup g, string status, int shipped, int cancelled = 0, int refunded = 0, bool shipment = true)
+        => FakePortal.Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
+        {
+            marketplaceOrderId = o.Number,
+            sellerOrders = new[] { new { sellerOrderId = g.SellerOrderId, sellerOrderNumber = g.SellerOrderNumber, status, updatedAt = _k.F.Clock.GetUtcNow(), currency = "USD", totalCents = o.TotalCents, refundedCents = 0,
+                lines = new[] { new { marketplaceLineId = o.Lines.Single().MarketplaceLineId, quantity = 2, shippedQty = shipped, cancelledQty = cancelled, refundedQty = refunded, returnedQty = 0 } },
+                shipments = shipment ? new[] { new { shipmentId = "sh-r1", method = "carrier", carrier = "USPS", trackingNumber = "9400R", status = "in_transit", shippedAt = _k.F.Clock.GetUtcNow().AddMinutes(-5), deliveredAt = (DateTimeOffset?)null } } : [], returns = Array.Empty<object>(), lastEventSequence = 9 } },
+        }));
+
+    [Fact]
+    public async Task C16_An_event_flagged_predecessorDead_makes_us_read_the_orders_state_once_and_catch_up_never_lowering_a_counter_or_leaving_a_final_state()
+    {
+        var (o, g) = await Placed();
+        _orderState = _ => State(o, g, "shipped", shipped: 2);
+        Assert.Equal("applied", await DeadEvt("order.accepted", o, g, new { acceptedAt = DateTimeOffset.UtcNow }, "dead-1"));        // accepted arrives, "shipped" was lost
+        Assert.Equal("duplicate", await DeadEvt("order.accepted", o, g, new { acceptedAt = DateTimeOffset.UtcNow }, "dead-1"));      // the same signed event again: one reconcile only
+        await Drain();
+        Assert.Equal(1, _orderReads);
+        Assert.Equal("shipped", await Status(g));                                                          // the gap is closed
+        var c = await Counters(o);
+        Assert.Equal(2, c.ShippedQty);
+        var sh = await _k.Db(db => db.OrderShipments.AsNoTracking().SingleAsync());
+        Assert.Equal(("sh-r1", "USPS", "9400R"), (sh.PortalShipmentId, sh.Carrier, sh.TrackingNumber));
+        Assert.NotNull(sh.ShippedAt);
+        // counters never go down: the portal (momentarily) reports less than we hold
+        _orderState = _ => State(o, g, "accepted", shipped: 0, shipment: false);
+        await DeadEvt("delivery.attempt_failed", o, g, new { attempt = 1, reason = "x" }, "dead-2");
+        await Drain();
+        Assert.Equal(2, (await Counters(o)).ShippedQty);
+        Assert.Equal("shipped", await Status(g));                                                          // an older status never moves us back
+        // a final state is never left: our delivered stays delivered even if the portal still says shipped
+        Assert.Equal("applied", await Evt("order.delivered", o, g, new { by = "seller" }, at: _k.F.Clock.GetUtcNow().AddSeconds(-1)));
+        _orderState = _ => State(o, g, "shipped", shipped: 2);
+        await DeadEvt("delivery.attempt_failed", o, g, new { attempt = 2, reason = "x" }, "dead-3");
+        await Drain();
+        Assert.Equal("delivered", await Status(g));
+    }
+
+    [Theory]
+    [InlineData(404)]
+    [InlineData(501)]
+    [InlineData(405)]
+    public async Task C16_A_portal_that_cannot_show_order_state_is_logged_as_an_error_and_not_retried(int status)
+    {
+        var (o, g) = await Placed();
+        _orderState = _ => FakePortal.Json((HttpStatusCode)status, "{\"code\":\"not_implemented\"}");
+        await DeadEvt("order.accepted", o, g, new { acceptedAt = DateTimeOffset.UtcNow }, "dead-na");
+        await Drain();
+        _k.F.Clock.Advance(TimeSpan.FromHours(3));
+        await Drain();
+        var msg = await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "portal.order-reconcile"));
+        Assert.Equal(("delivered", 1), (msg.Status, msg.Attempts));                                        // done after ONE call: nothing is retried against a portal without the endpoint
+        Assert.Equal(1, _orderReads);
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("cannot show order state yet"));                  // the alert
+        Assert.Equal("accepted", await Status(g));                                                         // and the event itself was applied as usual
+    }
+
+    [Fact]
+    public async Task C16_A_portal_that_is_down_is_retried_and_an_ordinary_event_does_not_trigger_a_read()
+    {
+        var (o, g) = await Placed();
+        await Evt("order.accepted", o, g, new { acceptedAt = DateTimeOffset.UtcNow });                    // no predecessorDead: no read
+        await Drain();
+        Assert.Equal(0, _orderReads);
+        _orderState = _ => FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+        await DeadEvt("delivery.attempt_failed", o, g, new { attempt = 1, reason = "x" }, "dead-down");
+        await Drain();
+        var msg = await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "portal.order-reconcile"));
+        Assert.Equal("pending", msg.Status);                                                               // retried later with backoff
     }
 
     // ---------------------------------------------------------------- M1

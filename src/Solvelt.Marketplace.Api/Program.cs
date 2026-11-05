@@ -49,6 +49,7 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solve
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Notifications.NotificationMailHandler>();
 builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.OrderReconcileHandler>();
 builder.Services.AddSingleton<PasswordService>();
 builder.Services.AddSingleton<GateKeys>();
 builder.Services.AddSingleton<GuestLinks>();
