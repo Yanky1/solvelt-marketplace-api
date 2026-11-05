@@ -64,7 +64,7 @@ async function main() {
     await page.getByTestId("buyer-card").getByText("Locked", { exact: true }).waitFor({ timeout: 20_000 });
     const refused = await api("POST", "/api/v1/auth/sign-in", { body: { email: buyer.email, password: L.BUYER_PASSWORD } });
     check(refused.status === 403 && refused.body?.code === "account_locked", `a locked buyer's sign-in answered ${refused.status} ${JSON.stringify(refused.body)} (expected 403 account_locked)`);
-    const old = await api("GET", "/api/v1/account", { token: buyer.token });
+    const old = await api("GET", "/api/v1/account/me", { token: buyer.token });
     check(old.status === 401, `the buyer's old session answered ${old.status} (expected 401)`);
     ok("sign-in is 403 account_locked and the old token is 401");
 
