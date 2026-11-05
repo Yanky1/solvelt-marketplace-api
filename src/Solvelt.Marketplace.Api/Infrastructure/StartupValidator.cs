@@ -29,7 +29,7 @@ public static class StartupValidator
     /// <summary>The only environment names that may run with <c>Demo:Enabled</c> on (compared case-insensitively after trimming).</summary>
     public static readonly HashSet<string> DemoAllowedEnvironments = new(["Development", "Testing", "Staging"], StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The same reading the options binder gives the setting (it trims): " true" and "True\t" are on. Anything that is not a boolean is off here and for the binder alike.</summary>
+    /// <summary>The same reading the options binder gives the setting (it trims): " true" and "True\t" are on. A value that is not a boolean is not a request here; the options binder rejects it at start-up, so the application does not start with it.</summary>
     public static bool FakeCaptureRequested(string? raw) => bool.TryParse(raw?.Trim(), out var on) && on;
 
     public static bool IsDevLike(IHostEnvironment env) => env.IsDevelopment() || env.IsEnvironment("Testing");

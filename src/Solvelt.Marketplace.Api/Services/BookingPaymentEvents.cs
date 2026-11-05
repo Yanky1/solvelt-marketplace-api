@@ -221,6 +221,19 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
     public sealed record Payload(Guid BookingId, Guid PaymentId);
     public IReadOnlyCollection<string> Types { get; } = [Type];
 
+    /// <summary>
+    /// The portal's own refusals of a confirm (portal <c>BookingService.ConfirmHoldAsync</c>, docs/SERVICES.md): 404 <c>booking_not_found</c>; 409 <c>hold_expired</c>, <c>hold_not_confirmable</c>,
+    /// <c>slot_unavailable</c>, <c>service_unavailable</c>; and a 422 that carries a portal code (<c>buyer_required</c>, the plan's validation codes). The code must be there: a 404 or 422 without one is
+    /// a proxy, not the portal. <c>version_conflict</c> and <c>concurrent_update</c> mean "send it again", never "refused".
+    /// </summary>
+    public static bool IsPortalRefusal(int status, string? code) => status switch
+    {
+        404 => code == "booking_not_found",
+        409 => code is "hold_expired" or "hold_not_confirmable" or "slot_unavailable" or "service_unavailable",
+        422 => !string.IsNullOrWhiteSpace(code),
+        _ => false,
+    };
+
     private async Task VoidClosedAsync(Booking b, BookingPayment pay, string email, string code, bool cancelAtPortal, CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -339,6 +352,15 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         }
         // Transient: try again later (never refund on a maybe).
         if (r.Retryable || r.Status is 408 or 429 or >= 500 or 401 or 413) return PortalOutcome.From(r);
+
+        // Only a REAL refusal by the portal (an allowlist of its own status + code pairs, portal BookingService.ConfirmHoldAsync) may void and refund a paid booking. Anything else that is not a 2xx
+        // (a 3xx redirect: auto-redirect is off; a proxy or WAF page; an ingress 404 or 403 during a deploy; a 400 with no portal code; a 409 version_conflict) says nothing about the booking: the payment
+        // stays untouched and the confirm is retried with an error in the log (dead-lettered after the usual attempts: see docs/API.md, Operations, "A dead booking confirm"; review MED-1).
+        if (!IsPortalRefusal(r.Status, r.Error?.Code))
+        {
+            log.LogError("The portal answered {Status} ({Code}) to the confirm of booking {Mid}, which is not one of its refusals; the payment is NOT refunded, the confirm is retried", r.Status, r.Error?.Code ?? "no portal code", b.MarketplaceBookingId);
+            return OutboxResult.Retry("confirm_unexpected_" + r.Status);
+        }
 
         // Definitive refusal: the booking will not happen. Void the payment, refund it in full (not a sale: the portal never recorded one), tell the buyer.
         var code = new string((r.Error?.Code ?? "refused").Where(ch => char.IsAsciiLetterOrDigit(ch) || ch == '_').Take(40).ToArray());

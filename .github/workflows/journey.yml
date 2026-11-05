@@ -102,6 +102,9 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
 
+      - name: The Stripe test key never reaches the stack's child processes
+        run: tools/journey/test-key-scope.sh
+
       - name: Run the journeys
         run: tools/journey/run.sh
         env:
