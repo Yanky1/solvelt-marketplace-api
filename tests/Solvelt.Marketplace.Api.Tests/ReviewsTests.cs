@@ -410,6 +410,8 @@ public sealed class ReviewsTests : IDisposable
     [InlineData(200, "{\"reviewId\":\"x\",\"id\":\"6f0c5d2e-0000-0000-0000-000000000001\",\"duplicate\":true,\"updated\":false,\"state\":\"visible\"}", "delivered", null)]
     [InlineData(200, "{\"reviewId\":\"x\",\"duplicate\":false,\"updated\":true,\"state\":\"visible\"}", "delivered", null)]
     [InlineData(422, "{\"code\":\"invalid_review\",\"message\":\"The review is not valid.\",\"errors\":{\"listingId\":\"not a product of that seller\"}}", "dead", "portal_422_invalid_review")]
+    [InlineData(422, "{\"code\":\"invalid_review\",\"message\":\"The review is not valid.\",\"errors\":[{\"index\":-1,\"code\":\"rating\",\"message\":\"rating must be an integer from 1 to 5\"}]}", "dead", "portal_422_invalid_review")]   // C17.1: the order ingest shape, errors as an ARRAY
+    [InlineData(422, "{\"message\":\"The review is not valid.\",\"errors\":[{\"index\":-1,\"code\":\"listingId\",\"message\":\"not a product of that seller\"}]}", "dead", "portal_422_error")]   // even without a top-level code it is final, never retried
     [InlineData(429, "{\"code\":\"rate_limited\",\"message\":\"slow down\"}", "pending", "portal_429")]
     [InlineData(503, "{}", "pending", "portal_503")]
     [InlineData(401, "{\"code\":\"bad_signature\"}", "dead", "portal_401")]
@@ -440,6 +442,8 @@ public sealed class ReviewsTests : IDisposable
     [InlineData(200, "{\"reviewId\":\"x\",\"state\":\"hidden\",\"changed\":false}", "delivered", null)]
     [InlineData(404, "{\"code\":\"not_found\"}", "delivered", null)]
     [InlineData(422, "{\"code\":\"invalid_state\",\"message\":\"bad state\"}", "dead", "portal_422_invalid_state")]
+    [InlineData(422, "{\"code\":\"invalid_state\",\"message\":\"The state is not valid.\",\"errors\":[{\"index\":-1,\"code\":\"state\",\"message\":\"must be visible, hidden or removed\"}]}", "dead", "portal_422_invalid_state")]   // C17.1: the array shape
+    [InlineData(422, "{\"message\":\"The state is not valid.\",\"errors\":[{\"index\":-1,\"code\":\"reason\",\"message\":\"at most 300 characters\"}]}", "dead", "portal_422_error")]
     [InlineData(409, "{\"code\":\"review_removed\",\"message\":\"final\"}", "dead", "portal_409_review_removed")]
     [InlineData(429, "{\"code\":\"rate_limited\"}", "pending", "portal_429")]
     [InlineData(500, "{}", "pending", "portal_500")]
@@ -842,5 +846,27 @@ public sealed class ReviewsTests : IDisposable
         Assert.Contains(_k.F.Logs.Lines, l => l.Contains("ReviewReplyHandler") && l.Contains("instead of the review's own") && l.Contains("warn-1") && l.Contains("review:not-this-one"));
         Assert.Equal("applied", await Numbered("warn-2", "review.reply_posted", id, Guid.NewGuid().ToString(), "Thanks again", at, Seq(id, 5)));   // the review's own scope: no warning for it
         Assert.DoesNotContain(_k.F.Logs.Lines, l => l.Contains("instead of the review's own") && l.Contains("warn-2"));
+    }
+
+    [Fact]
+    public async Task The_portals_example_envelope_of_C17_1_parses_and_a_reply_event_of_a_review_that_is_not_ours_is_skipped()
+    {
+        const string example = "{\"id\":\"9a21\u2026\",\"type\":\"review.reply_posted\",\"createdAt\":\"2026-11-05T10:20:00Z\",\"data\":{\"reviewId\":\"rev-8841\",\"replyId\":\"0f6c\u2026\",\"text\":\"Thank you very much!\",\"repliedAt\":\"2026-11-05T10:05:00Z\",\"editedAt\":\"2026-11-05T10:20:00Z\"},\"sequenceScope\":\"review:rev-8841\",\"sequence\":2}";
+        Assert.True(PortalEvent.TryParse(System.Text.Encoding.UTF8.GetBytes(example), out var evt, out _));
+        Assert.Equal(("9a21\u2026", "review.reply_posted", "review:rev-8841", 2L), (evt!.Id, evt.Type, evt.SequenceScope, evt.Sequence));
+        Assert.Equal(new DateTimeOffset(2026, 11, 5, 10, 20, 0, TimeSpan.Zero), evt.CreatedAt);
+        Assert.Equal(("rev-8841", "Thank you very much!"), (evt.Data.GetProperty("reviewId").GetString(), evt.Data.GetProperty("text").GetString()));
+        Assert.False(evt.PredecessorDead);
+        // the portal echoes the marketplace's OWN review id: "rev-8841" is the portal's example, ours are guids, so this one is not ours and changes nothing (and is not an error)
+        var (status, json) = await Post(_k.Http, Request(_k.F, example));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("skipped", StatusOf(json));
+        // the same envelope for a review of ours, scope and sequence as the portal sends them: applied, and a lower sequence after it is not
+        var (a, ida) = await Buyer("c171x@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        string Mine(string eventId, int sequence, string text) => example.Replace("9a21\u2026", eventId).Replace("rev-8841", id.ToString()).Replace("Thank you very much!", text).Replace("\"sequence\":2", $"\"sequence\":{sequence}");
+        Assert.Equal("applied", StatusOf((await Post(_k.Http, Request(_k.F, Mine("env-2", 2, "Thank you very much!")))).Item2));
+        Assert.Equal("skipped", StatusOf((await Post(_k.Http, Request(_k.F, Mine("env-1", 1, "An older edit")))).Item2));
+        Assert.Equal("Thank you very much!", await ReplyNow());
     }
 }
