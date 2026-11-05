@@ -26,9 +26,11 @@ public sealed class DemoFoundationTests
     private static IConfiguration Config(string? demo) => new ConfigurationBuilder().AddInMemoryCollection(demo is null ? [] : new Dictionary<string, string?> { ["Demo:Enabled"] = demo }).Build();
     private static bool Refused(string env, string? demo) => StartupValidator.Validate(Config(demo), new Env(env)).Any(p => p.Contains("Demo:Enabled"));
 
+    // M9-06: an allowlist. Demo:Enabled may be true only for Development, Testing and Staging (trimmed, case-insensitive); every other name refuses.
     [Theory]
-    [InlineData("Production")] [InlineData("production")] [InlineData("PRODUCTION")]
-    public void The_application_refuses_to_start_with_demo_data_on_in_production(string env)
+    [InlineData("Production")] [InlineData("production")] [InlineData("PRODUCTION")] [InlineData("Prod")] [InlineData(" Production")] [InlineData("Production ")] [InlineData("Live")]
+    [InlineData("Anything")] [InlineData("Demo")] [InlineData("Stagin")] [InlineData("Staging2")] [InlineData("Development-eu")] [InlineData("")] [InlineData("   ")]
+    public void The_application_refuses_to_start_with_demo_data_on_in_any_environment_that_is_not_on_the_allowlist(string env)
     {
         Assert.True(Refused(env, "true"), env);
         Assert.True(Refused(env, "TRUE"), env);
@@ -36,11 +38,11 @@ public sealed class DemoFoundationTests
     }
 
     [Theory]
-    [InlineData("Staging")] [InlineData("staging")] [InlineData("Development")] [InlineData("Testing")] [InlineData("Anything")] [InlineData("Demo")]
-    public void Every_other_environment_may_switch_it_on_so_the_test_site_can_run_as_staging(string env) => Assert.False(Refused(env, "true"), env);
+    [InlineData("Staging")] [InlineData("staging")] [InlineData("STAGING")] [InlineData(" Staging ")] [InlineData("Development")] [InlineData("development")] [InlineData("Testing")] [InlineData(" testing")]
+    public void Only_development_testing_and_staging_may_switch_it_on_so_the_test_site_can_run_as_staging(string env) => Assert.False(Refused(env, "true"), env);
 
     [Theory]
-    [InlineData("Production")] [InlineData("Staging")]
+    [InlineData("Production")] [InlineData("Staging")] [InlineData("Live")]
     public void Off_unset_or_blank_is_fine_everywhere(string env)
     {
         Assert.False(Refused(env, "false"));

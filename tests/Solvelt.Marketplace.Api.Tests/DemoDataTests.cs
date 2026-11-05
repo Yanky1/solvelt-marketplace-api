@@ -544,6 +544,96 @@ public sealed class DemoDataTests : IDisposable
         Assert.DoesNotContain(_k.F.Logs.Lines, l => l.Contains("demologged@example.com") || l.Contains("nobodylogged@example.com") || l.Contains("wrong password here"));
     }
 
+    // ---------- M9-07: a demo-verified address was never proven, so it never receives a guest order ----------
+    private async Task<Guid> GuestOrderFor(string guestEmail)
+    {
+        // an order of another account, turned into a guest order placed with <guestEmail> (a victim who checks out as a guest AFTER the attacker's sign-up)
+        var (seedToken, seedAccount) = await Buyer($"seed-{Guid.NewGuid():N}@example.com");
+        Assert.Equal(HttpStatusCode.Created, (await Fill(seedToken)).StatusCode);
+        return await _k.Db(async db =>
+        {
+            var o = await db.Orders.Where(x => x.AccountId == seedAccount && x.IsDemo).OrderBy(x => x.Number).FirstAsync();
+            await db.Orders.Where(x => x.Id == o.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.AccountId, (Guid?)null).SetProperty(x => x.GuestEmail, guestEmail));
+            return o.Id;
+        });
+    }
+    private Task<MarketplaceOrder> OrderRow(Guid id) => _k.Db(db => db.Orders.AsNoTracking().SingleAsync(o => o.Id == id));
+
+    [Fact]
+    public async Task A_demo_verified_account_never_claims_a_guest_order_placed_later_not_at_sign_in_and_not_with_a_passkey_path()
+    {
+        await SyncCatalog();
+        // the attacker signs up as victim@example.com and demo-verifies while there are no guest orders
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("later@example.com")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/demo/verify", new { email = "later@example.com", password = AuthKit.Password })).StatusCode);
+        var account = await _k.Account("later@example.com");
+        Assert.NotNull(account.EmailVerifiedAt); Assert.NotNull(account.DemoVerifiedAt);                                   // signs in, and is marked as never proven
+        // later the real owner of the mailbox checks out as a guest; the attacker signs in
+        var guest = await GuestOrderFor("later@example.com");
+        for (var i = 0; i < 3; i++) Assert.Equal(HttpStatusCode.OK, (await _k.Post("/api/v1/auth/sign-in", new { email = "later@example.com", password = AuthKit.Password })).StatusCode);
+        var order = await OrderRow(guest);
+        Assert.Null(order.AccountId); Assert.Null(order.ClaimedAt);                                                         // still the guest's
+        // the claimer itself refuses (every path ends there: sign-in, passkey sign-in, verify, reset)
+        using (var scope = _k.F.Services.CreateScope())
+            Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Auth.GuestClaims>().ClaimAsync(account.Id, "later@example.com", default));
+        Assert.Null((await OrderRow(guest)).AccountId);
+    }
+
+    [Fact]
+    public async Task A_real_mailbox_proof_replaces_a_demo_verification_through_the_link_and_through_a_reset_and_then_guest_orders_are_claimed()
+    {
+        await SyncCatalog();
+        // A) the verification link
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("proofa@example.com")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/demo/verify", new { email = "proofa@example.com", password = AuthKit.Password })).StatusCode);
+        var guestA = await GuestOrderFor("proofa@example.com");
+        await _k.Post("/api/v1/auth/sign-in", new { email = "proofa@example.com", password = AuthKit.Password });
+        Assert.Null((await OrderRow(guestA)).AccountId);
+        var link = AuthKit.TokenIn((await _k.Mail("proofa@example.com")).Last(m => m.Subject.StartsWith("Confirm")), "/verify-email");
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/auth/verify-email", new { token = link, password = AuthKit.Password })).StatusCode);
+        var a = await _k.Account("proofa@example.com");
+        Assert.Null(a.DemoVerifiedAt);                                                                                       // proven for real now
+        Assert.Equal(a.Id, (await OrderRow(guestA)).AccountId);                                                              // and the order is claimed by the proof
+        // B) a password reset through the mailbox
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("proofb@example.com")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/demo/verify", new { email = "proofb@example.com", password = AuthKit.Password })).StatusCode);
+        var guestB = await GuestOrderFor("proofb@example.com");
+        Assert.NotNull((await _k.Account("proofb@example.com")).DemoVerifiedAt);
+        await _k.Post("/api/v1/auth/forgot-password", new { email = "proofb@example.com" });
+        var reset = AuthKit.TokenIn((await _k.Mail("proofb@example.com")).Single(m => m.Subject == "Reset your password"), "/reset-password");
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/auth/reset-password", new { token = reset, password = "a brand new password" })).StatusCode);
+        var b = await _k.Account("proofb@example.com");
+        Assert.Null(b.DemoVerifiedAt);
+        Assert.Equal(b.Id, (await OrderRow(guestB)).AccountId);
+    }
+
+    [Fact]
+    public async Task An_ordinary_verified_account_still_claims_its_guest_orders_at_sign_in()
+    {
+        await SyncCatalog();
+        var token = await _k.VerifiedSession("ordinary@example.com");
+        var account = await _k.Account("ordinary@example.com");
+        Assert.Null(account.DemoVerifiedAt);
+        var guest = await GuestOrderFor("ordinary@example.com");
+        Assert.Equal(HttpStatusCode.OK, (await _k.Post("/api/v1/auth/sign-in", new { email = "ordinary@example.com", password = AuthKit.Password })).StatusCode);
+        Assert.Equal(account.Id, (await OrderRow(guest)).AccountId);
+        _ = token;
+    }
+
+    [Fact]
+    public async Task A_refused_verify_does_not_clear_the_sign_in_gate_but_a_verify_that_worked_does()
+    {
+        await SyncCatalog();
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("gate@example.com")).StatusCode);
+        await GuestOrderFor("gate@example.com");
+        // refused (an unclaimed guest order): counted against the address like a wrong password, never reset by the refusal
+        HttpStatusCode last = default;
+        for (var i = 0; i < 40 && last != HttpStatusCode.TooManyRequests; i++)
+            last = (await _k.Post("/api/v1/demo/verify", new { email = "gate@example.com", password = AuthKit.Password })).StatusCode;
+        Assert.Equal(HttpStatusCode.TooManyRequests, last);
+        Assert.Null((await _k.Account("gate@example.com")).EmailVerifiedAt);
+    }
+
     [Fact]
     public async Task Verify_goes_through_the_sign_in_budget_so_it_cannot_be_used_to_guess_a_password()
     {

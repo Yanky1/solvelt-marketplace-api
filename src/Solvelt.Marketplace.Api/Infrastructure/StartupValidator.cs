@@ -26,6 +26,9 @@ public static class DevDefaults
 
 public static class StartupValidator
 {
+    /// <summary>The only environment names that may run with <c>Demo:Enabled</c> on (compared case-insensitively after trimming).</summary>
+    public static readonly HashSet<string> DemoAllowedEnvironments = new(["Development", "Testing", "Staging"], StringComparer.OrdinalIgnoreCase);
+
     public static bool IsDevLike(IHostEnvironment env) => env.IsDevelopment() || env.IsEnvironment("Testing");
 
     public const int LeaseMarginSeconds = 30;
@@ -99,10 +102,12 @@ public static class StartupValidator
             if (value.Contains("_live_", StringComparison.OrdinalIgnoreCase)) problems.Add($"{name} is a LIVE key. Only Stripe test keys are allowed (test mode only).");
             else if (!prefixes.Any(p => value.StartsWith(p, StringComparison.Ordinal))) problems.Add($"{name} must be a Stripe test key ({string.Join(" or ", prefixes)}...).");
         }
-        // Demo data is test-mode data (M9): never in Production, with no override. Every other environment name may use it (the test site runs as Staging). An unset
-        // ASPNETCORE_ENVIRONMENT is Production. Checked first, before the dev-like early return below.
-        if (env.IsProduction() && string.Equals(config["Demo:Enabled"]?.Trim(), "true", StringComparison.OrdinalIgnoreCase))
-            problems.Add("Demo:Enabled (env Demo__Enabled) must not be true in Production: demo data is test-mode data and cannot be switched on here. A test site runs with ASPNETCORE_ENVIRONMENT=Staging.");
+        // Demo data is test-mode data (M9). An ALLOWLIST, not a denylist (orchestrator, M9-06): it may be switched on only when the environment name is exactly Development, Testing or Staging
+        // (trimmed, case-insensitive). Anything else refuses, whatever it is called ("Prod", " Production", "Live", an unset name which is Production): a denylist would let a misspelt name
+        // of the real site start with demo data on. There is no override. Checked first, before the dev-like early return below.
+        if (string.Equals(config["Demo:Enabled"]?.Trim(), "true", StringComparison.OrdinalIgnoreCase)
+            && !DemoAllowedEnvironments.Contains(env.EnvironmentName?.Trim() ?? ""))
+            problems.Add("Demo:Enabled (env Demo__Enabled) must not be true here: demo data is test-mode data and is allowed only when ASPNETCORE_ENVIRONMENT is Development, Testing or Staging (a test site runs as Staging).");
         // In every environment: a handler (a portal call, a mail) must always finish well inside the lease that protects its message,
         // otherwise a second dispatcher takes the message over while the first is still sending it (review of af8d339, item 7).
         var lease = IntOr(config["Outbox:LeaseSeconds"], 120);

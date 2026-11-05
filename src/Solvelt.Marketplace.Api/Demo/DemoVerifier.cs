@@ -25,24 +25,25 @@ public sealed class DemoVerifier(MarketplaceDb db, TimeProvider time, PasswordSe
         var account = await db.BuyerAccounts.FirstOrDefaultAsync(a => a.Email == normal && a.DeletedAt == null, ct);
         if (account is null) { passwords.BurnTime(password); return Failed(clientIp); }
         if (!passwords.Verify(account.PasswordHash, password).Ok) return Failed(clientIp);
-        await gate.SucceededAsync(addressKey, ipKey, ct);
         if (account.EmailVerifiedAt is null)
         {
             var now = time.GetUtcNow().ToUniversalTime();
-            // Demo verify skips the mailbox proof, so it must never hand over anything the mailbox owner could have: it does NOT claim guest orders (a real verification does), and it
-            // refuses an address that still has an unclaimed guest order (security review H1: an attacker could sign up as the victim's address and take the order). The check is part
-            // of the one conditional update, so an order placed between a check and the write cannot slip through. The answer is the generic refusal either way: nothing here says
-            // that guest orders exist for an address. Only EmailVerifiedAt (and UpdatedAt) change.
+            // Demo verify skips the mailbox proof, so it must never hand over anything the mailbox owner could have. It refuses an address that still has an unclaimed guest order (security
+            // review H1), the check being part of the one conditional update (no check-then-write gap), AND it records that the address was never proven (<c>DemoVerifiedAt</c>): while that
+            // is set no guest order is ever attached to the account, on any path, so a guest order placed LATER by the real owner of the mailbox cannot be claimed by whoever signed up
+            // first (M9-07). The answer is the generic refusal either way. Only EmailVerifiedAt, DemoVerifiedAt and UpdatedAt change.
             var changed = await db.BuyerAccounts.Where(a => a.Id == account.Id && a.EmailVerifiedAt == null && a.DeletedAt == null
                     && !db.Orders.Any(o => o.AccountId == null && o.GuestEmail == normal))
-                .ExecuteUpdateAsync(s => s.SetProperty(a => a.EmailVerifiedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.EmailVerifiedAt, (DateTimeOffset?)now).SetProperty(a => a.DemoVerifiedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
             if (changed == 0)
             {
                 var stillOpen = await db.BuyerAccounts.AnyAsync(a => a.Id == account.Id && a.EmailVerifiedAt == null && a.DeletedAt == null, ct);
+                // a refusal does not clear the sign-in gate (LOW-10): only a verify that did something counts as a success there
                 if (stillOpen) { log.LogWarning("Demo verify refused for account {AccountId}: its address has unclaimed guest orders (client {ClientHash})", account.Id, ClientHash(clientIp)); return (DemoVerifyStatus.InvalidCredentials, null); }
             }
             else log.LogInformation("Demo verify: account {AccountId} marked verified at {At}", account.Id, now);
         }
+        await gate.SucceededAsync(addressKey, ipKey, ct);
         return (DemoVerifyStatus.Verified, null);
     }
 
