@@ -931,6 +931,24 @@ public sealed class RefundEventTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task Q1b_a_refund_in_flight_is_not_counted_as_queued_ahead_when_a_later_refusal_is_cut_to_what_is_left()
+    {
+        var (o, g, line) = await Three();                                                    // paid 14262
+        Stripe.TimeoutAfterExecuteNext = true;                                               // A (5000) reaches Stripe, the answer is lost
+        Assert.Equal("applied", await RefundLines(o, g, "rf-A", line, 1, 5000));
+        await Drain();
+        Assert.Equal("reserved", (await Refund("portal:rf-A")).Status);
+        Stripe.SetListedStatus("portal:rf-A", "pending");                                    // Stripe lists A as pending: its 5000 is inside the confirmed figure, in neither ours nor known
+        Stripe.RefundInDashboard(o.PaymentIntentId!, 4000);                                  // a dashboard refund D
+        Stripe.RejectRefundWith = "charge_disputed";                                         // B (5500) is refused
+        Assert.Equal("applied", await RefundLines(o, g, "rf-B", line, 1, 5500));
+        await Drain();
+        var b = await Refund("portal:rf-B");
+        Assert.Equal(5262, b.AmountCents);                                                   // 14262 - 5000 - 4000: A is counted once (a double count would leave 262)
+        Assert.Equal(1, b.Attempt);
+    }
+
+    [Fact]
     public async Task Q2_an_older_message_of_a_cut_refund_does_nothing_and_an_idempotency_error_is_looked_at_again_never_a_rejection()
     {
         var (o, g, line) = await Three();
