@@ -23,6 +23,15 @@ TEST_DB_PROVIDER=postgres \
 TEST_POSTGRES_CONNECTION="Host=localhost;Username=postgres;Password=postgres;Database=postgres" \
   dotnet test                                             # the same tests against PostgreSQL (a fresh database per factory)
 ```
+## Database schema
+Development and Testing build the schema from the model (`EnsureCreated` + `SearchSchema.Ensure`). Production uses the EF migrations in `src/.../Data/Migrations` (PostgreSQL), made from `tools/MigrationsTool`:
+```bash
+dotnet tool install --global dotnet-ef --version 10.0.0
+./tools/migrations/regenerate-initial-create.sh           # BEFORE the first release only: rebuilds InitialCreate from the current model
+dotnet ef migrations add Name --project src/Solvelt.Marketplace.Api --startup-project tools/MigrationsTool --output-dir Data/Migrations   # after the first release
+```
+`MigrationTests` (PostgreSQL) fail when the model and the migrations differ (`HasPendingModelChanges`, and a table/column/index/constraint comparison against `EnsureCreated`). The search objects EF cannot model (pg_trgm, the tsvector function and column, GIN indexes) are the frozen `InitialCreate.SearchSchema.cs`; later changes to them are new migrations.
+
 CI (`.github/workflows/ci.yml`) restores, builds with warnings as errors, runs the tests on SQLite, and runs them again against a PostgreSQL service container.
 It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 
@@ -51,6 +60,7 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 | `Marketplace__RelayDomain` | yes | Domain of the buyer relay emails |
 | `Marketplace__PublicBaseUrl` | yes | Public website URL (links in emails) |
 | `Database__Provider` | yes, `Postgres` | `Sqlite` is for dev/tests only |
+| `Database__MigrateOnStart` | no (default `true`) | Production on PostgreSQL applies the EF migrations at start (a database lock makes several instances safe); `false` to apply them from a pipeline (`dotnet ef database update` with `MARKETPLACE_DB` set, or a migration bundle). Production never uses `EnsureCreated`; the database role must be allowed `CREATE EXTENSION pg_trgm` (or a superuser creates it once) |
 | `ConnectionStrings__Default` | yes | |
 | `Portal__AttemptTimeoutSeconds`, `Portal__TotalDeadlineSeconds`, `Portal__MaxAttempts`, `Portal__RetryBaseDelayMs` | no | Portal client deadlines: defaults 30, 30, 5, 500 (see decisions M1-09, M1-19) |
 | `RateLimits__AuthPerMinute`, `RateLimits__PublicPerMinute` | no | Defaults 10 and 240 per client IP |
