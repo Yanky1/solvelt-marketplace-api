@@ -51,6 +51,8 @@ public sealed class ServiceOptionsCache(IServiceScopeFactory scopes, TimeProvide
     private readonly ConcurrentDictionary<Guid, Entry> _cache = new();
     private readonly ConcurrentDictionary<Guid, Lazy<Task<ServiceOptionsView?>>> _inflight = new();
     public int PortalCalls;
+    public const int MaxEntries = 5000;
+    public int Count => _cache.Count;
     public static readonly TimeSpan Fresh = TimeSpan.FromMinutes(5), Missing = TimeSpan.FromMinutes(1);
 
     /// <summary>The view, or null when the portal could not answer (callers say 503).</summary>
@@ -81,10 +83,10 @@ public sealed class ServiceOptionsCache(IServiceScopeFactory scopes, TimeProvide
 
     private void Trim()
     {
-        if (_cache.Count < 5000) return;
+        if (_cache.Count < MaxEntries) return;
         var now = time.GetUtcNow();
         foreach (var kv in _cache.Where(k => now - k.Value.At >= k.Value.Ttl).ToList()) _cache.TryRemove(kv.Key, out _);
-        if (_cache.Count >= 5000) foreach (var kv in _cache.OrderBy(k => k.Value.At).Take(500).ToList()) _cache.TryRemove(kv.Key, out _);
+        if (_cache.Count >= MaxEntries) foreach (var kv in _cache.OrderBy(k => k.Value.At).Take(500).ToList()) _cache.TryRemove(kv.Key, out _);
     }
 }
 

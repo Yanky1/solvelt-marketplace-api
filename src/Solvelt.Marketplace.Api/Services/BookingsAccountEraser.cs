@@ -7,7 +7,8 @@ namespace Solvelt.Marketplace.Api.Services;
 /// <summary>
 /// M4's part of deleting an account (M1's <see cref="IAccountEraser"/>, decision M4-18): the buyer's bookings and quote requests lose their personal data AT ONCE, whatever their state
 /// (the same fields the retention job wipes: name, address, coordinates, phone, intake answers, meeting link, notes and preferred times). The number, the money fields and the status stay.
-/// Safe to run again: a redacted row is skipped.
+/// Safe to run again: a redacted row is skipped. Known limit (L7, documented): a LIVE hold or booking of the deleted account is redacted too, so a confirm that is still pending for it
+/// would send no address to the portal and fail there; the payment is then refunded in full by the confirm handler's refusal path, which is the right end for a booking whose buyer has left.
 /// </summary>
 public sealed class BookingsAccountEraser(MarketplaceDb db, TimeProvider time) : IAccountEraser
 {

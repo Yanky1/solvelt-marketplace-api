@@ -220,7 +220,7 @@ public sealed class BookingEventHandler(ILogger<BookingEventHandler> log) : IPro
         };
         if (kind is null) return;
         Notifications.Notifier.AddBooking(c.Db, new OutboxWriter(c.Db, c.Time), c.Time, b.AccountId, kind, c.Event.Id, b.Number ?? "", b.MarketplaceBookingId,
-            new { kind = Str(data, "kind"), startAt = b.StartAt, startsAt = b.StartAt });
+            new { kind = Str(data, "kind"), startAt = b.StartAt, startsAt = b.StartAt, bookingId = b.Id });
     }
 
     /// <summary>The status an event moves a booking TO, or null for facts that do not change the status.</summary>
