@@ -6,7 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PW_CHROMIUM_PATH="${PW_CHROMIUM_PATH:-}"
 [ -z "$PW_CHROMIUM_PATH" ] && unset PW_CHROMIUM_PATH
 "$HERE/stack.sh" up || exit 1
-journeys=("$@"); [ ${#journeys[@]} -eq 0 ] && journeys=(product)
+journeys=("$@"); [ ${#journeys[@]} -eq 0 ] && journeys=(product booking)
 failed=0
 for j in "${journeys[@]}"; do
   echo "=========== journey: $j"

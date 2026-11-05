@@ -94,7 +94,7 @@ cmd_up() {
     export Stripe__PublishableKey="${STRIPE_PUBLISHABLE_KEY:-pk_test_journeyfakekey0000000000}"
     export Marketplace__PublicBaseUrl="http://localhost:$WEB_PORT" Marketplace__RelayDomain="relay.journey.test"
     export Email__Provider=Smtp Email__SmtpHost=127.0.0.1 Email__SmtpPort="$SMTP_PORT" Email__SmtpUseTls=false Email__From="noreply@journey.test"
-    export Demo__Enabled=true Catalog__Source=Http
+    export Demo__Enabled=true Catalog__Source=Http Stripe__FakeCaptureOnWebhook=true
     # many sign-ins and requests from one address in a few minutes: the limits are not under test here
     export RateLimits__AuthPerMinute=100000 RateLimits__PublicPerMinute=100000
     export Outbox__BackoffSeconds=2 Catalog__SyncIntervalSeconds=5

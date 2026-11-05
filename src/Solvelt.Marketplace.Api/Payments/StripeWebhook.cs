@@ -24,7 +24,7 @@ public static class StripeWebhookEndpoint
     /// Verified with <c>Stripe:WebhookSecret</c> (its own key) over the raw bytes BEFORE anything is parsed; idempotent on the event id; order-independent (handlers read state,
     /// not the order events arrive in). A failure is a 5xx so Stripe retries for days.
     /// </summary>
-    private static async Task<IResult> Handle(HttpContext ctx, IOptions<StripeOptions> options, TimeProvider time, StripeEventProcessor processor)
+    private static async Task<IResult> Handle(HttpContext ctx, IOptions<StripeOptions> options, TimeProvider time, StripeEventProcessor processor, FakePaymentProvider fake, IHostEnvironment env)
     {
         var secret = options.Value.WebhookSecret;
         if (string.IsNullOrEmpty(secret)) return Problems.Json(503, "webhook_not_configured", "The webhook receiver is not configured.");
@@ -44,6 +44,8 @@ public static class StripeWebhookEndpoint
         try { evt = StripeEnvelope.Parse(body); }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException) { evt = null; }
         if (evt is null) return Problems.Json(400, "invalid_event", "The event could not be read.");
+        // the in-process fake has no card flow: its "money" is captured when the (signed) success event arrives, if the journey/dev setup asked for that (never with a real Stripe key, never outside dev-like environments)
+        if (options.Value.FakeCaptureOnWebhook && StartupValidator.IsDevLike(env) && string.IsNullOrWhiteSpace(options.Value.SecretKey) && evt.Type == "payment_intent.succeeded" && evt.Str("id") is { } intent) fake.TryCapture(intent);
         var outcome = await processor.ProcessAsync(evt, ctx.RequestAborted);
         return Results.Json(new { received = true, status = outcome.ToString().ToLowerInvariant() });
     }

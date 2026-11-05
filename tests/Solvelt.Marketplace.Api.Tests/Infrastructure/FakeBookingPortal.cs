@@ -221,7 +221,7 @@ public sealed class FakeBookingPortal
             if (!_byMid.TryGetValue(mid, out var h)) return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
             if (h.Status == "Hold") h.Status = Instant ? "Confirmed" : "Requested";
             if (ConfirmAppliesThenFails) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
-            var body = Summary(h);
+            var body = Wrap(h, false);   // the real portal answers { created, booking } (portal BookingService.ConfirmHoldAsync); a bare summary here once hid that
             var hook = OnConfirmed; OnConfirmed = null; hook?.Invoke();
             return FakePortal.Json(HttpStatusCode.OK, body);
         }

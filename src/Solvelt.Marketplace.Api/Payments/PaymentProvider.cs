@@ -20,6 +20,11 @@ public sealed class StripeOptions
     /// <summary>Stripe answers 409 idempotency_key_in_use while the first request with the same key is still running (a double submit). Wait this long and ask again, up to <see cref="InUseRetries"/> times, before giving up as "try again".</summary>
     public int InUseRetryDelayMs { get; set; } = 400;
     public int InUseRetries { get; set; } = 3;
+    /// <summary>
+    /// Development/Testing only, and only with the in-process fake provider (no secret key): a verified <c>payment_intent.succeeded</c> webhook also marks the fake's intent as captured, so a later refund of it
+    /// can succeed. There is no card flow in front of the fake; the journey (tools/journey) plays Stripe by posting the signed event, and a real Stripe has captured the money by then. Off by default; start-up refuses it elsewhere.
+    /// </summary>
+    public bool FakeCaptureOnWebhook { get; set; }
 }
 
 public sealed record PaymentIntentResult(string Id, string ClientSecret, string Status);
@@ -337,6 +342,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
 
     /// <summary>Test hook: the buyer paid (the whole amount). Stripe would send <c>payment_intent.succeeded</c>.</summary>
     public void Capture(string intentId) { lock (_lock) { var i = _intents[intentId]; i.CapturedCents = i.AmountCents; } }
+    /// <summary>Like <see cref="Capture"/>, for an intent this process may not know (a restart forgets them): false when unknown.</summary>
+    public bool TryCapture(string intentId) { lock (_lock) { if (!_intents.TryGetValue(intentId, out var i)) return false; i.CapturedCents = i.AmountCents; return true; } }
 
     private void MaybeFail() { if (FailNext > 0) { FailNext--; throw new PaymentsUnavailableException("unreachable"); } }
 }
