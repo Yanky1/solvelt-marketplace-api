@@ -70,3 +70,29 @@ public sealed class MessageRateLimitFilter(MessageRateLimiter limiter) : IEndpoi
         return await next(context);
     }
 }
+
+/// <summary>
+/// Writing reviews: create, edit, helpful votes, reports and photos share <c>RateLimits:ReviewWritesPerMinute</c> (30) per SIGNED-IN ACCOUNT (M6 review L2). Like <see cref="MessageRateLimiter"/> it counts only after the
+/// sign-in check, so two buyers behind one address do not share a bucket and requests without a session never count; the per-address <c>Public</c> limit still applies in front of it.
+/// </summary>
+public sealed class ReviewWriteRateLimiter(IConfiguration config) : IDisposable
+{
+    private readonly PartitionedRateLimiter<Guid> _limiter = PartitionedRateLimiter.Create<Guid, Guid>(account =>
+        RateLimitPartition.GetFixedWindowLimiter(account, _ => new FixedWindowRateLimiterOptions { PermitLimit = Math.Max(1, config.GetValue("RateLimits:ReviewWritesPerMinute", 30)), Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+    public bool TryAcquire(Guid accountId) { using var lease = _limiter.AttemptAcquire(accountId); return lease.IsAcquired; }
+    public void Dispose() => _limiter.Dispose();
+}
+
+public sealed class ReviewWriteRateLimitFilter(ReviewWriteRateLimiter limiter) : IEndpointFilter
+{
+    public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        if (!limiter.TryAcquire(context.HttpContext.Buyer().AccountId))
+        {
+            context.HttpContext.Response.Headers.RetryAfter = "60";
+            context.HttpContext.Response.Headers.CacheControl = "no-store";
+            return Problems.Json(429, "rate_limited", "Too many requests. Try again shortly.");
+        }
+        return await next(context);
+    }
+}

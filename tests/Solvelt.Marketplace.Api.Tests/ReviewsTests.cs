@@ -774,4 +774,21 @@ public sealed class ReviewsTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, (await Call(HttpMethod.Patch, $"/api/v1/reviews/{id}", a, new { rating = 4, text = "Changed my mind after the refund." })).Status);
         Assert.Equal(ReviewStatus.Published, (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).Status);
     }
+
+    [Fact]
+    public async Task Review_writes_are_limited_per_signed_in_account_not_per_address_and_requests_without_a_session_do_not_count()
+    {
+        var (a, ida) = await Buyer("l2a@example.com");
+        var (b, _) = await Buyer("l2b@example.com");
+        var (c, _) = await Buyer("l2c@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        for (var i = 0; i < 25; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await Call(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", null)).Status);   // no session: not counted
+        var results = new List<HttpStatusCode>();
+        for (var i = 0; i < 36; i++) results.Add((await Call(i % 2 == 0 ? HttpMethod.Put : HttpMethod.Delete, $"/api/v1/reviews/{id}/helpful", b)).Status);   // vote, un-vote, vote ...
+        Assert.All(results.Take(30), s => Assert.Equal(HttpStatusCode.NoContent, s));
+        Assert.All(results.Skip(30), s => Assert.Equal(HttpStatusCode.TooManyRequests, s));
+        var refused = await _k.Send(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", null, b);
+        Assert.Equal("60", refused.Headers.RetryAfter!.ToString());
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", c)).Status);   // another buyer, the same address: its own bucket
+    }
 }

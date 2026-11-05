@@ -45,6 +45,7 @@ builder.Services.Configure<AuthOptions>(o => OptionsSetup.Auth(o, builder.Config
 builder.Services.Configure<NotificationOptions>(o => OptionsSetup.Notifications(o, builder.Configuration, devLike));
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Notifications.UnsubscribeTokens>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Infrastructure.MessageRateLimiter>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Infrastructure.ReviewWriteRateLimiter>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner, Solvelt.Marketplace.Api.Messaging.AllowAllAttachmentScanner>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Demo.DemoAccountEraser>();   // first: demo rows are removed outright (M9)
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Messaging.MessagingAccountEraser>();
