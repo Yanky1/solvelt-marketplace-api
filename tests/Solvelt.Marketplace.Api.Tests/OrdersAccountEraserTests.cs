@@ -62,8 +62,23 @@ public sealed class OrdersAccountEraserTests : OrderFlowBase
             return 0;
         });
 
+        // a guest order placed with ANOTHER address must keep its address: only the deleted account's mailbox is cleared
+        var other = Guid.NewGuid();
+        await _k.Db(async db =>
+        {
+            var template = await db.Orders.AsNoTracking().SingleAsync(o => o.Number == number);
+            template.Id = other; template.Number = "MP-OTHER01"; template.GuestEmail = "someone-else@example.com"; template.AccountId = null; template.ActiveKey = null; template.PaymentIntentId = null;
+            db.Orders.Add(template);
+            await db.SaveChangesAsync();
+            return 0;
+        });
+
         await DeleteAccountAndRedact(Infrastructure.AuthKit.Password);
 
-        Assert.Null((await Order(number)).GuestEmail);
+        // the account's own address was already null when the erasers ran (M1 frees it at delete time), and the guest order still lost it: the hook is handed the address before it is freed
+        var account = await _k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.DeletedAt != null));
+        Assert.Null(account.Email);
+        Assert.Null((await Order(number)).GuestEmail);                                      // otherwise a new account with the same mailbox could claim it
+        Assert.Equal("someone-else@example.com", (await _k.Db(db => db.Orders.AsNoTracking().SingleAsync(o => o.Id == other))).GuestEmail);
     }
 }
