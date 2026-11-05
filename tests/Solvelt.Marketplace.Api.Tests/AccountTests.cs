@@ -305,12 +305,73 @@ public class AccountTests
                 };
             })).ToList();
             var results = await Task.WhenAll(ops);
-            Assert.All(results, r => Assert.True(r.StatusCode is HttpStatusCode.OK or HttpStatusCode.NoContent or HttpStatusCode.Created or HttpStatusCode.NotFound or HttpStatusCode.Conflict, r.StatusCode.ToString()));
+            // a write that kept hitting lock contention is refused as busy (503 with Retry-After): allowed under a storm, a 500 is not; the one-default invariant below is unchanged
+            Assert.All(results, r => Assert.True(r.StatusCode is HttpStatusCode.OK or HttpStatusCode.NoContent or HttpStatusCode.Created or HttpStatusCode.NotFound or HttpStatusCode.Conflict or HttpStatusCode.ServiceUnavailable, r.StatusCode.ToString()));
+            Assert.All(results.Where(r => r.StatusCode == HttpStatusCode.ServiceUnavailable), r => Assert.True(r.Headers.RetryAfter is not null));
             var total = await k.Db(db => db.BuyerAddresses.CountAsync(a => a.AccountId == accountId));
             Assert.Equal(total > 0 ? 1 : 0, await Defaults(k, accountId));
             ids = (await Book(k, token)).Select(b => b.Id).ToList();
             while (ids.Count < 6) ids.Add(await AddAddress(k, token, Us("Refill")));
         }
+    }
+
+    /// <summary>Fails the next <see cref="Remaining"/> writes to buyer_addresses with a SQLite error (a constraint, busy or locked), as lock contention would.</summary>
+    private sealed class FailAddressWrites : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        public int Remaining, Failed, Code = 5;
+        private void Maybe(System.Data.Common.DbCommand c)
+        {
+            if (Remaining > 0 && c.CommandText.TrimStart().StartsWith("INSERT", StringComparison.OrdinalIgnoreCase) && c.CommandText.Contains("buyer_addresses"))
+            { Remaining--; Failed++; throw new Microsoft.Data.Sqlite.SqliteException("injected", Code); }
+        }
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(System.Data.Common.DbCommand command, Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData, Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result, CancellationToken cancellationToken = default)
+        { Maybe(command); return base.ReaderExecutingAsync(command, eventData, result, cancellationToken); }
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(System.Data.Common.DbCommand command, Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData, Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        { Maybe(command); return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken); }
+    }
+
+    [Theory]
+    [InlineData(5)]     // SQLITE_BUSY
+    [InlineData(6)]     // SQLITE_LOCKED
+    [InlineData(19)]    // a constraint (a unique violation: another request made a default first)
+    public async Task A_write_that_meets_a_conflict_a_few_times_is_retried_and_succeeds(int sqliteCode)
+    {
+        var hook = new FailAddressWrites { Code = sqliteCode };
+        using var k = new AuthKit(null, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)));
+        var token = await k.VerifiedSession(Email);
+        hook.Remaining = 4;
+        var r = await k.Send(Post, "/api/v1/account/addresses", Us("Retried"), token);
+        Assert.Equal(HttpStatusCode.Created, r.StatusCode);
+        Assert.Equal(4, hook.Failed);                                                                   // it did fail four times and was tried again each time
+        Assert.Single(await Book(k, token));
+        Assert.Equal(1, await Defaults(k, (await k.Account(Email)).Id));
+    }
+
+    [Fact]
+    public async Task A_write_that_keeps_meeting_conflicts_is_a_503_with_retry_after_not_a_500_and_changes_nothing()
+    {
+        var hook = new FailAddressWrites { Code = 19 };
+        using var k = new AuthKit(null, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)));
+        var token = await k.VerifiedSession(Email);
+        hook.Remaining = int.MaxValue;
+        var r = await k.Send(Post, "/api/v1/account/addresses", Us("Never"), token);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, r.StatusCode);
+        Assert.Equal("1", r.Headers.RetryAfter!.Delta!.Value.TotalSeconds.ToString());
+        Assert.Equal("too_busy", JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.GetProperty("code").GetString());
+        hook.Remaining = 0;
+        Assert.Empty(await Book(k, token));                                                             // nothing half-written
+        Assert.Equal(HttpStatusCode.Created, (await k.Send(Post, "/api/v1/account/addresses", Us("Later"), token)).StatusCode);   // and the next request works
+    }
+
+    [Fact]
+    public void Only_lock_and_unique_conflicts_are_retried()
+    {
+        Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 19)));
+        Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 5)));
+        Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 6)));
+        Assert.True(AccountService.IsRetryable(new DbUpdateException("wrapped", new Microsoft.Data.Sqlite.SqliteException("x", 5))));
+        Assert.False(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 1)));       // SQL error: a bug, not contention
+        Assert.False(AccountService.IsRetryable(new InvalidOperationException("x")));
     }
 
     [Fact]

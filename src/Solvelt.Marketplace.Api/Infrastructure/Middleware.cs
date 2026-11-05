@@ -22,6 +22,9 @@ public sealed class SafeRequestLoggingMiddleware(RequestDelegate next, ILogger<S
 }
 
 /// <summary>Unhandled exceptions become <c>{code, message}</c> 500s with no detail leaked.</summary>
+/// <summary>Thrown when a write kept hitting a retryable conflict (see <c>AccountService.IsRetryable</c>) until its attempts ran out; <see cref="ProblemExceptionMiddleware"/> answers it with 503 and Retry-After.</summary>
+public sealed class TooBusyException(string message) : Exception(message);
+
 public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<ProblemExceptionMiddleware> log)
 {
     public async Task InvokeAsync(HttpContext ctx)
@@ -34,6 +37,11 @@ public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<Pro
                 await (ex.StatusCode == 413 ? Write(ctx, 413, "payload_too_large", "Request body too large.") : Write(ctx, 400, "bad_request", "The request could not be understood."));
         }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { }
+        catch (TooBusyException)
+        {
+            // The database kept refusing a write after the retries (lock contention): the caller may try again, so it is a 503 with Retry-After, not a 500.
+            if (!ctx.Response.HasStarted) await Write(ctx, 503, "too_busy", "The service is busy; try again in a moment.", null, r => r.Headers.RetryAfter = "1");
+        }
         catch (Exception ex)
         {
             // Exception messages (database, HTTP, parsing) can carry PII, so only the type, the stack and a correlation id
