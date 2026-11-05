@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105161608_InitialCreate")]
+    [Migration("20261105180720_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2425,6 +2425,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<string>("LastEventId")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<long?>("LastSequence")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("TerminalState")
                         .HasMaxLength(50)

@@ -712,6 +712,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     LastAppliedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     LastEventId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     TerminalState = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    LastSequence = table.Column<long>(type: "bigint", nullable: true),
                     Version = table.Column<int>(type: "integer", nullable: false)
                 },
                 constraints: table =>

@@ -16,6 +16,8 @@ public sealed class ProjectionState
     /// <summary>Id of the event that set <see cref="LastAppliedAt"/>: the deterministic tie-breaker when two events carry the same stored time.</summary>
     public string? LastEventId { get; set; }
     public string? TerminalState { get; set; }
+    /// <summary>The highest portal <c>sequence</c> applied in this group (C17.1: events of one scope such as <c>review:{id}</c> carry an increasing integer); null until an event with a sequence was applied.</summary>
+    public long? LastSequence { get; set; }
     public int Version { get; set; }
 }
 

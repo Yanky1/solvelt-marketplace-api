@@ -79,7 +79,8 @@ public sealed class ReviewReplyHandler : IProjectionHandler
         if (string.IsNullOrWhiteSpace(replyId) || replyId.Length > 100) return HandlerOutcome.Skipped("no reply id");
         var review = await c.Db.Reviews.FirstOrDefaultAsync(r => r.Id == reviewId, ct);
         if (review is null) return HandlerOutcome.Skipped("unknown review");
-        if (!await c.AdvanceAsync("review", reviewId.ToString(), "reply", ct: ct)) return HandlerOutcome.Skipped("older than the applied reply state");
+        // C17.1: the portal numbers the events of one review in the scope "review:{reviewId}"; the greater sequence wins, without one the arrival order does.
+        if (!await c.AdvanceBySequenceAsync("review", reviewId.ToString(), "reply", $"review:{reviewId}", ct)) return HandlerOutcome.Skipped("older than the applied reply state");
         if (c.Event.Type == "review.reply_removed")
         {
             if (review.ReplyId == replyId) { review.ReplyText = null; review.ReplyId = null; review.ReplyAt = null; }

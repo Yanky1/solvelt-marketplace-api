@@ -21,6 +21,16 @@ public sealed record ProjectionContext(MarketplaceDb Db, PortalEvent Event, Proj
     /// </summary>
     public Task<bool> AdvanceAsync(string aggregateType, string aggregateKey, string fieldGroup, string? terminalState = null, CancellationToken ct = default)
         => Store.TryAdvanceAsync(aggregateType, aggregateKey, fieldGroup, Event.Id, Event.CreatedAt, terminalState, ct);
+
+    /// <summary>
+    /// The ordering of C17.1 for events whose scope the portal numbers: when the event carries <c>sequenceScope</c> equal to <paramref name="expectedScope"/> and a <c>sequence</c>, it is applied only if that
+    /// sequence is greater than the last one applied in this group (an older or equal one, such as a dead event re-queued after its successors, is skipped). Without them, or for another scope, ARRIVAL order
+    /// decides (see <see cref="ProjectionStore.TryAdvanceByArrivalAsync"/>). Call it before changing the aggregate; when it returns false return <see cref="HandlerOutcome.Skipped"/>.
+    /// </summary>
+    public Task<bool> AdvanceBySequenceAsync(string aggregateType, string aggregateKey, string fieldGroup, string expectedScope, CancellationToken ct = default)
+        => Event is { Sequence: { } sequence, SequenceScope: { } scope } && string.Equals(scope, expectedScope, StringComparison.Ordinal)
+            ? Store.TryAdvanceBySequenceAsync(aggregateType, aggregateKey, fieldGroup, sequence, Event.Id, Event.CreatedAt, ct)
+            : Store.TryAdvanceByArrivalAsync(aggregateType, aggregateKey, fieldGroup, Event.Id, Event.CreatedAt, ct);
 }
 
 /// <summary>One handler per event type. Handlers must be idempotent and must not call out over the network (ack fast: heavy work goes to the outbox).</summary>
@@ -125,15 +135,43 @@ public sealed class ProjectionStore(MarketplaceDb db, TerminalStateRules rules)
         return true;
     }
 
-    private void Touch(ProjectionState? row, string aggregateType, string aggregateKey, string fieldGroup, DateTimeOffset at, string eventId, string? terminalState)
+    /// <summary>
+    /// C17.1: the event is applied only if its portal <paramref name="sequence"/> is greater than the last one applied in this (aggregate, group). Equal or lower is a duplicate or a late older event
+    /// (a dead one re-queued after its successors): its successors, which carry the later state, are already applied, so it is skipped. The time and the id play no part.
+    /// </summary>
+    public async Task<bool> TryAdvanceBySequenceAsync(string aggregateType, string aggregateKey, string fieldGroup, long sequence, string eventId, DateTimeOffset createdAt, CancellationToken ct = default)
+    {
+        if (fieldGroup == TerminalGroup) throw new ArgumentException($"'{TerminalGroup}' is reserved.", nameof(fieldGroup));
+        var group = await db.ProjectionStates.FindAsync([aggregateType, aggregateKey, fieldGroup], ct);
+        if (group?.LastSequence is { } last && sequence <= last) return false;
+        Touch(group, aggregateType, aggregateKey, fieldGroup, ToStoredPrecision(createdAt), eventId, null, sequence);
+        return true;
+    }
+
+    /// <summary>
+    /// The order for events that carry no sequence: ARRIVAL order. An event is applied unless its time is STRICTLY older than what the group already applied (a re-queued old event); the same time is
+    /// applied in the order the events arrived (a random event id is no order: two edits in the same instant must not be ranked by it). The portal delivers one scope strictly in order, so this is its order.
+    /// </summary>
+    public async Task<bool> TryAdvanceByArrivalAsync(string aggregateType, string aggregateKey, string fieldGroup, string eventId, DateTimeOffset createdAt, CancellationToken ct = default)
+    {
+        if (fieldGroup == TerminalGroup) throw new ArgumentException($"'{TerminalGroup}' is reserved.", nameof(fieldGroup));
+        createdAt = ToStoredPrecision(createdAt);
+        var group = await db.ProjectionStates.FindAsync([aggregateType, aggregateKey, fieldGroup], ct);
+        if (group is not null && createdAt < group.LastAppliedAt) return false;
+        Touch(group, aggregateType, aggregateKey, fieldGroup, createdAt, eventId, null);
+        return true;
+    }
+
+    private void Touch(ProjectionState? row, string aggregateType, string aggregateKey, string fieldGroup, DateTimeOffset at, string eventId, string? terminalState, long? sequence = null)
     {
         if (row is null)
         {
-            db.ProjectionStates.Add(new ProjectionState { AggregateType = aggregateType, AggregateKey = aggregateKey, FieldGroup = fieldGroup, LastAppliedAt = at, LastEventId = eventId, TerminalState = terminalState });
+            db.ProjectionStates.Add(new ProjectionState { AggregateType = aggregateType, AggregateKey = aggregateKey, FieldGroup = fieldGroup, LastAppliedAt = at, LastEventId = eventId, TerminalState = terminalState, LastSequence = sequence });
             return;
         }
         row.LastAppliedAt = at;
         row.LastEventId = eventId;
+        if (sequence is not null) row.LastSequence = sequence;
         if (terminalState is not null) row.TerminalState = terminalState;
         row.Version++;
     }
