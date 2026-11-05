@@ -193,7 +193,7 @@ public sealed class BookingEventHandler(ILogger<BookingEventHandler> log) : IPro
     private async Task RefundAsync(ProjectionContext c, Booking b, long wanted, string reason, CancellationToken ct)
     {
         var outbox = new OutboxWriter(c.Db, c.Time);
-        var refunds = new BookingRefundService(c.Db, outbox, c.Time);
+        var refunds = new BookingRefundService(c.Db, outbox, c.Time, new BookingHooks());
         var now = c.Time.GetUtcNow().ToUniversalTime();
         // Two tries: a confirm racing this event may report the sale between our read and our update, which turns "unreported" into "reported" under us.
         for (var attempt = 0; attempt < 2; attempt++)

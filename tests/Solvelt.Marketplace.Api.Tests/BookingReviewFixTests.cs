@@ -152,7 +152,10 @@ public sealed class BookingReviewFixTests : BookingFlowBase
         await Drain();
         Assert.Equal(14000, Assert.Single(Stripe.Refunds).AmountCents);                                      // not nothing
         Assert.Equal(10000, Assert.Single(await Refunds(), r => r.Status == RefundStatus.Deferred).AmountCents);
-        Assert.DoesNotContain("in full", (await _k.Mail("jane@example.com")).Last().TextBody);              // the buyer is not told "in full" when part is held
+        var held = (await _k.Mail("jane@example.com")).Last().TextBody;
+        Assert.DoesNotContain("in full", held);                                                              // the buyer is not told "in full" when part is held
+        Assert.DoesNotContain("will follow", held);                                                          // nor promised the rest: a lost dispute keeps it
+        Assert.Contains("only if the money is left with us", held);
     }
 
     [Fact]
@@ -242,5 +245,109 @@ public sealed class BookingReviewFixTests : BookingFlowBase
         for (var i = 0; i < ServiceOptionsCache.MaxEntries + 120; i++) await cache.GetAsync(Guid.NewGuid(), CancellationToken.None);   // the portal answers 404: cached as "no options"
         Assert.True(cache.Count <= ServiceOptionsCache.MaxEntries, cache.Count.ToString());
         Assert.True(cache.Count > ServiceOptionsCache.MaxEntries - 1000);                                    // and it is trimmed, not emptied
+    }
+
+    // ---------- second review (2f0832d..30d450a): deferred refunds and disputes ----------
+
+    private async Task<BookingMaintenance.Result> RunUpkeep()
+    {
+        using var scope = _k.F.Services.CreateScope();
+        return await scope.ServiceProvider.GetRequiredService<BookingMaintenance>().RunAsync();
+    }
+
+    [Fact]
+    public async Task MED1_a_released_refund_that_stripe_refuses_because_a_new_dispute_opened_goes_back_to_deferred_and_is_paid_when_that_one_is_won()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        var pay = await Pay(b.Id);
+        await StripeObject("charge.dispute.created", new { id = "dp_a", payment_intent = intent.Id, amount = 24000, status = "needs_response" }, T0 + 1);
+        await ReserveOrDefer(pay.Id, 5000, "K-med1");                                            // deferred behind the first dispute
+        await StripeObject("charge.dispute.closed", new { id = "dp_a", payment_intent = intent.Id, amount = 24000, status = "won" }, T0 + 5);   // released: reserved, the Stripe call is queued
+        Assert.Equal(5000, (await Pay(b.Id)).RefundedCents);
+        await StripeObject("charge.dispute.created", new { id = "dp_b", payment_intent = intent.Id, amount = 24000, status = "needs_response" }, T0 + 6);   // a NEW dispute before Stripe was called
+        Stripe.RejectRefundWith = "charge_disputed";
+        await Drain();
+        var row = Assert.Single(await Refunds(), r => r.Key == "K-med1:deferred");
+        Assert.Equal(RefundStatus.Deferred, row.Status);                                         // not lost: waiting again
+        Assert.Equal(0, (await Pay(b.Id)).RefundedCents);                                        // and it no longer counts against the cap
+        Assert.Empty(Stripe.Refunds);
+        await StripeObject("charge.dispute.closed", new { id = "dp_b", payment_intent = intent.Id, amount = 24000, status = "won" }, T0 + 9);
+        await Drain();
+        Assert.Equal(5000, Stripe.Refunds.Sum(r => r.AmountCents));                              // paid once, when the second dispute is won
+        Assert.Equal(5000, (await Pay(b.Id)).RefundedCents);
+    }
+
+    [Fact]
+    public async Task MED2_a_deferred_refund_is_never_paid_behind_a_lost_dispute_by_the_upkeep_or_by_a_direct_release()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        var pay = await Pay(b.Id);
+        await StripeObject("charge.dispute.created", new { id = "dp_l", payment_intent = intent.Id, amount = 24000, status = "needs_response" }, T0 + 1);
+        await ReserveOrDefer(pay.Id, 5000, "K-lost");
+        await StripeObject("charge.dispute.closed", new { id = "dp_l", payment_intent = intent.Id, amount = 24000, status = "lost" }, T0 + 5);   // the chargeback took everything
+        Assert.Equal(24000, (await Pay(b.Id)).DisputedCents);
+        Assert.Equal(0, (await RunUpkeep()).Released);                                           // the sweep releases nothing
+        await Drain();
+        Assert.Empty(Stripe.Refunds);
+        using (var scope = _k.F.Services.CreateScope())                                           // and even a direct release respects the cap
+        {
+            Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<BookingRefundService>().ReleaseDeferredAsync(pay.Id, CancellationToken.None));
+            await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().SaveChangesAsync();
+        }
+        await Drain();
+        Assert.Empty(Stripe.Refunds);
+        var after = await Pay(b.Id);
+        Assert.True(after.RefundedCents <= after.CapturedCents - after.DisputedCents, "refunded more than the capture minus the chargeback");
+        Assert.Equal(RefundStatus.Deferred, Assert.Single(await Refunds(), r => r.Key == "K-lost:deferred").Status);
+    }
+
+    [Fact]
+    public async Task LOW1_a_release_that_fits_only_in_part_reserves_what_fits_keeps_the_rest_deferred_and_pays_all_in_the_end()
+    {
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        var pay = await Pay(b.Id);
+        await StripeObject("charge.dispute.created", new { id = "dp_p", payment_intent = intent.Id, amount = 24000, status = "needs_response" }, T0 + 1);
+        await ReserveOrDefer(pay.Id, 10000, "K-split");
+        await StripeObject("charge.dispute.updated", new { id = "dp_p", payment_intent = intent.Id, amount = 18000, status = "needs_response" }, T0 + 3);   // the amount at stake shrinks: 6000 of room
+        var rows = await Refunds();
+        Assert.Equal(6000, Assert.Single(rows, r => r.Key.StartsWith("K-split:deferred:split")).AmountCents);
+        Assert.Equal(4000, Assert.Single(rows, r => r.Key == "K-split:deferred").AmountCents);
+        Assert.Equal(RefundStatus.Deferred, rows.Single(r => r.Key == "K-split:deferred").Status);
+        Assert.Equal(6000, (await Pay(b.Id)).RefundedCents);
+        await Drain();
+        Assert.Equal(6000, Stripe.Refunds.Sum(r => r.AmountCents));
+        await StripeObject("charge.dispute.closed", new { id = "dp_p", payment_intent = intent.Id, amount = 18000, status = "won" }, T0 + 8);
+        await Drain();
+        Assert.Equal(10000, Stripe.Refunds.Sum(r => r.AmountCents));                             // all of it in the end, never more
+        Assert.Equal(10000, (await Pay(b.Id)).RefundedCents);
+    }
+
+    [Fact]
+    public async Task LOW2_postgres_a_dispute_decision_cannot_slip_in_between_the_refunds_read_and_its_insert()
+    {
+        // Only PostgreSQL gives row locks a meaning here (SQLite serialises every writer anyway): on SQLite this test has nothing to observe and returns.
+        if (!string.Equals(Environment.GetEnvironmentVariable("TEST_DB_PROVIDER"), "postgres", StringComparison.OrdinalIgnoreCase)) return;
+        await Ready();
+        var b = await PaidBooking();
+        var intent = IntentOf(b.MarketplaceBookingId);
+        var pay = await Pay(b.Id);
+        await StripeObject("charge.dispute.created", new { id = "dp_x", payment_intent = intent.Id, amount = 24000, status = "needs_response" }, T0 + 1);
+        Task? slip = null; var slippedEarly = false;
+        _k.F.Services.GetRequiredService<BookingHooks>().AfterPaymentRead = async () =>
+        {
+            // a dispute decision tries to change the payment row now: while the refund holds the payment's lock it must WAIT
+            slip = Task.Run(() => _k.Db(db => db.BookingPayments.Where(p => p.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(p => p.DisputedCents, 0L))));
+            slippedEarly = await Task.WhenAny(slip, Task.Delay(1500)) == slip;
+        };
+        await ReserveOrDefer(pay.Id, 5000, "K-lock");
+        Assert.False(slippedEarly, "the dispute update got through while the refund held the payment lock");
+        await slip!;
+        Assert.Contains(await Refunds(), r => r.Key == "K-lock:deferred");                         // decided on the state the refund read
     }
 }

@@ -26,6 +26,8 @@ public sealed class BookingHooks
     public Func<Task>? AfterIntentCreated { get; set; }
     /// <summary>Test seam: awaited in the quote-booking path after the payment was read and before the sale is marked reported (a void can land in between).</summary>
     public Func<Task>? BeforeSaleReport { get; set; }
+    /// <summary>Test seam: awaited once inside <c>ReserveOrDeferAsync</c>, after the payment was read under its row lock and before the refund rows are written (PostgreSQL lock test).</summary>
+    public Func<Task>? AfterPaymentRead { get; set; }
 }
 
 public sealed class BookingPaymentService(MarketplaceDb db, BookingHooks hooks, IPaymentProvider payments, IOptions<StripeOptions> stripe, OutboxWriter outbox, TimeProvider time, ILogger<BookingPaymentService> log)
@@ -67,13 +69,17 @@ public sealed class BookingPaymentService(MarketplaceDb db, BookingHooks hooks, 
         if (stored == 0) return (BookingCheckoutStatus.NotPayable, null, null);
 
         var pay = existing;
-        if (pay is null)
+        // A failed insert is not always "a parallel checkout inserted it first": under load (SQLite's write lock) it can be a refusal that left NO row yet. So look again, and try again a few times
+        // before giving up with a retryable answer (review LOW-5: 2 of 8 parallel checkouts once got a 500).
+        for (var attempt = 0; pay is null && attempt < 4; attempt++)
         {
             db.BookingPayments.Add(new BookingPayment { Id = Guid.NewGuid(), Key = key, BookingId = b.Id, Kind = PaymentKinds.Booking, Currency = b.Currency, AmountCents = b.TotalCents, Status = BookingPaymentStatus.Pending, CreatedAt = now, UpdatedAt = now });
             try { await db.SaveChangesAsync(ct); }
-            catch (DbUpdateException) { db.ChangeTracker.Clear(); }   // a parallel checkout inserted it first: it is the same payment
-            pay = await db.BookingPayments.AsNoTracking().FirstAsync(p => p.Key == key, ct);
+            catch (DbUpdateException) { db.ChangeTracker.Clear(); }
+            pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.Key == key, ct);
+            if (pay is null) await Task.Delay(40 * (attempt + 1), ct);
         }
+        if (pay is null) return (BookingCheckoutStatus.PaymentsUnavailable, null, null);
         if (pay.Status != BookingPaymentStatus.Pending) return (BookingCheckoutStatus.NotPayable, null, null);
         if (pay.AmountCents != b.TotalCents) return (BookingCheckoutStatus.NotPayable, null, null);   // the portal's price moved since the intent: never charge a different amount than the one shown
         try
@@ -213,7 +219,7 @@ public enum BookingReserveOutcome { Reserved, Duplicate, ExceedsCaptured, NotCap
 /// The only way a booking payment's money leaves: reserve against the cap (<c>RefundedCents + amount &lt;= CapturedCents</c>, a conditional update) together with the unique refund key and the outbox
 /// message that calls Stripe, so refunds can never exceed what was captured however many events, retries or parallel requests arrive (same rule as <c>RefundService</c> for orders).
 /// </summary>
-public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, TimeProvider time)
+public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, TimeProvider time, BookingHooks hooks)
 {
     public const string StripeRefundType = "stripe.booking-refund";
     public sealed record RefundPayload(string Key);
@@ -235,6 +241,7 @@ public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, 
         if (await db.BookingRefunds.AnyAsync(r => r.Key == key || r.Key == dkey, ct)) { if (own) await tx!.CommitAsync(ct); return 0; }
         var pay = await db.BookingPayments.AsNoTracking().Where(p => p.Id == paymentId).Select(p => new { p.BookingId, p.CapturedCents, p.RefundedCents, p.DisputedCents }).FirstOrDefaultAsync(ct);
         if (pay is null) { if (own) await tx!.CommitAsync(ct); return 0; }
+        if (hooks.AfterPaymentRead is { } afterRead) { hooks.AfterPaymentRead = null; await afterRead(); }
         var available = Math.Max(0, pay.CapturedCents - pay.RefundedCents - pay.DisputedCents);
         var now = Math.Min(wanted, available);
         if (now > 0)
@@ -273,24 +280,69 @@ public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, 
     private Task<int> LockAsync(Guid paymentId, CancellationToken ct)
         => db.BookingPayments.Where(p => p.Id == paymentId).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents), ct);
 
-    /// <summary>Reserves deferred refunds of a payment, oldest first, as far as the cap now allows (a won or closed dispute released its hold), under the payment's row lock. Idempotent: a deferred row becomes reserved exactly once.</summary>
-    public async Task ReleaseDeferredAsync(Guid paymentId, CancellationToken ct)
+    /// <summary>
+    /// Reserves deferred refunds of a payment, oldest first, as far as the cap now allows (a won or closed dispute released its hold), under the payment's row lock. A row that does not fit whole
+    /// is SPLIT: what fits is reserved now (under its own key, <c>key:splitN</c>) and the rest stays deferred, so nothing is held back needlessly. Idempotent: a deferred row becomes reserved
+    /// exactly once. Returns how many refunds were really released (whole or in part).
+    /// </summary>
+    public async Task<int> ReleaseDeferredAsync(Guid paymentId, CancellationToken ct)
     {
         var own = db.Database.CurrentTransaction is null;
         await using var tx = own ? await db.Database.BeginTransactionAsync(ct) : null;
         await LockAsync(paymentId, ct);
         var rows = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == paymentId && r.Status == RefundStatus.Deferred).OrderBy(r => r.CreatedAt).ToListAsync(ct);
+        var released = 0;
         foreach (var r in rows)
         {
-            var took = await db.BookingPayments.Where(p => p.Id == paymentId && p.RefundedCents + r.AmountCents <= p.CapturedCents - p.DisputedCents)
-                .ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents + r.AmountCents), ct);
+            var room = await db.BookingPayments.AsNoTracking().Where(p => p.Id == paymentId).Select(p => p.CapturedCents - p.RefundedCents - p.DisputedCents).FirstAsync(ct);
+            var take = Math.Min(r.AmountCents, room);
+            if (take <= 0) continue;                                                          // nothing fits (a dispute still holds the money): the row stays deferred
+            var took = await db.BookingPayments.Where(p => p.Id == paymentId && p.RefundedCents + take <= p.CapturedCents - p.DisputedCents)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents + take), ct);
             if (took == 0) continue;
-            var flipped = await db.BookingRefunds.Where(x => x.Id == r.Id && x.Status == RefundStatus.Deferred)
-                .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, RefundStatus.Reserved).SetProperty(x => x.UpdatedAt, time.GetUtcNow()), ct);
-            if (flipped == 0) { await db.BookingPayments.Where(p => p.Id == paymentId).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents - r.AmountCents), ct); continue; }
-            outbox.Enqueue(StripeRefundType, new RefundPayload(r.Key), $"refund:{r.Key}");
+            var t = time.GetUtcNow().ToUniversalTime();
+            string sendKey;
+            if (take == r.AmountCents)
+            {
+                var flipped = await db.BookingRefunds.Where(x => x.Id == r.Id && x.Status == RefundStatus.Deferred)
+                    .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, RefundStatus.Reserved).SetProperty(x => x.UpdatedAt, t), ct);
+                if (flipped == 0) { await db.BookingPayments.Where(p => p.Id == paymentId).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents - take), ct); continue; }
+                sendKey = r.Key;
+            }
+            else
+            {
+                // the part that fits becomes its own reserved refund; the deferred row keeps the rest
+                sendKey = $"{r.Key}:split{t.UtcTicks}";
+                var cut = await db.BookingRefunds.Where(x => x.Id == r.Id && x.Status == RefundStatus.Deferred && x.AmountCents == r.AmountCents)
+                    .ExecuteUpdateAsync(s => s.SetProperty(x => x.AmountCents, x => x.AmountCents - take).SetProperty(x => x.UpdatedAt, t), ct);
+                if (cut == 0) { await db.BookingPayments.Where(p => p.Id == paymentId).ExecuteUpdateAsync(s => s.SetProperty(p => p.RefundedCents, p => p.RefundedCents - take), ct); continue; }
+                db.BookingRefunds.Add(new BookingRefund { Id = Guid.NewGuid(), Key = sendKey, PaymentId = paymentId, BookingId = r.BookingId, AmountCents = take, Reason = r.Reason, Status = RefundStatus.Reserved, ReportToPortal = r.ReportToPortal, CreatedAt = t, UpdatedAt = t });
+            }
+            outbox.Enqueue(StripeRefundType, new RefundPayload(sendKey), $"refund:{sendKey}:{Guid.NewGuid():N}");   // a fresh message per release: a refund bounced back to deferred is sent again
+            released++;
         }
         if (own) { await db.SaveChangesAsync(ct); await tx!.CommitAsync(ct); }
+        return released;
+    }
+
+    /// <summary>
+    /// A reserved refund that Stripe refused (the bounce of <see cref="BookingStripeRefundHandler"/>) because a NEW dispute holds the money goes back to deferred under the lock (its amount leaves
+    /// the cap again), to be released when the dispute is decided; any other refusal is rejected and given back. Returns true when it was deferred again.
+    /// </summary>
+    public async Task<bool> BounceAsync(BookingRefund refund, string code, ILogger log, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await LockAsync(refund.PaymentId, ct);
+        var disputed = await db.BookingPayments.AsNoTracking().Where(p => p.Id == refund.PaymentId).Select(p => p.DisputedCents).FirstAsync(ct);
+        var again = disputed > 0 || code == "charge_disputed";
+        var t = time.GetUtcNow().ToUniversalTime();
+        var changed = await db.BookingRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, again ? RefundStatus.Deferred : RefundStatus.Rejected).SetProperty(r => r.UpdatedAt, t), ct);
+        if (changed == 1) await db.BookingPayments.Where(x => x.Id == refund.PaymentId).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents), ct);
+        await tx.CommitAsync(ct);
+        if (changed == 1 && again) log.LogWarning("Booking refund {Key} ({Amount} cents) was refused because of a dispute and is deferred again", refund.Key, refund.AmountCents);
+        else if (changed == 1) log.LogError("ALERT: booking refund {Key} ({Amount} cents) was REFUSED by Stripe ({Code}); the buyer is owed it and a person must look", refund.Key, refund.AmountCents, code);
+        return changed == 1 && again;
     }
 
     public async Task<BookingReserveOutcome> ReserveAsync(Guid paymentId, long amountCents, string key, string reason, bool reportToPortal, CancellationToken ct)
@@ -325,7 +377,7 @@ public sealed class BookingRefundService(MarketplaceDb db, OutboxWriter outbox, 
 }
 
 /// <summary>Calls Stripe for a reserved booking refund (idempotent on the refund key); reports <c>refund.processed</c> with <c>marketplaceBookingId</c> only when it reverses a sale the portal knows.</summary>
-public sealed class BookingStripeRefundHandler(MarketplaceDb db, IPaymentProvider payments, OutboxWriter outbox, TimeProvider time) : IOutboxHandler
+public sealed class BookingStripeRefundHandler(MarketplaceDb db, IPaymentProvider payments, OutboxWriter outbox, BookingRefundService refunds, TimeProvider time, ILogger<BookingStripeRefundHandler> log) : IOutboxHandler
 {
     public IReadOnlyCollection<string> Types { get; } = [BookingRefundService.StripeRefundType];
 
@@ -346,11 +398,9 @@ public sealed class BookingStripeRefundHandler(MarketplaceDb db, IPaymentProvide
         catch (PaymentsUnavailableException) { return OutboxResult.Retry("stripe_unavailable"); }
         catch (PaymentRejectedException ex)
         {
-            await using var tx = await db.Database.BeginTransactionAsync(ct);
-            var changed = await db.BookingRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Rejected).SetProperty(r => r.UpdatedAt, time.GetUtcNow()), ct);
-            if (changed == 1) await db.BookingPayments.Where(x => x.Id == pay.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.RefundedCents, x => x.RefundedCents - refund.AmountCents), ct);
-            await tx.CommitAsync(ct);
-            return OutboxResult.Dead("stripe_" + ex.Code);
+            // Refused (the card, or a dispute that opened after the release): never lost silently (see BounceAsync).
+            var deferredAgain = await refunds.BounceAsync(refund, ex.Code, log, ct);
+            return deferredAgain ? OutboxResult.Delivered() : OutboxResult.Dead("stripe_" + ex.Code);
         }
         await using (var tx = await db.Database.BeginTransactionAsync(ct))
         {

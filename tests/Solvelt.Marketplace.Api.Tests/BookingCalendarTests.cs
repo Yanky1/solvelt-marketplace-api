@@ -27,7 +27,7 @@ public sealed class BookingCalendarTests : BookingFlowBase
         Assert.Contains("STATUS:CONFIRMED", text);
         Assert.Contains("SUMMARY:Deep House Cleaning", text);
         Assert.Contains("LOCATION:Online", text);
-        Assert.Contains($"/account/bookings/{b.Id}", text);
+        Assert.Contains($"/bookings/{b.Id}", text); Assert.DoesNotContain("/account/bookings/", text);
         Assert.DoesNotContain("secret-room", text);
         Assert.All(text.Split("\r\n", StringSplitOptions.RemoveEmptyEntries), l => Assert.True(Encoding.UTF8.GetByteCount(l) <= 75, l));
     }
