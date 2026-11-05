@@ -521,14 +521,22 @@ public class PasskeyTests
     [Fact]
     public async Task Two_parallel_removals_cannot_take_both_of_the_last_two_passkeys()
     {
+        // The account-row lock is what keeps this true; SQLite's BEGIN IMMEDIATE serialises writers anyway, so the interleaving that needs the lock can only happen on PostgreSQL (CI's PG job): there the
+        // race is run many times (a removal that counts without the lock lets both succeed in some round), on SQLite twice.
         using var k = new AuthKit(Open());
         var token = await k.VerifiedSession(Email);
-        var (_, first) = await AddPasskey(k, token);
-        var (_, second) = await AddPasskey(k, token);
-        await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, (string?)null)); return 0; });
-        var results = await Task.WhenAll(new[] { first, second }.Select(id => k.Send(Delete, $"{AccountPasskeys}/{id}", null, token)));
-        Assert.Equal(new[] { HttpStatusCode.NoContent, HttpStatusCode.Conflict }, results.Select(r => r.StatusCode).Order().ToArray());
-        Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+        var rounds = k.F.Provider == "postgres" ? 25 : 2;
+        for (var round = 0; round < rounds; round++)
+        {
+            await k.Db(async db => { await db.BuyerPasskeys.ExecuteDeleteAsync(); return 0; });
+            var (_, first) = await AddPasskey(k, token);
+            var (_, second) = await AddPasskey(k, token);
+            await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, (string?)null)); return 0; });
+            var results = await Task.WhenAll(new[] { first, second }.Select(id => k.Send(Delete, $"{AccountPasskeys}/{id}", null, token)));
+            Assert.Equal(new[] { HttpStatusCode.NoContent, HttpStatusCode.Conflict }, results.Select(r => r.StatusCode).Order().ToArray());
+            Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+            await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, "x")); return 0; });   // a password again, so the next round starts from two passkeys with no password only by the update above
+        }
     }
 
     // ---------- the owner is told, a reset recovers the account, erasure and retention ----------
