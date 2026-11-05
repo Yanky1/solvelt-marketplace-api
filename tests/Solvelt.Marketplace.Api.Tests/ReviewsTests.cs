@@ -296,7 +296,10 @@ public sealed class ReviewsTests : IDisposable
             await scope.ServiceProvider.GetServices<IAccountEraser>().OfType<ReviewsAccountEraser>().Single().EraseAsync(ida, default);   // again: no error
         }
         Assert.Equal(1, await _k.Db(db => db.Reviews.CountAsync()));
-        Assert.Equal((0, 0), (await _k.Db(db => db.ReviewVotes.CountAsync()), await _k.Db(db => db.ReviewReports.CountAsync())));
+        Assert.Equal(0, await _k.Db(db => db.ReviewVotes.CountAsync()));
+        var kept = Assert.Single(await _k.Db(db => db.ReviewReports.AsNoTracking().ToListAsync()));   // M6 review MED-2: the report is anonymised, not deleted (staff may still decide on it)
+        Assert.Equal((theirs, (string?)null), (kept.ReviewId, kept.Note));
+        Assert.NotEqual(ida, kept.AccountId);
         var agg = (await Agg("listing", Listing()))!;
         Assert.Equal((1, 3L), (agg.Count, agg.Sum));
         Assert.Equal(0, await _k.Db(db => db.Reviews.AsNoTracking().Where(r => r.Id == theirs).Select(r => r.HelpfulCount).SingleAsync()));
@@ -694,6 +697,38 @@ public sealed class ReviewsTests : IDisposable
         await Task.WhenAll(work);
         await AssertFiguresAreWhatThePublishedReviewsAddUp();
         Assert.All(await _k.Db(db => db.Reviews.AsNoTracking().ToListAsync()), r => Assert.Equal(ReviewStatus.Hidden, r.Status));
+        Assert.Equal(0, (await Agg("listing", Listing()))!.Count);
+    }
+
+    [Fact]
+    public async Task A_decision_that_arrives_after_the_reporters_erased_their_accounts_still_applies_and_the_reports_hold_nothing_of_them()
+    {
+        var (a, ida) = await Buyer("m2a@example.com");
+        var (b, idb) = await Buyer("m2b@example.com");
+        var (c, idc) = await Buyer("m2c@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 1);
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, $"/api/v1/reviews/{id}/report", b, new { reason = "offensive", note = "this person insulted me" })).Status);
+        Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Post, $"/api/v1/reviews/{id}/report", c, new { reason = "offensive" })).Status);
+        while (await _k.Dispatch() > 0) { }
+        var reportIds = _k.F.Portal.VerifiedCalls.Where(x => x.PathAndQuery == "/api/internal/v1/content/reports").Select(x => JsonDocument.Parse(x.BodyText).RootElement.Clone().GetProperty("reportId").GetString()!).ToList();
+        Assert.Equal(2, reportIds.Count);
+        foreach (var reporter in new[] { idb, idc })                    // both reporters delete their accounts; two erased reporters of one review must not collide
+            using (var scope = _k.F.Services.CreateScope())
+            {
+                var eraser = scope.ServiceProvider.GetServices<IAccountEraser>().OfType<ReviewsAccountEraser>().Single();
+                await eraser.EraseAsync(reporter, default);
+                await eraser.EraseAsync(reporter, default);              // again: nothing to do
+                var export = JsonSerializer.Serialize(await scope.ServiceProvider.GetServices<IAccountDataExporter>().Single(e => e.Section == "reviews").ExportAsync(reporter, default));
+                Assert.DoesNotContain("offensive", export);              // nothing of the reports is left under their name
+            }
+        var rows = await _k.Db(db => db.ReviewReports.AsNoTracking().ToListAsync());
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, r => Assert.Equal((id, "review", id.ToString(), (string?)null), (r.ReviewId, r.Kind, r.TargetId, r.Note)));
+        Assert.DoesNotContain(rows, r => r.AccountId == idb || r.AccountId == idc);
+        Assert.Equal(2, rows.Select(r => r.AccountId).Distinct().Count());
+        Assert.Equal("applied", await Decided("review", reportIds[0], id.ToString(), "hidden", "Insulting"));      // staff decide after the reporters are gone
+        var review = await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync());
+        Assert.Equal(ReviewStatus.Hidden, review.Status);
         Assert.Equal(0, (await Agg("listing", Listing()))!.Count);
     }
 }
