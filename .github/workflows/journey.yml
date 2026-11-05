@@ -92,8 +92,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: ${{ runner.temp }}/web/package-lock.json
       - name: Install the web app and a browser
         working-directory: ${{ runner.temp }}/web
         run: |

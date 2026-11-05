@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import * as L from "./lib.mjs";
 import { launch, watch, hydrated, go } from "./browser.mjs";
+import { exposePay } from "./pay.mjs";
 
 const { step, ok, check, until, portal, api, env } = L;
 const run = L.uniq();
@@ -43,13 +44,7 @@ async function main() {
     watch(page, problems); livePage = page;
     // the stand-in Stripe.js asks the runner to "pay": deliver Stripe's signed webhook for the order named in the return URL (never trusting the page for the amount)
     let buyerToken = null;
-    await page.exposeFunction("journeyPay", async (clientSecret, returnUrl) => {
-      const intentId = String(clientSecret).split("_secret_")[0];
-      const number = decodeURIComponent(new URL(returnUrl).pathname.split("/").pop());
-      const order = (await L.must(api("GET", `/api/v1/checkout/orders/${number}`, { token: buyerToken }), 200, "read the order to pay")).body;
-      const r = await L.stripeEvent("payment_intent.succeeded", { id: intentId, amount: order.totalCents, amount_received: order.totalCents, currency: "usd", metadata: { marketplace_order_id: number } });
-      check(r.status === 200, `the Stripe webhook answered ${r.status}: ${JSON.stringify(r.body)}`);
-    });
+    await exposePay(page, () => buyerToken);
 
     step("the buyer browses and searches");
     await go(page, "/");
