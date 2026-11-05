@@ -44,6 +44,14 @@ public static class StartupValidator
         var warnings = new List<string>();
         if (!IsDevLike(env) && string.IsNullOrWhiteSpace(config["Portal:ImageKey"]))
             warnings.Add("Portal:ImageKey (env Portal__ImageKey) is not set: image downloads are signed with Portal:InboundSecret. Set a separate key before the portal sets Orders:ImageAcceptInboundKey=false (then also set Portal:RequireImageKey=true).");
+        // With a Stripe secret key the checkout page needs the publishable key to show the payment form, and the web accepts only pk_test_ followed by letters and digits (anything else, an
+        // underscore included, makes it say "Payments are not available right now"). Not fatal (a publishable key is optional where payments are simply off, and short test values exist), but
+        // said loudly at start-up so an unexplained checkout has an explanation in the log (M8-12).
+        var stripePublishable = config["Stripe:PublishableKey"];
+        if (!string.IsNullOrWhiteSpace(config["Stripe:SecretKey"]) && string.IsNullOrWhiteSpace(stripePublishable))
+            warnings.Add("Stripe:SecretKey is set but Stripe:PublishableKey (env Stripe__PublishableKey) is not: the checkout page cannot show the payment form and will say \"Payments are not available right now\".");
+        else if (!string.IsNullOrWhiteSpace(stripePublishable) && !System.Text.RegularExpressions.Regex.IsMatch(stripePublishable.Trim(), "^pk_test_[A-Za-z0-9]{8,200}$"))
+            warnings.Add("Stripe:PublishableKey does not look like pk_test_ followed by 8 or more letters and digits: the web refuses any other value and says \"Payments are not available right now\".");
         return warnings;
     }
 
