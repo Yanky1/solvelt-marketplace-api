@@ -74,12 +74,12 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
             .Select(p => new PasskeyView(p.Id, p.Name, p.CreatedAt, p.LastUsedAt, p.BackedUp)).ToListAsync(ct);
 
     public static string? NameProblem(string? name)
-        => string.IsNullOrWhiteSpace(name) ? "Give the passkey a name." : name.Trim().Length > 60 ? "Use at most 60 characters." : AuthValidation.HasForbiddenCharacters(name) ? "That name has characters that are not allowed." : null;
+        => string.IsNullOrWhiteSpace(name) ? "Give the passkey a name." : AuthValidation.NormaliseText(name).Length > 60 ? "Use at most 60 characters." : AuthValidation.HasForbiddenCharacters(name) ? "That name has characters that are not allowed." : null;
 
     public async Task<PasskeyOutcome> RenameAsync(Guid accountId, Guid id, string? name, CancellationToken ct)
     {
         if (NameProblem(name) is not null) return PasskeyOutcome.InvalidName;
-        var clean = name!.Trim();
+        var clean = AuthValidation.NormaliseText(name);
         var rows = await db.BuyerPasskeys.Where(p => p.Id == id && p.AccountId == accountId).ExecuteUpdateAsync(s => s.SetProperty(p => p.Name, clean), ct);
         return rows == 1 ? PasskeyOutcome.Ok : PasskeyOutcome.NotFound;
     }
@@ -141,7 +141,7 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         if (NameProblem(name ?? "Passkey") is not null) return (PasskeyOutcome.InvalidName, null);
         // the recency (O-11) holds at completion too, not only when the options were asked for: a challenge lives 5 minutes, so without this the window was up to 15. The challenge is not used up by this refusal.
         if (!Recent(who, Now)) return (PasskeyOutcome.ReauthenticationRequired, null);
-        var label = string.IsNullOrWhiteSpace(name) ? "Passkey" : name.Trim();
+        var label = string.IsNullOrWhiteSpace(name) ? "Passkey" : AuthValidation.NormaliseText(name);
         var stored = await ConsumeChallengeAsync(challengeId, ChallengePurpose.Register, who.AccountId, who.SessionId, ct);
         if (stored is null) return (PasskeyOutcome.InvalidChallenge, null);
         var response = Parse<AuthenticatorAttestationRawResponse>(credential);

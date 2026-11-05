@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>NormalizationCheck</RootNamespace>
+    <!-- This tool needs the REAL normaliser of the runtime (ICU), so it runs with globalization on, unlike the application. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Solvelt.Marketplace.Api\Solvelt.Marketplace.Api.csproj" />
+  </ItemGroup>
+</Project>

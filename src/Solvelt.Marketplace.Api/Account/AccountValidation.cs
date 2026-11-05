@@ -52,13 +52,13 @@ public static partial class AccountValidation
         void Required(string field, string? value, int max, string label)
         {
             if (string.IsNullOrWhiteSpace(value)) e[field] = $"Enter {label}.";
-            else if (value.Trim().Length > max) e[field] = $"Use at most {max} characters.";
+            else if (Auth.AuthValidation.NormaliseText(value).Length > max) e[field] = $"Use at most {max} characters.";
             else if (!Clean(value)) e[field] = "That has characters that are not allowed.";
         }
         void Optional(string field, string? value, int max)
         {
             if (string.IsNullOrWhiteSpace(value)) return;
-            if (value.Trim().Length > max) e[field] = $"Use at most {max} characters.";
+            if (Auth.AuthValidation.NormaliseText(value).Length > max) e[field] = $"Use at most {max} characters.";
             else if (!Clean(value)) e[field] = "That has characters that are not allowed.";
         }
         Required("fullName", b.FullName, 100, "the recipient's name");
