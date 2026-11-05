@@ -16,9 +16,9 @@ public class StaffOpsTests
     private sealed record W(StaffKit S, string Admin, string Support, string Finance, Guid OrderId, Guid RefundId, string Key, string Intent) : IDisposable { public void Dispose() => S.Dispose(); }
 
     /// <summary>A paid order with a RESERVED refund whose outbox message died (Stripe was unreachable for the whole backoff).</summary>
-    private static async Task<W> Setup()
+    private static async Task<W> Setup(AuditFault? fault = null)
     {
-        var s = new StaffKit();
+        var s = fault is null ? new StaffKit() : new StaffKit(services: x => x.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(fault)));
         var (admin, _, _) = await s.Admin();
         var (support, _, _) = await s.Member(admin, "support@example.com", "support");
         var (finance, _, _) = await s.Member(admin, "finance@example.com", "finance");
@@ -244,5 +244,33 @@ public class StaffOpsTests
         Assert.Equal("MP-2001", j[0].GetProperty("number").GetString());
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await w.S.Get($"/api/v1/staff/buyers/{acct}/orders", w.Support)).StatusCode);
         Assert.Single(await w.S.Audit(), a => a.Action == "buyer.orders" && a.TargetId == acct.ToString("D"));
+    }
+
+    // ---------- the audit row and the action commit together (security review MED-2) ----------
+
+    [Fact]
+    public async Task A_failing_audit_write_leaves_a_refund_ingest_and_outbox_retry_undone_and_a_replay_unrun()
+    {
+        var fault = new AuditFault();
+        using var w = await Setup(fault);
+        var now = w.S.F.Clock.GetUtcNow();
+        var mailId = Guid.NewGuid();
+        await w.S.Db(async db =>
+        {
+            db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), Type = "order.ingest", DedupeKey = "ingest:MP-2001", Payload = $"{{\"orderId\":\"{w.OrderId}\"}}", Status = OutboxStatus.Dead, Attempts = 8, NextAttemptAt = now, CreatedAt = now, DeadAt = now });
+            db.OutboxMessages.Add(new OutboxMessage { Id = mailId, Type = "email.send", Payload = "{}", Status = OutboxStatus.Dead, Attempts = 8, NextAttemptAt = now, CreatedAt = now, DeadAt = now });
+            db.PortalInboundEvents.Add(new PortalInboundEvent { Id = "evt-p", Type = "order.shipped", PortalCreatedAt = now, OrderingAt = now, ReceivedAt = now, Status = InboundStatus.Parked, AggregateType = "order", AggregateKey = "MP-NOPE", PayloadJson = "{}" });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        fault.On = true;
+        Assert.Equal(HttpStatusCode.InternalServerError, (await w.S.Post($"/api/v1/staff/orders/{w.OrderId}/refunds/{w.RefundId}/retry", new { reason = R }, w.Finance)).StatusCode);
+        Assert.Equal(HttpStatusCode.InternalServerError, (await w.S.Post($"/api/v1/staff/ingests/{w.OrderId}/retry", new { reason = R }, w.Support)).StatusCode);
+        Assert.Equal(HttpStatusCode.InternalServerError, (await w.S.Post($"/api/v1/staff/outbox/{mailId}/retry", new { reason = R }, w.Admin)).StatusCode);
+        Assert.Equal(HttpStatusCode.InternalServerError, (await w.S.Post("/api/v1/staff/dead-letters/retry", new { eventId = "evt-p", reason = R }, w.Admin)).StatusCode);
+        fault.On = false;
+        Assert.All(await w.S.Db(db => db.OutboxMessages.Where(m => m.DedupeKey == "refund:portal:r-1" || m.DedupeKey == "ingest:MP-2001" || m.Id == mailId).ToListAsync()), m => Assert.Equal(OutboxStatus.Dead, m.Status));
+        Assert.Null(await w.S.Db(db => db.PortalInboundEvents.Where(e => e.Id == "evt-p").Select(e => e.LastReplayAt).SingleAsync()));   // the replay never ran
+        Assert.DoesNotContain(await w.S.Audit(), a => a.Action is "refund.retry" or "ingest.retry" or "outbox.retry" or "deadletter.retry");
     }
 }
