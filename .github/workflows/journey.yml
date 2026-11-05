@@ -1,0 +1,117 @@
+name: Journey
+
+# The buyer journey against the REAL seller portal (brief M8): the portal backend (Yanky1/Yanky1-test-login-backend, built and run, never changed), this API on PostgreSQL,
+# the web server and a mail sandbox, all started by tools/journey/stack.sh (the same script runs locally: tools/journey/run.sh).
+# There is no mock portal anywhere in this job. If the portal cannot be checked out, built or started, the job FAILS with a message saying so: it is never skipped and never green without it.
+
+on:
+  push:
+    branches: ["main", "feat/**", "fix/**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      web_ref:
+        description: "Ref of Yanky1/solvelt-marketplace-web to run against"
+        default: main
+      portal_ref:
+        description: "Ref of Yanky1/Yanky1-test-login-backend to run against"
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: journey-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  journey:
+    name: Buyer journey (real portal, PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Where the checkouts and the logs go
+        run: |
+          echo "PORTAL_DIR=$RUNNER_TEMP/portal" >> "$GITHUB_ENV"
+          echo "WEB_DIR=$RUNNER_TEMP/web" >> "$GITHUB_ENV"
+          echo "JOURNEY_RUN_DIR=$RUNNER_TEMP/journey-run" >> "$GITHUB_ENV"
+
+      # The portal repo is public (2026-11-04). BACKEND_REPO_TOKEN (read-only, only the owner can add it) is used when present, in case it becomes private again.
+      - name: Check out the seller-portal backend (read-only)
+        id: portal
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: Yanky1/Yanky1-test-login-backend
+          ref: ${{ inputs.portal_ref || 'main' }}
+          token: ${{ secrets.BACKEND_REPO_TOKEN || github.token }}
+          path: _portal
+      - name: Fail clearly when the portal is missing
+        if: steps.portal.outcome != 'success'
+        run: |
+          echo "::error title=Seller portal not available::The journey runs against the REAL seller portal (Yanky1/Yanky1-test-login-backend) and it could not be checked out. It is public; if it is private again, the owner must add a read-only token as the repository secret BACKEND_REPO_TOKEN (ask the orchestrator). There is no mock-portal fallback: this job fails instead of going green without the portal."
+          exit 1
+      - name: Check out the web app
+        id: web
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: Yanky1/solvelt-marketplace-web
+          ref: ${{ inputs.web_ref || 'main' }}
+          path: _web
+      - name: Fail clearly when the web app is missing
+        if: steps.web.outcome != 'success'
+        run: |
+          echo "::error title=Web app not available::Yanky1/solvelt-marketplace-web could not be checked out, so the buyer journey cannot run."
+          exit 1
+      # outside the workspace: this repo's Directory.Build.props (warnings as errors) must not apply to the portal's projects
+      - name: Move the checkouts out of the workspace
+        run: |
+          mv _portal "$PORTAL_DIR"
+          mv _web "$WEB_DIR"
+          git -C "$PORTAL_DIR" log --oneline -1
+          git -C "$WEB_DIR" log --oneline -1
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ runner.temp }}/web/package-lock.json
+      - name: Install the web app and a browser
+        working-directory: ${{ runner.temp }}/web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run the journeys
+        run: tools/journey/run.sh
+        env:
+          CI: "true"
+
+      - name: Keep the logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-logs
+          path: |
+            ${{ runner.temp }}/journey-run/*.log
+            ${{ runner.temp }}/journey-run/*.png
+            ${{ runner.temp }}/journey-run/env.json
+          retention-days: 7
