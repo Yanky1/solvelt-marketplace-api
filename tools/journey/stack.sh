@@ -94,7 +94,15 @@ cmd_up() {
     export Stripe__PublishableKey="${STRIPE_PUBLISHABLE_KEY:-pk_test_journeyfakekey0000000000}"
     export Marketplace__PublicBaseUrl="http://localhost:$WEB_PORT" Marketplace__RelayDomain="relay.journey.test"
     export Email__Provider=Smtp Email__SmtpHost=127.0.0.1 Email__SmtpPort="$SMTP_PORT" Email__SmtpUseTls=false Email__From="noreply@journey.test"
-    export Demo__Enabled=true Catalog__Source=Http Stripe__FakeCaptureOnWebhook=true
+    export Demo__Enabled=true Catalog__Source=Http
+    if [ "${JOURNEY_REAL_STRIPE:-0}" = "1" ]; then
+      # the opt-in job: a REAL Stripe test-mode key from the environment (never a file, never printed). The API refuses live keys (sk_live_/rk_live_) at start-up in every environment.
+      [ -n "${STRIPE_TEST_SECRET_KEY:-}" ] || die "JOURNEY_REAL_STRIPE=1 needs STRIPE_TEST_SECRET_KEY (a sk_test_ key)"
+      case "$STRIPE_TEST_SECRET_KEY" in sk_test_*|rk_test_*) ;; *) die "STRIPE_TEST_SECRET_KEY must be a Stripe TEST key (sk_test_ or rk_test_)";; esac
+      export Stripe__SecretKey="$STRIPE_TEST_SECRET_KEY"
+    else
+      export Stripe__FakeCaptureOnWebhook=true
+    fi
     # many sign-ins and requests from one address in a few minutes: the limits are not under test here
     export RateLimits__AuthPerMinute=100000 RateLimits__PublicPerMinute=100000
     export Outbox__BackoffSeconds=2 Catalog__SyncIntervalSeconds=5
