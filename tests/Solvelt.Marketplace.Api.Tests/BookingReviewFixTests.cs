@@ -174,7 +174,7 @@ public sealed class BookingReviewFixTests : BookingFlowBase
     // ---------- L7: the eraser, quote fields ----------
 
     [Fact]
-    public async Task L7_deleting_the_account_redacts_the_quote_phone_and_preferred_times_too()
+    public async Task L7_deleting_the_account_redacts_a_finished_quotes_phone_and_preferred_times_too()
     {
         await Ready();
         var account = await _k.Db(db => db.BuyerAccounts.AsNoTracking().Where(a => a.Email == "jane@example.com").Select(a => a.Id).SingleAsync());
@@ -183,7 +183,7 @@ public sealed class BookingReviewFixTests : BookingFlowBase
         {
             db.Quotes.Add(new BuyerQuote
             {
-                Id = qid, MarketplaceQuoteId = "mq-erase-1", AccountId = account, IdempotencyKey = "erase-key-0001", RequestHash = "h", ListingId = Service, Status = QuoteStatus.Requested, Location = "customer",
+                Id = qid, MarketplaceQuoteId = "mq-erase-1", AccountId = account, IdempotencyKey = "erase-key-0001", RequestHash = "h", ListingId = Service, Status = QuoteStatus.Declined, Location = "customer",
                 Details = "Please bring a ladder", PreferredTimesJson = "[\"2030-01-01T10:00:00+00:00\"]", Note = "note", Phone = "+1 555 123 4567", Currency = "USD",
                 AddrName = "Jane Brown", AddrLine1 = "1 Main St", AddrCity = "Austin", AddrCountry = "US", CreatedAt = Now, UpdatedAt = Now,
             });
@@ -195,6 +195,28 @@ public sealed class BookingReviewFixTests : BookingFlowBase
         Assert.Null(q.Phone); Assert.Null(q.PreferredTimesJson); Assert.Null(q.Note); Assert.Null(q.AddrLine1); Assert.Null(q.AddrName);
         Assert.Equal("", q.Details);
         Assert.NotNull(q.RedactedAt);
+    }
+
+    [Fact]
+    public async Task O23_an_open_quote_keeps_its_data_when_the_account_is_deleted_and_is_wiped_by_the_sweep_once_it_ends()
+    {
+        await Ready();
+        var account = await _k.Db(db => db.BuyerAccounts.AsNoTracking().Where(a => a.Email == "jane@example.com").Select(a => a.Id).SingleAsync());
+        var qid = Guid.NewGuid();
+        await _k.Db(async db =>
+        {
+            db.Quotes.Add(new BuyerQuote { Id = qid, MarketplaceQuoteId = "mq-open-1", AccountId = account, IdempotencyKey = "open-key-0001", RequestHash = "h", ListingId = Service, Status = QuoteStatus.Quoted, Location = "online",
+                Details = "Please bring a ladder", Phone = "+1 555 123 4567", Currency = "USD", CreatedAt = Now, UpdatedAt = Now });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        Assert.Equal(System.Net.HttpStatusCode.NoContent, (await Send(HttpMethod.Post, "/api/v1/account/delete", _jane, new { password = Solvelt.Marketplace.Api.Tests.Infrastructure.AuthKit.Password })).StatusCode);
+        await Drain();
+        Assert.Equal("+1 555 123 4567", (await _k.Db(db => db.Quotes.AsNoTracking().SingleAsync(x => x.Id == qid))).Phone);       // still open: identified
+        await _k.Db(db => db.Quotes.Where(x => x.Id == qid).ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, QuoteStatus.Expired)));
+        using (var scope = _k.F.Services.CreateScope()) await scope.ServiceProvider.GetRequiredService<BookingMaintenance>().RunAsync();
+        var q = await _k.Db(db => db.Quotes.AsNoTracking().SingleAsync(x => x.Id == qid));
+        Assert.Null(q.Phone); Assert.Equal("", q.Details); Assert.NotNull(q.RedactedAt);
     }
 
     // ---------- L8: the .ics file name ----------

@@ -13,10 +13,10 @@ namespace Solvelt.Marketplace.Api.Services;
 /// is re-read the same way, so a lost event cannot keep a booking "held" forever. (3) Retention: personal data is wiped <c>Bookings:RedactAfterDays</c> (30, as the portal does,
 /// SERVICES.md §9) after a booking ended, and a day after a hold attempt failed; money, ids and the policy numbers stay.
 /// </summary>
-public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient portal, BookingService bookings, BuyerQuoteService quotes, BookingRefundService refunds, PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingMaintenance> log)
+public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient portal, BookingService bookings, BuyerQuoteService quotes, BookingRefundService refunds, BookingsAccountEraser eraser, PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingMaintenance> log)
 {
     public const int Batch = 50;
-    public sealed record Result(int Resolved, int Failed, int Redacted, int Cancelled = 0, int Released = 0);
+    public sealed record Result(int Resolved, int Failed, int Redacted, int Cancelled = 0, int Released = 0, int Erased = 0);
 
     public async Task<Result> RunAsync(CancellationToken ct = default)
     {
@@ -55,7 +55,7 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
         db.ChangeTracker.Clear();
         var cancelled = await CancelUnpaidQuoteBookingsAsync(now, ct);
         await ResolveRequestingQuotesAsync(now, ct);
-        return new Result(resolved, failed, await RedactAsync(now, ct), cancelled, await ReleaseDeferredAsync(ct));
+        return new Result(resolved, failed, await RedactAsync(now, ct), cancelled, await ReleaseDeferredAsync(ct), await EraseDeletedAccountsAsync(ct));
     }
 
     /// <summary>
@@ -121,6 +121,21 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
         var ids = await db.BookingRefunds.AsNoTracking().Where(r => r.Status == RefundStatus.Deferred && db.BookingPayments.Any(p => p.Id == r.PaymentId && p.DisputedCents == 0))
             .Select(r => r.PaymentId).Distinct().Take(Batch).ToListAsync(ct);
         foreach (var id in ids) { db.ChangeTracker.Clear(); await refunds.ReleaseDeferredAsync(id, ct); }
+        return ids.Count;
+    }
+
+    /// <summary>
+    /// A deleted account's bookings that were still open when it was deleted keep their data until they finish (decision O-23); once finished they are wiped here, without waiting for the
+    /// retention days. Idempotent: a redacted row is no longer selected.
+    /// </summary>
+    public async Task<int> EraseDeletedAccountsAsync(CancellationToken ct)
+    {
+        string[] bookingDone = [.. BookingStatus.Terminal], quoteDone = [.. QuoteStatus.Terminal];
+        var ids = await db.BuyerAccounts.AsNoTracking().Where(a => a.DeletedAt != null && (
+                db.Bookings.Any(b => b.AccountId == a.Id && b.RedactedAt == null && bookingDone.Contains(b.Status)) ||
+                db.Quotes.Any(q => q.AccountId == a.Id && q.RedactedAt == null && quoteDone.Contains(q.Status))))
+            .Select(a => a.Id).Take(Batch).ToListAsync(ct);
+        foreach (var id in ids) await eraser.EraseAsync(id, ct);
         return ids.Count;
     }
 

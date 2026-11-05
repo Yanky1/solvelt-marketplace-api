@@ -36,7 +36,8 @@ public static class ServicesModule
         services.AddSingleton<AvailabilityCache>();
         services.AddSingleton<ServiceOptionsCache>();
         services.Configure<BookingOptions>(configuration.GetSection("Bookings"));
-        services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, BookingsAccountEraser>();
+        services.AddScoped<BookingsAccountEraser>();
+        services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser>(sp => sp.GetRequiredService<BookingsAccountEraser>());
         services.AddScoped<BookingService>();
         services.AddScoped<BookingMaintenance>();
         services.AddScoped<BookingActions>();
