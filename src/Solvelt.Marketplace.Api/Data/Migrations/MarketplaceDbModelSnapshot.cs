@@ -2670,6 +2670,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<Guid>("ReviewId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("TargetId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ReportId")

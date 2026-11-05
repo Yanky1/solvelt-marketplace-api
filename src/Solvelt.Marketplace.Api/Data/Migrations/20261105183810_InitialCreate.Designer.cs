@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105180720_InitialCreate")]
+    [Migration("20261105183810_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2672,6 +2672,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<Guid>("ReviewId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("TargetId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.HasKey("Id");
 
