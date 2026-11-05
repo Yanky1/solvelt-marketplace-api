@@ -345,6 +345,7 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
             {
                 await db.Bookings.Where(x => x.Id == b.Id && x.Status == BookingStatus.Hold)
                     .ExecuteUpdateAsync(x => x.SetProperty(y => y.Status, newStatus).SetProperty(y => y.FailureCode, "confirm_" + code).SetProperty(y => y.UpdatedAt, now).SetProperty(y => y.Version, y => y.Version + 1), ct);
+                if (newStatus == BookingStatus.Expired) await QuoteReopen.ReopenAsync(db, b, now, ct);     // "accept the quote again" (portal C13)
                 // What can go back now goes back; what an open dispute holds is deferred until it is decided (never dropped, never claimed as refunded: M4-22).
                 var left = await db.BookingPayments.AsNoTracking().Where(x => x.Id == pay.Id).Select(x => x.CapturedCents - x.RefundedCents).FirstAsync(ct);
                 var held = await refunds.ReserveOrDeferAsync(pay.Id, left, $"void:{pay.Key}", "confirm_" + code, false, log, ct);

@@ -94,6 +94,7 @@ public sealed class BookingEventHandler(ILogger<BookingEventHandler> log) : IPro
             case HoldExpired:
                 if (!await Step("status", BookingStatus.Expired, "expired")) return Done(false);
                 b.HoldExpiresAt = null; ClearPending(b);
+                await QuoteReopen.ReopenAsync(c.Db, b, now, ct);        // a quote's hold lapsed: the quote can be accepted again (portal C13)
                 // An intent behind a lapsed hold must not stay payable (a payment that still lands is refunded, but not offering it is better).
                 await BookingMoney.QueueCancelPendingIntentsAsync(c.Db, new OutboxWriter(c.Db, c.Time), b.Id, null, null, ct);
                 break;

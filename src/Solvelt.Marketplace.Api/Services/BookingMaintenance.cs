@@ -40,6 +40,7 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
             if (r.IsSuccess && r.Value is { } s && string.Equals(s.MarketplaceBookingId, row.MarketplaceBookingId, StringComparison.Ordinal) && (s.ServiceId is null || s.ServiceId == row.ListingId))
             {
                 await bookings.ApplySummaryAsync(row, s, now, ct);
+                if (row.Status == BookingStatus.Expired) await QuoteReopen.ReopenAsync(db, row, now, ct);        // an overdue quote hold read as lapsed (portal C13)
                 await events.ReplayParkedAsync(BookingEventHandler.Aggregate, row.MarketplaceBookingId, ct);
                 resolved++;
             }
