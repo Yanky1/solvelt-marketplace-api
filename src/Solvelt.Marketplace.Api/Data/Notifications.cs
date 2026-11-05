@@ -20,7 +20,7 @@ public static class NotificationKinds
     public const string OrderAccepted = "order_accepted", OrderShipped = "order_shipped", OutForDelivery = "out_for_delivery", OrderDelivered = "order_delivered",
         OrderCancelled = "order_cancelled", CancellationRejected = "cancellation_rejected", ReturnApproved = "return_approved", ReturnRejected = "return_rejected",
         ReturnReceived = "return_received", ReturnLabelReady = "return_label_ready", DeliveryAttemptFailed = "delivery_attempt_failed", RefundIssued = "refund_issued",
-        MessageReceived = "message_received",
+        MessageReceived = "message_received", DataExported = "data_exported",
         BookingConfirmed = "booking_confirmed", BookingDeclined = "booking_declined", BookingTimeProposed = "booking_time_proposed", BookingRescheduled = "booking_rescheduled",
         BookingCancelled = "booking_cancelled", BookingCompleted = "booking_completed", BookingReminder = "booking_reminder", BookingExtraChargeRequested = "booking_extra_charge_requested", BookingNoShow = "booking_no_show";
 
@@ -30,7 +30,7 @@ public static class NotificationKinds
         OutForDelivery => NotificationCategories.OutForDelivery,
         OrderDelivered => NotificationCategories.Delivered,
         // transactional (O-21 / M5-20): money, cancellations, a delivery that failed, every change to a return, and every change to a booking except its reminder and its completion
-        RefundIssued or OrderCancelled or CancellationRejected or DeliveryAttemptFailed or ReturnApproved or ReturnRejected or ReturnReceived or ReturnLabelReady
+        RefundIssued or DataExported or OrderCancelled or CancellationRejected or DeliveryAttemptFailed or ReturnApproved or ReturnRejected or ReturnReceived or ReturnLabelReady
             or BookingConfirmed or BookingDeclined or BookingTimeProposed or BookingRescheduled or BookingCancelled or BookingExtraChargeRequested or BookingNoShow => NotificationCategories.Transactional,
         MessageReceived => NotificationCategories.Messages,
         var k when k.StartsWith("booking_") => NotificationCategories.Bookings,

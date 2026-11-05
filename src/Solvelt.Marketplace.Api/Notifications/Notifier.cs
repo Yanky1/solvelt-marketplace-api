@@ -151,13 +151,14 @@ public static class NotificationEmails
             NotificationKinds.ReturnLabelReady => ($"Your return label for {order} is ready", $"Your return label for order {order} is ready on the order page."),
             NotificationKinds.DeliveryAttemptFailed => ($"A delivery attempt for {order} did not work", $"A delivery attempt for order {order} from {seller} was unsuccessful. The seller will try again or contact you."),
             NotificationKinds.RefundIssued => ($"A refund for order {order}", $"{seller} refunded ${Money() / 100m:0.00} for order {order}. It returns to your original payment method."),
+            NotificationKinds.DataExported => ("Your data was downloaded from Solvelt", "A download of your account data (profile, addresses, orders, messages and more) was started from your account. If this was not you, change your password now and contact support."),
             NotificationKinds.MessageReceived => ($"New message from {seller}", $"{seller} sent you a message about {(P("subject") is { Length: > 0 } sub ? sub : "your order")}. Open it in your Solvelt messages."),
             var k when k.StartsWith("booking_") => (BookingSubject(k, P("bookingNumber")), $"There is an update on your booking {P("bookingNumber")}: {BookingSubject(k, P("bookingNumber")).ToLowerInvariant()}."),
             _ => ($"Update on order {order}", $"There is an update on your order {order}."),
         };
         subject = System.Text.RegularExpressions.Regex.Replace(subject, @"[\p{Cc}\u2028\u2029]+", " ").Trim();   // a seller/listing name can never add a header line (review P7)
         if (subject.Length > 200) subject = subject[..(char.IsHighSurrogate(subject[199]) ? 199 : 200)];   // never cut a surrogate pair in half (review X7)
-        var link = n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? (Guid.TryParse(P("bookingId"), out var bid) ? $"{baseUrl}/bookings/{bid}" : $"{baseUrl}/account/bookings") : $"{baseUrl}/account/orders/{n.OrderNumber}";
+        var link = n.Kind == NotificationKinds.DataExported ? $"{baseUrl}/account/privacy" : n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? (Guid.TryParse(P("bookingId"), out var bid) ? $"{baseUrl}/bookings/{bid}" : $"{baseUrl}/account/bookings") : $"{baseUrl}/account/orders/{n.OrderNumber}";
         var footer = unsubscribeCategory is null || unsubscribeAll is null
             ? $"This email is required for your orders and account, so it cannot be switched off. You can choose which other emails you get at {baseUrl}/account/notifications/preferences.\n"
             : $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";

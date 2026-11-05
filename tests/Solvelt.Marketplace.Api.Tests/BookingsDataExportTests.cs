@@ -71,6 +71,7 @@ public sealed class BookingsDataExportTests : BookingFlowBase
         Assert.Equal(0, section.GetProperty("quoteRequests").GetArrayLength());
         _portal.FailNext = (HttpStatusCode.Conflict, "slot_unavailable");
         await NewHoldAttempt();
+        await _k.Db(db => db.Notifications.Where(n => n.Kind == "data_exported").ExecuteDeleteAsync());           // the ten-minute limit between two exports is not what this test is about
         var again = JsonDocument.Parse(await (await Send(HttpMethod.Post, "/api/v1/account/data-export", _joe)).Content.ReadAsStringAsync()).RootElement.GetProperty("sections").GetProperty("bookings");
         Assert.Equal(0, again.GetProperty("bookings").GetArrayLength());                  // a refused attempt was never a booking
     }
