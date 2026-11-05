@@ -24,7 +24,36 @@ public sealed class WishlistWatchHandler(MarketplaceDb db, TimeProvider time, IL
     public static readonly TimeSpan Cooldown = TimeSpan.FromDays(7);
     public IReadOnlyCollection<string> Types { get; } = [Type];
 
+    /// <summary>
+    /// Any failure that is not ONE buyer's own write (a dropped connection, a timeout, a bug) is NOT swallowed: it is logged at Error with its type only and the message is retried. That is safe: the buyers
+    /// finished so far have their baselines moved, and the notification key holds account + listing + version, so a retry cannot send twice. Only a buyer's own failed write (a constraint, not a transient
+    /// fault) is skipped, so one buyer can never hold back the others.
+    /// </summary>
     public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
+    {
+        try { return await RunAsync(message, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            log.LogError("Wishlist watch failed and will be retried: {Type}", ex.GetType().FullName);
+            return OutboxResult.Retry("wishlist_watch_" + ex.GetType().Name);
+        }
+    }
+
+    /// <summary>A fault of the connection or the server's load rather than of the data: a timeout, an I/O or socket error, a provider error marked transient, or EF's own "likely a transient failure" wrapper.</summary>
+    public static bool IsTransient(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException!)
+        {
+            if (e is TimeoutException or System.IO.IOException or System.Net.Sockets.SocketException) return true;
+            if (e is Npgsql.NpgsqlException { IsTransient: true }) return true;
+            if (e is InvalidOperationException && e.Message.Contains("transient failure", StringComparison.OrdinalIgnoreCase)) return true;
+            if (e.InnerException is null) break;
+        }
+        return false;
+    }
+
+    private async Task<OutboxResult> RunAsync(OutboxMessage message, CancellationToken ct)
     {
         Payload? p;
         try { p = message.Payload is null ? null : System.Text.Json.JsonSerializer.Deserialize<Payload>(message.Payload, Solvelt.Marketplace.Api.Portal.PortalJson.Options); }
@@ -63,10 +92,10 @@ public sealed class WishlistWatchHandler(MarketplaceDb db, TimeProvider time, IL
                 foreach (var i in items) { i.BaselinePriceCents = price; i.BaselineCurrency = listing.Currency; i.BaselineAvailable = listing.Available; }
                 await db.SaveChangesAsync(ct);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (DbUpdateException ex) when (!IsTransient(ex))
             {
-                db.ChangeTracker.Clear();   // this buyer is skipped (their baseline did not move, so the next version tries again); the others and the catalog are untouched
-                log.LogWarning("Wishlist notification skipped for listing {ListingId}: {Type}", listing.Id, ex.GetType().Name);
+                db.ChangeTracker.Clear();   // this buyer's own write failed for a reason of the data: skipped (their baseline did not move, so the next version tries again); the others and the catalog are untouched
+                log.LogWarning("Wishlist notification skipped for listing {ListingId}: {Type}", listing.Id, ex.GetType().Name);   // the type only: a message or a stack can carry personal data
             }
         }
         return OutboxResult.Delivered();

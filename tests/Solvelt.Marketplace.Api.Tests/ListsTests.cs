@@ -404,12 +404,17 @@ public sealed class ListsTests : IDisposable
         await Call(HttpMethod.Put, $"/api/v1/recently-viewed/{Listing()}", t);
         var key = (await Call(HttpMethod.Post, $"/api/v1/wishlists/{id}/share", t)).Body.GetProperty("shareKey").GetString()!;
         var account = await _k.Account("l10@example.com");
+        var notifiedAt = _k.F.Clock.GetUtcNow().AddDays(-2);
+        await _k.Db(async db => { await db.WishlistItems.Where(i => db.Wishlists.Any(w => w.Id == i.WishlistId && w.AccountId == account.Id)).ExecuteUpdateAsync(s => s.SetProperty(i => i.LastPriceNotifiedAt, (DateTimeOffset?)notifiedAt).SetProperty(i => i.LastStockNotifiedAt, (DateTimeOffset?)notifiedAt.AddHours(1))); return 0; });
 
         using (var scope = _k.F.Services.CreateScope())
         {
             var w = await scope.ServiceProvider.GetServices<IAccountDataExporter>().Single(e => e.Section == "wishlists").ExportAsync(account.Id, default);
             var json = JsonSerializer.Serialize(w);
             Assert.Contains("Mine", json);
+            var item = JsonDocument.Parse(json).RootElement.GetProperty("wishlists")[0].GetProperty("items")[0];   // the dates the buyer was last mailed are in the file (review LOW-3)
+            Assert.Equal(notifiedAt, item.GetProperty("lastPriceDropNotifiedAt").GetDateTimeOffset());
+            Assert.Equal(notifiedAt.AddHours(1), item.GetProperty("lastBackInStockNotifiedAt").GetDateTimeOffset());
             Assert.DoesNotContain(key, json);
             Assert.DoesNotContain("Theirs", json);
             Assert.Contains(Listing().ToString(), JsonSerializer.Serialize(await scope.ServiceProvider.GetServices<IAccountDataExporter>().Single(e => e.Section == "recently-viewed").ExportAsync(account.Id, default)));

@@ -35,7 +35,7 @@ public static class PiiRegistry
         (typeof(OrderGroup), "per-seller totals, shipping money and seller names of an order; the order (claimed) holds the buyer and the address"),
         (typeof(OrderLine), "items, quantities and prices of an order; the order (claimed) holds the buyer and the address"),
         (typeof(OrderReturnLine), "which order lines come back and how many; the return (claimed) holds the buyer"),
-        (typeof(WishlistItem), "a listing id and the price it had when last checked; the wishlist (claimed) holds the owner"),
+        (typeof(WishlistItem), "a listing id, the price and availability it had when last checked, and when this buyer was last mailed about it (a date, no text); the wishlist (claimed) holds the owner, and whole rows are deleted with the account"),
         (typeof(StaffAccount), "a member of staff: their own email and name, not a buyer's data (M7-01); no buyer id; see the PII table"),
         (typeof(OrderShipment), "carrier, tracking and the delivery driver's own position: data about the driver, not the buyer"),
     ];
