@@ -415,3 +415,16 @@ Everything is under `/api/v1/staff`, bearer `stf_…` token, `private, no-store`
 | `POST /buyers/{id}/sign-out {reason}` | `buyers.sign_out` | Ends every buyer session |
 
 A buyer locked by staff gets `403 account_locked` from `POST /api/v1/auth/sign-in` (after the right password) and `401` from every token.
+
+
+## Reviews and ratings (M6)
+Reading is public; writing needs a signed-in buyer (`Authorization: Bearer`, `Cache-Control: private, no-store`). Another buyer's line, booking or review is 404.
+| Route | Answer |
+|---|---|
+| `GET /api/v1/reviews?listingId=&sort=recent\|helpful\|high\|low&rating=1..5&page=` | public: `{ summary: { count, average, distribution: [1..5 stars] }, reviews: [{ id, listingId, rating, text, displayName, verified, createdAt, editedAt, helpfulCount, reply: { id, text, at } \| null }], page, pageSize: 10, total }` (published reviews only) |
+| `GET /api/v1/reviews/eligible?listingId=` | `{ items: [{ kind: "order_line" \| "booking", id, label, at }] }`: what the buyer can still review for that listing |
+| `POST /api/v1/reviews` `{ kind, targetId, rating, text }` | `201` the review (with `status`, `canEdit`); `422 validation_failed` (`errors.rating`, `errors.text`), `422 not_eligible`, `409 already_reviewed`, `404` |
+| `PATCH /api/v1/reviews/{id}` `{ rating, text }` | `200`; `422 review_locked` after 30 days or when not published |
+| `PUT` / `DELETE /api/v1/reviews/{id}/helpful` | `204`, one vote per buyer; `422 own_review` |
+| `POST /api/v1/reviews/{id}/report` `{ reason: spam\|personal_information\|offensive\|fake\|off_topic\|other, note? }` | `204`; `/reply/report` reports the seller's reply |
+| `GET /api/v1/account/reviews` | the buyer's own reviews with status, moderation note and listing title |

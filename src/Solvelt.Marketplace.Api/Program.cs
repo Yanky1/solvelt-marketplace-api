@@ -172,7 +172,15 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Outbox.IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.ReprojectHandler>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Messaging.MessageService>();
-builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Messaging.ContentReportDecidedHandler>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.ContentReportDecidedHandler>();
+builder.Services.AddSingleton<IProjectionHandler>(sp => { var h = sp.GetRequiredService<Solvelt.Marketplace.Api.Messaging.ContentReportDecidedHandler>(); h.ReviewDecision = Solvelt.Marketplace.Api.Reviews.ReviewModeration.ApplyAsync; return h; });   // M6: kind review / review_reply
+builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Reviews.ReviewReplyHandler>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Reviews.ReviewService>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Reviews.ReviewUpsertOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Reviews.ReviewStateOutboxHandler>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Reviews.ReviewReportOutboxHandler>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Reviews.ReviewsAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Reviews.ReviewsDataExporter>();
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Messaging.MessageSentHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.MessageSendOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Messaging.MessageReceiptOutboxHandler>();
@@ -278,6 +286,7 @@ app.MapAccount();
 app.MapCart();
 Solvelt.Marketplace.Api.Lists.WishlistEndpoints.MapWishlists(app);
 Solvelt.Marketplace.Api.Lists.RecentlyViewedEndpoints.MapRecentlyViewed(app);
+Solvelt.Marketplace.Api.Reviews.ReviewEndpoints.MapReviews(app);
 app.MapDemo();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
