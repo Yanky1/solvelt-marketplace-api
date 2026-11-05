@@ -26,6 +26,8 @@ OUTBOUND="journey-portal-outbound-secret-fedcba9876543210"    # portal -> market
 FWD_KEY="journey-web-forwarding-key-aaaaaaaaaaaaaaaaaaaa"
 SESSION_SECRET="Journey#Session9Secret!kdj39fK2mZq7Xw2Rt8YbN4"
 STRIPE_WEBHOOK="whsec_journey_test_only_00000000000000000000"
+# the staff area (M7): the first admin is created at start-up from this one-time secret (a made-up test value, only for this local stack; it must differ from every other key)
+STAFF_BOOT="journey-staff-bootstrap-secret-0123456789abcdef"; STAFF_EMAIL="staff-journey@journey.test"
 ADMIN_EMAIL="admin@example.com"; ADMIN_PASSWORD="Qu1et-Marble-Fox-Test!"
 
 die() { echo "JOURNEY STACK FAILED: $*" >&2; exit 1; }
@@ -95,6 +97,9 @@ cmd_up() {
     export Database__Provider=Postgres ConnectionStrings__Default="Host=$PG_HOST;Port=$PG_PORT;Username=$PG_USER;Password=$PG_PASSWORD;Database=$DB_NAME"
     export Portal__BaseUrl="http://127.0.0.1:$PORTAL_PORT" Portal__InboundSecret="$INBOUND" Portal__WebhookSecret="$OUTBOUND"
     export Web__ForwardingKey="$FWD_KEY" Stripe__WebhookSecret="$STRIPE_WEBHOOK"
+    export Staff__BootstrapToken="$STAFF_BOOT" Staff__BootstrapEmail="$STAFF_EMAIL" Staff__BootstrapName="Journey Admin"
+    # the passkey origin is the web site's (the default is port 3000 only)
+    export Auth__WebAuthnRpId=localhost Auth__WebAuthnOrigins__0="http://localhost:$WEB_PORT"
     # no secret key = the in-process fake payment provider (CI); the web needs a publishable key to mount the (stand-in) Payment Element. A fake test-mode value, not a secret
     export Stripe__PublishableKey="${STRIPE_PUBLISHABLE_KEY:-pk_test_journeyfakekey0000000000}"
     export Marketplace__PublicBaseUrl="http://localhost:$WEB_PORT" Marketplace__RelayDomain="relay.journey.test"
@@ -128,7 +133,7 @@ cmd_up() {
 
   cat >"$RUN_DIR/env.json" <<JSON
 { "portal": "http://127.0.0.1:$PORTAL_PORT", "api": "http://127.0.0.1:$API_PORT", "web": "http://localhost:$WEB_PORT", "mail": "http://127.0.0.1:$MAIL_HTTP_PORT",
-  "webDir": "$WEB_DIR", "pg": { "host": "$PG_HOST", "port": $PG_PORT, "user": "$PG_USER", "password": "$PG_PASSWORD", "db": "$DB_NAME" }, "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "stripeWebhookSecret": "$STRIPE_WEBHOOK", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
+  "webDir": "$WEB_DIR", "pg": { "host": "$PG_HOST", "port": $PG_PORT, "user": "$PG_USER", "password": "$PG_PASSWORD", "db": "$DB_NAME" }, "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "stripeWebhookSecret": "$STRIPE_WEBHOOK", "staffBootstrapSecret": "$STAFF_BOOT", "staffEmail": "$STAFF_EMAIL", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
 JSON
   echo "stack is up: $RUN_DIR/env.json"
 }
