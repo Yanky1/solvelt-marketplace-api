@@ -23,7 +23,7 @@ builder.Configuration.AddCommandLine(args);
 // missing appsettings.json nor a config override can loosen them (decision M1-13, review F3).
 builder.Logging.AddSafeLogFilters();
 
-var problems = StartupValidator.Validate(builder.Configuration, builder.Environment);
+var problems = StartupValidator.AllProblems(builder.Configuration, builder.Environment);
 if (problems.Count > 0)
     throw new InvalidOperationException("Invalid configuration:\n - " + string.Join("\n - ", problems));
 
@@ -60,6 +60,13 @@ builder.Services.AddScoped<GuestClaims>();
 builder.Services.AddScoped<SignInGate>();
 builder.Services.AddScoped<AuthMaintenance>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.AccountService>();
+builder.Services.AddSingleton(sp => Solvelt.Marketplace.Api.Auth.WebAuthnSettings.From(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthOptions>>().Value, sp.GetRequiredService<IHostEnvironment>()));
+builder.Services.AddSingleton<Fido2NetLib.IFido2>(sp =>
+{
+    var rp = sp.GetRequiredService<Solvelt.Marketplace.Api.Auth.WebAuthnSettings>();
+    return new Fido2NetLib.Fido2(new Fido2NetLib.Fido2Configuration { RPID = rp.RpId, RPName = rp.RpName, Origins = new HashSet<string>(rp.Origins), ChallengeSize = 32, Timeout = 60000 }, null!);
+});
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Auth.PasskeyService>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Account.AccountRedactionHandler>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));

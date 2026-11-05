@@ -23,6 +23,8 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<BuyerSession> BuyerSessions => Set<BuyerSession>();
     public DbSet<EmailToken> EmailTokens => Set<EmailToken>();
     public DbSet<BuyerAddress> BuyerAddresses => Set<BuyerAddress>();
+    public DbSet<BuyerPasskey> BuyerPasskeys => Set<BuyerPasskey>();
+    public DbSet<WebAuthnChallenge> WebAuthnChallenges => Set<WebAuthnChallenge>();
     public DbSet<SignInAttempt> SignInAttempts => Set<SignInAttempt>();
     public DbSet<SignInIpBudget> SignInIpBudgets => Set<SignInIpBudget>();
     public DbSet<Cart> Carts => Set<Cart>();

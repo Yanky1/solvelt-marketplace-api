@@ -292,6 +292,8 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
             .SetProperty(a => a.EmailVerifiedAt, a => a.EmailVerifiedAt ?? now), ct);
         if (changed == 0) return new ResetOutcome(false);
         await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        // a reset is account recovery: whatever got in (a stolen session that added a passkey) must not survive it, so every passkey goes and the owner adds theirs again (M1-80)
+        await db.BuyerPasskeys.Where(p => p.AccountId == accountId).ExecuteDeleteAsync(ct);
         await gate.ClearAddressAsync(gateKeys.Address(peek.Email!), ct);
         await tx.CommitAsync(ct);
         await guestClaims.ClaimAsync(peek.Id, peek.Email!, ct);   // a reset proves the mailbox too

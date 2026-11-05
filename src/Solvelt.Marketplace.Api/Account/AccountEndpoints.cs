@@ -12,6 +12,8 @@ public static class AccountEndpoints
     public sealed record ProfileBody(string? DisplayName, string? Phone);
     public sealed record ChangePasswordBody(string? CurrentPassword, string? NewPassword);
     public sealed record DeleteBody(string? Password);
+    public sealed record PasskeyRegisterBody(Guid? ChallengeId, string? Name, System.Text.Json.JsonElement? Credential);
+    public sealed record PasskeyRenameBody(string? Name);
 
     public static IEndpointRouteBuilder MapAccount(this IEndpointRouteBuilder app)
     {
@@ -27,6 +29,12 @@ public static class AccountEndpoints
         // sensitive: the strict per-client limit, a recent sign-in and the password
         g.MapPost("/password", ChangePassword).RequireRateLimiting(RateLimitPolicies.Auth);
         g.MapPost("/delete", Delete).RequireRateLimiting(RateLimitPolicies.Auth);
+        // passkeys (M1-80): adding and removing one needs a recent sign-in like the password change
+        g.MapGet("/passkeys", ListPasskeys);
+        g.MapPost("/passkeys/options", PasskeyOptions).RequireRateLimiting(RateLimitPolicies.Auth);
+        g.MapPost("/passkeys", RegisterPasskey).RequireRateLimiting(RateLimitPolicies.Auth);
+        g.MapPatch("/passkeys/{id:guid}", RenamePasskey);
+        g.MapDelete("/passkeys/{id:guid}", RemovePasskey).RequireRateLimiting(RateLimitPolicies.Auth);
         return app;
     }
 
@@ -74,6 +82,45 @@ public static class AccountEndpoints
 
     private static async Task<IResult> SetDefault(Guid id, HttpContext ctx, AccountService a, CancellationToken ct)
         => await a.SetDefaultAsync(ctx.Buyer().AccountId, id, ct) ? Results.NoContent() : Problems.NotFound();
+
+    private static async Task<IResult> ListPasskeys(HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+        => Results.Json((await passkeys.ListAsync(ctx.Buyer().AccountId, ct)).Select(p => new { id = p.Id, name = p.Name, createdAt = p.CreatedAt, lastUsedAt = p.LastUsedAt, backedUp = p.BackedUp }));
+
+    private static async Task<IResult> PasskeyOptions(HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+    {
+        var (outcome, challengeId, options) = await passkeys.BeginRegistrationAsync(ctx.Buyer(), ct);
+        return outcome == PasskeyOutcome.Ok ? Results.Json(new { challengeId, options = System.Text.Json.JsonDocument.Parse(options!).RootElement }) : PasskeyProblem(outcome);
+    }
+
+    private static async Task<IResult> RegisterPasskey(PasskeyRegisterBody? body, HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+    {
+        if (body?.ChallengeId is not { } challengeId) return Problems.Json(400, "invalid_challenge", "Start again: the passkey request is missing or has expired.");
+        var (outcome, passkey) = await passkeys.CompleteRegistrationAsync(ctx.Buyer(), challengeId, body.Name, body.Credential, ct);
+        return outcome == PasskeyOutcome.Ok
+            ? Results.Json(new { id = passkey!.Id, name = passkey.Name, createdAt = passkey.CreatedAt, lastUsedAt = passkey.LastUsedAt, backedUp = passkey.BackedUp }, statusCode: 201)
+            : PasskeyProblem(outcome);
+    }
+
+    private static async Task<IResult> RenamePasskey(Guid id, PasskeyRenameBody? body, HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+        => PasskeyOutcomeToResult(await passkeys.RenameAsync(ctx.Buyer().AccountId, id, body?.Name, ct));
+
+    private static async Task<IResult> RemovePasskey(Guid id, HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+        => PasskeyOutcomeToResult(await passkeys.RemoveAsync(ctx.Buyer(), id, ct));
+
+    private static IResult PasskeyOutcomeToResult(PasskeyOutcome outcome) => outcome == PasskeyOutcome.Ok ? Results.NoContent() : PasskeyProblem(outcome);
+
+    internal static IResult PasskeyProblem(PasskeyOutcome outcome) => outcome switch
+    {
+        PasskeyOutcome.ReauthenticationRequired => Problems.Json(403, "reauthentication_required", "Confirm your password again first."),
+        PasskeyOutcome.InvalidChallenge => Problems.Json(400, "invalid_challenge", "Start again: the passkey request is missing, used or has expired."),
+        PasskeyOutcome.InvalidCredential => Problems.Json(400, "invalid_credential", "The passkey could not be verified."),
+        PasskeyOutcome.AlreadyRegistered => Problems.Json(409, "already_registered", "This passkey is already registered."),
+        PasskeyOutcome.TooMany => Problems.Json(409, "too_many_passkeys", "You have reached the number of passkeys you can keep. Remove one first."),
+        PasskeyOutcome.LastSignInMethod => Problems.Json(409, "last_sign_in_method", "This is your only way to sign in. Add another one first."),
+        PasskeyOutcome.InvalidName => Problems.Validation(new Dictionary<string, string> { ["name"] = "Give the passkey a name of up to 60 characters." }),
+        PasskeyOutcome.NoPasskeys => Problems.Json(409, "no_passkeys", "There is no passkey on this account."),
+        _ => Problems.NotFound(),
+    };
 
     private static IResult Map(AccountResult r, HttpContext ctx, string passwordField)
     {

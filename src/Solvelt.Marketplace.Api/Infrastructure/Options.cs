@@ -211,6 +211,18 @@ public sealed class AuthOptions
     public int SignInIpFailuresPerHour { get; set; } = 20;
     /// <summary>Largest request body the auth endpoints read. A password is at most 128 characters.</summary>
     public int MaxBodyBytes { get; set; } = 16 * 1024;
+    /// <summary>
+    /// WebAuthn relying party id: the registrable domain the web site is served from (no scheme, no port), for example <c>solvelt.com</c>. Required in production; a passkey is bound to it for ever,
+    /// so changing it orphans every registered passkey. Development and tests default to <c>localhost</c>.
+    /// </summary>
+    public string? WebAuthnRpId { get; set; }
+    /// <summary>Name the browser shows when it asks the buyer to create or use a passkey.</summary>
+    public string WebAuthnRpName { get; set; } = "Solvelt";
+    /// <summary>The exact origins (scheme, host, port) the web site is served from, for example <c>https://www.solvelt.com</c>. Required in production, https only; each host must be the RP id or below it.</summary>
+    public string[] WebAuthnOrigins { get; set; } = [];
+    /// <summary>How long a registration or sign-in challenge lives. It is single use and stored on the server.</summary>
+    public int PasskeyChallengeMinutes { get; set; } = 5;
+    public int MaxPasskeys { get; set; } = 10;
 }
 
 /// <summary>Checkout settings. <see cref="QuoteKey"/> keys the HMAC that binds a quote to a checkout (its own key, required in production, never the dev default, distinct from every other key).</summary>

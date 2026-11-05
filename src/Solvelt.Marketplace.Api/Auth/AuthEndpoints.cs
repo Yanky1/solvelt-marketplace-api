@@ -13,6 +13,7 @@ public static class AuthEndpoints
     public sealed record SignInBody(string? Email, string? Password);
     public sealed record ResetBody(string? Token, string? Password);
     public sealed record PasswordBody(string? Password);
+    public sealed record PasskeyAssertionBody(Guid? ChallengeId, System.Text.Json.JsonElement? Credential);
 
     public static IEndpointRouteBuilder MapAuth(this IEndpointRouteBuilder app)
     {
@@ -21,6 +22,11 @@ public static class AuthEndpoints
         auth.MapPost("/resend-verification", ResendVerification).RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/verify-email", VerifyEmail).RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/sign-in", SignIn).RequireRateLimiting(RateLimitPolicies.Auth);
+        // passkeys (M1-80): anonymous sign-in, and a second way to step up
+        auth.MapPost("/passkey/options", PasskeySignInOptions).RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/passkey/sign-in", PasskeySignIn).RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/reauthenticate/passkey/options", PasskeyReauthOptions).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/reauthenticate/passkey", PasskeyReauth).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/forgot-password", ForgotPassword).RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/reset-password", ResetPassword).RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/reauthenticate", Reauthenticate).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
@@ -79,6 +85,33 @@ public static class AuthEndpoints
             default:
                 return Problems.Json(401, "invalid_credentials", "The email or password is not correct.");
         }
+    }
+
+    private static async Task<IResult> PasskeySignInOptions(PasskeyService passkeys, CancellationToken ct)
+    {
+        var (challengeId, options) = await passkeys.BeginSignInAsync(ct);
+        return Results.Json(new { challengeId, options = System.Text.Json.JsonDocument.Parse(options).RootElement });
+    }
+
+    private static async Task<IResult> PasskeySignIn(PasskeyAssertionBody? body, PasskeyService passkeys, CancellationToken ct)
+    {
+        var r = body?.ChallengeId is { } challengeId ? await passkeys.SignInAsync(challengeId, body.Credential, ct) : new SignInResult(SignInStatus.InvalidCredentials);
+        return r.Status == SignInStatus.Ok
+            ? Results.Json(new { token = r.Token, user = new { id = r.Account!.Id, displayName = r.Account.DisplayName } })
+            : Problems.Json(401, "invalid_credentials", "The passkey was not accepted.");
+    }
+
+    private static async Task<IResult> PasskeyReauthOptions(HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+    {
+        var (outcome, challengeId, options) = await passkeys.BeginReauthenticationAsync(ctx.Buyer(), ct);
+        return outcome == PasskeyOutcome.Ok ? Results.Json(new { challengeId, options = System.Text.Json.JsonDocument.Parse(options!).RootElement }) : Account.AccountEndpoints.PasskeyProblem(outcome);
+    }
+
+    private static async Task<IResult> PasskeyReauth(PasskeyAssertionBody? body, HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+    {
+        if (body?.ChallengeId is not { } challengeId) return Account.AccountEndpoints.PasskeyProblem(PasskeyOutcome.InvalidChallenge);
+        var outcome = await passkeys.ReauthenticateAsync(ctx.Buyer(), challengeId, body.Credential, ct);
+        return outcome == PasskeyOutcome.Ok ? Results.NoContent() : Account.AccountEndpoints.PasskeyProblem(outcome);
     }
 
     private static async Task<IResult> ForgotPassword(EmailBody? body, AuthService auth, CancellationToken ct)
