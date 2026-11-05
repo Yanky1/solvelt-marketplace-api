@@ -8,7 +8,7 @@ The portal admin stays the place for sellers, listings and moderation (decision 
 - Sessions: idle `Staff:SessionIdleMinutes` (30), absolute `Staff:SessionAbsoluteHours` (8). Sensitive actions need a passkey check within `Staff:StepUpMinutes` (5): `403 reauthentication_required` otherwise; `POST /api/v1/staff/auth/reauthenticate/options` then `/reauthenticate`.
 - The web area sends the token as `Authorization: Bearer`; the web server keeps it in a `Secure; HttpOnly; SameSite=Strict` cookie of its own (not the buyer cookie) and checks CSRF on every action.
 - Everything under `/api/v1/staff` is `Cache-Control: private, no-store` and `X-Robots-Tag: noindex, nofollow`, and is rate limited per client IP (`RateLimits:StaffPerMinute`, 60; sign-in and enrolment use the strict auth bucket).
-- **IP allow-list (optional; a blank entry stops the start, it never means "everyone"):** `Staff__AllowedIps__0=203.0.113.0/24`, `Staff__AllowedIps__1=198.51.100.7`. When any entry is set every other address gets `404` on `/api/v1/staff`. The address is the one the web server forwards and signs (`Web__ForwardingKey`), else the peer.
+- **IP allow-list (optional; a blank entry or a single value stops the start, it never means "everyone"; always the list form):** `Staff__AllowedIps__0=203.0.113.0/24`, `Staff__AllowedIps__1=198.51.100.7`. When any entry is set every other address gets `404` on `/api/v1/staff`. The address is the one the web server forwards and signs (`Web__ForwardingKey`), else the peer.
 
 ## First staff account (for Ronald)
 There is **no default account and no default password**. To create the first admin:

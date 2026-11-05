@@ -55,7 +55,7 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
         {
             id = o.Id, number = o.Number, status = o.Status, createdAt = o.CreatedAt, paidAt = o.PaidAt, placedAt = o.PlacedAt, failureCode = o.FailureCode, currency = o.Currency, demo = o.IsDemo,
             itemsCents = o.ItemsCents, shippingCents = o.ShippingCents, taxCents = o.TaxCents, totalCents = o.TotalCents, paidCents = o.PaidCents, refundedCents = o.RefundedCents,
-            buyer = new { accountId = o.AccountId, name = Masking.Name(o.BuyerName), guestEmail = Masking.Email(o.GuestEmail), relayEmail = o.RelayEmail, shipCountry = o.ShipCountry },
+            buyer = new { accountId = o.AccountId, name = Masking.Name(o.BuyerName), guestEmail = Masking.Email(o.GuestEmail), relayEmail = Masking.Email(o.RelayEmail), shipCountry = o.ShipCountry },
             lines,
             groups = o.Groups.OrderBy(g => g.SellerOrderNumber).Select(g => new { id = g.Id, sellerOrderNumber = g.SellerOrderNumber, totalCents = g.TotalCents, refundedCents = g.RefundedCents }),
             refunds = refunds.Select(r => new { id = r.Id, amountCents = r.AmountCents, status = r.Status, reason = r.Reason, attempt = r.Attempt, createdAt = r.CreatedAt, updatedAt = r.UpdatedAt, retryable = dead.Contains(r.Id) }),
@@ -99,15 +99,33 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
         return (OpsOutcome.Ok, null);
     }
 
-    public async Task AuditAsync(StaffPrincipal who, string action, string? targetType, string? targetId, string reason, CancellationToken ct)
+    public sealed record OrderLookup(bool Limited, object? View);
+
+    /// <summary>One order lookup as one unit: the hourly cap (shared with the buyer lookups), the find, the view and the audit row by order id, in one transaction (security review LOW 7).</summary>
+    public async Task<OrderLookup> LookupOrderAsync(StaffPrincipal who, string? number, string reason, bool payments, CancellationToken ct)
     {
-        StaffAudit.Add(db, time, who, action, targetType, targetId, reason);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (await StaffLookupCap.ReachedAsync(db, who, Now, options.Value.LookupsPerHour, ct)) return new(true, null);
+        var found = await FindOrderAsync(null, number, ct);
+        var view = found is { } f ? await OrderViewAsync(f, payments, ct) : null;
+        StaffAudit.Add(db, time, who, view is null ? "order.lookup_miss" : "order.lookup", view is null ? null : "order", found?.ToString("D"), reason);
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return new(false, view);
     }
 
-    public async Task<object> BuyerOrdersAsync(Guid accountId, CancellationToken ct)
-        => await db.Orders.AsNoTracking().Where(o => o.AccountId == accountId).OrderByDescending(o => o.CreatedAt).ThenByDescending(o => o.Id).Take(50)
+    /// <summary>A buyer's last 50 orders, audited and counted against the same cap.</summary>
+    public async Task<(bool Limited, object? Orders)> BuyerOrdersAsync(StaffPrincipal who, Guid accountId, string reason, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (await StaffLookupCap.ReachedAsync(db, who, Now, options.Value.LookupsPerHour, ct)) return (true, null);
+        var list = await db.Orders.AsNoTracking().Where(o => o.AccountId == accountId).OrderByDescending(o => o.CreatedAt).ThenByDescending(o => o.Id).Take(50)
             .Select(o => new { id = o.Id, number = o.Number, status = o.Status, createdAt = o.CreatedAt, totalCents = o.TotalCents, refundedCents = o.RefundedCents, demo = o.IsDemo }).ToListAsync(ct);
+        StaffAudit.Add(db, time, who, "buyer.orders", "buyer", accountId.ToString("D"), reason);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (false, list);
+    }
 
     // ---------- stuck ingests ----------
 

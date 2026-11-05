@@ -45,6 +45,20 @@ public static class StaffAudit
     private static string Clip(string s) => s.Length <= 1000 ? s : s[..1000];
 }
 
+/// <summary>The hourly cap on lookups (security review LOW 7): counted from the audit log under the staff row's lock, so parallel requests count each other.</summary>
+public static class StaffLookupCap
+{
+    public static readonly string[] Actions = ["buyer.lookup", "buyer.lookup_miss", "order.lookup", "order.lookup_miss", "buyer.orders"];
+
+    /// <summary>True when the member has already used their hour. Call inside the transaction that will write the audit row.</summary>
+    public static async Task<bool> ReachedAsync(MarketplaceDb db, StaffPrincipal who, DateTimeOffset now, int perHour, CancellationToken ct)
+    {
+        await db.StaffAccounts.Where(a => a.Id == who.StaffId).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct);   // the lock
+        var since = now.AddHours(-1);
+        return await db.StaffAudit.CountAsync(a => a.ActorId == who.StaffId && Actions.Contains(a.Action) && a.At > since, ct) >= Math.Max(1, perHour);
+    }
+}
+
 /// <summary>Retention of the staff tables (PII table, decision M7-05).</summary>
 public sealed class StaffMaintenance(MarketplaceDb db, TimeProvider time, Microsoft.Extensions.Options.IOptions<StaffOptions> options)
 {

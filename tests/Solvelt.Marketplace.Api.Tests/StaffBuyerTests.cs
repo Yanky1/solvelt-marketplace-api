@@ -36,7 +36,9 @@ public class StaffBuyerTests
         return new World(s, admin, adminKey, support, finance, buyerToken, buyer.Id);
     }
 
-    private static string Q(string key, string value, string reason = "ticket 9: caller asked") => $"/api/v1/staff/buyers?{key}={Uri.EscapeDataString(value)}&reason={Uri.EscapeDataString(reason)}";
+    /// <summary>A lookup is a POST with a body (never a URL: the typed address and the reason stay out of access logs).</summary>
+    private static Task<HttpResponseMessage> Find(World w, string? token, string key, string value, string reason = "ticket 9: caller asked")
+        => w.S.Post("/api/v1/staff/buyers/lookup", new Dictionary<string, object?> { [key] = value, ["reason"] = reason }, token);
 
     // ---------- lookup ----------
 
@@ -44,9 +46,9 @@ public class StaffBuyerTests
     public async Task Lookup_finds_one_buyer_by_email_order_or_id_and_shows_nothing_unmasked()
     {
         await using var w = await Setup();
-        foreach (var url in new[] { Q("email", "  Jane.Doe@Example.com "), Q("order", "MP-1001"), Q("id", w.BuyerId.ToString()) })
+        foreach (var (key, value) in new[] { ("email", "  Jane.Doe@Example.com "), ("order", "MP-1001"), ("id", w.BuyerId.ToString()) })
         {
-            var r = await w.S.Get(url, w.Support);
+            var r = await Find(w, w.Support, key, value);
             Assert.Equal(HttpStatusCode.OK, r.StatusCode);
             var body = await r.Content.ReadAsStringAsync();
             Assert.DoesNotContain("jane.doe@example.com", body); Assert.DoesNotContain("Brown", body); Assert.DoesNotContain(Phone, body); Assert.DoesNotContain(Street, body);
@@ -54,23 +56,23 @@ public class StaffBuyerTests
             Assert.Equal((w.BuyerId, "j***@e***.com", "Jane B."), (j.GetProperty("id").GetGuid(), j.GetProperty("email").GetString(), j.GetProperty("name").GetString()));
             Assert.Equal((1, 1), (j.GetProperty("addresses").GetInt32(), j.GetProperty("orders").GetInt32()));
         }
-        Assert.Equal(HttpStatusCode.OK, (await w.S.Get($"/api/v1/staff/buyers/{w.BuyerId}?reason=ticket%209%3A%20again", w.Finance)).StatusCode);   // finance may look, masked
+        Assert.Equal(HttpStatusCode.OK, (await w.S.Post($"/api/v1/staff/buyers/{w.BuyerId}/lookup", new { reason = "ticket 9: again" }, w.Finance)).StatusCode);   // finance may look, masked
     }
 
     [Fact]
     public async Task A_lookup_needs_a_reason_and_exactly_one_key_and_is_audited_by_id_not_by_what_was_typed()
     {
         await using var w = await Setup();
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await w.S.Get($"/api/v1/staff/buyers?email={Email}", w.Support)).StatusCode);
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await w.S.Get(Q("email", Email, "jane.doe@example.com asked"), w.Support)).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await w.S.Get($"/api/v1/staff/buyers?email={Email}&order=MP-1001&reason=ticket%209%3A%20x", w.Support)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await w.S.Get(Q("email", "nobody@example.com"), w.Support)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await w.S.Get(Q("email", Email), w.Support)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await w.S.Post("/api/v1/staff/buyers/lookup", new { email = Email }, w.Support)).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Find(w, w.Support, "email", Email, "jane.doe@example.com asked")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await w.S.Post("/api/v1/staff/buyers/lookup", new { email = Email, order = "MP-1001", reason = "ticket 9: x" }, w.Support)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Find(w, w.Support, "email", "nobody@example.com")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Find(w, w.Support, "email", Email)).StatusCode);
         var audit = await w.S.Audit();
         Assert.Single(audit, a => a.Action == "buyer.lookup" && a.TargetId == w.BuyerId.ToString("D") && a.Reason == "ticket 9: caller asked");
         Assert.Single(audit, a => a.Action == "buyer.lookup_miss" && a.TargetId == null);
         Assert.DoesNotContain(audit, a => (a.Reason + a.Detail + a.TargetId).Contains("nobody") || (a.Reason + a.Detail + a.TargetId).Contains("jane.doe"));
-        Assert.Equal(HttpStatusCode.Unauthorized, (await w.S.Get(Q("email", Email), w.BuyerToken)).StatusCode);   // a buyer is not staff
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Find(w, w.BuyerToken, "email", Email)).StatusCode);   // a buyer is not staff
     }
 
     [Fact]
@@ -78,10 +80,10 @@ public class StaffBuyerTests
     {
         await using var w = await Setup();
         await w.S.Db(async db => { await db.BuyerAccounts.Where(a => a.Id == w.BuyerId).ExecuteUpdateAsync(x => x.SetProperty(a => a.DemoVerifiedAt, w.S.F.Clock.GetUtcNow())); return 0; });
-        var j = await StaffKit.Json(await w.S.Get(Q("id", w.BuyerId.ToString()), w.Support));
+        var j = await StaffKit.Json(await Find(w, w.Support, "id", w.BuyerId.ToString()));
         Assert.True(j.GetProperty("demo").GetBoolean());
         await w.S.Db(async db => { await db.BuyerAccounts.Where(a => a.Id == w.BuyerId).ExecuteUpdateAsync(x => x.SetProperty(a => a.DeletedAt, w.S.F.Clock.GetUtcNow())); return 0; });
-        var d = await StaffKit.Json(await w.S.Get(Q("id", w.BuyerId.ToString()), w.Support));
+        var d = await StaffKit.Json(await Find(w, w.Support, "id", w.BuyerId.ToString()));
         Assert.True(d.GetProperty("deleted").GetBoolean());
     }
 
@@ -155,7 +157,7 @@ public class StaffBuyerTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await w.S.K.Post("/api/v1/auth/sign-in", new { email = Email, password = "wrong password here" })).StatusCode);   // a wrong password learns nothing
         var bo = await StaffKit.Json(await w.S.K.Post("/api/v1/auth/passkey/options", null));
         Assert.Equal(HttpStatusCode.Unauthorized, (await w.S.K.Post("/api/v1/auth/passkey/sign-in", new { challengeId = bo.GetProperty("challengeId").GetGuid(), credential = buyerKey.Assert(bo.GetProperty("options")) })).StatusCode);
-        var view = await StaffKit.Json(await w.S.Get(Q("id", w.BuyerId.ToString()), w.Support));
+        var view = await StaffKit.Json(await Find(w, w.Support, "id", w.BuyerId.ToString()));
         Assert.True(view.GetProperty("locked").GetBoolean());
         Assert.Equal(0, view.GetProperty("activeSessions").GetInt32());
         // unlock: sign-in works again, the old session does not

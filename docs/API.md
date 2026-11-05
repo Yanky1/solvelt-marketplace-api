@@ -412,7 +412,7 @@ Everything is under `/api/v1/staff`, bearer `stf_…` token, `private, no-store`
 | `GET /me`, `GET /me/passkeys`, `POST /me/passkeys/options`, `POST /me/passkeys`, `DELETE /me/passkeys/{id}` | signed in | `me` has `role`, `permissions[]`, `stepUpUntil`; adding and removing need a recent check; the last passkey stays (`409 last_passkey`) |
 | `GET /accounts`, `POST /accounts {email, displayName, role, reason}` (`201 { account, enrolmentToken, expiresAt }`), `POST /accounts/{id}/enrolment {reason, revokePasskeys}`, `/role {role, reason}`, `/disable`, `/enable`, `/sign-out {reason}` | `staff.manage` | `409 last_admin` when no active admin would remain, `409 email_in_use` |
 | `GET /audit?action&actor&targetType&target&limit&before` | `audit.view` | `{ entries[], next }`, newest first |
-| `GET /buyers?email=\|order=\|id=&reason=`, `GET /buyers/{id}?reason=` | `buyers.view` | One buyer, masked (M7-07); `reason` required; `404` when none |
+| `POST /buyers/lookup { email \| order \| id, reason }`, `POST /buyers/{id}/lookup { reason }` | `buyers.view` | One buyer, masked (M7-07; the relay address too, M7-17); a BODY, never a URL (M7-17); `reason` required; `404` when none; `429 lookup_limit` after `Staff:LookupsPerHour` (120) |
 | `POST /buyers/{id}/reveal {fields[], reason}` | `buyers.reveal` | Break-glass (M7-08): real email/name/phone/addresses, passkey check, `429 reveal_limit` |
 | `POST /buyers/{id}/lock`, `/unlock {reason}` | `buyers.lock` | M7-09; `204`, idempotent |
 | `POST /buyers/{id}/sign-out {reason}` | `buyers.sign_out` | Ends every buyer session |
@@ -423,7 +423,7 @@ Orders, payments and queues (M7-10..14):
 
 | Endpoint | Who | Notes |
 |---|---|---|
-| `GET /orders?number=\|id=&reason=`, `GET /buyers/{id}/orders?reason=` | `orders.view` | Masked; `payment` block only with `payments.view` |
+| `POST /orders/lookup { number, reason }`, `POST /buyers/{id}/orders { reason }` | `orders.view` | Masked; `payment` block only with `payments.view`; the same hourly cap as the buyer lookups |
 | `POST /orders/{id}/refunds/{refundId}/retry {reason}` | `refunds.retry` | Reserved refund with a dead message; `409 not_retryable` / `already_queued` |
 | `GET /ingests`, `POST /ingests/{orderId}/retry {reason}` | `ingests.view` / `ingests.retry` | Paid orders the portal has not taken |
 | `GET /outbox?status&type&limit&before`, `POST /outbox/{id}/retry {reason}` | `outbox.view` / `outbox.retry` | No payload ever |

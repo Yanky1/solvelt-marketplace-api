@@ -11,9 +11,14 @@ public sealed record StaffPermissionMetadata(string Permission);
 public sealed class StaffPublicMetadata { public static readonly StaffPublicMetadata Instance = new(); }
 public sealed class StaffSelfMetadata { public static readonly StaffSelfMetadata Instance = new(); }
 public sealed class StaffAuthMetadata { public static readonly StaffAuthMetadata Instance = new(); }
+/// <summary>Carried by every endpoint of the staff group: added by the SAME call that installs <see cref="StaffDenyByDefaultFilter"/>, so a test can tell that the filter is on every route.</summary>
+public sealed class StaffDenyByDefaultMetadata { public static readonly StaffDenyByDefaultMetadata Instance = new(); }
 
 public static class StaffRouteExtensions
 {
+    /// <summary>The deny-by-default filter AND its marker, together (removing one removes the other, and the route-walking test sees it).</summary>
+    public static TBuilder StaffDenyByDefault<TBuilder>(this TBuilder b) where TBuilder : IEndpointConventionBuilder => b.WithMetadata(StaffDenyByDefaultMetadata.Instance).AddEndpointFilter<TBuilder, StaffDenyByDefaultFilter>();
+
     /// <summary>The sign-in and enrolment routes: anonymous by design.</summary>
     public static TBuilder StaffPublic<TBuilder>(this TBuilder b) where TBuilder : IEndpointConventionBuilder => b.WithMetadata(StaffPublicMetadata.Instance);
     /// <summary>A signed-in staff member acting on THEIR OWN session or account (me, passkeys, step-up, sign-out): no permission needed, a staff session is.</summary>
@@ -72,7 +77,7 @@ public static class StaffEndpoints
 
     /// <summary>The group every staff endpoint hangs off: deny by default, then the staff rate limit (the IP allow-list is a middleware that runs before all of it).</summary>
     public static RouteGroupBuilder StaffGroup(this IEndpointRouteBuilder app)
-        => app.MapGroup("/api/v1/staff").AddEndpointFilter<StaffDenyByDefaultFilter>().RequireRateLimiting(RateLimitPolicies.Staff);
+        => app.MapGroup("/api/v1/staff").StaffDenyByDefault().RequireRateLimiting(RateLimitPolicies.Staff);
 
     public static IEndpointRouteBuilder MapStaff(this IEndpointRouteBuilder app)
     {
