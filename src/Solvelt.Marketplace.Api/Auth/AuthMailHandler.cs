@@ -10,7 +10,7 @@ namespace Solvelt.Marketplace.Api.Auth;
 
 public static class AuthMailKinds
 {
-    public const string Verify = "verify", Reset = "reset", Exists = "exists", PasswordChanged = "password-changed";
+    public const string Verify = "verify", Reset = "reset", Exists = "exists", PasswordChanged = "password-changed", PasskeyAdded = "passkey-added", PasskeyRemoved = "passkey-removed";
 }
 
 /// <summary>What the outbox holds for an account mail: ids only. No address, name or link: those are read and computed when the mail is sent.</summary>
@@ -33,7 +33,7 @@ public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSe
         AuthMailPayload? p;
         try { p = message.Payload is null ? null : JsonSerializer.Deserialize<AuthMailPayload>(message.Payload, PortalJson.Options); }
         catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
-        if (p is null || p.Kind is not (AuthMailKinds.Verify or AuthMailKinds.Reset or AuthMailKinds.Exists or AuthMailKinds.PasswordChanged)) return OutboxResult.Dead("invalid_payload");
+        if (p is null || p.Kind is not (AuthMailKinds.Verify or AuthMailKinds.Reset or AuthMailKinds.Exists or AuthMailKinds.PasswordChanged or AuthMailKinds.PasskeyAdded or AuthMailKinds.PasskeyRemoved)) return OutboxResult.Dead("invalid_payload");
 
         var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == p.AccountId && a.DeletedAt == null && a.Email != null).Select(a => new { a.Email, a.DisplayName }).FirstOrDefaultAsync(ct);
         if (account is null) return OutboxResult.Delivered();   // deleted since: nothing to send
@@ -41,6 +41,8 @@ public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSe
         EmailMessage mail;
         if (p.Kind == AuthMailKinds.Exists) mail = AuthEmails.AlreadyRegistered(account.Email!, baseUrl);
         else if (p.Kind == AuthMailKinds.PasswordChanged) mail = AuthEmails.PasswordChanged(account.Email!, baseUrl);
+        else if (p.Kind == AuthMailKinds.PasskeyAdded) mail = AuthEmails.PasskeyAdded(account.Email!, baseUrl);
+        else if (p.Kind == AuthMailKinds.PasskeyRemoved) mail = AuthEmails.PasskeyRemoved(account.Email!, baseUrl);
         else
         {
             if (p.TokenId is not { } tokenId) return OutboxResult.Dead("invalid_payload");

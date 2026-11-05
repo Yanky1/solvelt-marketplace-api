@@ -6,7 +6,7 @@ namespace Solvelt.Marketplace.Api.Auth;
 /// <summary>Retention for the auth tables (PII table): old sessions and links, placeholder rows, and the sign-in gate's memory.</summary>
 public sealed class AuthMaintenance(MarketplaceDb db, TimeProvider time, Outbox.OutboxWriter outbox)
 {
-    public sealed record Result(int Sessions, int Tokens, int Decoys, int GateRows, int Redactions = 0);
+    public sealed record Result(int Sessions, int Tokens, int Decoys, int GateRows, int Redactions = 0, int Challenges = 0);
 
     public async Task<Result> PurgeAsync(CancellationToken ct = default)
     {
@@ -27,7 +27,9 @@ public sealed class AuthMaintenance(MarketplaceDb db, TimeProvider time, Outbox.
         var queued = 0;
         foreach (var id in stuck)
             if (await outbox.TryEnqueueAsync(Account.AccountRedactionHandler.Type, new Account.AccountRedactionPayload(id), $"redact-sweep:{id:N}:{now.ToUnixTimeSeconds() / 3600}", ct: ct)) queued++;
-        return new Result(sessions, tokens, decoys, gate, queued);
+        // WebAuthn challenges are good for minutes; an hour after expiry (or use) they are gone
+        var challenges = await db.WebAuthnChallenges.Where(c => c.ExpiresAt < hour).ExecuteDeleteAsync(ct);
+        return new Result(sessions, tokens, decoys, gate, queued, challenges);
     }
 }
 

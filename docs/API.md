@@ -326,6 +326,23 @@ Buyer routes need the session and answer `private, no-store`.
 * `POST /api/v1/notifications/{id}/read`, `POST /api/v1/notifications/read-all` → 204, idempotent; another buyer's id is 404.
 * `GET|PUT /api/v1/notifications/preferences` → `{ email: { order_updates, shipped, out_for_delivery, delivered, messages, bookings }, alwaysOn: ["refunds", "cancellations", "delivery_problems", "returns", "booking_changes"] }`; PUT sends the categories to change; unknown categories are 422, and so is naming an `alwaysOn` one with `false` ("Required for your orders and account"). Transactional mail (decision O-21, M5-21) is always sent and the `all` unsubscribe leaves it on.
 * `POST /api/v1/notifications/unsubscribe` (anonymous; the signed token from a mail link; the token is `<id>.<category|all>.<expiry>.<mac>` and lives 90 days) → 204, or 400 `invalid_token`, or 400 `expired_token` (the website then points to the signed-in preferences page). The token comes in the JSON body `{ token }`, or in the `?token=` query with the RFC 8058 form body `List-Unsubscribe=One-Click` (what a mail client's unsubscribe button sends; a form POST without the marker is a 400, a GET is 405). Switches that category (or all) off, never on. Every notification mail carries `List-Unsubscribe: <{origin}/api/v1/notifications/unsubscribe?token=…>` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`.
+## Passkeys (buyers)
+Passkeys are WebAuthn credentials (decision M1-80). The web server relays the browser's JSON: the options it gets are `PublicKeyCredentialCreationOptions` / `PublicKeyCredentialRequestOptions` as JSON (base64url fields), the credential it returns is `PublicKeyCredential.toJSON()`. All answers are `private, no-store`. Challenges are single use, stored on the server and valid for 5 minutes.
+
+| Endpoint | Body | Answers |
+|---|---|---|
+| `GET /api/v1/account/passkeys` (Bearer) | none | `200 [{ id, name, createdAt, lastUsedAt, backedUp }]` (no key material) |
+| `POST /api/v1/account/passkeys/options` (Bearer) | none | `200 { challengeId, options }` for `navigator.credentials.create()`; `403 reauthentication_required` (sign in again within 10 minutes: password or passkey step-up); `409 too_many_passkeys` (10) |
+| `POST /api/v1/account/passkeys` (Bearer) | `{ challengeId, name?, credential }` | `201 { id, name, createdAt, lastUsedAt, backedUp }`; `400 invalid_challenge` (unknown, used, expired, made for another session or purpose); `400 invalid_credential` (did not verify); `409 already_registered`; `409 too_many_passkeys`; `422` bad name (1 to 60 characters) |
+| `PATCH /api/v1/account/passkeys/{id}` (Bearer) | `{ name }` | `204`; `404` for another buyer's or an unknown id; `422` |
+| `DELETE /api/v1/account/passkeys/{id}` (Bearer) | none | `204`; `403 reauthentication_required`; `404`; `409 last_sign_in_method` (an account with no password keeps its last passkey) |
+| `POST /api/v1/auth/passkey/options` | none | `200 { challengeId, options }` for `navigator.credentials.get()`: no account named, user verification required (discoverable passkeys) |
+| `POST /api/v1/auth/passkey/sign-in` | `{ challengeId, credential }` | `200 { token, user: { id, displayName } }` like the password sign-in; every failure is `401 invalid_credentials` |
+| `POST /api/v1/auth/reauthenticate/passkey/options` (Bearer) | none | `200 { challengeId, options }` (allowCredentials: the buyer's own passkeys); `409 no_passkeys` |
+| `POST /api/v1/auth/reauthenticate/passkey` (Bearer) | `{ challengeId, credential }` | `204`: the session's `authenticated_at` is now (like `/auth/reauthenticate` with the password); `400 invalid_challenge` / `invalid_credential` |
+
+The relying party is configured (`Auth__WebAuthnRpId`, `Auth__WebAuthnOrigins__n`): the web site must be served from one of those origins. A password reset removes every passkey of the account, and the owner gets a mail when one is added or removed. The endpoints share the strict per-client rate limit.
+
 ## Guest order links (for M3 and M5)
 Not endpoints of their own: services other modules call (decision M1-70).
 

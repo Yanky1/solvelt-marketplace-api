@@ -20,6 +20,8 @@ public static class DevDefaults
     public const string PublicBaseUrl = "http://localhost:3000";
     public const string RelayDomain = "relay.solvelt.test";
     public const string SqliteConnection = "Data Source=marketplace-dev.db";
+    public const string WebAuthnRpId = "localhost";
+    public const string WebAuthnOrigin = "http://localhost:3000";
 }
 
 public static class StartupValidator
@@ -38,6 +40,39 @@ public static class StartupValidator
             warnings.Add("Portal:ImageKey (env Portal__ImageKey) is not set: image downloads are signed with Portal:InboundSecret. Set a separate key before the portal sets Orders:ImageAcceptInboundKey=false (then also set Portal:RequireImageKey=true).");
         return warnings;
     }
+
+    /// <summary>
+    /// The passkey settings (decision M1-80). In production the RP id and the origins are required and the origins must be https; in every environment, what is set must be
+    /// consistent: an RP id that is a plain lower-case domain (not an address, no scheme or port) and origins that are bare scheme://host[:port] whose host is the RP id or below it.
+    /// </summary>
+    public static IReadOnlyList<string> WebAuthnProblems(IConfiguration config, IHostEnvironment env)
+    {
+        var problems = new List<string>();
+        var rpId = config["Auth:WebAuthnRpId"];
+        var origins = config.GetSection("Auth:WebAuthnOrigins").GetChildren().Select(c => c.Value).Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v!).ToList();
+        var production = !IsDevLike(env);
+        if (production && string.IsNullOrWhiteSpace(rpId)) problems.Add("Auth:WebAuthnRpId (env Auth__WebAuthnRpId) is required in production: the domain the web site is served from, for example solvelt.com.");
+        if (production && origins.Count == 0) problems.Add("Auth:WebAuthnOrigins (env Auth__WebAuthnOrigins__0, __1, ...) is required in production: the https origins of the web site.");
+        if (!string.IsNullOrWhiteSpace(rpId))
+        {
+            var id = rpId.Trim();
+            if (id != id.ToLowerInvariant() || id.Contains("://") || id.Contains(':') || id.Contains('/') || System.Net.IPAddress.TryParse(id, out _) || id.StartsWith('.') || id.EndsWith('.') || id.Any(char.IsWhiteSpace))
+                problems.Add("Auth:WebAuthnRpId must be a lower-case domain name without scheme, port or path, and not an IP address.");
+            else if (production && !id.Contains('.')) problems.Add("Auth:WebAuthnRpId must be a registrable domain in production (not localhost).");
+        }
+        foreach (var o in origins)
+        {
+            if (!Uri.TryCreate(o, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp) || !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) || (uri.AbsolutePath != "/") || o.EndsWith('/'))
+            { problems.Add($"Auth:WebAuthnOrigins entry '{o}' must be a bare origin such as https://www.example.com (scheme, host and optional port, no path or trailing slash)."); continue; }
+            if (production && uri.Scheme != Uri.UriSchemeHttps) problems.Add($"Auth:WebAuthnOrigins entry '{o}' must be https in production.");
+            if (!string.IsNullOrWhiteSpace(rpId) && uri.Host != rpId.Trim() && !uri.Host.EndsWith("." + rpId.Trim(), StringComparison.Ordinal))
+                problems.Add($"Auth:WebAuthnOrigins entry '{o}' is not on the RP id '{rpId.Trim()}' (its host must be the RP id or below it).");
+        }
+        return problems;
+    }
+
+    /// <summary>Everything start-up checks: the shared validation plus the passkey settings (M1-80). Program.cs calls this.</summary>
+    public static IReadOnlyList<string> AllProblems(IConfiguration config, IHostEnvironment env) => Validate(config, env).Concat(WebAuthnProblems(config, env)).ToList();
 
     /// <summary>Returns every configuration problem; empty means the configuration is acceptable.</summary>
     public static IReadOnlyList<string> Validate(IConfiguration config, IHostEnvironment env)

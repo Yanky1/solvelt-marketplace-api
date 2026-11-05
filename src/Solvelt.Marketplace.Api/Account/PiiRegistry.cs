@@ -16,7 +16,7 @@ public static class PiiRegistry
 
     public static readonly IReadOnlyList<Module> Modules =
     [
-        new("account", "M1", [typeof(BuyerAccount), typeof(BuyerAddress), typeof(BuyerSession), typeof(EmailToken)], null),   // erased by AccountService.RedactAsync itself
+        new("account", "M1", [typeof(BuyerAccount), typeof(BuyerAddress), typeof(BuyerSession), typeof(EmailToken), typeof(BuyerPasskey), typeof(WebAuthnChallenge)], null),   // erased by AccountService.RedactAsync itself
         new("messaging", "M5", [typeof(Notification), typeof(NotificationPreference), typeof(MessageThread), typeof(ThreadMessage), typeof(MessageAttachment), typeof(MessageAttachmentData)], typeof(Messaging.MessagingAccountEraser)),
         new("orders-and-carts", "M3", [typeof(MarketplaceOrder), typeof(Cart)], typeof(Checkout.OrdersAccountEraser)),   // decision M3-35
         new("order-cancellations-and-returns", "M5", [typeof(OrderCancelRequest), typeof(OrderReturn)], typeof(Fulfilment.AfterSalesAccountEraser)),

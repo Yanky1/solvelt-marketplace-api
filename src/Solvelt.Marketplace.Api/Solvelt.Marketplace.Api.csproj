@@ -3,6 +3,7 @@
     <RootNamespace>Solvelt.Marketplace.Api</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Fido2" Version="4.3.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
     <PackageReference Include="SkiaSharp" Version="3.116.1" />
