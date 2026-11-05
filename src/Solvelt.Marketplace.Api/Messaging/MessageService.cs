@@ -64,7 +64,10 @@ public sealed class MessageService(MarketplaceDb db, OutboxWriter outbox, TimePr
         if (i.ThreadId is { } tid)
         {
             var t = await db.MessageThreads.FirstOrDefaultAsync(x => x.Id == tid && x.AccountId == buyer.AccountId, ct);
-            return t is null || t.RedactedAt is not null ? (null, ActionResult.NotFound()) : (t, null);
+            if (t is null || t.RedactedAt is not null) return (null, ActionResult.NotFound());
+            // the booking behind the thread was redacted (the personal data of it is gone): the conversation is closed even before the maintenance job closes the thread itself (review L4)
+            if (t.Kind == ThreadKinds.Booking && await db.Bookings.AsNoTracking().AnyAsync(b => b.Id == t.BookingId && b.RedactedAt != null, ct)) return (null, ActionResult.Conflict("thread_closed", "This conversation has been closed."));
+            return (t, null);
         }
         if (i.OrderNumber is not null)
         {
