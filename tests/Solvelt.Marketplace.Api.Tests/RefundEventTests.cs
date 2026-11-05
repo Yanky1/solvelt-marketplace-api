@@ -1247,6 +1247,18 @@ public sealed class RefundEventTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task An_unknown_event_type_still_carries_the_predecessor_dead_mark()
+    {
+        var body = Body("pe-unknown-dead", "order.some_future_type", _k.F.Clock.GetUtcNow(), new Dictionary<string, object?> { ["x"] = 1 }).Insert(1, "\"predecessorDead\":true,");
+        var (status, _) = await Post(_k.Http, Request(_k.F, body));
+        Assert.Equal(HttpStatusCode.OK, status);
+        var row = await _k.Db(db => db.PortalInboundEvents.AsNoTracking().SingleAsync(e => e.Id == "pe-unknown-dead"));
+        Assert.Equal("stored", row.Status);
+        Assert.StartsWith(Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadMark, row.Note);
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("order.some_future_type") && l.Contains("went dead"));
+    }
+
+    [Fact]
     public void M2_the_note_keeps_the_mark_first_and_never_exceeds_the_column()
     {
         var mark = Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadMark;

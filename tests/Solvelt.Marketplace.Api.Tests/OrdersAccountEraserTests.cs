@@ -122,6 +122,33 @@ public sealed class OrdersAccountEraserTests : OrderFlowBase
         Assert.Equal(0, await _k.Db(db => OrdersAccountEraser.SweepDeletedAccountsAsync(db, default)));   // idempotent
     }
 
+    [Theory]
+    [InlineData(ReturnStatus.Requested)]
+    [InlineData(ReturnStatus.Approved)]
+    public async Task A_delivered_order_with_an_open_return_keeps_its_address_until_the_return_is_decided(string open)
+    {
+        await Login("eraser7-" + open + "@example.com");
+        await AddToCart("challah-classic");
+        var (number, intent, total) = await Checkout(new { address = Address() });
+        await Pay(number, intent, total);
+        await Drain();
+        var order = await Order(number);
+        await CloseOrder(order);                                                                      // delivered ...
+        var group = order.Groups.Single();
+        await _k.Db(async db =>
+        {
+            db.OrderReturns.Add(new OrderReturn { Id = Guid.NewGuid(), ReturnId = "ret-" + open, OrderId = order.Id, GroupId = group.Id, AccountId = order.AccountId!.Value, Reason = "damaged", Status = open, CreatedAt = _k.F.Clock.GetUtcNow(), UpdatedAt = _k.F.Clock.GetUtcNow() });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        await DeleteAccountAndRedact(Infrastructure.AuthKit.Password);
+        Assert.Equal("1 Main St", (await Order(number)).ShipLine1);                                   // ... but a return is open: the seller may still need the address
+        Assert.Equal(0, await _k.Db(db => OrdersAccountEraser.SweepDeletedAccountsAsync(db, default)));
+        await _k.Db(async db => await db.OrderReturns.Where(r => r.OrderId == order.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ReturnStatus.Rejected)));
+        Assert.Equal(1, await _k.Db(db => OrdersAccountEraser.SweepDeletedAccountsAsync(db, default)));
+        Assert.Equal("Redacted", (await Order(number)).ShipLine1);
+    }
+
     [Fact]
     public async Task The_sweep_never_touches_a_closed_order_of_a_live_account()
     {

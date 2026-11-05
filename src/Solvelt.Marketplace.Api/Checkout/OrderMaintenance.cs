@@ -103,7 +103,9 @@ public sealed class OrderWorker(IServiceScopeFactory scopes, ILogger<OrderWorker
                 await m.ExpirePendingAsync(stoppingToken);
                 await m.ReleaseHeldDisputesAsync(stoppingToken);
                 await m.PurgeAbandonedAsync(stoppingToken);
-                await OrdersAccountEraser.SweepDeletedAccountsAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), stoppingToken);   // orders of deleted accounts that have closed since (O-23)
+                // orders of deleted accounts that have closed since (O-23): privacy work of its own, so it cannot be stopped by the steps around it, and does not stop them
+                try { await OrdersAccountEraser.SweepDeletedAccountsAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), stoppingToken); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { log.LogError("Deleted-account sweep failed: {ExceptionType}", ex.GetType().FullName); }
                 await DisputeStateMaintenance.PurgeAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), scope.ServiceProvider.GetRequiredService<TimeProvider>(), stoppingToken);
                 await fulfilment.RunAsync(stoppingToken);
             }
