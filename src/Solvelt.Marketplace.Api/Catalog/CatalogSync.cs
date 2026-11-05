@@ -18,7 +18,7 @@ public static class SnapshotLimits
     public const int MaxVariants = 200, MaxImages = 50, MaxAttributes = 100, MaxFaqs = 50;
     /// <summary>The most a unit may cost and still be bought (M3-22: checkout treats a larger unit price as unavailable). A variant above it is stored as not available.</summary>
     public const long MaxUnitPriceCents = 99_999_999;
-    public const int Title = 300, Summary = 600, Name = 300, Alt = 300, AttributeKey = 100, AttributeValue = 500, Question = 500, DisplayName = 200, Slug = 120;
+    public const int Title = 300, Summary = 600, Description = 50_000, Name = 300, Alt = 300, AttributeKey = 100, AttributeValue = 500, Question = 500, DisplayName = 200, Slug = 120;
     public static string Clip(string? s, int max) => SearchText.Clip(s ?? "", max);   // never cuts inside a surrogate pair (a lone surrogate is invalid UTF-8 and a deterministic error on PostgreSQL)
 }
 
@@ -357,9 +357,18 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
     /// </summary>
     private async Task<bool> ApplyTombstoneAsync(ListingTombstone t, CancellationToken ct)
     {
-        if (t.Version < 1) return false;
+        if (t.Version < 0) return false;
         var l = await db.CatalogListings.FirstOrDefaultAsync(x => x.Id == t.Id, ct);
         if (l is null) return false;
+        if (t.Version == ListingTombstone.UnknownVersion)
+        {
+            // an unreadable version: hide at the version we hold (idempotent); any newer snapshot, a re-listing, shows it again
+            if (l.IsUnlisted) return false;
+            l.UnlistedVersion = Math.Max(l.UnlistedVersion ?? 0, l.Version);
+            l.RecomputeVisibility();
+            l.Row++;
+            return true;
+        }
         if (t.Version < l.Version) return false;                                  // older than what we hold: stale
         l.KnownVersion = Math.Max(l.KnownVersion, t.Version);
         l.UnlistedVersion = Math.Max(l.UnlistedVersion ?? 0, t.Version);
@@ -408,7 +417,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
 
         // oversized text is cut to its column rather than dropping the whole listing
         var title = SnapshotLimits.Clip(s.Title, SnapshotLimits.Title);
-        listing.Type = s.Type; listing.Title = title; listing.TitleSort = Slug.From(title); listing.Summary = SnapshotLimits.Clip(s.Summary, SnapshotLimits.Summary); listing.Description = s.Description ?? "";
+        listing.Type = s.Type; listing.Title = title; listing.TitleSort = Slug.From(title); listing.Summary = SnapshotLimits.Clip(s.Summary, SnapshotLimits.Summary); listing.Description = SnapshotLimits.Clip(s.Description, SnapshotLimits.Description);
         listing.SellerId = s.Seller.Id; listing.BrandId = s.Brand.Id; listing.CategoryId = s.CategoryId;
         listing.Status = s.Status; listing.Currency = s.Currency.Trim().ToUpperInvariant();   // ISO 4217 in upper case, whatever the feed sends (review L5)
         listing.CreatedAt = s.CreatedAt.ToUniversalTime(); listing.UpdatedAt = s.UpdatedAt.ToUniversalTime();
@@ -428,7 +437,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.RecomputeVisibility();
 
         var brandName = (await db.CatalogBrands.FindAsync([s.Brand.Id], ct))?.Name ?? s.Brand.Name;
-        SearchIndexer.Upsert(db, s.Id, s.Brand.Id, title, brandName, s.SearchTerms, s.Description ?? "");
+        SearchIndexer.Upsert(db, s.Id, s.Brand.Id, title, brandName, s.SearchTerms, listing.Description);
         SyncVariants(listing, s);
         SyncImages(listing, s);
         db.CatalogAttributes.RemoveRange(listing.Attributes);
