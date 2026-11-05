@@ -231,7 +231,7 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
     {
         var o = options.Value;
         // Image downloads have a key of their own once configured; until then (and only then) the inbound key signs them too.
-        var key = string.IsNullOrEmpty(o.ImageKey) ? o.InboundSecret : o.ImageKey;
+        var key = string.IsNullOrWhiteSpace(o.ImageKey) ? o.InboundSecret : o.ImageKey;
         if (string.IsNullOrEmpty(key)) throw new PortalNotConfiguredException("Portal:ImageKey or Portal:InboundSecret");
         if (http.BaseAddress is null) throw new PortalNotConfiguredException("Portal:BaseUrl");
         var path = $"{ApiBase}/catalog/images/{imageId:D}";

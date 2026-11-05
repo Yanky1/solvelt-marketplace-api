@@ -65,6 +65,29 @@ public class CatalogImageTests
     }
 
     [Fact]
+    public async Task If_None_Match_star_gets_304_for_an_existing_image_and_the_etag_is_stable_across_requests()
+    {
+        using var f = WithPortalImages();
+        await Sync(f);
+        var id = FirstImage(f);
+        f.Portal.RespondAlways(_ => Image(Png, "image/png"));
+        var c = f.CreateClient();
+        var first = await c.GetAsync($"/api/v1/catalog/images/{id}");
+        var second = await c.GetAsync($"/api/v1/catalog/images/{id}");
+        Assert.Equal(first.Headers.ETag!.Tag, second.Headers.ETag!.Tag);                                      // one hash, kept with the cached bytes
+        var star = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/catalog/images/{id}");
+        star.Headers.TryAddWithoutValidation("If-None-Match", "*");
+        Assert.Equal(HttpStatusCode.NotModified, (await c.SendAsync(star)).StatusCode);
+        var other = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/catalog/images/{id}");
+        other.Headers.TryAddWithoutValidation("If-None-Match", "\"something-else\"");
+        Assert.Equal(HttpStatusCode.OK, (await c.SendAsync(other)).StatusCode);
+        // "*" never reveals an image that is not served: an unknown id is still a 404
+        var unknown = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/catalog/images/{Guid.NewGuid()}");
+        unknown.Headers.TryAddWithoutValidation("If-None-Match", "*");
+        Assert.Equal(HttpStatusCode.NotFound, (await c.SendAsync(unknown)).StatusCode);
+    }
+
+    [Fact]
     public async Task An_unknown_image_is_404_and_the_portal_is_never_asked()
     {
         using var f = WithPortalImages();

@@ -34,14 +34,15 @@ public static class ImageEndpoints
                 return Problems.Json(503, "image_unavailable", "Images are temporarily unavailable.");
         }
         var image = fetched.Image!;
-        var etag = $"\"{Convert.ToHexStringLower(SHA256.HashData(image.Bytes))[..32]}\"";
+        var etag = image.ETag;
         var res = http.Response;
         res.Headers.CacheControl = CacheControl;
         res.Headers.ETag = etag;
         res.Headers["X-Content-Type-Options"] = "nosniff";
         res.Headers.ContentDisposition = "inline";
         res.Headers["Content-Security-Policy"] = "default-src 'none'; sandbox";           // a picture, never a page: whatever it holds cannot run or load anything
-        if (http.Request.Headers.IfNoneMatch.ToString().Split(',').Select(t => t.Trim().Replace("W/", "")).Contains(etag)) return Results.StatusCode(304);
+        var tags = http.Request.Headers.IfNoneMatch.ToString().Split(',').Select(t => t.Trim()).ToArray();
+        if (tags.Contains("*") || tags.Select(t => t.Replace("W/", "")).Contains(etag)) return Results.StatusCode(304);   // "*" matches any current representation (RFC 9110 13.1.2)
         return Results.Bytes(image.Bytes, image.ContentType);
     }
 }

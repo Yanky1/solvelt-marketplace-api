@@ -28,7 +28,11 @@ public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, 
 public sealed record ListingPage(IReadOnlyList<ListingSnapshot> Items, string? NextCursor, bool HasMore, IReadOnlyList<ListingTombstone>? Tombstones = null);
 
 /// <summary>The feed says a listing we may know is no longer public (portal tombstone). <see cref="Reason"/> is informational (an unknown reason is treated as "unlisted").</summary>
-public sealed record ListingTombstone(Guid Id, long Version, string Reason);
+public sealed record ListingTombstone(Guid Id, long Version, string Reason)
+{
+    /// <summary>The feed named the listing but its version could not be read: hide the listing at the version we hold (a newer snapshot still re-lists it).</summary>
+    public const long UnknownVersion = 0;
+}
 
 /// <summary>Where listings come from: the fixture today, the portal's signed catalog feed (C1) later.</summary>
 public interface ICatalogSource
