@@ -130,7 +130,14 @@ public sealed class ReviewsAccountEraser(MarketplaceDb db, TimeProvider time) : 
                 await db.Reviews.Where(x => x.Id == reviewId).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount - 1), ct);
             await tx.CommitAsync(ct);
         }
-        await db.ReviewReports.Where(x => x.AccountId == accountId).ExecuteDeleteAsync(ct);
+        // The reports this account made are NOT deleted: the portal's staff may still decide on them, and the decision is matched on our report id. They are anonymised instead: the note (the buyer's words) goes,
+        // the account id is replaced by a fresh one that belongs to nobody (a fixed empty id would collide on the one-report-per-buyer index when two reporters are erased), and the export finds nothing by the old id.
+        foreach (var report in await db.ReviewReports.Where(x => x.AccountId == accountId).ToListAsync(ct))
+        {
+            report.AccountId = Guid.NewGuid();
+            report.Note = null;
+        }
+        await db.SaveChangesAsync(ct);
     }
 }
 
