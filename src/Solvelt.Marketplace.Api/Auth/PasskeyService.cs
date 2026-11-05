@@ -97,7 +97,7 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         if (!hasPassword && count <= 1) return (PasskeyOutcome.LastSignInMethod, null);
         await db.BuyerPasskeys.Where(p => p.Id == id && p.AccountId == who.AccountId).ExecuteDeleteAsync(ct);
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasskeyRemoved, who.AccountId));
-        var token = await auth.RotateSessionsAsync(who.AccountId, ct);   // every session ends, a fresh one is opened (M1-87)
+        var token = await auth.RotateSessionsAsync(who.AccountId, ct, carryClocksOf: who);   // every session ends, a fresh one is opened (M1-87)
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return (PasskeyOutcome.Ok, token);
@@ -113,7 +113,7 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         if (!await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == who.AccountId && a.PasswordHash != null, ct)) return (PasskeyOutcome.LastSignInMethod, null);
         await db.BuyerPasskeys.Where(p => p.AccountId == who.AccountId).ExecuteDeleteAsync(ct);
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasskeyRemoved, who.AccountId));
-        var token = await auth.RotateSessionsAsync(who.AccountId, ct);   // every session ends, a fresh one is opened (M1-87)
+        var token = await auth.RotateSessionsAsync(who.AccountId, ct, carryClocksOf: who);   // every session ends, a fresh one is opened (M1-87)
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return (PasskeyOutcome.Ok, token);

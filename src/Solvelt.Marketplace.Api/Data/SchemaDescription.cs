@@ -6,7 +6,7 @@ namespace Solvelt.Marketplace.Api.Data;
 /// <summary>
 /// A normalised description of everything in one PostgreSQL schema that the model (and so the migrations) decides, one string per object, sorted: every column with its type, nullability,
 /// identity, generated expression, default and collation; every constraint and index as PostgreSQL itself prints it (<c>pg_get_constraintdef</c>, <c>indexdef</c>: so unique, partial and filtered
-/// indexes, check constraints and foreign key actions all count); and the functions of the schema. Two databases with equal descriptions have the same schema as far as the application can tell.
+/// indexes, check constraints and foreign key actions all count); and the functions, views, triggers, sequences, enum types and table comments of the schema. Grants and data are not described: see <see cref="Choose"/>. Two databases with equal descriptions have the same schema as far as the application can tell.
 /// The baseline of a database made without migrations (decision M1-84) compares such descriptions.
 /// </summary>
 public static class SchemaDescription
@@ -46,6 +46,23 @@ public static class SchemaDescription
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname = @s AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
             """);
+        Add("view", "SELECT viewname || ' ' || md5(definition) FROM pg_views WHERE schemaname = @s");
+        Add("trigger", """
+            SELECT c.relname || ' ' || t.tgname || ' ' || pg_get_triggerdef(t.oid)
+            FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = @s AND NOT t.tgisinternal
+            """);
+        Add("sequence", "SELECT sequencename || ' ' || data_type::text || ' start=' || start_value || ' inc=' || increment_by || ' min=' || min_value || ' max=' || max_value || ' cycle=' || cycle::text FROM pg_sequences WHERE schemaname = @s");
+        Add("enum", """
+            SELECT t.typname || ' ' || string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+            FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = @s GROUP BY t.typname
+            """);
+        Add("comment", """
+            SELECT c.relname || ' ' || obj_description(c.oid, 'pg_class')
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = @s AND c.relkind = 'r' AND c.relname <> '__EFMigrationsHistory' AND obj_description(c.oid, 'pg_class') IS NOT NULL
+            """);
         lines.Sort(StringComparer.Ordinal);
         return lines;
     }
@@ -69,19 +86,21 @@ public static class SchemaDescription
     }
 
     /// <summary>
-    /// The newest migration (the list is oldest first) whose result the actual schema equals, or -1 with the differences against the NEWEST one (the most useful list for the operator). The expected
-    /// description of a migration is produced lazily and only until one matches.
+    /// The OLDEST migration (the list is oldest first) whose result the actual schema equals, or -1 with the differences against the NEWEST one (the most useful list for the operator).
+    /// Oldest, not newest: a later migration may change nothing the description can see (data, a grant, a comment on something not described), and marking it as applied would mean it never runs;
+    /// the ones after the match are applied by the normal Migrate(), and a migration that changes no schema is harmless to apply. The expected description of a migration is produced lazily, oldest first,
+    /// and only until one matches.
     /// </summary>
     public static (int Index, List<string> Problems) Choose(IReadOnlyList<string> migrationIds, Func<string, IReadOnlyCollection<string>> expectedFor, IReadOnlyCollection<string> actual)
     {
-        List<string>? against = null;
-        for (var i = migrationIds.Count - 1; i >= 0; i--)
+        List<string>? last = null;
+        for (var i = 0; i < migrationIds.Count; i++)
         {
             var problems = Compare(actual, expectedFor(migrationIds[i]), ignoreSearchObjects: true);
             if (problems.Count == 0) return (i, []);
-            against ??= problems;
+            last = problems;                                      // after the loop: the differences against the newest
         }
-        return (-1, against ?? ["there are no migrations"]);
+        return (-1, last ?? ["there are no migrations"]);
     }
 
     public static string Quote(string identifier) => "\"" + identifier.Replace("\"", "\"\"") + "\"";

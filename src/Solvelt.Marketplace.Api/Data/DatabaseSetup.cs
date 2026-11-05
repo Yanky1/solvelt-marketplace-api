@@ -22,6 +22,23 @@ public static class DatabaseSetup
 {
     private const long BaselineLockKey = 0x4D50_4241_5345;   // "MPBASE"
 
+    /// <summary>How long a start waits for another instance that is baselining the same database before it gives up (an error, nothing changed) instead of waiting for ever.</summary>
+    internal static TimeSpan LockWait = TimeSpan.FromMinutes(2);
+
+    /// <summary>Test seam: called after each history row is written, before the transaction commits.</summary>
+    internal static Action<string>? HistoryRowWritten;
+
+    private static void AcquireLock(DbConnection conn)
+    {
+        var until = DateTime.UtcNow + LockWait;
+        while (!Convert.ToBoolean(Scalar(conn, null, $"SELECT pg_try_advisory_lock({BaselineLockKey})")))
+        {
+            if (DateTime.UtcNow >= until)
+                throw new TimeoutException($"Another instance has been baselining this database for more than {LockWait.TotalSeconds:0} seconds; this start gave up and changed nothing. Start again when it has finished.");
+            Thread.Sleep(200);
+        }
+    }
+
     public static void Prepare(MarketplaceDb db, bool devLike, bool migrateOnStart, ILogger? log = null)
     {
         if (devLike)
@@ -62,7 +79,7 @@ public static class DatabaseSetup
         var conn = db.Database.GetDbConnection();
         try
         {
-            Scalar(conn, null, $"SELECT pg_advisory_lock({BaselineLockKey})");
+            AcquireLock(conn);
             try
             {
                 if (db.Database.GetAppliedMigrations().Any() || !HasTables(db)) return;   // another instance got there first, or the database is empty after all
@@ -77,12 +94,25 @@ public static class DatabaseSetup
                 }
                 SearchSchema.Ensure(db);                                  // the objects EF cannot model; before the history, so a failure here is retried at the next start
                 var history = db.GetService<IHistoryRepository>();
-                Scalar(conn, null, history.GetCreateIfNotExistsScript());
-                foreach (var id in ids.Take(index + 1))
-                    Scalar(conn, null, history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())).TrimEnd().TrimEnd(';') + " ON CONFLICT DO NOTHING;");
+                // the history table and ALL the rows in ONE transaction (still under the lock): a crash between two rows must not leave a partial history, which would make every later start fail
+                using (var tx = conn.BeginTransaction())
+                {
+                    Scalar(conn, tx, history.GetCreateIfNotExistsScript());
+                    foreach (var id in ids.Take(index + 1))
+                    {
+                        Scalar(conn, tx, history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())).TrimEnd().TrimEnd(';') + " ON CONFLICT DO NOTHING;");
+                        HistoryRowWritten?.Invoke(id);
+                    }
+                    tx.Commit();
+                }
                 log?.LogWarning("The database was made without migrations and equals what the migrations make: baselined at {Migration} ({Count} migration(s) recorded)", ids[index], index + 1);
             }
-            finally { Scalar(conn, null, $"SELECT pg_advisory_unlock({BaselineLockKey})"); }
+            finally
+            {
+                // never let a failing unlock (a broken connection) replace the error that is already on its way out: the lock goes with the session anyway
+                try { Scalar(conn, null, $"SELECT pg_advisory_unlock({BaselineLockKey})"); }
+                catch (Exception ex) { log?.LogWarning("The baseline lock could not be released explicitly ({ExceptionType}); it ends with the connection", ex.GetType().Name); }
+            }
         }
         finally { db.Database.CloseConnection(); }
     }
