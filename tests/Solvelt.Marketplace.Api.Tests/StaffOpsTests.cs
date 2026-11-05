@@ -67,6 +67,28 @@ public class StaffOpsTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await Lookup(w, null)).StatusCode);
     }
 
+    [Fact]
+    public async Task The_disputes_of_an_order_are_found_by_its_seller_order_numbers_only()
+    {
+        // The outbox keys are "dispute:<stripe event>:<seller order number>"; only this order's numbers match, a longer number that merely ends the same way does not (review of slice 3, item 5).
+        using var w = await Setup();
+        var now = w.S.F.Clock.GetUtcNow();
+        await w.S.Db(async db =>
+        {
+            db.OrderGroups.Add(new OrderGroup { Id = Guid.NewGuid(), OrderId = w.OrderId, SellerId = Guid.NewGuid(), BrandId = Guid.NewGuid(), SellerName = "Shop", BrandName = "Shop", ItemsCents = 10_000, TotalCents = 10_000, SellerOrderNumber = "SO-MINE" });
+            foreach (var (evt, dispute, number) in new[] { ("evt_mine", "dp_mine", "SO-MINE"), ("evt_other", "dp_other", "SO-OTHER"), ("evt_lookalike", "dp_lookalike", "XSO-MINE") })
+            {
+                db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), Type = "dispute.opened", DedupeKey = $"dispute:{evt}:{number}", Payload = "{}", Status = OutboxStatus.Pending, Attempts = 0, NextAttemptAt = now, CreatedAt = now });
+                db.StripeEvents.Add(new StripeEvent { Id = evt, Type = "charge.dispute.created", StripeCreated = 1, ReceivedAt = now, Outcome = "applied", ObjectId = dispute });
+            }
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        var finance = await StaffKit.Json(await Lookup(w, w.Finance));
+        var disputes = finance.GetProperty("payment").GetProperty("disputes").EnumerateArray().Select(d => d.GetProperty("disputeId").GetString()).ToList();
+        Assert.Equal(new[] { "dp_mine" }, disputes);
+    }
+
     // ---------- refund retry ----------
 
     [Fact]
@@ -120,6 +142,26 @@ public class StaffOpsTests
         var r = await w.S.Post($"/api/v1/staff/orders/{w.OrderId}/refunds/{w.RefundId}/retry", new { reason = R }, w.Finance);
         Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
         Assert.Equal("reauthentication_required", (await StaffKit.Json(r)).GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Ingest_outbox_and_dead_letter_retries_need_a_recent_passkey_check_too()
+    {
+        // The step-up is the first check of each route, before any lookup: so an id that exists nowhere still answers 403 reauthentication_required, and a route that lost its step-up would answer 404 or 409 (review of slice 3, item 1).
+        using var w = await Setup();
+        w.S.F.Clock.Advance(TimeSpan.FromMinutes(6));
+        foreach (var (url, body) in new (string, object)[]
+        {
+            ($"/api/v1/staff/ingests/{w.OrderId}/retry", new { reason = R }),
+            ($"/api/v1/staff/outbox/{Guid.NewGuid()}/retry", new { reason = R }),
+            ("/api/v1/staff/dead-letters/retry", new { eventId = "evt-anything", reason = R }),
+        })
+        {
+            var r = await w.S.Post(url, body, w.Admin);
+            Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+            Assert.Equal("reauthentication_required", (await StaffKit.Json(r)).GetProperty("code").GetString());
+        }
+        Assert.DoesNotContain(await w.S.Audit(), a => a.Action.Contains("retry"));   // nothing was audited, nothing was done
     }
 
     // ---------- ingests ----------
@@ -207,6 +249,15 @@ public class StaffOpsTests
         Assert.Equal(0, ok.GetProperty("replayed").GetInt32());   // its order is still unknown: it stays parked, and the sweep tries again
         Assert.Equal(HttpStatusCode.Conflict, (await w.S.Post("/api/v1/staff/dead-letters/retry", new { eventId = "no-such-event", reason = R }, w.Admin)).StatusCode);
         Assert.Single(await w.S.Audit(), a => a.Action == "deadletter.retry" && a.TargetId == "evt-parked-1");
+        // the replay covers the whole aggregate, so the audit says which one, and a second row says how many events it applied (review of slice 3, item 3); ids and counts only
+        var audit = await w.S.Audit();
+        var intent = audit.Single(a => a.Action == "deadletter.retry" && a.TargetId == "evt-parked-1");
+        Assert.Contains("\"aggregateType\":\"order\"", intent.Detail);
+        Assert.Contains("\"aggregateKey\":\"MP-NOPE\"", intent.Detail);
+        var result = audit.Single(a => a.Action == "deadletter.retry_result" && a.TargetId == "evt-parked-1");
+        Assert.Contains("\"applied\":0", result.Detail);
+        Assert.Contains("\"aggregateKey\":\"MP-NOPE\"", result.Detail);
+        Assert.DoesNotContain("Sam Secret", result.Detail + intent.Detail);
         Assert.Equal(1, await w.S.Db(db => db.PortalInboundEvents.CountAsync(e => e.Id == "evt-parked-1" && e.Status == InboundStatus.Parked)));
     }
 

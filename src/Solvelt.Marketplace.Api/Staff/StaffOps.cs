@@ -37,9 +37,13 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
         object? payment = null;
         if (payments)
         {
-            var sellerNumbers = o.Groups.Select(g => g.SellerOrderNumber).Where(n => n != null).Select(n => ":" + n).ToList();
-            var disputeMessages = sellerNumbers.Count == 0 ? [] : await db.OutboxMessages.AsNoTracking().Where(m => m.DedupeKey != null && m.DedupeKey.StartsWith("dispute:")).Select(m => new { m.DedupeKey, m.Status }).ToListAsync(ct);
-            var eventIds = disputeMessages.Where(m => sellerNumbers.Any(n => m.DedupeKey!.EndsWith(n))).Select(m => (Id: m.DedupeKey!.Split(':')[1], m.Status)).DistinctBy(x => x.Id).ToList();
+            var sellerNumbers = o.Groups.Select(g => g.SellerOrderNumber).Where(n => n != null).Select(n => ":" + n).Distinct().ToList();
+            // The key is "dispute:<stripe event id>:<seller order number>": the event id is what is being looked for, so the key cannot be built whole. One indexed prefix-and-suffix query per seller
+            // order of THIS order (a handful), in SQL, instead of loading every dispute row of the table and filtering in memory (review of slice 3, item 5).
+            var disputeMessages = new List<(string? DedupeKey, string Status)>();
+            foreach (var n in sellerNumbers)
+                disputeMessages.AddRange((await db.OutboxMessages.AsNoTracking().Where(m => m.DedupeKey != null && m.DedupeKey.StartsWith("dispute:") && m.DedupeKey.EndsWith(n)).Select(m => new { m.DedupeKey, m.Status }).ToListAsync(ct)).Select(m => (m.DedupeKey, m.Status)));
+            var eventIds = disputeMessages.Select(m => (Id: m.DedupeKey!.Split(':')[1], m.Status)).DistinctBy(x => x.Id).ToList();
             var ids = eventIds.Select(e => e.Id).ToList();
             var events = await db.StripeEvents.AsNoTracking().Where(e => ids.Contains(e.Id)).Select(e => new { e.Id, e.Type, e.ObjectId, e.ReceivedAt }).ToListAsync(ct);
             var disputeIds = events.Select(e => e.ObjectId).Where(x => x != null).Distinct().ToList();
@@ -275,10 +279,22 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
         if (e?.AggregateType is null || e.AggregateKey is null) return (OpsOutcome.NotRetryable, 0);
         // The intent is recorded FIRST and saved on its own: the replay commits in transactions of its own (one per parked event), so it cannot share one with the audit row, and a replay that
         // happened without a record must not be possible (security review MED-2). If this save fails, nothing is replayed.
-        StaffAudit.Add(db, time, who, "deadletter.retry", "inbound_event", eventId.Length > 80 ? eventId[..80] : eventId, reason, new { type = e.Type });
+        // The replay covers the WHOLE aggregate, not just this event, so the row says which one (ids only, never a payload; review of slice 3, item 3).
+        var target = eventId.Length > 80 ? eventId[..80] : eventId;
+        StaffAudit.Add(db, time, who, "deadletter.retry", "inbound_event", target, reason, new { type = e.Type, aggregateType = e.AggregateType, aggregateKey = e.AggregateKey });
         await db.SaveChangesAsync(ct);
         // the existing replay applies every parked event of the aggregate in order, each once (its row version is the guard), so a second click or a parallel replay changes nothing
         var applied = await replay.ReplayParkedAsync(e.AggregateType, e.AggregateKey, ct);
+        // The outcome as a second row: how many parked events the replay applied. The intent row above already exists, so a failure here must not hide that the replay happened.
+        try
+        {
+            StaffAudit.Add(db, time, who, "deadletter.retry_result", "inbound_event", target, reason, new { aggregateType = e.AggregateType, aggregateKey = e.AggregateKey, applied });
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
         return (OpsOutcome.Ok, applied);
     }
 
