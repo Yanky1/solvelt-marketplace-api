@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105151304_InitialCreate")]
+    [Migration("20261105152021_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2354,6 +2354,52 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasIndex("Status", "AggregateType", "AggregateKey", "PortalCreatedAt");
 
                     b.ToTable("portal_inbound_events", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.ProductQuestion", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(240)
+                        .HasColumnType("character varying(240)");
+
+                    b.Property<Guid>("ListingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RejectedReason")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<DateTimeOffset?>("SentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(12)
+                        .HasColumnType("character varying(12)");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "CreatedAt");
+
+                    b.HasIndex("AccountId", "ListingId", "CreatedAt");
+
+                    b.ToTable("product_questions", (string)null);
                 });
 
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.ProjectionState", b =>

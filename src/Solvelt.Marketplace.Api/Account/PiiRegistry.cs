@@ -24,6 +24,7 @@ public static class PiiRegistry
         new("portal-inbound-events", "M1", [typeof(PortalInboundEvent)], typeof(Portal.Webhooks.PortalEventsAccountEraser)),   // decision M1-82: the raw bodies of events about the account's orders, bookings, quotes and conversations
         new("wishlists-and-recently-viewed", "M6", [typeof(Wishlist), typeof(RecentlyViewedItem)], typeof(Lists.ListsAccountEraser)),   // decision M6-01; the items are children of a list
         new("reviews", "M6", [typeof(Review), typeof(ReviewVote), typeof(ReviewReport), typeof(ReviewPhoto), typeof(ReviewPhotoData)], typeof(Reviews.ReviewsAccountEraser)),   // decision M6-04
+        new("product-questions", "M6", [typeof(ProductQuestion)], typeof(Reviews.QuestionsAccountEraser)),   // decision M6-06
         new("bookings", "M4", [typeof(Booking), typeof(BuyerQuote)], typeof(Services.BookingsAccountEraser)),
     ];
 

@@ -425,3 +425,10 @@ Reading is public; writing needs a signed-in buyer (`Authorization: Bearer`, `Ca
 | `POST /api/v1/reviews/{id}/photos` (multipart, one `file`) | `201 { id, width, height }`; `422 bad_photo` (not a JPEG/PNG/WebP, over 5 MB), `422 too_many_photos` (5), `422 review_locked` |
 | `DELETE /api/v1/reviews/{id}/photos/{photoId}` | `204`, the author only |
 | `GET /api/v1/reviews/photos/{photoId}` | public: the stored picture (`image/jpeg|png|webp`, `nosniff`, cached a day); `404` unless the review is published |
+
+### Product questions (M6)
+| Route | Answer |
+|---|---|
+| `POST /api/v1/questions` `{ listingId, text }` | signed-in buyer: `202 { id, status: "sending", createdAt }`; `422 validation_failed` (`errors.text`, `errors.listingId`), `404` (not a visible listing), `429 too_many_questions` (3 per listing and 10 per day) |
+| `GET /api/v1/account/questions` | `{ questions: [{ id, text, status: sending\|sent\|rejected, rejectedReason, createdAt, listing: { title, slug } }] }` |
+The seller's published answer is part of the listing's `faqs` in the catalog; it is not returned here.

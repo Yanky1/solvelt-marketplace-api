@@ -32,6 +32,8 @@ public interface ISignedPortalClient
     Task<PortalBytes> GetAttachmentAsync(Guid attachmentId, CancellationToken ct = default);
     /// <summary><c>POST /content/reports</c> (CATALOG.md §6): idempotent on <c>reportId</c>.</summary>
     Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody body, CancellationToken ct = default);
+    /// <summary><c>POST /products/{id}/questions</c> (C1, CATALOG.md §5): a buyer question for the seller's Q&amp;A inbox; idempotent on the question id.</summary>
+    Task<PortalResult<JsonElement>> AskQuestionAsync(Guid listingId, PortalQuestionBody body, CancellationToken ct = default);
     /// <summary><c>POST /reviews</c> (C17): a buyer review for the seller; idempotent on the review id.</summary>
     Task<PortalResult<JsonElement>> UpsertReviewAsync(ReviewUpsertBody body, CancellationToken ct = default);
     /// <summary><c>POST /reviews/{id}/state</c> (C17): visible, hidden or removed; an unknown id is 404.</summary>
@@ -147,6 +149,9 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody b, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/content/reports", b, Retry.Standard, ct);
+
+    public Task<PortalResult<JsonElement>> AskQuestionAsync(Guid listingId, PortalQuestionBody b, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/products/{listingId}/questions", b, Retry.Standard, ct);
 
     public Task<PortalResult<JsonElement>> UpsertReviewAsync(ReviewUpsertBody b, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/reviews", b, Retry.Standard, ct);
