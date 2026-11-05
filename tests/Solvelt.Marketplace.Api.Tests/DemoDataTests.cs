@@ -641,6 +641,9 @@ public sealed class DemoDataTests : IDisposable
             await _k.Db(async db =>
             {
                 await db.BuyerAccounts.Where(x => x.Id == a.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.Phone, "+1 555 0123"));
+                // one marked demo notification and one real one (M1-89): a reset of a demo-verified account removes the marked rows only
+                db.Notifications.Add(new Notification { Id = Guid.NewGuid(), AccountId = a.Id, Kind = "order_placed", DedupeKey = "demo-" + a.Id, CreatedAt = now, IsDemo = true });
+                db.Notifications.Add(new Notification { Id = Guid.NewGuid(), AccountId = a.Id, Kind = "order_placed", DedupeKey = "real-" + a.Id, CreatedAt = now, IsDemo = false });
                 db.BuyerAddresses.Add(new BuyerAddress { Id = Guid.NewGuid(), AccountId = a.Id, FullName = name, Line1 = "1 Squat St", City = "Town", PostalCode = "10001", Country = "US", IsDefault = true, CreatedAt = now, UpdatedAt = now });
                 await db.SaveChangesAsync(); return 0;
             });
@@ -658,6 +661,8 @@ public sealed class DemoDataTests : IDisposable
         var a1 = await _k.Account("squatreset@example.com");
         Assert.Equal("Buyer", a1.DisplayName); Assert.Null(a1.Phone); Assert.Null(a1.DemoVerifiedAt); Assert.NotNull(a1.EmailVerifiedAt);
         Assert.Equal(0, await _k.Db(db => db.BuyerAddresses.CountAsync(x => x.AccountId == a1.Id)));
+        Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync(x => x.AccountId == a1.Id && x.IsDemo)));          // what the squatter made in demo mode is gone ...
+        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(x => x.AccountId == a1.Id && !x.IsDemo)));        // ... a real row stays
         // control: an ordinary, mailbox-verified account keeps its own name, phone and addresses through a reset
         await Seed("ordreset@example.com", "Dana Real");
         var link = AuthKit.TokenIn((await _k.Mail("ordreset@example.com")).Last(m => m.Subject.StartsWith("Confirm")), "/verify-email");
@@ -666,6 +671,7 @@ public sealed class DemoDataTests : IDisposable
         var a2 = await _k.Account("ordreset@example.com");
         Assert.Equal("Dana Real", a2.DisplayName); Assert.Equal("+1 555 0123", a2.Phone);
         Assert.Equal(1, await _k.Db(db => db.BuyerAddresses.CountAsync(x => x.AccountId == a2.Id)));
+        Assert.Equal(2, await _k.Db(db => db.Notifications.CountAsync(x => x.AccountId == a2.Id)));                      // an ordinary account loses nothing, marked rows included
     }
 
     [Fact]
