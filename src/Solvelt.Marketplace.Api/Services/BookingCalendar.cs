@@ -64,7 +64,14 @@ public static class BookingCalendar
         var baseUrl = (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
         ctx.Response.Headers.CacheControl = "private, no-store";
         ctx.Response.Headers["X-Robots-Tag"] = "noindex";
-        ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"booking-{b.Number ?? b.Id.ToString("N")[..8]}.ics\"".Replace("..", ".");
+        ctx.Response.Headers.ContentDisposition = $"attachment; filename=\"booking-{FileStem(b)}.ics\"";
         return Results.Text(Build(b, title, baseUrl, time.GetUtcNow()), "text/calendar; charset=utf-8");
+    }
+
+    /// <summary>The file name stem: only letters, digits and dashes of the number (it comes from the portal and goes into a header), else the start of the id.</summary>
+    internal static string FileStem(Booking b)
+    {
+        var clean = new string((b.Number ?? "").Where(ch => char.IsAsciiLetterOrDigit(ch) || ch == '-').Take(40).ToArray());
+        return clean.Length > 0 ? clean : b.Id.ToString("N")[..8];
     }
 }
