@@ -45,6 +45,8 @@ public sealed class MessageSentHandler : IProjectionHandler
             if (group is null) return HandlerOutcome.Skipped("no such seller order on this order");
             // A guest order has no account to hold a thread (decision M3-32): the seller's message waits, parked, until a verified account claims the order (the parked-event loop replays it).
             if (order.AccountId is not { } orderAccountId) return HandlerOutcome.Parked("order", order.Number, "guest order not claimed yet");
+            // an erased account gets no new thread and no notification (review P1): the message is dropped
+            if (await c.Db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == orderAccountId && a.DeletedAt != null, ct)) return HandlerOutcome.Skipped("account deleted");
             thread = await c.Db.MessageThreads.FirstOrDefaultAsync(t => t.GroupId == group.Id && t.AccountId == orderAccountId, ct);
             if (thread is null)
             {

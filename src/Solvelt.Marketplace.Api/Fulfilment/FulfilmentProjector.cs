@@ -97,7 +97,9 @@ public sealed class FulfilmentProjector(Microsoft.Extensions.Options.IOptions<In
         // The buyer's notification (and its email, queued in the same transaction), once per event and kind.
         // Side facts (returns, labels, tracking, attempts) have their OWN aggregates: an order's terminal state (delivered) must not freeze them, the portal allows Delivered -> ReturnRequested.
         Task<bool> Side(string sub, string fieldGroup) => c.AdvanceAsync("order-side", $"{key}/{sub}", fieldGroup, null, ct);
-        void Tell(string kind, object? parameters) => Notifier.Add(c.Db, new OutboxWriter(c.Db, c.Time), c.Time, order, group, kind, c.Event.Id, parameters);
+        // an erased account gets no in-app entry and no mail for the events of its old orders (review P1)
+        var accountDeleted = order.AccountId is { } oa && await c.Db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == oa && a.DeletedAt != null, ct);
+        void Tell(string kind, object? parameters) { if (!accountDeleted) Notifier.Add(c.Db, new OutboxWriter(c.Db, c.Time), c.Time, order, group, kind, c.Event.Id, parameters); }
 
         switch (c.Event.Type)
         {
