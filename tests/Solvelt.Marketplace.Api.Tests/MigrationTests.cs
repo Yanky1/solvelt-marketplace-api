@@ -361,7 +361,7 @@ public class DatabaseSetupTests
     // --- which migration is recorded: the newest one the database equals (a pure test of the choice, with made-up migrations) ---
 
     [Fact]
-    public void The_baseline_is_recorded_at_the_newest_migration_the_schema_equals()
+    public void The_baseline_is_recorded_at_the_oldest_migration_the_schema_equals()
     {
         string[] ids = ["001_Initial", "002_AddA", "003_AddB"];
         var m1 = new[] { "table t" };
@@ -376,6 +376,17 @@ public class DatabaseSetupTests
         Assert.Equal(-1, none);
         Assert.Contains(problems, p => p.Contains("column t.zzz") && p.Contains("not expected"));   // the differences are against the newest migration
         Assert.Contains(problems, p => p.Contains("column t.b"));
+    }
+
+    [Fact]
+    public void Among_migrations_that_leave_the_same_schema_the_oldest_is_chosen_so_a_data_only_migration_still_runs()
+    {
+        string[] ids = ["001_Initial", "002_SeedData", "003_BackfillData"];                // 002 and 003 change data only: the description cannot tell the three apart
+        var same = new[] { "table t", "column t.a" };
+        Assert.Equal(0, SchemaDescription.Choose(ids, _ => same, same).Index);            // recorded at 001: 002 and 003 are applied by Migrate(), not marked as done unseen
+        // and a schema change in the middle still decides
+        IReadOnlyCollection<string> ExpectedFor(string id) => id == "001_Initial" ? ["table t"] : same;
+        Assert.Equal(1, SchemaDescription.Choose(ids, ExpectedFor, same).Index);
     }
 
     [Fact]
@@ -458,5 +469,69 @@ public class DatabaseSetupTests
             Assert.Empty(await db.Database.GetPendingMigrationsAsync());
         }
         finally { Drop(admin, name); }
+    }
+
+    // ---------- review of the baseline, round 2 (M1-89) ----------
+
+    [Fact]
+    public async Task The_search_script_runs_before_the_history_so_when_it_fails_no_history_row_is_written_and_the_next_start_retries()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await OldDatabase(admin);
+        try
+        {
+            using var _ = db;
+            // a function of the same name and arguments with another return type: the search script (CREATE OR REPLACE) cannot replace it. The comparison ignores search objects, so it passes and the script is what fails.
+            await db.Database.ExecuteSqlRawAsync("CREATE FUNCTION catalog_tokens_tsvector(t text, w \"char\") RETURNS int LANGUAGE sql AS 'SELECT 1'");
+            Assert.ThrowsAny<Exception>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));
+            Assert.Equal(0, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM information_schema.tables WHERE table_name = '__EFMigrationsHistory'"));         // nothing marked as done
+            await db.Database.ExecuteSqlRawAsync("DROP FUNCTION catalog_tokens_tsvector(text, \"char\")");
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);                                                                                           // the next start retries and baselines
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        }
+        finally { Drop(admin, name); }
+    }
+
+    [Fact]
+    public async Task The_history_table_and_its_rows_are_written_in_one_transaction()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await OldDatabase(admin);
+        try
+        {
+            using var _ = db;
+            DatabaseSetup.HistoryRowWritten = _ => throw new InvalidOperationException("crash after the first history row");
+            try { Assert.Throws<InvalidOperationException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true)); }
+            finally { DatabaseSetup.HistoryRowWritten = null; }
+            // the crash left neither the history table nor a row (before this, a partial history made every later start fail)
+            Assert.Equal(0, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM information_schema.tables WHERE table_name = '__EFMigrationsHistory'"));
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        }
+        finally { Drop(admin, name); }
+    }
+
+    [Fact]
+    public async Task A_start_waiting_for_another_baselining_instance_gives_up_after_the_deadline_and_changes_nothing()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await OldDatabase(admin);
+        var holder = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(db.Database.GetConnectionString()!) { Pooling = false }.ConnectionString);
+        var wait = DatabaseSetup.LockWait;
+        try
+        {
+            using var _ = db;
+            await holder.OpenAsync();
+            using (var cmd = new NpgsqlCommand("SELECT pg_advisory_lock(" + 0x4D50_4241_5345L + ")", holder)) await cmd.ExecuteScalarAsync();   // "another instance" holds the baseline lock
+            DatabaseSetup.LockWait = TimeSpan.FromSeconds(1);
+            var ex = Assert.Throws<TimeoutException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));
+            Assert.Contains("changed nothing", ex.Message);
+            Assert.Equal(0, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM information_schema.tables WHERE table_name = '__EFMigrationsHistory'"));
+            await holder.CloseAsync();                                                                                                           // the other instance is done (its session ends, the lock goes)
+            DatabaseSetup.LockWait = TimeSpan.FromSeconds(30);
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        }
+        finally { DatabaseSetup.LockWait = wait; await holder.DisposeAsync(); Drop(admin, name); }
     }
 }

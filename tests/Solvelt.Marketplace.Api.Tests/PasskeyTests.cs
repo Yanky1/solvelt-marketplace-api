@@ -893,4 +893,61 @@ public class PasskeyTests
         Assert.False(string.IsNullOrEmpty(await AccountTests.FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = NewPw, newPassword = Pw, removePasskeys = true }, next))));
         Assert.Equal(0, await k.Db(db => db.BuyerPasskeys.CountAsync()));                           // removed in the same step when asked
     }
+
+    // ---------- review of M1-87 (M1-89) ----------
+
+    private static async Task<BuyerSession> SessionOf(AuthKit k, string token)
+        => await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync(s => s.TokenHash == Tokens.Hash(token)));
+
+    [Fact]
+    public async Task A_passkey_removal_keeps_the_callers_step_up_time_and_absolute_expiry_and_only_a_password_change_restarts_them()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        var (_, first) = await AddPasskey(k, token);
+        var (_, second) = await AddPasskey(k, token);
+        var original = await SessionOf(k, token);
+        k.F.Clock.Advance(TimeSpan.FromMinutes(6));
+        var fresh = await AccountTests.FreshToken(await k.Send(Delete, $"{AccountPasskeys}/{first}", null, token));
+        var carried = await SessionOf(k, fresh);
+        Assert.Equal(original.AuthenticatedAt, carried.AuthenticatedAt);                    // the removal did not restart the 10-minute recency clock ...
+        Assert.Equal(original.AbsoluteExpiresAt, carried.AbsoluteExpiresAt);                // ... nor push the session 30 days further
+        k.F.Clock.Advance(TimeSpan.FromMinutes(6));                                         // 12 minutes after the only sign-in
+        var late = await k.Send(Delete, $"{AccountPasskeys}/{second}", null, fresh);
+        Assert.Equal(HttpStatusCode.Forbidden, late.StatusCode);                            // a second removal needs a fresh sign-in, as it did before the rotation existed
+        Assert.Equal("reauthentication_required", (await Problem(late)).GetProperty("code").GetString());
+        Assert.Equal(1, await k.Db(db => db.BuyerPasskeys.CountAsync()));
+        // a password change IS a new proof: it starts both afresh
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/auth/reauthenticate", new { password = Pw }, fresh)).StatusCode);
+        var afterPassword = await AccountTests.FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = "a brand new passphrase" }, fresh));
+        var restarted = await SessionOf(k, afterPassword);
+        Assert.Equal(k.F.Clock.GetUtcNow(), restarted.AuthenticatedAt);
+        Assert.True(restarted.AbsoluteExpiresAt > original.AbsoluteExpiresAt);
+    }
+
+    [Fact]
+    public async Task A_session_created_while_a_passkey_is_removed_does_not_survive_it()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        var (_, id) = await AddPasskey(k, token);
+        var account = await k.Account(Email);
+        var raced = Tokens.New();
+        var now = k.F.Clock.GetUtcNow();
+        await k.Db(async db =>
+        {
+            db.BuyerSessions.Add(new BuyerSession
+            {
+                Id = Guid.NewGuid(), AccountId = account.Id, TokenHash = Tokens.Hash(raced), CreatedAt = now, LastSeenAt = now, AuthenticatedAt = now, Epoch = account.SessionEpoch,
+                ExpiresAt = now.AddDays(7), AbsoluteExpiresAt = now.AddDays(30),
+            });
+            await db.SaveChangesAsync(); return 0;
+        });
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", raced)).StatusCode);
+        var fresh = await AccountTests.FreshToken(await k.Send(Delete, $"{AccountPasskeys}/{id}", null, token));
+        await k.Db(db => db.BuyerSessions.Where(s => s.TokenHash == Tokens.Hash(raced)).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)null)));   // as if the revoking UPDATE had missed it
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", raced)).StatusCode);                                                                 // the epoch alone ends it
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);
+        Assert.Equal(account.SessionEpoch + 1, (await k.Account(Email)).SessionEpoch);
+    }
 }

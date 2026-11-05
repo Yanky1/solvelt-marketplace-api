@@ -325,7 +325,7 @@ public class AccountTests
         private void Maybe(System.Data.Common.DbCommand c)
         {
             if (Remaining > 0 && c.CommandText.TrimStart().StartsWith(Verb, StringComparison.OrdinalIgnoreCase) && c.CommandText.Contains("buyer_addresses"))
-            { Remaining--; Failed++; throw new Microsoft.Data.Sqlite.SqliteException("injected", Code); }
+            { Remaining--; Failed++; throw new Microsoft.Data.Sqlite.SqliteException("injected", Code, Code == 19 ? 2067 : Code); }
         }
         public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader>> ReaderExecutingAsync(System.Data.Common.DbCommand command, Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData, Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<System.Data.Common.DbDataReader> result, CancellationToken cancellationToken = default)
         { Maybe(command); return base.ReaderExecutingAsync(command, eventData, result, cancellationToken); }
@@ -397,11 +397,16 @@ public class AccountTests
     [Fact]
     public void Only_lock_and_unique_conflicts_are_retried()
     {
-        Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 19)));
+        Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 19, 2067)));      // SQLITE_CONSTRAINT_UNIQUE
+        Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 19, 1555)));      // SQLITE_CONSTRAINT_PRIMARYKEY
+        Assert.False(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 19, 1299)));     // NOT NULL: a bug, not contention
+        Assert.False(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 19, 787)));      // FOREIGN KEY
+        Assert.False(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 19, 275)));      // CHECK
+        Assert.False(AccountService.IsUniqueViolation(new Microsoft.Data.Sqlite.SqliteException("x", 19)));     // the bare constraint code is not enough
         Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 5)));
         Assert.True(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 6)));
         Assert.True(AccountService.IsRetryable(new DbUpdateException("wrapped", new Microsoft.Data.Sqlite.SqliteException("x", 5))));
-        Assert.False(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 1)));       // SQL error: a bug, not contention
+        Assert.False(AccountService.IsRetryable(new Microsoft.Data.Sqlite.SqliteException("x", 1)));            // SQL error: a bug, not contention
         Assert.False(AccountService.IsRetryable(new InvalidOperationException("x")));
     }
 
@@ -471,6 +476,23 @@ public class AccountTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", here)).StatusCode);        // the session that asked ended too (M1-87) ...
         Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);                 // ... and its replacement lives
         Assert.Equal(account.SessionEpoch + 1, (await k.Account(Email)).SessionEpoch);
+    }
+
+    [Fact]
+    public async Task After_a_password_change_the_epoch_alone_and_the_revocation_alone_each_end_the_old_token()
+    {
+        using var k = new AuthKit(new() { ["Auth:SignInIpFailuresPerHour"] = "100000" });
+        var old = await k.VerifiedSession(Email);
+        var account = await k.Account(Email);
+        await FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = "a brand new password" }, old));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", old)).StatusCode);
+        // the row un-revoked, as if the revoking UPDATE had missed it: the epoch alone still ends the token
+        await k.Db(db => db.BuyerSessions.Where(s => s.TokenHash == Tokens.Hash(old)).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)null)));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", old)).StatusCode);
+        // the epoch put back, as if the bump had missed it: the revocation alone ends it
+        await k.Db(db => db.BuyerSessions.Where(s => s.TokenHash == Tokens.Hash(old)).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, k.F.Clock.GetUtcNow())));
+        await k.Db(db => db.BuyerAccounts.Where(a => a.Id == account.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.SessionEpoch, account.SessionEpoch)));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", old)).StatusCode);
     }
 
     [Fact]
