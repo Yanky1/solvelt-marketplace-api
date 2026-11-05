@@ -320,6 +320,19 @@ What a buyer sees, what the API answers, which log line to search for, and what 
 | Paid, but the confirmation page never says "placed" | the order stays `paid` | `GET /api/admin/outbox?status=dead`: type `order.ingest` with `lastError` (for example `portal_401`, `portal_422_...`) | the portal secret, or the order data the portal refused; then `POST /api/admin/outbox/{id}/retry` |
 | Paid, but the order stays `pending_payment` | the webhook never arrived or was refused | `stripe_events` has no row; Stripe's dashboard shows the delivery failing; `bad_signature` answers | `Stripe__WebhookSecret` must be the signing secret of the endpoint `https://<api host>/api/stripe/webhooks` |
 
+## Behind Azure (TLS termination) (M8-13)
+
+Azure ends TLS, so the API always sees plain http and never learns the buyer's scheme or host; it does not try (no `X-Forwarded-*`, no request-derived links, no cookies). Everything public comes from settings. Checklist for each deployment:
+
+| Check | Why |
+|---|---|
+| App Service **HTTPS Only = On** for the API app (and the web app); access to the API restricted to the web tier | the API has no HTTPS redirect or HSTS of its own: without this the signed headers and keys could travel over http (M8-13) |
+| `Marketplace__PublicBaseUrl` = the **web** site's https address | every link in mail starts with it; start-up refuses http and a missing value |
+| `Notifications__PublicApiBaseUrl` = the API's https address | the one-click unsubscribe URL; start-up refuses http |
+| `Auth__WebAuthnRpId` = the web site's registrable domain; `Auth__WebAuthnOrigins__0` = the **web** site's https origin | passkeys are bound to the page the buyer is on, not to the API |
+| `Web__ForwardingKey` equal on the API and the web app | otherwise every request is keyed by the socket peer (Azure's front end) and `/health` counts invalid forwarding headers |
+| `Admin__Host` = the operations host name (not the public one) | `/api/admin` answers 404 on any other Host; the key is still required |
+
 ## Stripe webhook (M3, called by Stripe, not by the web)
 `POST /api/stripe/webhooks`, anonymous, body cap 256 KB. Verified with `Stripe:WebhookSecret` (its own key) over the raw body: header `Stripe-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "t.body")>`, 5 minute window, several `v1` accepted. Wrong, missing or stale signature: `400 bad_signature`; secret unset: `503`. Answer `200 { received, status: applied|ignored|unmatched|duplicate }`. Idempotent on the event id (`stripe_events`); a handler failure is `5xx`, so Stripe retries. Register the endpoint for `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded` and `charge.dispute.created|updated|closed|funds_withdrawn|funds_reinstated`.
 * `payment_intent.succeeded`: the order is found by the intent id **and** its `marketplace_order_id` metadata (both must agree); it becomes `paid` only from `pending_payment`, the cart lines it bought are removed, and `order.ingest` is queued. A payment on a superseded or expired order is refunded in full automatically (order `failed`, `superseded_payment` / `expired_payment`, buyer emailed) and never sent to the seller. The amount and currency must equal the priced order, otherwise the order is `failed` (`amount_mismatch`) and what was taken is refunded.
