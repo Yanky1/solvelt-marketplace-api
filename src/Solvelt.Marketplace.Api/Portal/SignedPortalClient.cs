@@ -171,8 +171,15 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
     public Task<PortalResult<BookingResponse>> CreateBookingHoldAsync(BookingRequestBody r, CancellationToken ct = default)
         => Call<BookingResponse>(HttpMethod.Post, $"{ApiBase}/bookings/holds", r, Retry.Standard, ct);
 
-    public Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string mid, BookingConfirmBody b, CancellationToken ct = default)
-        => Call<PortalBookingSummary>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/confirm", b, Retry.Standard, ct);
+    /// <summary>
+    /// The portal answers a confirm like a hold: <c>{ created, booking: { ... } }</c> (found by the real-portal journey, M8-07: reading it as the bare summary left the marketplace booking id empty,
+    /// so a PAID booking counted as "refused" and was refunded). The caller still gets the summary.
+    /// </summary>
+    public async Task<PortalResult<PortalBookingSummary>> ConfirmBookingAsync(string mid, BookingConfirmBody b, CancellationToken ct = default)
+    {
+        var r = await Call<BookingResponse>(HttpMethod.Post, $"{ApiBase}/bookings/{Id(mid)}/confirm", b, Retry.Standard, ct);
+        return new PortalResult<PortalBookingSummary>(r.Status, r.Value?.Booking, r.Error, r.Attempts) { Retryable = r.Retryable };
+    }
 
     public Task<PortalResult<QuoteCreatedResponse>> CreateQuoteRequestAsync(QuoteRequestBody b, CancellationToken ct = default)
         => Call<QuoteCreatedResponse>(HttpMethod.Post, $"{ApiBase}/quote-requests", b, Retry.Standard, ct);
