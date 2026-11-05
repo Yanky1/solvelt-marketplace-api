@@ -115,18 +115,18 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
         catch (PaymentsUnavailableException) { throw new StripeOrderNotYetKnownException(); }
         catch (PaymentRejectedException) { return StripeOutcome.Ignored; }
         // A reserved refund of OURS that Stripe already executed (our call timed out, its retry is queued) is matched by the refund_key in Stripe's list (M3's approach): it is money that left and is ours, never
-        // a dashboard refund. A reserved refund Stripe does not list may still be on its way, so for a recent one the event waits (Stripe retries); one stuck for over an hour no longer blocks.
+        // a dashboard refund. A recent reserved refund Stripe does not list may still be on its way, so the event waits (Stripe retries); one stuck for over an hour no longer blocks and, being unlisted, is not money
+        // that left. Both counts come from ONE read of the refunds per attempt, so a refund that finishes in between is counted once (review L6).
         var executed = listed.Where(l => l.RefundKey is not null && l.Status is not ("failed" or "canceled")).Select(l => l.RefundKey!).ToHashSet();
         var cutoff = time.GetUtcNow().AddHours(-1);
-        var reserved = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == first.Id && r.Status == RefundStatus.Reserved).Select(r => new { r.Key, r.AmountCents, r.CreatedAt }).ToListAsync(ct);
-        if (reserved.Any(r => !executed.Contains(r.Key) && r.CreatedAt > cutoff)) throw new StripeOrderNotYetKnownException();
-        var inFlightOurs = reserved.Where(r => executed.Contains(r.Key)).Sum(r => r.AmountCents);
         for (var attempt = 0; attempt < 5; attempt++)
         {
             var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(p => p.IntentId == intentId, ct);
             if (pay is null) return StripeOutcome.Unmatched;
-            var ours = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == pay.Id && r.Status == RefundStatus.Succeeded).SumAsync(r => (long?)r.AmountCents, ct) ?? 0;
-            var delta = refunded - ours - inFlightOurs - pay.ExternalRefundedCents;
+            var rows = await db.BookingRefunds.AsNoTracking().Where(r => r.PaymentId == pay.Id && (r.Status == RefundStatus.Succeeded || r.Status == RefundStatus.Reserved)).Select(r => new { r.Key, r.Status, r.AmountCents, r.CreatedAt }).ToListAsync(ct);
+            if (rows.Any(r => r.Status == RefundStatus.Reserved && !executed.Contains(r.Key) && r.CreatedAt > cutoff)) throw new StripeOrderNotYetKnownException();
+            var ours = rows.Sum(r => r.Status == RefundStatus.Succeeded || executed.Contains(r.Key) ? r.AmountCents : 0);
+            var delta = refunded - ours - pay.ExternalRefundedCents;
             if (delta <= 0) return StripeOutcome.Ignored;                                            // ours, or already recorded
             var seen = pay.ExternalRefundedCents;
             var won = await db.BookingPayments.Where(p => p.Id == pay.Id && p.ExternalRefundedCents == seen)
@@ -161,8 +161,8 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
         var baseKey = row.Key.Contains(":retry") ? row.Key[..row.Key.IndexOf(":retry", StringComparison.Ordinal)] : row.Key;
         if (!row.Key.Contains(":retry"))
         {
-            var outcome = await refunds.ReserveAsync(row.PaymentId, row.AmountCents, baseKey + ":retry1", row.Reason, false, ct);
-            log.LogError("ALERT: booking refund {Key} ({Amount} cents) FAILED at Stripe after it was accepted; it was re-issued once ({Outcome}) and the portal may have been told the first one succeeded", row.Key, row.AmountCents, outcome);
+            var held = await refunds.ReserveOrDeferAsync(row.PaymentId, row.AmountCents, baseKey + ":retry1", row.Reason, false, log, ct);
+            log.LogError("ALERT: booking refund {Key} ({Amount} cents) FAILED at Stripe after it was accepted; it was re-issued once ({Held} cents deferred behind a dispute) and the portal may have been told the first one succeeded", row.Key, row.AmountCents, held);
         }
         else log.LogError("ALERT: the re-issued booking refund {Key} ({Amount} cents) FAILED again; the buyer is owed it and a person must look", row.Key, row.AmountCents);
         return StripeOutcome.Applied;
@@ -215,7 +215,7 @@ public sealed class BookingPaymentEvents(MarketplaceDb db, IPaymentProvider paym
 /// invalid, the portal does not know the booking) voids the payment and refunds it in full, never reported to the portal as a sale; the buyer is told. Idempotent: the portal
 /// confirm is idempotent on our booking id and the payment event on its own event id.
 /// </summary>
-public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient portal, BookingService bookings, BookingRefundService refunds, OutboxWriter outbox, PortalEventProcessor events, TimeProvider time, ILogger<BookingConfirmHandler> log) : IOutboxHandler
+public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient portal, BookingService bookings, BookingRefundService refunds, BookingHooks hooks, OutboxWriter outbox, PortalEventProcessor events, TimeProvider time, ILogger<BookingConfirmHandler> log) : IOutboxHandler
 {
     public const string Type = "portal.booking-confirm";
     public sealed record Payload(Guid BookingId, Guid PaymentId);
@@ -262,15 +262,26 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         if (b.PaymentDueAt is not null)
         {
             // Created from a quote: the portal confirmed it when the quote was accepted, so there is nothing to confirm; the payment only needs to be reported (and stops the unpaid-booking timer).
+            if (hooks.BeforeSaleReport is { } beforeReport) { hooks.BeforeSaleReport = null; await beforeReport(); }
             await using var qtx = await db.Database.BeginTransactionAsync(ct);
             var qnow = time.GetUtcNow().ToUniversalTime();
-            var qmarked = await db.BookingPayments.Where(x => x.Id == pay.Id && !x.ReportedToPortal).ExecuteUpdateAsync(x => x.SetProperty(y => y.ReportedToPortal, true).SetProperty(y => y.UpdatedAt, qnow), ct);
-            await db.Bookings.Where(x => x.Id == b.Id).ExecuteUpdateAsync(x => x.SetProperty(y => y.PaymentDueAt, (DateTimeOffset?)null).SetProperty(y => y.UpdatedAt, qnow).SetProperty(y => y.Version, y => y.Version + 1), ct);
-            if (qmarked == 1)
+            // Reported only while the payment is still Captured (a void that won the race has refunded it: no sale may be reported for it), like the confirm path below.
+            var qmarked = await db.BookingPayments.Where(x => x.Id == pay.Id && !x.ReportedToPortal && x.Status == BookingPaymentStatus.Captured).ExecuteUpdateAsync(x => x.SetProperty(y => y.ReportedToPortal, true).SetProperty(y => y.UpdatedAt, qnow), ct);
+            if (qmarked == 0)
             {
-                outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency.ToUpperInvariant(), null, pay.CapturedAt));
-                await db.SaveChangesAsync(ct);
+                await qtx.RollbackAsync(CancellationToken.None);
+                db.ChangeTracker.Clear();
+                var qcurrent = await db.BookingPayments.AsNoTracking().Where(x => x.Id == pay.Id).Select(x => x.Status).FirstAsync(ct);
+                if (qcurrent == BookingPaymentStatus.Void)
+                {
+                    outbox.Enqueue(BookingLateCancelHandler.Type, new BookingLateCancelHandler.Payload(b.MarketplaceBookingId), "late-cancel:" + b.MarketplaceBookingId);
+                    await db.SaveChangesAsync(ct);
+                }
+                return OutboxResult.Delivered();
             }
+            await db.Bookings.Where(x => x.Id == b.Id).ExecuteUpdateAsync(x => x.SetProperty(y => y.PaymentDueAt, (DateTimeOffset?)null).SetProperty(y => y.UpdatedAt, qnow).SetProperty(y => y.Version, y => y.Version + 1), ct);
+            outbox.EnqueuePaymentEvent($"captured:{pay.Key}", PaymentEventTypes.Captured, new PaymentCapturedData(PaymentKinds.Booking, null, b.MarketplaceBookingId, null, pay.IntentId!, pay.Currency.ToUpperInvariant(), null, pay.CapturedAt));
+            await db.SaveChangesAsync(ct);
             await qtx.CommitAsync(ct);
             return OutboxResult.Delivered();
         }
@@ -334,9 +345,13 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
             {
                 await db.Bookings.Where(x => x.Id == b.Id && x.Status == BookingStatus.Hold)
                     .ExecuteUpdateAsync(x => x.SetProperty(y => y.Status, newStatus).SetProperty(y => y.FailureCode, "confirm_" + code).SetProperty(y => y.UpdatedAt, now).SetProperty(y => y.Version, y => y.Version + 1), ct);
-                await refunds.ReserveAsync(pay.Id, pay.CapturedCents, $"void:{pay.Key}", "confirm_" + code, false, ct);
+                // What can go back now goes back; what an open dispute holds is deferred until it is decided (never dropped, never claimed as refunded: M4-22).
+                var left = await db.BookingPayments.AsNoTracking().Where(x => x.Id == pay.Id).Select(x => x.CapturedCents - x.RefundedCents).FirstAsync(ct);
+                var held = await refunds.ReserveOrDeferAsync(pay.Id, left, $"void:{pay.Key}", "confirm_" + code, false, log, ct);
                 outbox.EnqueueEmail(new EmailMessage(account.Email, "We couldn't confirm your booking",
-                    "The time you chose could not be confirmed, so your payment is being refunded in full to your card (it can take a few days to show). Please choose another time.\n"), "mail:void:" + pay.Key);
+                    held == 0
+                        ? "The time you chose could not be confirmed, so your payment is being refunded in full to your card (it can take a few days to show). Please choose another time.\n"
+                        : "The time you chose could not be confirmed, so your payment is being refunded to your card (it can take a few days to show). Part of it is held while your card issuer decides a dispute, and it will follow when that is decided. Please choose another time.\n"), "mail:void:" + pay.Key);
                 await db.SaveChangesAsync(ct);
             }
             await tx.CommitAsync(ct);
