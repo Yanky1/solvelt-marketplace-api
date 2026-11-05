@@ -197,7 +197,7 @@ public sealed class OutboxWorker(IServiceScopeFactory scopes, IOptions<OutboxOpt
         var d = scope.ServiceProvider.GetRequiredService<OutboxDispatcher>();
         while (await d.DispatchDueAsync(ct) >= Math.Max(1, options.Value.BatchSize)) { }   // keep draining while full batches come back
         await scope.ServiceProvider.GetRequiredService<OutboxMaintenance>().PurgeAsync(ct);
-        if (_authPurge.ShouldRun(time.GetUtcNow())) await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Auth.AuthMaintenance>().PurgeAsync(ct);
+        if (_authPurge.ShouldRun(time.GetUtcNow())) { await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Auth.AuthMaintenance>().PurgeAsync(ct); await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Staff.StaffMaintenance>().PurgeAsync(ct); }
     }
 }
 

@@ -11,6 +11,7 @@ using Solvelt.Marketplace.Api.Payments;
 using Solvelt.Marketplace.Api.Outbox;
 using Solvelt.Marketplace.Api.Portal;
 using Solvelt.Marketplace.Api.Portal.Webhooks;
+using Solvelt.Marketplace.Api.Staff;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -65,6 +66,10 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter,
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Account.CartsDataExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Account.PasskeysDataExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Fulfilment.TrackingDataExporter>();
+builder.Services.Configure<Solvelt.Marketplace.Api.Staff.StaffOptions>(builder.Configuration.GetSection("Staff"));   // M7: marketplace staff area
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffService>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffPasskeyService>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffMaintenance>();
 builder.Services.AddSingleton<PasswordService>();
 builder.Services.AddSingleton<GateKeys>();
 builder.Services.AddSingleton<GuestLinks>();
@@ -207,6 +212,8 @@ foreach (var warning in startupWarnings) app.Logger.LogWarning("{Warning}", warn
 app.Use(async (ctx, next) =>
 {
     var p = ctx.Request.Path;
+    if (p.StartsWithSegments("/api/v1/staff"))   // never cached, never indexed (M7)
+        ctx.Response.OnStarting(() => { ctx.Response.Headers.CacheControl = "private, no-store"; ctx.Response.Headers["X-Robots-Tag"] = "noindex, nofollow"; return Task.CompletedTask; });
     if (p.StartsWithSegments("/api/v1/cart") || p.StartsWithSegments("/api/v1/checkout") || p.StartsWithSegments("/api/v1/auth") || p.StartsWithSegments("/api/v1/account"))
         ctx.Response.OnStarting(() => { ctx.Response.Headers.CacheControl = "private, no-store"; return Task.CompletedTask; });
     await next();
@@ -228,6 +235,13 @@ app.Use(async (ctx, next) =>
 {
     using var scope = app.Services.CreateScope();
     DatabaseSetup.Prepare(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), devLike, builder.Configuration.GetValue("Database:MigrateOnStart", true), app.Logger);
+}
+{
+    // M7-04: the first admin, from the one-time bootstrap token in configuration (nothing happens without it)
+    using var scope = app.Services.CreateScope();
+    var state = await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Staff.StaffService>().BootstrapAsync(CancellationToken.None);
+    if (state == "open") app.Logger.LogWarning("Staff bootstrap: the first admin can enrol a passkey with the bootstrap token. Remove Staff__BootstrapToken once they have.");
+    else if (state == "used") app.Logger.LogInformation("Staff bootstrap: Staff:BootstrapToken is still set but a staff member has already enrolled; it does nothing and should be removed.");
 }
 if (!builder.Environment.IsEnvironment("Testing"))
 {
@@ -251,6 +265,7 @@ app.MapPortalWebhooks();
 app.MapCatalog();
 app.MapOutboxAdmin();
 app.MapAuth();
+app.MapStaff();   // M7
 app.MapAccount();
 app.MapCart();
 app.MapDemo();

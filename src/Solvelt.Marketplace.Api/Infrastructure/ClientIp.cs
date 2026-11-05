@@ -26,7 +26,7 @@ public sealed class ClientIpResolver(IOptions<WebOptions> options, TimeProvider 
 {
     public const string IpHeader = "X-Solvelt-Client-Ip", TimestampHeader = "X-Solvelt-Client-Timestamp", SignatureHeader = "X-Solvelt-Client-Signature";
     public const int WindowSeconds = 60;
-    private const string CacheKey = "solvelt.client-bucket";
+    private const string CacheKey = "solvelt.client-bucket", AddressKey = "solvelt.client-address";
     private static readonly TimeSpan WarnEvery = TimeSpan.FromMinutes(1);
     private long _invalid;
     private long _lastWarnTicks;
@@ -39,11 +39,19 @@ public sealed class ClientIpResolver(IOptions<WebOptions> options, TimeProvider 
     {
         if (ctx.Items.TryGetValue(CacheKey, out var cached) && cached is string key) return key;
         var forwarded = TryForwarded(ctx.Request.Headers);
+        ctx.Items[AddressKey] = forwarded ?? ctx.Connection.RemoteIpAddress;
         key = forwarded is not null
             ? "fwd:" + Normalize(forwarded)
             : "peer:" + (ctx.Connection.RemoteIpAddress is { } peer ? Normalize(peer) : "unknown");
         ctx.Items[CacheKey] = key;
         return key;
+    }
+
+    /// <summary>The end user's address itself (the signed forwarded one, else the peer), for the staff IP allow-list. Null when unknown.</summary>
+    public IPAddress? ResolveAddress(HttpContext ctx)
+    {
+        Resolve(ctx);
+        return ctx.Items.TryGetValue(AddressKey, out var a) ? a as IPAddress : null;
     }
 
     private IPAddress? TryForwarded(IHeaderDictionary h)

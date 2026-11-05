@@ -52,6 +52,11 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<BuyerQuote> Quotes => Set<BuyerQuote>();
     public DbSet<BookingPayment> BookingPayments => Set<BookingPayment>();
     public DbSet<BookingRefund> BookingRefunds => Set<BookingRefund>();
+    public DbSet<StaffAccount> StaffAccounts => Set<StaffAccount>();
+    public DbSet<StaffPasskey> StaffPasskeys => Set<StaffPasskey>();
+    public DbSet<StaffSession> StaffSessions => Set<StaffSession>();
+    public DbSet<StaffEnrolment> StaffEnrolments => Set<StaffEnrolment>();
+    public DbSet<StaffAuditEntry> StaffAudit => Set<StaffAuditEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

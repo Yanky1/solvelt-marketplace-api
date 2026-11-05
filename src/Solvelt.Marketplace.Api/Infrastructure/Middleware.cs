@@ -169,7 +169,7 @@ public sealed class AuthBodyLimitMiddleware(RequestDelegate next, Microsoft.Exte
     public Task InvokeAsync(HttpContext ctx)
     {
         // the passkey endpoints of the account take an attestation (a few KB at most), so they carry the same cap as the auth endpoints instead of the server's 30 MB default
-        if (!ctx.Request.Path.StartsWithSegments("/api/v1/auth") && !ctx.Request.Path.StartsWithSegments("/api/v1/account/passkeys")) return next(ctx);
+        if (!ctx.Request.Path.StartsWithSegments("/api/v1/auth") && !ctx.Request.Path.StartsWithSegments("/api/v1/account/passkeys") && !ctx.Request.Path.StartsWithSegments("/api/v1/staff")) return next(ctx);
         var cap = Math.Max(1024, options.Value.MaxBodyBytes);
         if (ctx.Request.ContentLength > cap) return ProblemExceptionMiddleware.Write(ctx, 413, "too_large", "Request body too large.");
         var feature = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();

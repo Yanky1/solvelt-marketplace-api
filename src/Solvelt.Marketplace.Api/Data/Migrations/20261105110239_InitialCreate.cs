@@ -797,6 +797,104 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "staff_accounts",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    Email = table.Column<string>(type: "character varying(254)", maxLength: 254, nullable: false),
+                    DisplayName = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: false),
+                    Role = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    EnrolledAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    DisabledAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    SessionEpoch = table.Column<long>(type: "bigint", nullable: false),
+                    CreatedBy = table.Column<Guid>(type: "uuid", nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    LastSignInAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_staff_accounts", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "staff_audit",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    At = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    ActorId = table.Column<Guid>(type: "uuid", nullable: true),
+                    ActorRole = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    SessionId = table.Column<Guid>(type: "uuid", nullable: true),
+                    Action = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: false),
+                    TargetType = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: true),
+                    TargetId = table.Column<string>(type: "character varying(80)", maxLength: 80, nullable: true),
+                    Reason = table.Column<string>(type: "character varying(300)", maxLength: 300, nullable: false),
+                    Detail = table.Column<string>(type: "character varying(1000)", maxLength: 1000, nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_staff_audit", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "staff_enrolments",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    StaffId = table.Column<Guid>(type: "uuid", nullable: false),
+                    TokenHash = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UsedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    Bootstrap = table.Column<bool>(type: "boolean", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_staff_enrolments", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "staff_passkeys",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    StaffId = table.Column<Guid>(type: "uuid", nullable: false),
+                    CredentialId = table.Column<byte[]>(type: "bytea", maxLength: 1024, nullable: false),
+                    PublicKey = table.Column<byte[]>(type: "bytea", maxLength: 2048, nullable: false),
+                    SignCount = table.Column<long>(type: "bigint", nullable: false),
+                    AaGuid = table.Column<Guid>(type: "uuid", nullable: false),
+                    Name = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: false),
+                    BackedUp = table.Column<bool>(type: "boolean", nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    LastUsedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_staff_passkeys", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "staff_sessions",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    StaffId = table.Column<Guid>(type: "uuid", nullable: false),
+                    TokenHash = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    LastSeenAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    AuthenticatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Epoch = table.Column<long>(type: "bigint", nullable: false),
+                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    AbsoluteExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    RevokedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_staff_sessions", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "stripe_events",
                 columns: table => new
                 {
@@ -1573,6 +1671,60 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 column: "WindowStart");
 
             migrationBuilder.CreateIndex(
+                name: "IX_staff_accounts_Email",
+                table: "staff_accounts",
+                column: "Email",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_audit_ActorId",
+                table: "staff_audit",
+                column: "ActorId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_audit_At",
+                table: "staff_audit",
+                column: "At");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_audit_TargetType_TargetId",
+                table: "staff_audit",
+                columns: new[] { "TargetType", "TargetId" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_enrolments_StaffId",
+                table: "staff_enrolments",
+                column: "StaffId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_enrolments_TokenHash",
+                table: "staff_enrolments",
+                column: "TokenHash",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_passkeys_CredentialId",
+                table: "staff_passkeys",
+                column: "CredentialId",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_passkeys_StaffId",
+                table: "staff_passkeys",
+                column: "StaffId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_sessions_StaffId",
+                table: "staff_sessions",
+                column: "StaffId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_staff_sessions_TokenHash",
+                table: "staff_sessions",
+                column: "TokenHash",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
                 name: "IX_stripe_events_ReceivedAt",
                 table: "stripe_events",
                 column: "ReceivedAt");
@@ -1726,6 +1878,21 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "signin_ip_budgets");
+
+            migrationBuilder.DropTable(
+                name: "staff_accounts");
+
+            migrationBuilder.DropTable(
+                name: "staff_audit");
+
+            migrationBuilder.DropTable(
+                name: "staff_enrolments");
+
+            migrationBuilder.DropTable(
+                name: "staff_passkeys");
+
+            migrationBuilder.DropTable(
+                name: "staff_sessions");
 
             migrationBuilder.DropTable(
                 name: "stripe_events");
