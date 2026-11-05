@@ -75,6 +75,7 @@ public sealed class MessageSentHandler : IProjectionHandler
             if (bk is null) return HandlerOutcome.Skipped("unknown booking");
             if (bk.PortalBookingId is null) return HandlerOutcome.Parked(Services.BookingEventHandler.Aggregate, bk.MarketplaceBookingId, "the portal's booking id is not stored yet");
             if (!EventRefs.Matches(bref, bk.MarketplaceBookingId, bk.PortalBookingId.Value)) return HandlerOutcome.Skipped("booking ids do not match");
+            if (bk.RedactedAt != null) return HandlerOutcome.Skipped("booking redacted");   // its personal data is gone: no thread is opened or continued for it (review L4)
             if (await c.Db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == bk.AccountId && a.DeletedAt != null, ct)) return HandlerOutcome.Skipped("account deleted");
             thread = await c.Db.MessageThreads.FirstOrDefaultAsync(t => t.AccountId == bk.AccountId && t.BookingId == bk.Id, ct);
             if (thread is null)

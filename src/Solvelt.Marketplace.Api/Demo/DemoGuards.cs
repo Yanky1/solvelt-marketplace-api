@@ -61,6 +61,8 @@ public sealed class DemoMessageGuard : IEndpointFilter
         {
             if (send.ThreadId is { } tid && await db.MessageThreads.AsNoTracking().AnyAsync(t => t.Id == tid && t.AccountId == account && t.IsDemo, ct)) return DemoRefusal.Result();
             if (send.ListingId is { } lid && await db.MessageThreads.AsNoTracking().AnyAsync(t => t.ListingId == lid && t.AccountId == account && t.IsDemo, ct)) return DemoRefusal.Result();
+            if (!string.IsNullOrWhiteSpace(send.MarketplaceBookingId) && await db.Bookings.AsNoTracking().AnyAsync(b => b.MarketplaceBookingId == send.MarketplaceBookingId && b.AccountId == account && b.IsDemo, ct)) return DemoRefusal.Result();   // review L6: a demo booking is never written to
+            if (send.ThreadId is { } btid && await (from t in db.MessageThreads.AsNoTracking() join b in db.Bookings.AsNoTracking() on t.BookingId equals b.Id where t.Id == btid && t.AccountId == account && b.IsDemo select t.Id).AnyAsync(ct)) return DemoRefusal.Result();
             if (!string.IsNullOrWhiteSpace(send.OrderNumber) && await db.Orders.AsNoTracking().AnyAsync(o => o.Number == send.OrderNumber && o.AccountId == account && o.IsDemo, ct)) return DemoRefusal.Result();
             if (!string.IsNullOrWhiteSpace(send.SellerOrderNumber)
                 && await (from g in db.OrderGroups.AsNoTracking() join o in db.Orders.AsNoTracking() on g.OrderId equals o.Id where g.SellerOrderNumber == send.SellerOrderNumber && o.AccountId == account && o.IsDemo select g.Id).AnyAsync(ct))
