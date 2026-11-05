@@ -202,9 +202,53 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
             .Select(e => new { e.Id, e.Type, e.AggregateType, e.AggregateKey, e.ReceivedAt, e.LastReplayAt, e.Note, HasPayload = e.PayloadJson != null }).ToListAsync(ct);
         return new
         {
+            bookingConfirms = await DeadBookingConfirmsAsync(ct),
             counts = counts.ToDictionary(k => k.Key, k => k.Value),
             parked = rows.Select(e => new { id = e.Id, type = e.Type, aggregateType = e.AggregateType, aggregateKey = e.AggregateKey, receivedAt = e.ReceivedAt, ageHours = (int)(now - e.ReceivedAt).TotalHours, lastReplayAt = e.LastReplayAt, note = e.Note, retryable = e.HasPayload }),
         };
+    }
+
+    /// <summary>
+    /// What a person does about a dead booking confirm (docs/API.md "A dead booking confirm", decision M8-11). The payment stays Captured and the booking a Hold, and nobody is told, so
+    /// these are listed among the dead letters with the booking, the payment and the amount. The first two steps happen outside this area (the portal is asked with its signed internal API).
+    /// </summary>
+    public static readonly string[] BookingConfirmSteps =
+    [
+        "Ask the portal what it knows about this booking (GET /api/internal/v1/bookings/<booking number>, signed).",
+        "If the portal has it as Confirmed or Requested, or the cause is fixed (a wrong Portal__BaseUrl, a finished deploy): retry the outbox message below (an admin; the confirm is idempotent at the portal and the sale is then reported).",
+        "If the portal has no such booking or will not confirm it: refund the PaymentIntent in the Stripe dashboard (the charge.refunded event is recorded here) and tell the buyer.",
+    ];
+
+    /// <summary>Dead <c>portal.booking-confirm</c> messages with their booking and payment. Never the payload; the ids come from it only to look the rows up, and a purged payload still lists the message.</summary>
+    private async Task<List<object>> DeadBookingConfirmsAsync(CancellationToken ct)
+    {
+        var dead = await db.OutboxMessages.AsNoTracking().Where(m => m.Type == Services.BookingConfirmHandler.Type && m.Status == OutboxStatus.Dead).OrderByDescending(m => m.DeadAt).Take(100)
+            .Select(m => new { m.Id, m.LastError, m.Attempts, m.DeadAt, m.Payload }).ToListAsync(ct);
+        var parsed = dead.Select(m =>
+        {
+            Services.BookingConfirmHandler.Payload? p = null;
+            try { if (m.Payload is not null) p = System.Text.Json.JsonSerializer.Deserialize<Services.BookingConfirmHandler.Payload>(m.Payload, Portal.PortalJson.Options); } catch (System.Text.Json.JsonException) { }
+            return (Message: m, Payload: p);
+        }).ToList();
+        var bookingIds = parsed.Where(x => x.Payload is not null).Select(x => x.Payload!.BookingId).ToList();
+        var paymentIds = parsed.Where(x => x.Payload is not null).Select(x => x.Payload!.PaymentId).ToList();
+        var bookings = (await db.Bookings.AsNoTracking().Where(b => bookingIds.Contains(b.Id)).Select(b => new { b.Id, b.MarketplaceBookingId, b.Status, b.IsDemo }).ToListAsync(ct)).ToDictionary(b => b.Id);
+        var payments = (await db.BookingPayments.AsNoTracking().Where(p => paymentIds.Contains(p.Id)).Select(p => new { p.Id, p.Status, p.Currency, p.AmountCents, p.CapturedCents, p.RefundedCents, p.ReportedToPortal }).ToListAsync(ct)).ToDictionary(p => p.Id);
+        return parsed.Select(x =>
+        {
+            var b = x.Payload is { } p1 && bookings.TryGetValue(p1.BookingId, out var bb) ? bb : null;
+            var pay = x.Payload is { } p2 && payments.TryGetValue(p2.PaymentId, out var pp) ? pp : null;
+            return (object)new
+            {
+                messageId = x.Message.Id, lastError = x.Message.LastError, attempts = x.Message.Attempts, deadAt = x.Message.DeadAt,
+                bookingId = x.Payload?.BookingId, bookingNumber = b?.MarketplaceBookingId, bookingStatus = b?.Status, demo = b?.IsDemo ?? false,
+                paymentId = x.Payload?.PaymentId, paymentStatus = pay?.Status, currency = pay?.Currency, amountCents = pay?.AmountCents, capturedCents = pay?.CapturedCents, refundedCents = pay?.RefundedCents,
+                // the buyer has paid and nothing was reported: a person has to act
+                needsPerson = pay is { Status: BookingPaymentStatus.Captured, ReportedToPortal: false },
+                retryable = x.Message.Payload is not null,
+                steps = BookingConfirmSteps,
+            };
+        }).ToList();
     }
 
     public async Task<(OpsOutcome Outcome, int Replayed)> RetryDeadLetterAsync(StaffPrincipal who, string eventId, string reason, CancellationToken ct)

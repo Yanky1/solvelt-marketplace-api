@@ -273,4 +273,65 @@ public class StaffOpsTests
         Assert.Null(await w.S.Db(db => db.PortalInboundEvents.Where(e => e.Id == "evt-p").Select(e => e.LastReplayAt).SingleAsync()));   // the replay never ran
         Assert.DoesNotContain(await w.S.Audit(), a => a.Action is "refund.retry" or "ingest.retry" or "outbox.retry" or "deadletter.retry");
     }
+
+    // ---------- a dead booking confirm needs a person (M8-11) ----------
+
+    [Fact]
+    public async Task A_dead_booking_confirm_is_listed_among_the_dead_letters_with_its_booking_amount_and_the_steps()
+    {
+        using var w = await Setup();
+        var now = w.S.F.Clock.GetUtcNow();
+        var bookingId = Guid.NewGuid(); var paymentId = Guid.NewGuid(); var deadId = Guid.NewGuid();
+        await w.S.Db(async db =>
+        {
+            db.Bookings.Add(new Booking { Id = bookingId, MarketplaceBookingId = "BK-7001", AccountId = Guid.NewGuid(), ListingId = Guid.NewGuid(), Status = BookingStatus.Hold, Currency = "USD", CreatedAt = now, UpdatedAt = now });
+            db.BookingPayments.Add(new BookingPayment { Id = paymentId, Key = "pay:BK-7001:booking", BookingId = bookingId, Kind = "booking", Currency = "USD", AmountCents = 12_500, CapturedCents = 12_500, IntentId = "pi_fake_booking", Status = BookingPaymentStatus.Captured, ReportedToPortal = false, CreatedAt = now, UpdatedAt = now });
+            db.OutboxMessages.Add(new OutboxMessage { Id = deadId, Type = Solvelt.Marketplace.Api.Services.BookingConfirmHandler.Type, DedupeKey = "confirm:BK-7001", Payload = $"{{\"bookingId\":\"{bookingId}\",\"paymentId\":\"{paymentId}\"}}", Status = OutboxStatus.Dead, Attempts = 8, LastError = "confirm_unexpected_403", NextAttemptAt = now, CreatedAt = now, DeadAt = now });
+            // not listed: still pending, already delivered, and a dead message of another type
+            db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), Type = Solvelt.Marketplace.Api.Services.BookingConfirmHandler.Type, Payload = "{}", Status = OutboxStatus.Pending, NextAttemptAt = now, CreatedAt = now });
+            db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), Type = Solvelt.Marketplace.Api.Services.BookingConfirmHandler.Type, Payload = null, Status = OutboxStatus.Delivered, NextAttemptAt = now, CreatedAt = now, DeliveredAt = now });
+            db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), Type = "email.send", Payload = "{}", Status = OutboxStatus.Dead, LastError = "SmtpException", NextAttemptAt = now, CreatedAt = now, DeadAt = now });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        foreach (var token in new[] { w.Support, w.Finance, w.Admin })   // everyone who may look at dead letters sees it
+        {
+            var r = await w.S.Get("/api/v1/staff/dead-letters", token);
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+            var body = await r.Content.ReadAsStringAsync();
+            Assert.DoesNotContain("\"payload\"", body, StringComparison.OrdinalIgnoreCase);
+            var list = JsonDocument.Parse(body).RootElement.GetProperty("bookingConfirms");
+            var one = Assert.Single(list.EnumerateArray());
+            Assert.Equal((deadId, "BK-7001", "hold", "confirm_unexpected_403", 12_500, 12_500, "captured", true, true),
+                (one.GetProperty("messageId").GetGuid(), one.GetProperty("bookingNumber").GetString(), one.GetProperty("bookingStatus").GetString()!.ToLowerInvariant(), one.GetProperty("lastError").GetString(),
+                 one.GetProperty("amountCents").GetInt64(), one.GetProperty("capturedCents").GetInt64(), one.GetProperty("paymentStatus").GetString(), one.GetProperty("needsPerson").GetBoolean(), one.GetProperty("retryable").GetBoolean()));
+            Assert.Equal(3, one.GetProperty("steps").GetArrayLength());
+            Assert.Contains("Stripe dashboard", one.GetProperty("steps")[2].GetString());
+        }
+        // once the buyer is refunded or the sale reported, it no longer "needs a person"
+        await w.S.Db(async db => { await db.BookingPayments.Where(x => x.Id == paymentId).ExecuteUpdateAsync(x => x.SetProperty(p => p.ReportedToPortal, true)); return 0; });
+        var after = JsonDocument.Parse(await (await w.S.Get("/api/v1/staff/dead-letters", w.Finance)).Content.ReadAsStringAsync()).RootElement.GetProperty("bookingConfirms")[0];
+        Assert.False(after.GetProperty("needsPerson").GetBoolean());
+        // the replay goes through the existing audited outbox retry (an admin), and only an admin may
+        Assert.Equal(HttpStatusCode.Forbidden, (await w.S.Post($"/api/v1/staff/outbox/{deadId}/retry", new { reason = R }, w.Support)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await w.S.Post($"/api/v1/staff/outbox/{deadId}/retry", new { reason = R }, w.Admin)).StatusCode);
+        Assert.Single(await w.S.Audit(), a => a.Action == "outbox.retry" && a.TargetId == deadId.ToString("D"));
+        Assert.Empty(JsonDocument.Parse(await (await w.S.Get("/api/v1/staff/dead-letters", w.Finance)).Content.ReadAsStringAsync()).RootElement.GetProperty("bookingConfirms").EnumerateArray());   // pending again: not dead
+    }
+
+    [Fact]
+    public async Task A_dead_booking_confirm_whose_payload_was_purged_is_still_listed_without_a_booking()
+    {
+        using var w = await Setup();
+        var now = w.S.F.Clock.GetUtcNow();
+        await w.S.Db(async db =>
+        {
+            db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), Type = Solvelt.Marketplace.Api.Services.BookingConfirmHandler.Type, Payload = null, Status = OutboxStatus.Dead, Attempts = 8, LastError = "confirm_unreadable", NextAttemptAt = now, CreatedAt = now, DeadAt = now, PayloadPurgedAt = now });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        var one = JsonDocument.Parse(await (await w.S.Get("/api/v1/staff/dead-letters", w.Support)).Content.ReadAsStringAsync()).RootElement.GetProperty("bookingConfirms")[0];
+        Assert.Equal("confirm_unreadable", one.GetProperty("lastError").GetString());
+        Assert.Equal((JsonValueKind.Null, false, false), (one.GetProperty("bookingNumber").ValueKind, one.GetProperty("retryable").GetBoolean(), one.GetProperty("needsPerson").GetBoolean()));
+    }
 }
