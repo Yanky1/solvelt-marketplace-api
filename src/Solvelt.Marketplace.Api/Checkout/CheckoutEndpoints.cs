@@ -43,7 +43,7 @@ public static class CheckoutEndpoints
     /// <summary>
     /// Creates our order as PendingPayment and the ONE PaymentIntent for it. Safe to repeat and to send twice in parallel: an identical checkout is the same order and the same
     /// intent (unique key in the database + the order number as Stripe's idempotency key). Amounts come from <see cref="QuoteService"/> only; the body has no money field.
-    /// The buyer is signed in (Bearer) or a guest: the cart token (<c>X-Cart-Token</c>) and an <c>email</c> in the body. A guest's order carries that address, gets a relay address of its own, and the answer
+    /// The buyer is signed in (Bearer) or a guest: the cart token (<c>X-Solvelt-Cart-Token</c>, <see cref="Carts.CartEndpoints.GuestHeader"/>) and an <c>email</c> in the body. A guest's order carries that address, gets a relay address of its own, and the answer
     /// includes <c>guestOrderToken</c> (the order-access link's token, also mailed to the address once the payment is confirmed).
     /// </summary>
     private static async Task<IResult> Place(CheckoutRequest? body, HttpContext ctx, AuthService auth, CheckoutService checkout, MarketplaceDb db, GuestLinks links,
