@@ -38,21 +38,22 @@ public class SchemaCheckTests
         public void Dispose() { Db.Dispose(); _drop(); }
     }
 
-    public static IEnumerable<object[]> Providers() { yield return ["sqlite"]; yield return ["postgres"]; }
-    private static bool Skip(string provider) => provider == "postgres" && Admin is null;
-
-    [Theory, MemberData(nameof(Providers))]
+    [Theory]
+    [InlineData("sqlite")]
     public void A_database_made_from_the_current_model_has_no_differences(string provider)
     {
-        if (Skip(provider)) return;
         using var o = new Old(provider);
         Assert.Empty(SchemaCheck.Differences(o.Db));
     }
 
-    [Theory, MemberData(nameof(Providers))]
+    [PostgresTheory]
+    [InlineData("postgres")]
+    public void A_database_made_from_the_current_model_has_no_differences_on_PostgreSQL(string provider) => A_database_made_from_the_current_model_has_no_differences(provider);
+
+    [Theory]
+    [InlineData("sqlite")]
     public void A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it(string provider)
     {
-        if (Skip(provider)) return;
         using var o = new Old(provider);
         var q = provider == "postgres" ? "\"" : "\"";
         o.Run($"ALTER TABLE buyer_accounts DROP COLUMN {q}SessionEpoch{q}");                       // a column added later
@@ -74,6 +75,10 @@ public class SchemaCheckTests
         Assert.Empty(SchemaCheck.Differences(o.Db));
     }
 
+    [PostgresTheory]
+    [InlineData("postgres")]
+    public void A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it_on_PostgreSQL(string provider) => A_database_from_an_earlier_build_is_described_and_the_fix_script_repairs_it(provider);
+
     [Fact]
     public void A_missing_column_on_a_table_with_rows_gets_the_types_default_so_existing_rows_take_it()
     {
@@ -85,10 +90,9 @@ public class SchemaCheckTests
         Assert.Equal(0L, o.Db.BuyerAccounts.AsNoTracking().Single().SessionEpoch);                 // the row survived and has the default
     }
 
-    [Fact]
+    [PostgresFact]
     public void A_column_of_the_wrong_type_or_nullability_is_listed_as_manual_on_postgres()
     {
-        if (Admin is null) return;
         using var o = new Old("postgres");
         o.Run("ALTER TABLE buyer_accounts ALTER COLUMN \"DisplayName\" TYPE character varying(5)");
         var diffs = SchemaCheck.Differences(o.Db);
@@ -127,4 +131,71 @@ public class SchemaCheckTests
         SchemaCheck.LogAtStartup(db, log);
         Assert.Equal(LogLevel.Warning, Assert.Single(log.Lines).Level);
     }
+
+    // ---------- review lows (M1-83) ----------
+
+    [Fact]
+    public void A_mistyped_SQLite_path_is_not_created_when_reading()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "mp_typo_" + Guid.NewGuid().ToString("N") + ".db");
+        using (var db = SchemaCheck.OpenReadOnly("sqlite", $"Data Source={path}"))
+            Assert.ThrowsAny<Exception>(() => SchemaCheck.Differences(db));
+        Assert.False(File.Exists(path));                                                       // a read-write open would have made an empty database here
+    }
+
+    [Fact]
+    public void A_read_only_context_cannot_change_a_SQLite_database()
+    {
+        using var o = new Old("sqlite");
+        var path = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(o.Db.Database.GetConnectionString()).DataSource;
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        using var ro = SchemaCheck.OpenReadOnly("sqlite", $"Data Source={path}");
+        Assert.Empty(SchemaCheck.Differences(ro));
+        Assert.ThrowsAny<Exception>(() => ro.Database.ExecuteSqlRaw("CREATE TABLE should_not_exist (x int)"));
+    }
+
+    [PostgresFact]
+    public void A_read_only_context_cannot_change_a_PostgreSQL_database()
+    {
+        using var o = new Old("postgres");
+        using var ro = SchemaCheck.OpenReadOnly("postgres", o.Db.Database.GetConnectionString()!);
+        Assert.Empty(SchemaCheck.Differences(ro));
+        Assert.ThrowsAny<Exception>(() => ro.Database.ExecuteSqlRaw("CREATE TABLE should_not_exist (x int)"));
+    }
+
+    [Theory]
+    [InlineData("Failed to connect. Host=db.internal;Port=5432;Password=hunter2;Username=app", "hunter2")]
+    [InlineData("login failed for Pwd = s3cret; User ID=sa", "s3cret")]
+    [InlineData("unable to open Data Source=/srv/secret/marketplace.db", "/srv/secret")]
+    public void The_failure_reason_in_the_log_carries_no_connection_string_values(string message, string secret)
+    {
+        var text = SchemaCheck.Sanitise(message);
+        Assert.DoesNotContain(secret, text);
+        Assert.Contains("***", text);
+    }
+
+    [Fact]
+    public void The_failure_reason_is_kept_short_and_on_one_line_and_tells_the_causes_apart()
+    {
+        Assert.Equal("permission denied for table x", SchemaCheck.Sanitise("permission denied\nfor table x"));
+        Assert.Contains("connection refused", SchemaCheck.Sanitise("Failed to connect: connection refused"));
+        Assert.True(SchemaCheck.Sanitise(new string('a', 5000)).Length <= 303);
+        Assert.Equal("no detail", SchemaCheck.Sanitise(null));
+    }
+
+    [Fact]
+    public void The_start_up_warning_says_why_the_database_could_not_be_read_without_the_connection_string()
+    {
+        var db = new MarketplaceDb(new DbContextOptionsBuilder<MarketplaceDb>().UseSqlite("Data Source=/nonexistent-dir/none.db;Password=hunter2").Options);
+        var log = new Capture();
+        SchemaCheck.LogAtStartup(db, log);
+        var line = Assert.Single(log.Lines);
+        Assert.Equal(LogLevel.Warning, line.Level);
+        Assert.Contains("SqliteException", line.Text);
+        Assert.DoesNotContain("hunter2", line.Text);
+        Assert.DoesNotContain("/nonexistent-dir", line.Text);
+    }
+
+    [PostgresFact]
+    public void The_PostgreSQL_checks_run_only_with_a_server_and_say_so_when_skipped() => Assert.True(PostgresFactAttribute.Available);
 }
