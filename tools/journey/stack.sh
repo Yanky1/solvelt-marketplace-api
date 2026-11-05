@@ -45,6 +45,8 @@ cmd_up() {
   [ -d "$PORTAL_DIR/src/Solvelt.Api" ] || die "the seller-portal backend is not checked out at $PORTAL_DIR (set PORTAL_DIR). The journey runs against the REAL portal; there is no mock fallback."
   [ -d "$WEB_DIR/app" ] || die "the web repo is not checked out at $WEB_DIR (set WEB_DIR)."
   command -v dotnet >/dev/null || die "dotnet is not installed (.NET 10 SDK)."
+  command -v psql >/dev/null || die "psql (the PostgreSQL client) is not installed."
+  command -v node >/dev/null || die "node is not installed (Node 22)."
   cmd_down >/dev/null 2>&1 || true
   if [ "${SKIP_BUILD:-0}" = "1" ]; then rm -rf "$RUN_DIR/portal-data"; find "$RUN_DIR" -maxdepth 1 -name "*.log" -delete; mkdir -p "$RUN_DIR/portal-data/uploads"
   else rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR/portal-data/uploads"; fi
