@@ -137,7 +137,7 @@ public class StaffOpsTests
         var list = await StaffKit.Json(await w.S.Get("/api/v1/staff/ingests", w.Support));
         var o = list.GetProperty("orders")[0];
         Assert.Equal(("MP-2001", "dead", "invalid_shipping_speed", true), (o.GetProperty("number").GetString(), o.GetProperty("message").GetProperty("status").GetString(), o.GetProperty("message").GetProperty("lastError").GetString(), o.GetProperty("retryable").GetBoolean()));
-        Assert.Equal(HttpStatusCode.Forbidden, (await w.S.Get("/api/v1/staff/ingests", null)).StatusCode == HttpStatusCode.Unauthorized ? HttpStatusCode.Forbidden : HttpStatusCode.OK);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await w.S.Get("/api/v1/staff/ingests", null)).StatusCode);
         var url = $"/api/v1/staff/ingests/{w.OrderId}/retry";
         Assert.Equal(HttpStatusCode.Forbidden, (await w.S.Post(url, new { reason = R }, w.Finance)).StatusCode);
         var rs = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => w.S.Post(url, new { reason = R }, w.Support)));
