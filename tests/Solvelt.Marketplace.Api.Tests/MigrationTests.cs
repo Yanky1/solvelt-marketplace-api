@@ -385,4 +385,78 @@ public class DatabaseSetupTests
         Assert.Empty(SchemaDescription.Compare(["table t"], expected, ignoreSearchObjects: true));
         Assert.Equal(3, SchemaDescription.Compare(["table t"], expected, ignoreSearchObjects: false).Count);
     }
+
+    // ---------- a history row from another build (InitialCreate regenerated, or a rolled-back deploy): refuse clearly, one-line fix ----------
+
+    private static async Task<(MarketplaceDb Db, string Name)> MigratedDatabase(string admin)
+    {
+        var name = "mp_hist_" + Guid.NewGuid().ToString("N");
+        using (var c = new NpgsqlConnection(admin)) { c.Open(); using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", c); cmd.ExecuteNonQuery(); }
+        var db = new MarketplaceDb(new DbContextOptionsBuilder<MarketplaceDb>().UseNpgsql(new NpgsqlConnectionStringBuilder(admin) { Database = name }.ConnectionString).Options);
+        DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);
+        return (db, name);
+    }
+
+    [Fact]
+    public async Task A_history_row_this_build_does_not_have_stops_the_start_with_the_ids_and_the_fix_and_changes_nothing()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await MigratedDatabase(admin);
+        try
+        {
+            using var _ = db;
+            await db.Database.ExecuteSqlRawAsync("UPDATE \"__EFMigrationsHistory\" SET \"MigrationId\" = '20260101000000_InitialCreate'");   // the id an earlier build recorded
+            var ex = Assert.Throws<InvalidOperationException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));
+            Assert.Contains("20260101000000_InitialCreate", ex.Message);
+            Assert.Contains("Nothing was changed", ex.Message);
+            Assert.Contains("DELETE FROM \"__EFMigrationsHistory\"", ex.Message);
+            Assert.DoesNotContain("already exists", ex.Message);                                                                   // not a database error about creating tables again
+            Assert.Equal(1, await Scalar(db, "SELECT count(*)::int AS \"Value\" FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = '20260101000000_InitialCreate'"));
+            Assert.Equal(0, await db.BuyerAccounts.CountAsync());                                                                  // the tables are untouched
+        }
+        finally { Drop(admin, name); }
+    }
+
+    [Fact]
+    public async Task The_documented_fix_works_the_history_is_cleared_and_the_database_is_baselined_again()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await MigratedDatabase(admin);
+        try
+        {
+            using var _ = db;
+            await db.Database.ExecuteSqlRawAsync("UPDATE \"__EFMigrationsHistory\" SET \"MigrationId\" = '20260101000000_InitialCreate'");
+            Assert.Throws<InvalidOperationException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM \"__EFMigrationsHistory\";");                                         // the one-line fix
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);                                                       // equal to what the migrations make: baselined
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+            Assert.Equal(db.Database.GetMigrations().First(), await db.Database.SqlQueryRaw<string>("SELECT \"MigrationId\" AS \"Value\" FROM \"__EFMigrationsHistory\"").SingleAsync());
+        }
+        finally { Drop(admin, name); }
+    }
+
+    [Fact]
+    public async Task After_the_fix_a_database_made_by_the_older_InitialCreate_lists_what_differs_and_the_tool_script_repairs_it()
+    {
+        if (Admin is not { } admin) return;
+        var (db, name) = await MigratedDatabase(admin);
+        try
+        {
+            using var _ = db;
+            // the earlier InitialCreate had no buyer_accounts.DemoVerifiedAt
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE buyer_accounts DROP COLUMN \"DemoVerifiedAt\"");
+            await db.Database.ExecuteSqlRawAsync("UPDATE \"__EFMigrationsHistory\" SET \"MigrationId\" = '20260101000000_InitialCreate'");
+            Assert.Throws<InvalidOperationException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));        // 1: the stranger in the history
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM \"__EFMigrationsHistory\";");
+            var ex = Assert.Throws<InvalidOperationException>(() => DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true));  // 2: the schema differs: listed, nothing changed
+            Assert.Contains("DemoVerifiedAt", ex.Message);
+            var fix = SchemaCheck.FixScript(db);                                                                                   // 3: the tool's SQL adds the column
+            Assert.Contains("DemoVerifiedAt", fix);
+            await db.Database.OpenConnectionAsync();
+            using (var cmd = db.Database.GetDbConnection().CreateCommand()) { cmd.CommandText = fix; await cmd.ExecuteNonQueryAsync(); }
+            DatabaseSetup.Prepare(db, devLike: false, migrateOnStart: true);                                                       // 4: baselined
+            Assert.Empty(await db.Database.GetPendingMigrationsAsync());
+        }
+        finally { Drop(admin, name); }
+    }
 }
