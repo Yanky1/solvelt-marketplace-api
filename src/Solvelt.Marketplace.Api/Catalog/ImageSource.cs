@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
-using System.Text;
 using Microsoft.Extensions.Caching.Memory;
+using SkiaSharp;
 using Solvelt.Marketplace.Api.Portal;
 
 namespace Solvelt.Marketplace.Api.Catalog;
@@ -46,15 +46,25 @@ public sealed class PortalImageSource(IServiceScopeFactory scopes, ILogger<Porta
     }
 }
 
-/// <summary>For the seed fixture (no portal): a plain coloured picture of the right shape, made from the image id alone (no text from the catalog goes into it).</summary>
+/// <summary>
+/// For the seed fixture (no portal): a plain coloured picture of the right shape, made from the image id alone (no text from the catalog goes into it).
+/// It is a PNG, not an SVG: the web resizer only accepts raster pictures (a seller's SVG is refused on purpose), so an SVG placeholder made every fixture
+/// image a 502 on the site. Drawn with SkiaSharp, which the API already needs for message attachments.
+/// </summary>
 public sealed class PlaceholderImageSource : ICatalogImageSource
 {
+    private const int MaxSide = 1200;                                              // the web shows these at most ~1200 px wide; a bigger fixture size is drawn smaller
+
     public Task<ImageFetch> GetAsync(Guid imageId, int width, int height, CancellationToken ct)
     {
         var h = SHA256.HashData(imageId.ToByteArray());
-        string Colour(int i, int light) => $"hsl({h[i] * 360 / 256} 35% {light}%)";
-        var w = Math.Clamp(width, 1, 4000); var ht = Math.Clamp(height, 1, 4000);
-        var svg = $"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{ht}\" viewBox=\"0 0 {w} {ht}\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"{Colour(0, 82)}\"/><stop offset=\"1\" stop-color=\"{Colour(1, 68)}\"/></linearGradient></defs><rect width=\"100%\" height=\"100%\" fill=\"url(#g)\"/></svg>";
-        return Task.FromResult(new ImageFetch(ImageFetchStatus.Ok, new ImageBytes(Encoding.UTF8.GetBytes(svg), "image/svg+xml")));
+        var w = Math.Clamp(width, 1, MaxSide); var ht = Math.Clamp(height, 1, MaxSide);
+        SKColor Colour(int i, float light) => SKColor.FromHsl(h[i] * 360f / 256f, 35f, light);
+        using var surface = SKSurface.Create(new SKImageInfo(w, ht, SKColorType.Rgba8888, SKAlphaType.Opaque));
+        using var paint = new SKPaint { IsAntialias = false, Shader = SKShader.CreateLinearGradient(new SKPoint(0, 0), new SKPoint(w, ht), [Colour(0, 82), Colour(1, 68)], SKShaderTileMode.Clamp) };
+        surface.Canvas.DrawRect(0, 0, w, ht, paint);
+        using var image = surface.Snapshot();
+        using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+        return Task.FromResult(new ImageFetch(ImageFetchStatus.Ok, new ImageBytes(data.ToArray(), "image/png")));
     }
 }
