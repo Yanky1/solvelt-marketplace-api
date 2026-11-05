@@ -166,7 +166,7 @@ public sealed class DataExportReviewTests : OrderFlowBase
         var res = await Export();
         var text = await res.Content.ReadAsStringAsync();
         var d = JsonDocument.Parse(text).RootElement.GetProperty("sections");
-        Assert.Equal(new[] { "account", "bookings", "carts", "cancellations-and-returns", "messages", "notifications", "orders", "passkeys", "tracking" }.Order().ToArray(), d.EnumerateObject().Select(p => p.Name).Order().ToArray());
+        Assert.Equal(new[] { "account", "bookings", "carts", "cancellations-and-returns", "messages", "notifications", "orders", "passkeys", "recently-viewed", "tracking", "wishlists" }.Order().ToArray(), d.EnumerateObject().Select(p => p.Name).Order().ToArray());
 
         var cart = Assert.Single(d.GetProperty("carts").GetProperty("carts").EnumerateArray());
         Assert.Equal(3, Assert.Single(cart.GetProperty("lines").EnumerateArray()).GetProperty("quantity").GetInt32());
@@ -236,6 +236,7 @@ public sealed class DataExportReviewTests : OrderFlowBase
         ["orders-and-carts"] = ["orders", "carts", "tracking"],
         ["order-cancellations-and-returns"] = ["cancellations-and-returns"],
         ["bookings"] = ["bookings"],
+        ["wishlists-and-recently-viewed"] = ["wishlists", "recently-viewed"],
     };
 
     /// <summary>Modules that hold buyer data and are NOT in the file, each with the reason (M5-32). Sessions and tokens are in the account module and are not data about the person.</summary>

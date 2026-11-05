@@ -7,11 +7,11 @@ namespace Solvelt.Marketplace.Api.Data;
 public static class NotificationCategories
 {
     public const string OrderUpdates = "order_updates", Shipped = "shipped", OutForDelivery = "out_for_delivery", Delivered = "delivered",
-        Messages = "messages", Bookings = "bookings", All = "all";
+        Messages = "messages", Bookings = "bookings", Wishlist = "wishlist", All = "all";
     /// <summary>Mail about money and about a delivery that did not happen (refund issued, order cancelled, failed delivery attempt): TRANSACTIONAL (decision O-21 / M5-20). It cannot be switched
     /// off, "all" does not touch it, and it is not in <see cref="Switchable"/>; the in-app entry exists as always.</summary>
     public const string Transactional = "transactional";
-    public static readonly string[] Switchable = [OrderUpdates, Shipped, OutForDelivery, Delivered, Messages, Bookings];
+    public static readonly string[] Switchable = [OrderUpdates, Shipped, OutForDelivery, Delivered, Messages, Bookings, Wishlist];
     public static readonly string[] AlwaysOn = ["refunds", "cancellations", "delivery_problems", "returns", "booking_changes"];
 }
 
@@ -22,7 +22,8 @@ public static class NotificationKinds
         ReturnReceived = "return_received", ReturnLabelReady = "return_label_ready", DeliveryAttemptFailed = "delivery_attempt_failed", RefundIssued = "refund_issued",
         MessageReceived = "message_received", DataExported = "data_exported",
         BookingConfirmed = "booking_confirmed", BookingDeclined = "booking_declined", BookingTimeProposed = "booking_time_proposed", BookingRescheduled = "booking_rescheduled",
-        BookingCancelled = "booking_cancelled", BookingCompleted = "booking_completed", BookingReminder = "booking_reminder", BookingExtraChargeRequested = "booking_extra_charge_requested", BookingNoShow = "booking_no_show";
+        BookingCancelled = "booking_cancelled", BookingCompleted = "booking_completed", BookingReminder = "booking_reminder", BookingExtraChargeRequested = "booking_extra_charge_requested", BookingNoShow = "booking_no_show",
+        WishlistPriceDrop = "wishlist_price_drop", WishlistBackInStock = "wishlist_back_in_stock";
 
     public static string CategoryOf(string kind) => kind switch
     {
@@ -33,6 +34,7 @@ public static class NotificationKinds
         RefundIssued or DataExported or OrderCancelled or CancellationRejected or DeliveryAttemptFailed or ReturnApproved or ReturnRejected or ReturnReceived or ReturnLabelReady
             or BookingConfirmed or BookingDeclined or BookingTimeProposed or BookingRescheduled or BookingCancelled or BookingExtraChargeRequested or BookingNoShow => NotificationCategories.Transactional,
         MessageReceived => NotificationCategories.Messages,
+        WishlistPriceDrop or WishlistBackInStock => NotificationCategories.Wishlist,
         var k when k.StartsWith("booking_") => NotificationCategories.Bookings,
         _ => NotificationCategories.OrderUpdates,
     };
@@ -69,13 +71,15 @@ public sealed class NotificationPreference
     public bool EmailDelivered { get; set; } = true;
     public bool EmailMessages { get; set; } = true;
     public bool EmailBookings { get; set; } = true;
+    /// <summary>Price drops and back-in-stock mails for wishlist items (M6).</summary>
+    public bool EmailWishlist { get; set; } = true;
     public DateTimeOffset UpdatedAt { get; set; }
 
     public bool Wants(string category) => category switch
     {
         NotificationCategories.OrderUpdates => EmailOrderUpdates, NotificationCategories.Shipped => EmailShipped, NotificationCategories.OutForDelivery => EmailOutForDelivery,
         NotificationCategories.Delivered => EmailDelivered, NotificationCategories.Messages => EmailMessages,
-        NotificationCategories.Bookings => EmailBookings, _ => false,
+        NotificationCategories.Bookings => EmailBookings, NotificationCategories.Wishlist => EmailWishlist, _ => false,
     };
 
     public void Set(string category, bool on)
@@ -88,6 +92,7 @@ public sealed class NotificationPreference
             case NotificationCategories.Delivered: EmailDelivered = on; break;
             case NotificationCategories.Messages: EmailMessages = on; break;
             case NotificationCategories.Bookings: EmailBookings = on; break;
+            case NotificationCategories.Wishlist: EmailWishlist = on; break;
         }
     }
 }

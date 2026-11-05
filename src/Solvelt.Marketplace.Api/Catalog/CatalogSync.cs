@@ -435,6 +435,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.CompareAtFromCents = basis.Where(v => v.CompareAtCents > v.PriceCents).Select(v => v.CompareAtCents).Min();
         listing.Available = s.Variants.Any(v => v.Available);
         listing.RecomputeVisibility();
+        await Lists.WishlistWatcher.OnListingAppliedAsync(db, time, new Lists.CatalogListingView(listing.Id, listing.Slug, listing.Title, listing.Currency, listing.PriceFromCents, listing.Available, listing.Visible, listing.Version), ct);
 
         var brandName = (await db.CatalogBrands.FindAsync([s.Brand.Id], ct))?.Name ?? s.Brand.Name;
         SearchIndexer.Upsert(db, s.Id, s.Brand.Id, title, brandName, s.SearchTerms, listing.Description);

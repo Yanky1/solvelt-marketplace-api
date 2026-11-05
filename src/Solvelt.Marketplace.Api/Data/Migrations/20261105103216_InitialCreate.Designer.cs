@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105081436_InitialCreate")]
+    [Migration("20261105103216_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -1683,6 +1683,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<bool>("EmailShipped")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("EmailWishlist")
+                        .HasColumnType("boolean");
+
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -2387,6 +2390,30 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.ToTable("projection_states", (string)null);
                 });
 
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.RecentlyViewedItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ListingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("ViewedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "ListingId")
+                        .IsUnique();
+
+                    b.HasIndex("AccountId", "ViewedAt");
+
+                    b.ToTable("recently_viewed", (string)null);
+                });
+
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.SellerOrderState", b =>
                 {
                     b.Property<Guid>("GroupId")
@@ -2627,6 +2654,83 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.ToTable("webauthn_challenges", (string)null);
                 });
 
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.Wishlist", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(240)
+                        .HasColumnType("character varying(240)");
+
+                    b.Property<string>("NameKey")
+                        .IsRequired()
+                        .HasMaxLength(240)
+                        .HasColumnType("character varying(240)");
+
+                    b.Property<string>("ShareKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset?>("SharedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ShareKeyHash")
+                        .IsUnique();
+
+                    b.HasIndex("AccountId", "NameKey")
+                        .IsUnique();
+
+                    b.ToTable("wishlists", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.WishlistItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("AddedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("BaselineAvailable")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("BaselineCurrency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<long>("BaselinePriceCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("ListingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("WishlistId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ListingId");
+
+                    b.HasIndex("WishlistId", "ListingId")
+                        .IsUnique();
+
+                    b.ToTable("wishlist_items", (string)null);
+                });
+
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.CartLine", b =>
                 {
                     b.HasOne("Solvelt.Marketplace.Api.Data.Cart", null)
@@ -2713,6 +2817,15 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasOne("Solvelt.Marketplace.Api.Data.OrderReturn", null)
                         .WithMany("Lines")
                         .HasForeignKey("ReturnId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.WishlistItem", b =>
+                {
+                    b.HasOne("Solvelt.Marketplace.Api.Data.Wishlist", null)
+                        .WithMany()
+                        .HasForeignKey("WishlistId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

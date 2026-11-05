@@ -22,6 +22,7 @@ public static class PiiRegistry
         new("orders-and-carts", "M3", [typeof(MarketplaceOrder), typeof(Cart)], typeof(Checkout.OrdersAccountEraser)),   // decision M3-35
         new("order-cancellations-and-returns", "M5", [typeof(OrderCancelRequest), typeof(OrderReturn)], typeof(Fulfilment.AfterSalesAccountEraser)),
         new("portal-inbound-events", "M1", [typeof(PortalInboundEvent)], typeof(Portal.Webhooks.PortalEventsAccountEraser)),   // decision M1-82: the raw bodies of events about the account's orders, bookings, quotes and conversations
+        new("wishlists-and-recently-viewed", "M6", [typeof(Wishlist), typeof(RecentlyViewedItem)], typeof(Lists.ListsAccountEraser)),   // decision M6-01; the items are children of a list
         new("bookings", "M4", [typeof(Booking), typeof(BuyerQuote)], typeof(Services.BookingsAccountEraser)),
     ];
 
@@ -32,6 +33,7 @@ public static class PiiRegistry
         (typeof(OrderGroup), "per-seller totals, shipping money and seller names of an order; the order (claimed) holds the buyer and the address"),
         (typeof(OrderLine), "items, quantities and prices of an order; the order (claimed) holds the buyer and the address"),
         (typeof(OrderReturnLine), "which order lines come back and how many; the return (claimed) holds the buyer"),
+        (typeof(WishlistItem), "a listing id and the price it had when last checked; the wishlist (claimed) holds the owner"),
         (typeof(OrderShipment), "carrier, tracking and the delivery driver's own position: data about the driver, not the buyer"),
     ];
 

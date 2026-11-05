@@ -47,6 +47,9 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Infrastructure.MessageRate
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner, Solvelt.Marketplace.Api.Messaging.AllowAllAttachmentScanner>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Demo.DemoAccountEraser>();   // first: demo rows are removed outright (M9)
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Messaging.MessagingAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Lists.ListsAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Lists.WishlistsDataExporter>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Lists.RecentlyViewedDataExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.IOrderReconcileObserver, Solvelt.Marketplace.Api.Checkout.OrderMoneyReconcileObserver>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>());
@@ -253,6 +256,8 @@ app.MapOutboxAdmin();
 app.MapAuth();
 app.MapAccount();
 app.MapCart();
+Solvelt.Marketplace.Api.Lists.WishlistEndpoints.MapWishlists(app);
+Solvelt.Marketplace.Api.Lists.RecentlyViewedEndpoints.MapRecentlyViewed(app);
 app.MapDemo();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);

@@ -377,3 +377,24 @@ Only while `Demo:Enabled` is on (only when `ASPNETCORE_ENVIRONMENT` is exactly D
 | `POST /api/v1/demo/verify` | none | `{ email, password }` -> `204`, the account is now verified. `401 invalid_credentials` for a wrong password and for an unknown address alike, `429` after too many tries (same budget as sign-in). It changes only the verification time and records `DemoVerifiedAt`: it never claims guest orders, an address that still has an unclaimed guest order is refused with the same `401`, and while `DemoVerifiedAt` is set the account never receives a guest order at all (a real mailbox proof, the verification link or a reset, clears it). A cart with any demo line answers `409 demo_data` at `POST /api/v1/checkout/quote` and `POST /api/v1/checkout`. Needed because an unverified account cannot sign in, so there is no session to take the account from. |
 
 The account is always the signed-in buyer's, never a value from the request. What a fill creates (all marked `IsDemo` with the batch id): one address (example street, `555` phone), a cart of 2 to 3 live items (only when the buyer has no cart), three paid orders (delivered, shipped, refunded; tracking; fake `pi_demo_*` and `re_demo_*` ids), two bookings (one upcoming, one completed), one seller thread with two messages, and matching notifications. Listings whose feed document says `demo: true` are used first. Nothing is sent to the portal, a payment provider or a mailbox, and no outbox row is written. Buyer actions on a demo order, booking or thread (cancel, return, confirm delivery, message, report, reschedule) answer `409 demo_data`. Listing cards and details carry `demo: bool`.
+
+## Wishlists and recently viewed (M6)
+All routes are the signed-in buyer's own (`Authorization: Bearer`), `Cache-Control: private, no-store`; another buyer's list is 404. Money is `long` cents.
+| Route | Answer |
+|---|---|
+| `GET /api/v1/wishlists` | `{ limit, itemLimit, wishlists: [{ id, name, itemCount, shared, sharedAt, createdAt, updatedAt }] }` |
+| `POST /api/v1/wishlists` `{ name }` | `201` the list; `409 name_taken`, `422 validation_failed` (`errors.name`), `422 too_many_lists` (20) |
+| `PATCH /api/v1/wishlists/{id}` `{ name }` | `200` the list; `409 name_taken` |
+| `DELETE /api/v1/wishlists/{id}` | `204` |
+| `GET /api/v1/wishlists/{id}` | `{ wishlist, items: [{ listingId, addedAt, unavailable, listing: {id, slug, type, title, priceFromCents, priceToCents, currency, available, brandName, sellerName, image} \| null }] }`, newest first |
+| `PUT /api/v1/wishlists/{id}/items/{listingId}` | `204`, idempotent; `404` for a listing not on the storefront; `422 list_full` (200) |
+| `DELETE /api/v1/wishlists/{id}/items/{listingId}` | `204` |
+| `GET /api/v1/wishlists/membership?listingIds=a,b` | up to 50 ids: `{ membership: { "<listingId>": ["<listId>", ...] } }` (for the heart buttons) |
+| `POST /api/v1/wishlists/{id}/share` | `{ shareKey }`, shown once; replaces any earlier link. The link is `<web>/wishlists/shared/<shareKey>` |
+| `DELETE /api/v1/wishlists/{id}/share` | `204`, the link stops working |
+| `GET /api/v1/shared-wishlists/{key}` | anonymous: `{ name, items: [{ addedAt, listing }] }`, `404` for a wrong or revoked key; `no-store`, `noindex`, `no-referrer` |
+| `GET /api/v1/recently-viewed` | `{ items: [{ viewedAt, listing }] }`, newest first, at most 20, hidden listings left out |
+| `PUT /api/v1/recently-viewed/{listingId}` | `204`; the time is ours; `404` for a listing not on the storefront |
+| `POST /api/v1/recently-viewed/merge` `{ listingIds }` | `204`; the guest's ids newest first (the rest of the body is ignored), never replaces a view the server has |
+| `DELETE /api/v1/recently-viewed` | `204` |
+Notifications: kinds `wishlist_price_drop` and `wishlist_back_in_stock` (`parameters`: listingId, slug, title, currency, priceCents, previousPriceCents); email category `wishlist` in `GET/PUT /notifications/preferences`.
