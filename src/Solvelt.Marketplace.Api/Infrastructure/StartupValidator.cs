@@ -105,8 +105,12 @@ public static class StartupValidator
         // Demo data is test-mode data (M9). An ALLOWLIST, not a denylist (orchestrator, M9-06): it may be switched on only when the environment name is exactly Development, Testing or Staging
         // (trimmed, case-insensitive). Anything else refuses, whatever it is called ("Prod", " Production", "Live", an unset name which is Production): a denylist would let a misspelt name
         // of the real site start with demo data on. There is no override. Checked first, before the dev-like early return below.
-        if (string.Equals(config["Demo:Enabled"]?.Trim(), "true", StringComparison.OrdinalIgnoreCase)
-            && !DemoAllowedEnvironments.Contains(env.EnvironmentName?.Trim() ?? ""))
+        // The value is read by the SAME function the application uses (DemoOptions.Parse: bool.TryParse, which also trims control characters such as a trailing NUL, so "true\0" is TRUE for both;
+        // review LOW-3). Blank is "not set" (an empty Demo__Enabled= in a container template). A non-blank value that is not a boolean refuses the start in every environment: a typo must be seen.
+        var rawDemo = config["Demo:Enabled"];
+        var demoOn = DemoOptions.Parse(rawDemo);
+        if (!string.IsNullOrWhiteSpace(rawDemo) && !bool.TryParse(rawDemo, out _)) problems.Add("Demo:Enabled (env Demo__Enabled) is not a valid true or false.");
+        if (demoOn && !DemoAllowedEnvironments.Contains(env.EnvironmentName?.Trim() ?? ""))
             problems.Add("Demo:Enabled (env Demo__Enabled) must not be true here: demo data is test-mode data and is allowed only when ASPNETCORE_ENVIRONMENT is Development, Testing or Staging (a test site runs as Staging).");
         // In every environment: a handler (a portal call, a mail) must always finish well inside the lease that protects its message,
         // otherwise a second dispatcher takes the message over while the first is still sending it (review of af8d339, item 7).

@@ -81,9 +81,6 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
 {
     public async Task<(QuoteStatus Status, QuoteView? View, string? Detail)> QuoteAsync(CartOwner owner, QuoteRequest req, CancellationToken ct)
     {
-        // A cart with a demo line is never priced or paid (M9-04): a payment for demo goods would be real money for nothing, and an order the portal would then be asked to fulfil.
-        // It is decided by the LINES, not the cart's own marker (a buyer's real cart that picked up one demo line is as refused as a pure demo cart; Remove hands the cart back).
-        if (await carts.HasDemoLinesAsync(owner, ct)) return (QuoteStatus.DemoCart, null, null);
         var a = req.Address;
         var country = a?.Country?.Trim().ToUpperInvariant();
         if (country is not { Length: 2 } || !country.All(char.IsAsciiLetterUpper) || string.IsNullOrWhiteSpace(a?.PostalCode) || a.PostalCode.Length > 20
@@ -93,6 +90,10 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
         var region = a.Region?.Trim().ToUpperInvariant();
 
         var cart = await carts.GetAsync(owner, ct);
+        // A cart with a demo line is never priced or paid (M9-04): a payment for demo goods would be real money for nothing, and an order the portal would then be asked to fulfil.
+        // It is decided by the LINES, not the cart's own marker (a buyer's real cart that picked up one demo line is as refused as a pure demo cart; Remove hands the cart back), and by the
+        // lines THIS quote reads (the same query that prices them: no gap between "is it a demo cart" and "what is in it", review LOW-1). Checkout asks again inside its own transaction.
+        if (cart.HasDemoLines) return (QuoteStatus.DemoCart, null, null);
         if (!cart.CanCheckout || cart.Groups.Count == 0) return (QuoteStatus.EmptyOrUnavailableCart, null, null);
 
         var picks = req.Selections ?? [];

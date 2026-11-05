@@ -42,12 +42,45 @@ public sealed class DemoFoundationTests
     public void Only_development_testing_and_staging_may_switch_it_on_so_the_test_site_can_run_as_staging(string env) => Assert.False(Refused(env, "true"), env);
 
     [Theory]
+    [InlineData("Production")] [InlineData("Prod")] [InlineData("Live")]
+    public void The_bound_value_is_what_is_checked_so_a_true_with_a_trailing_control_character_is_still_refused_where_demo_is_not_allowed(string env)
+    {
+        // the configuration binder's bool.Parse also trims control characters, so "true\0" is TRUE for the application though it is not the string "true"
+        foreach (var v in new[] { "true\0", "true\0\0", " true\0 ", "TRUE\0" })
+            Assert.True(Refused(env, v), $"{env} {v.Replace("\0", "<NUL>")}");
+    }
+
+    [Theory]
+    [InlineData("Staging")] [InlineData("Development")] [InlineData("Testing")]
+    public void The_same_values_are_fine_on_an_allowed_environment(string env)
+    {
+        foreach (var v in new[] { "true\0", "TRUE\0" }) Assert.False(Refused(env, v), env);
+    }
+
+    [Theory]
+    [InlineData("Production")] [InlineData("Staging")] [InlineData("Development")]
+    public void A_value_the_binder_cannot_read_refuses_the_start_in_every_environment(string env)
+    {
+        foreach (var v in new[] { "yes", "enabled", "tru", "2", "true false" })
+            Assert.True(Refused(env, v), $"{env} {v}");
+    }
+
+    [Theory]
     [InlineData("Production")] [InlineData("Staging")] [InlineData("Live")]
     public void Off_unset_or_blank_is_fine_everywhere(string env)
     {
         Assert.False(Refused(env, "false"));
         Assert.False(Refused(env, null));
         Assert.False(Refused(env, ""));
+    }
+
+    [Fact]
+    public async Task A_blank_value_is_off_all_the_way_the_application_starts_and_says_demoEnabled_false()
+    {
+        using var f = new TestFactory(new() { ["Demo:Enabled"] = "" });
+        var res = await f.CreateClient().GetAsync("/api/v1/config");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.False(JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement.GetProperty("demoEnabled").GetBoolean());
     }
 
     [Fact]

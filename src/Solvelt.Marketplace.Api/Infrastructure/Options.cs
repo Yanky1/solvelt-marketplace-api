@@ -238,4 +238,11 @@ public sealed class CheckoutOptions
 public sealed class DemoOptions
 {
     public bool Enabled { get; set; }
+
+    /// <summary>
+    /// The ONE reading of <c>Demo:Enabled</c>, used by the application AND by the start-up validator so they can never disagree: <c>bool.TryParse</c> (which also trims whitespace and control
+    /// characters such as a trailing NUL, so "true\0" is true for both), and anything else, a blank or an unreadable value, is off. The configuration binder is NOT used: it throws on a blank
+    /// value (an empty <c>Demo__Enabled=</c> is normal in a container template), which used to make every demo route and the public config answer 500.
+    /// </summary>
+    public static bool Parse(string? value) => bool.TryParse(value, out var on) && on;
 }

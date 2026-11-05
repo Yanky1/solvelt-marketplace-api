@@ -19,7 +19,11 @@ public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser, IAcc
     public async Task OnDeletingAsync(Guid accountId, string email, CancellationToken ct)
     {
         var lower = Auth.AuthValidation.NormaliseEmail(email);
-        await db.Orders.Where(o => o.AccountId == null && o.GuestEmail == lower).ExecuteUpdateAsync(s => s.SetProperty(o => o.GuestEmail, (string?)null), ct);
+        // An account whose address was only "demo verified" (no mailbox proof, M9-07) never owned this address: whoever holds it could have signed up as somebody else's address, and their
+        // deleting the account must not strip the REAL owner's unclaimed guest orders of their address (no more shipping or refund mail, never claimable). The guard is part of the one UPDATE, the
+        // same one the claimer uses.
+        await db.Orders.Where(o => o.AccountId == null && o.GuestEmail == lower && !db.BuyerAccounts.Any(a => a.Id == accountId && a.DemoVerifiedAt != null))
+            .ExecuteUpdateAsync(s => s.SetProperty(o => o.GuestEmail, (string?)null), ct);
     }
 
     /// <summary>

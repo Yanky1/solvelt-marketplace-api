@@ -82,7 +82,7 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Auth.PasskeyService>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Account.AccountRedactionHandler>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
-builder.Services.Configure<DemoOptions>(builder.Configuration.GetSection("Demo"));
+builder.Services.Configure<DemoOptions>(o => o.Enabled = DemoOptions.Parse(builder.Configuration["Demo:Enabled"]));
 builder.Services.AddScoped<DemoService>();
 builder.Services.AddScoped<DemoVerifier>();
 builder.Services.AddSingleton<DemoActionLimiter>();

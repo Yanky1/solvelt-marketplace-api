@@ -28,6 +28,8 @@ public enum CheckoutStatus { Ok, Invalid, Quote, NotPending, PaymentsUnavailable
 public sealed class CheckoutHooks
 {
     public Func<Task>? AfterIntentCreated { get; set; }
+    /// <summary>Test seam: awaited after the quote was priced and signed and before the checkout transaction starts.</summary>
+    public Func<Task>? AfterQuote { get; set; }
     /// <summary>Test seam: awaited inside the checkout transaction, after supersede listed an old pending order and before it changes that order's status; gets the transaction's context.</summary>
     public Func<MarketplaceDb, Task>? BeforeSupersedeUpdate { get; set; }
 }
@@ -88,7 +90,10 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
                 catch (PaymentRejectedException ex) when (ex.Code == "resource_missing") { /* gone at Stripe: nothing in flight */ }
             }
         }
-        var existing = await LockedInsertOrFindAsync(order, ct);
+        if (hooks.AfterQuote is { } afterQuote) await afterQuote();
+        MarketplaceOrder existing;
+        try { existing = await LockedInsertOrFindAsync(order, ct); }
+        catch (DemoCartException) { return (CheckoutStatus.Quote, null, "DemoCart"); }   // a demo line appeared after the quote was priced: refused here too (M9-04)
         if (existing.Status != OrderStatus.PendingPayment) return (CheckoutStatus.NotPending, null, null);
 
         try
@@ -175,6 +180,9 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
                 {
                     var now = Now;
                     await db.Carts.Where(c => c.Id == cart).ExecuteUpdateAsync(s => s.SetProperty(c => c.UpdatedAt, now), ct);
+                    // Under the cart's lock, in the same transaction that would insert the order: a demo line that arrived after the quote was priced (a fill racing the checkout) is refused
+                    // here, so no order for demo goods can ever be inserted (M9-04, review LOW-1).
+                    if (await db.CartLines.AsNoTracking().AnyAsync(l => l.CartId == cart && l.IsDemo, ct)) throw new DemoCartException();
                 }
                 var found = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.ActiveKey == order.ActiveKey, ct);
                 if (found is not null) { await tx.CommitAsync(ct); return found; }
@@ -192,6 +200,8 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
             }
         }
     }
+
+    private sealed class DemoCartException : Exception;
 
     private static void RenumberFor(MarketplaceOrder order)
     {

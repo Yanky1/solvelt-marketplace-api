@@ -300,15 +300,20 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var accountId = await ConsumeTokenAsync(EmailTokenPurpose.Reset, token, ct);
         if (accountId is null) return new ResetOutcome(false);
         // The mailbox is proven by the link, so the address counts as verified too, and the sign-in gate forgets the address (a person who can read the mailbox is not an attacker).
+        // An account that was only "demo verified" (M9-07) was never proven to be its address's owner: what whoever registered it typed (name, phone, saved addresses) is not kept either
+        // when the real owner takes it over by a reset. Read before the update clears the marker.
+        var wasDemoVerified = await db.BuyerAccounts.AnyAsync(a => a.Id == accountId && a.DemoVerifiedAt != null, ct);
         var changed = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s
             .SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, a => a.SessionEpoch + 1)
-            .SetProperty(a => a.DisplayName, a => a.EmailVerifiedAt == null ? "Buyer" : a.DisplayName)   // a name typed by whoever registered an unverified address first is not kept
+            .SetProperty(a => a.DisplayName, a => a.EmailVerifiedAt == null || a.DemoVerifiedAt != null ? "Buyer" : a.DisplayName)   // a name typed by whoever registered an unverified address first is not kept
+            .SetProperty(a => a.Phone, a => a.DemoVerifiedAt != null ? null : a.Phone)
             .SetProperty(a => a.EmailVerifiedAt, a => a.EmailVerifiedAt ?? now)
             .SetProperty(a => a.DemoVerifiedAt, (DateTimeOffset?)null), ct);   // the reset link proves the mailbox: a test-only verification is replaced by it (M9-07)
         if (changed == 0) return new ResetOutcome(false);
         await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         // a reset is account recovery: whatever got in (a stolen session that added a passkey) must not survive it, so every passkey goes and the owner adds theirs again (M1-80)
         await db.BuyerPasskeys.Where(p => p.AccountId == accountId).ExecuteDeleteAsync(ct);
+        if (wasDemoVerified) await db.BuyerAddresses.Where(a => a.AccountId == accountId).ExecuteDeleteAsync(ct);
         await gate.ClearAddressAsync(gateKeys.Address(peek.Email!), ct);
         await tx.CommitAsync(ct);
         await guestClaims.ClaimAsync(peek.Id, peek.Email!, ct);   // a reset proves the mailbox too

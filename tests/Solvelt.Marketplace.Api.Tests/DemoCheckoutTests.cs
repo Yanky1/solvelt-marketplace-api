@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Solvelt.Marketplace.Api.Carts;
 using Solvelt.Marketplace.Api.Data;
 using Xunit;
@@ -105,5 +106,36 @@ public sealed class DemoCheckoutTests : OrderFlowBase
         Assert.False(line.IsDemo); Assert.Equal(demoLine.Quantity + 2, line.Quantity);
         await RemoveDemo();
         Assert.Equal(demoLine.VariantId, Assert.Single(await Lines()).VariantId);
+    }
+
+    [Fact]
+    public async Task A_demo_line_that_arrives_after_the_quote_was_priced_is_refused_inside_the_checkout_transaction()
+    {
+        await Login("dco@example.com");
+        await AddToCart("challah-classic");                                                                                    // a real cart with a real line
+        var hooks = _k.F.Services.GetRequiredService<Solvelt.Marketplace.Api.Checkout.CheckoutHooks>();
+        // between the quote and the transaction a fill adds a demo line (a race the earlier checks cannot see)
+        hooks.AfterQuote = async () => { await _k.Db(async db => { await db.CartLines.ExecuteUpdateAsync(s => s.SetProperty(l => l.IsDemo, true)); return 0; }); };
+        var body = new { address = Address() };
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = await QuoteHashes.WithHashAsync(_k.Http, _session, body) };
+        r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        var res = await _k.Http.SendAsync(r);
+        Assert.Equal(HttpStatusCode.Conflict, res.StatusCode);
+        Assert.Equal("demo_data", (await Body(res)).GetProperty("code").GetString());
+        Assert.Equal(0, await _k.Db(db => db.Orders.CountAsync()));                                                           // no order was inserted
+        Assert.Empty(Stripe.Intents);                                                                                           // and no payment was started
+    }
+
+    [Fact]
+    public async Task A_demo_cart_whose_lines_the_buyer_has_all_adopted_can_be_checked_out_whatever_the_carts_own_marker_says()
+    {
+        await Login("dco@example.com");
+        await FillDemo();
+        foreach (var line in await Lines())
+            Assert.Equal(HttpStatusCode.OK, (await Call(HttpMethod.Patch, $"/api/v1/cart/lines/{line.Id}", new { quantity = line.Quantity })).StatusCode);   // adopting a line: touching it
+        Assert.All(await Lines(), l => Assert.False(l.IsDemo));
+        Assert.True(await _k.Db(db => db.Carts.AnyAsync(c => c.IsDemo)));                                                      // the cart row still says demo: the lines decide
+        var (number, _, _) = await Checkout();
+        Assert.False((await Order(number)).IsDemo);
     }
 }

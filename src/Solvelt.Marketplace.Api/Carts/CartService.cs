@@ -27,7 +27,7 @@ public sealed record CartLineView(Guid Id, Guid ListingId, Guid VariantId, strin
     long UnitPriceCents, long? CompareAtCents, long LineTotalCents, string Status, long? PreviousUnitPriceCents);
 /// <summary>One group per (seller, brand), exactly how the portal splits seller orders (CONTRACT.md §3).</summary>
 public sealed record CartGroupView(Guid SellerId, string SellerName, Guid BrandId, string BrandName, long SubtotalCents, IReadOnlyList<CartLineView> Lines);
-public sealed record CartView(string Currency, IReadOnlyList<CartGroupView> Groups, int ItemCount, long SubtotalCents, bool CanCheckout, string? CartToken = null);
+public sealed record CartView(string Currency, IReadOnlyList<CartGroupView> Groups, int ItemCount, long SubtotalCents, bool CanCheckout, string? CartToken = null, [property: System.Text.Json.Serialization.JsonIgnore] bool HasDemoLines = false);
 
 public enum AddStatus { Ok, NotFound, NotPurchasable, QuantityLimit, TooManyLines, CurrencyMismatch, Busy }
 
@@ -56,10 +56,6 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
         var now = Now;
         return await db.Carts.Where(c => c.Id == cartId).ExecuteUpdateAsync(s => s.SetProperty(c => c.UpdatedAt, now), ct) == 1;
     }
-
-    /// <summary>True when the owner's cart has any line created by "Fill with demo data" (M9-04): checkout and the quote refuse such a cart.</summary>
-    public Task<bool> HasDemoLinesAsync(CartOwner o, CancellationToken ct)
-        => db.CartLines.AsNoTracking().AnyAsync(l => l.IsDemo && Find(o).Select(c => c.Id).Contains(l.CartId), ct);
 
     private IQueryable<Data.Cart> Find(CartOwner o)
         => o.AccountId is { } a ? db.Carts.Where(c => c.AccountId == a)
@@ -223,7 +219,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
                           orderby cl.AddedAtMs, cl.Id
                           select new
                           {
-                              cl.Id, ListingId = v == null ? cl.ListingId : v.ListingId, cl.VariantId, cl.Quantity, cl.SeenUnitPriceCents,
+                              cl.Id, cl.IsDemo, ListingId = v == null ? cl.ListingId : v.ListingId, cl.VariantId, cl.Quantity, cl.SeenUnitPriceCents,
                               VName = v == null ? null : v.Name, PriceCents = v == null ? 0L : v.PriceCents, CompareAtCents = v == null ? null : v.CompareAtCents, VAvail = v != null && v.Available,
                               LTitle = l == null ? null : l.Title, LSlug = l == null ? null : l.Slug, LVisible = l != null && l.Visible, LType = l == null ? null : l.Type,
                               Currency = l == null ? null : l.Currency, SellerId = l == null ? Guid.Empty : l.SellerId, BrandId = l == null ? Guid.Empty : l.BrandId,
@@ -253,7 +249,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
         }
         // Lines of a seller/brand the catalog no longer knows share the empty group; they are all unavailable.
         var items = groups.SelectMany(g => g.Lines).Where(l => l.Status == CartLineStatus.Ok).Sum(l => l.Quantity);
-        return new CartView(currency, groups, items, groups.Sum(g => g.SubtotalCents), canCheckout, token);
+        return new CartView(currency, groups, items, groups.Sum(g => g.SubtotalCents), canCheckout, token, rows.Any(r => r.IsDemo));
     }
 }
 

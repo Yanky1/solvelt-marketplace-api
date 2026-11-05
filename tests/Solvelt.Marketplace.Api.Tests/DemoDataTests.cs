@@ -608,6 +608,67 @@ public sealed class DemoDataTests : IDisposable
     }
 
     [Fact]
+    public async Task A_demo_verified_squatter_deleting_the_account_does_not_strip_the_real_owners_guest_orders_but_an_ordinary_account_still_does()
+    {
+        await SyncCatalog();
+        // the squatter signs up as victim@example.com, demo-verifies with no guest orders yet, signs in
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp("squat@example.com")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/demo/verify", new { email = "squat@example.com", password = AuthKit.Password })).StatusCode);
+        var signIn = await _k.Post("/api/v1/auth/sign-in", new { email = "squat@example.com", password = AuthKit.Password });
+        var squatter = (await signIn.Content.ReadFromJsonAsync<AuthKit.SignInResponse>())!.Token;
+        // later the real owner checks out as a guest; then the squatter deletes the account
+        var guest = await GuestOrderFor("squat@example.com");
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/account/delete", new { password = AuthKit.Password }, squatter)).StatusCode);
+        var order = await OrderRow(guest);
+        Assert.Equal("squat@example.com", order.GuestEmail);                                                                  // the owner's address is still on the order: mail still reaches them
+        Assert.Null(order.AccountId);
+        // control: an ordinary verified account that deletes itself still strips its own address from guest orders (the existing rule)
+        var ordinary = await _k.VerifiedSession("ordinary-del@example.com");
+        var guest2 = await GuestOrderFor("ordinary-del@example.com");
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/account/delete", new { password = AuthKit.Password }, ordinary)).StatusCode);
+        Assert.Null((await OrderRow(guest2)).GuestEmail);
+    }
+
+    [Fact]
+    public async Task A_reset_through_the_mailbox_after_a_demo_verify_drops_what_the_squatter_typed_name_phone_and_addresses_but_keeps_an_ordinary_accounts()
+    {
+        await SyncCatalog();
+        var now = _k.F.Clock.GetUtcNow();
+        async Task Seed(string email, string name)
+        {
+            Assert.Equal(HttpStatusCode.NoContent, (await _k.SignUp(email, name: name)).StatusCode);
+            var a = await _k.Account(email);
+            await _k.Db(async db =>
+            {
+                await db.BuyerAccounts.Where(x => x.Id == a.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.Phone, "+1 555 0123"));
+                db.BuyerAddresses.Add(new BuyerAddress { Id = Guid.NewGuid(), AccountId = a.Id, FullName = name, Line1 = "1 Squat St", City = "Town", PostalCode = "10001", Country = "US", IsDefault = true, CreatedAt = now, UpdatedAt = now });
+                await db.SaveChangesAsync(); return 0;
+            });
+        }
+        async Task Reset(string email)
+        {
+            await _k.Post("/api/v1/auth/forgot-password", new { email });
+            var token = AuthKit.TokenIn((await _k.Mail(email)).Single(m => m.Subject == "Reset your password"), "/reset-password");
+            Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/auth/reset-password", new { token, password = "a brand new password" })).StatusCode);
+        }
+        // the squatter: demo-verified, typed a name, a phone and an address
+        await Seed("squatreset@example.com", "Mallory Squatter");
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/demo/verify", new { email = "squatreset@example.com", password = AuthKit.Password })).StatusCode);
+        await Reset("squatreset@example.com");
+        var a1 = await _k.Account("squatreset@example.com");
+        Assert.Equal("Buyer", a1.DisplayName); Assert.Null(a1.Phone); Assert.Null(a1.DemoVerifiedAt); Assert.NotNull(a1.EmailVerifiedAt);
+        Assert.Equal(0, await _k.Db(db => db.BuyerAddresses.CountAsync(x => x.AccountId == a1.Id)));
+        // control: an ordinary, mailbox-verified account keeps its own name, phone and addresses through a reset
+        await Seed("ordreset@example.com", "Dana Real");
+        var link = AuthKit.TokenIn((await _k.Mail("ordreset@example.com")).Last(m => m.Subject.StartsWith("Confirm")), "/verify-email");
+        Assert.Equal(HttpStatusCode.NoContent, (await _k.Post("/api/v1/auth/verify-email", new { token = link, password = AuthKit.Password })).StatusCode);
+        await Reset("ordreset@example.com");
+        var a2 = await _k.Account("ordreset@example.com");
+        Assert.Equal("Dana Real", a2.DisplayName); Assert.Equal("+1 555 0123", a2.Phone);
+        Assert.Equal(1, await _k.Db(db => db.BuyerAddresses.CountAsync(x => x.AccountId == a2.Id)));
+    }
+
+    [Fact]
     public async Task An_ordinary_verified_account_still_claims_its_guest_orders_at_sign_in()
     {
         await SyncCatalog();
