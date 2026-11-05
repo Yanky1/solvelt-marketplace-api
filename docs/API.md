@@ -419,6 +419,16 @@ Everything is under `/api/v1/staff`, bearer `stf_…` token, `private, no-store`
 
 A buyer locked by staff gets `403 account_locked` from `POST /api/v1/auth/sign-in` (after the right password) and `401` from every token.
 
+Orders, payments and queues (M7-10..14):
+
+| Endpoint | Who | Notes |
+|---|---|---|
+| `GET /orders?number=\|id=&reason=`, `GET /buyers/{id}/orders?reason=` | `orders.view` | Masked; `payment` block only with `payments.view` |
+| `POST /orders/{id}/refunds/{refundId}/retry {reason}` | `refunds.retry` | Reserved refund with a dead message; `409 not_retryable` / `already_queued` |
+| `GET /ingests`, `POST /ingests/{orderId}/retry {reason}` | `ingests.view` / `ingests.retry` | Paid orders the portal has not taken |
+| `GET /outbox?status&type&limit&before`, `POST /outbox/{id}/retry {reason}` | `outbox.view` / `outbox.retry` | No payload ever |
+| `GET /dead-letters`, `POST /dead-letters/retry {eventId, reason}` | `deadletters.view` / `deadletters.retry` | Parked inbound events |
+| `GET /stripe/failures?before&limit` | `stripe.view` | Unmatched and failed Stripe events (ids and types only) |
 
 ## Reviews and ratings (M6)
 Reading is public; writing needs a signed-in buyer (`Authorization: Bearer`, `Cache-Control: private, no-store`). Another buyer's line, booking or review is 404.
