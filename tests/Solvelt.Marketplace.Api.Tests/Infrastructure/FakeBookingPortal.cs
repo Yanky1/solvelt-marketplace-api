@@ -48,6 +48,8 @@ public sealed class FakeBookingPortal
     public (HttpStatusCode Status, string Code)? ConfirmFailNext { get; set; }
     /// <summary>Every confirm answers 503 while set (an outage between the payment and the confirmation).</summary>
     public bool ConfirmDown { get; set; }
+    /// <summary>Test hook: the next confirm of a live hold answers 200 with exactly this body (an unreadable or foreign answer).</summary>
+    public string? ConfirmBodyOverride { get; set; }
     /// <summary>The portal confirms the booking but the answer never arrives (a timeout after the write): the ambiguous confirm.</summary>
     public bool ConfirmAppliesThenFails { get; set; }
     /// <summary>Runs inside the portal's confirm, after the booking is confirmed there and before the answer leaves (a race with an event on our side).</summary>
@@ -119,7 +121,7 @@ public sealed class FakeBookingPortal
         lock (_lock)
         {
             if (!_quotes.TryGetValue(qid, out var q)) return Err(HttpStatusCode.NotFound, "quote_not_found");
-            if (!accept) { if (q.Status is "Requested" or "Quoted") { q.Status = "Withdrawn"; return FakePortal.Json(HttpStatusCode.OK, "{}"); } return q.Status == "Withdrawn" ? FakePortal.Json(HttpStatusCode.OK, "{}") : Err(HttpStatusCode.Conflict, "quote_not_open"); }
+            if (!accept) { if (q.Status is "Requested" or "Quoted") { q.Status = "Withdrawn"; return FakePortal.Json(HttpStatusCode.OK, "{\"ok\":true}"); } return q.Status == "Withdrawn" ? FakePortal.Json(HttpStatusCode.OK, "{}") : Err(HttpStatusCode.Conflict, "quote_not_open"); }
             Interlocked.Increment(ref QuoteAcceptCalls);
             // a hold that lapsed frees the slot and puts the quote back to Quoted (portal C13); a quote that was already Confirmed by the older flow stays Accepted
             if (q.Status == "Accepted" && q.AcceptedMid is { } am && _byMid.TryGetValue(am, out var lapsed) && lapsed.Status == "Expired") { q.Status = "Quoted"; q.AcceptedMid = null; }
@@ -150,7 +152,7 @@ public sealed class FakeBookingPortal
         if (c.Method == "POST" && c.PathAndQuery == "/api/internal/v1/payment-events")
         {
             lock (_lock) PaymentEvents.Add(c.BodyText);
-            return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\"}");
+            return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"ok\",\"result\":null}");   // the real portal: { status, result }
         }
         if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/confirm")) return ConfirmCall(c);
         if (c.Method == "POST" && c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/cancellations")) return Action(c, "/cancellations", CancelCall);
@@ -219,6 +221,12 @@ public sealed class FakeBookingPortal
             if (ConfirmDown) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
             if (ConfirmFailNext is { } f) { ConfirmFailNext = null; return FakePortal.Json(f.Status, JsonSerializer.Serialize(new { code = f.Code })); }
             if (!_byMid.TryGetValue(mid, out var h)) return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
+            // the real portal (BookingService.ConfirmHoldAsync): a confirmed/requested booking answers 200 (idempotent); a hold that is no longer live is 409 hold_expired (decided under the provider lock);
+            // anything else that is final (cancelled, declined, expired...) is 409 hold_not_confirmable. Never 200 for those.
+            if (h.Status is not ("Hold" or "Confirmed" or "Requested" or "Rescheduled"))
+                return FakePortal.Json(HttpStatusCode.Conflict, h.Status == "Expired" ? "{\"code\":\"hold_expired\"}" : "{\"code\":\"hold_not_confirmable\"}");
+            if (h.Status == "Hold" && h.ExpiresAt <= _clock.GetUtcNow()) { h.Status = "Expired"; return FakePortal.Json(HttpStatusCode.Conflict, "{\"code\":\"hold_expired\"}"); }
+            if (ConfirmBodyOverride is { } raw) { ConfirmBodyOverride = null; return FakePortal.Json(HttpStatusCode.OK, raw); }
             if (h.Status == "Hold") h.Status = Instant ? "Confirmed" : "Requested";
             if (ConfirmAppliesThenFails) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
             var body = Wrap(h, false);   // the real portal answers { created, booking } (portal BookingService.ConfirmHoldAsync); a bare summary here once hid that

@@ -29,6 +29,9 @@ public static class StartupValidator
     /// <summary>The only environment names that may run with <c>Demo:Enabled</c> on (compared case-insensitively after trimming).</summary>
     public static readonly HashSet<string> DemoAllowedEnvironments = new(["Development", "Testing", "Staging"], StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The same reading the options binder gives the setting (it trims): " true" and "True\t" are on. Anything that is not a boolean is off here and for the binder alike.</summary>
+    public static bool FakeCaptureRequested(string? raw) => bool.TryParse(raw?.Trim(), out var on) && on;
+
     public static bool IsDevLike(IHostEnvironment env) => env.IsDevelopment() || env.IsEnvironment("Testing");
 
     public const int LeaseMarginSeconds = 30;
@@ -102,7 +105,7 @@ public static class StartupValidator
             if (value.Contains("_live_", StringComparison.OrdinalIgnoreCase)) problems.Add($"{name} is a LIVE key. Only Stripe test keys are allowed (test mode only).");
             else if (!prefixes.Any(p => value.StartsWith(p, StringComparison.Ordinal))) problems.Add($"{name} must be a Stripe test key ({string.Join(" or ", prefixes)}...).");
         }
-        if (string.Equals(config["Stripe:FakeCaptureOnWebhook"], "true", StringComparison.OrdinalIgnoreCase) && !IsDevLike(env))
+        if (FakeCaptureRequested(config["Stripe:FakeCaptureOnWebhook"]) && !IsDevLike(env))
             problems.Add("Stripe:FakeCaptureOnWebhook (env Stripe__FakeCaptureOnWebhook) is for Development/Testing with the in-process fake payment provider only.");
         // Demo data is test-mode data (M9). An ALLOWLIST, not a denylist (orchestrator, M9-06): it may be switched on only when the environment name is exactly Development, Testing or Staging
         // (trimmed, case-insensitive). Anything else refuses, whatever it is called ("Prod", " Production", "Live", an unset name which is Production): a denylist would let a misspelt name
