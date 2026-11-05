@@ -20,17 +20,6 @@ public class StaffReviewTests
     private static string R => StaffKit.Reason;
     private const string Accounts = "/api/v1/staff/accounts";
 
-    /// <summary>Makes the audit write of one test host fail on demand, the way a full disk or a dropped connection would.</summary>
-    private sealed class AuditFault : SaveChangesInterceptor
-    {
-        public volatile bool On;
-        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData e, InterceptionResult<int> r, CancellationToken ct = default)
-        {
-            if (On && e.Context!.ChangeTracker.Entries<StaffAuditEntry>().Any(x => x.State == EntityState.Added)) throw new InvalidOperationException("audit write failed");
-            return base.SavingChangesAsync(e, r, ct);
-        }
-    }
-
     private static StaffKit WithFault(AuditFault fault) => new(services: s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(fault)));
 
     // ---------- MED-1: an allow-list that is set but blank never means "everyone" ----------

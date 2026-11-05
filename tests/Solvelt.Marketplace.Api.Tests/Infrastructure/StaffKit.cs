@@ -8,6 +8,17 @@ using Solvelt.Marketplace.Api.Staff;
 
 namespace Solvelt.Marketplace.Api.Tests.Infrastructure;
 
+/// <summary>Makes the audit write of one test host fail on demand, the way a full disk or a dropped connection would.</summary>
+public sealed class AuditFault : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+{
+    public volatile bool On;
+    public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData e, Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> r, CancellationToken ct = default)
+    {
+        if (On && e.Context!.ChangeTracker.Entries<StaffAuditEntry>().Any(x => x.State == EntityState.Added)) throw new InvalidOperationException("audit write failed");
+        return base.SavingChangesAsync(e, r, ct);
+    }
+}
+
 /// <summary>A running API with a bootstrap admin configured, plus the calls every staff test makes (software authenticators stand in for the browser).</summary>
 public sealed class StaffKit : IDisposable
 {
