@@ -186,6 +186,68 @@ public sealed class CheckoutTests : IDisposable
         Assert.Equal(1, await _k.Db(db => db.Orders.CountAsync()));
     }
 
+    // ---- "Something went wrong" at checkout on a misconfigured site (M8-12): each cause is a clear status and a log line that names the fix, never an unhandled 500 --------------------------------
+    [Fact]
+    public async Task A_refused_lookup_of_the_buyers_earlier_pending_order_is_a_502_with_the_cause_in_the_log_not_a_500()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        await Ok(await Checkout(s, new { address = Address("NY") }));                 // a first checkout leaves a pending order with an intent
+        Stripe.RejectLookupWith = "invalid_api_key";                                    // the key was rotated or is wrong: Stripe refuses to read that intent
+        var refused = await Ok(await Checkout(s, new { address = Address("NJ") }), HttpStatusCode.BadGateway);   // another destination = another order, so the earlier one is looked up
+        Assert.Equal("payment_rejected", refused.GetProperty("code").GetString());
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("invalid_api_key") && l.Contains("Stripe:SecretKey"));
+    }
+
+    [Fact]
+    public async Task A_payment_provider_that_cannot_be_reached_says_why_in_the_log()
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        Stripe.FailNext = 1;
+        Assert.Equal("payments_unavailable", (await Ok(await Checkout(s, new { address = Address() }), HttpStatusCode.ServiceUnavailable)).GetProperty("code").GetString());
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("Payments are unavailable for order") && l.Contains("unreachable"));
+    }
+
+    [Theory]
+    [InlineData("<html>Welcome to nginx</html>")]
+    [InlineData("")]
+    [InlineData("not json")]
+    public async Task A_2xx_from_stripe_that_is_not_json_is_unavailable_never_an_unhandled_exception(string body)
+    {
+        var h = new Script((_, _) => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "text/html") });
+        var ex = await Assert.ThrowsAsync<PaymentsUnavailableException>(() => Http(h).CreateIntentAsync(4573, "USD", "pi:MP-1", new Dictionary<string, string>(), default));
+        Assert.Equal("bad_response", ex.Message);
+        await Assert.ThrowsAsync<PaymentsUnavailableException>(() => Http(h).GetIntentStatusAsync("pi_1", default));
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "Portal:InboundSecret")]
+    [InlineData(HttpStatusCode.NotFound, "Portal:BaseUrl")]
+    [InlineData(HttpStatusCode.InternalServerError, "The portal is failing")]
+    public async Task A_quote_the_portal_cannot_answer_is_a_503_and_the_log_names_what_to_check(HttpStatusCode portalAnswer, string hint)
+    {
+        var s = await Buyer();
+        await AddToCart(s, "kiddush-cup-pewter");
+        _k.F.Portal.RespondAlways(_ => FakePortal.Json(portalAnswer, "{\"code\":\"x\"}"));
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout/quote") { Content = JsonContent.Create(new { address = new { country = "US", region = "NY", postalCode = "11201" } }) };
+        r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s);
+        var res = await _k.Http.SendAsync(r);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, res.StatusCode);
+        Assert.Equal("shipping_unavailable", (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains(((int)portalAnswer).ToString()) && l.Contains(hint));
+    }
+
+    [Fact]
+    public void A_stripe_secret_key_without_a_usable_publishable_key_is_warned_about_at_start_up()
+    {
+        string[] Warn(params (string, string?)[] kv) => StartupValidator.Warnings(new ConfigurationBuilder().AddInMemoryCollection(kv.Select(x => new KeyValuePair<string, string?>(x.Item1, x.Item2))).Build(), new FakeEnv("Testing")).ToArray();
+        Assert.Contains(Warn(("Stripe:SecretKey", "sk_test_abc")), w => w.Contains("Stripe:PublishableKey") && w.Contains("not available"));
+        Assert.Contains(Warn(("Stripe:SecretKey", "sk_test_abc"), ("Stripe:PublishableKey", "pk_test_has_underscores_x")), w => w.Contains("does not look like"));
+        Assert.Empty(Warn(("Stripe:SecretKey", "sk_test_abc"), ("Stripe:PublishableKey", "pk_test_abcdefgh1234")));
+        Assert.Empty(Warn());                                                         // payments simply off: nothing to say
+    }
+
     [Fact]
     public async Task Checkout_needs_a_signed_in_buyer_a_valid_address_and_a_payable_cart()
     {

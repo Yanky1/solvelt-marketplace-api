@@ -145,7 +145,12 @@ public sealed class StripeHttpProvider(HttpClient http, IOptions<StripeOptions> 
             using (res)
             {
                 var text = await res.Content.ReadAsStringAsync(ct);
-                if (res.IsSuccessStatusCode) return JsonDocument.Parse(text).RootElement.Clone();
+                if (res.IsSuccessStatusCode)
+                {
+                    // a 2xx that is not JSON (a proxy or captive page in front of Stripe) is "unavailable", never an unhandled exception (M8-12)
+                    try { return JsonDocument.Parse(text).RootElement.Clone(); }
+                    catch (JsonException) { throw new PaymentsUnavailableException("bad_response"); }
+                }
                 // 409 = the same key is still being processed: wait briefly and ask again (the answer will be the first request's result), then give up as "try again".
                 if ((int)res.StatusCode == 409 && attempt < Math.Max(0, options.Value.InUseRetries))
                 {
@@ -208,6 +213,8 @@ public sealed class FakePaymentProvider : IPaymentProvider
     public int FailNext { get; set; }
     /// <summary>Test hook: the next cancel is refused by the processor with this error code (for example <c>api_key_expired</c>).</summary>
     public string? RejectCancelWith { get; set; }
+    /// <summary>Test hook: the next read of an intent's status is refused by the processor with this error code (for example <c>invalid_api_key</c>).</summary>
+    public string? RejectLookupWith { get; set; }
     /// <summary>Test hook: the next refund is refused by the processor with this error code (one that moved no money, for example <c>api_key_expired</c>).</summary>
     public string? RejectRefundWith { get; set; }
     /// <summary>Test hook: runs once, just before a refund is refused for exceeding what is left (a slow worker is overtaken here by a parallel one). It runs AFTER the fake's lock is released: its continuations may resume on other threads, which could never take a lock held by this one.</summary>
@@ -277,6 +284,7 @@ public sealed class FakePaymentProvider : IPaymentProvider
         lock (_lock)
         {
             MaybeFail();
+            if (RejectLookupWith is { } code) { RejectLookupWith = null; throw new PaymentRejectedException(code); }
             if (!_intents.TryGetValue(intentId, out var i)) throw new PaymentRejectedException("resource_missing");
             return Task.FromResult(i.Cancelled ? "canceled" : i.CapturedCents > 0 ? "succeeded" : i.Processing ? "processing" : "requires_payment_method");
         }

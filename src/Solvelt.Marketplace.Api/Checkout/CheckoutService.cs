@@ -78,7 +78,7 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
             // Asked at Stripe BEFORE the transaction (no provider call while the cart is locked). A different checkout of the same cart is only allowed once nothing is in flight.
             var key = order.ActiveKey;
             var others = await db.Orders.AsNoTracking().Where(o => o.CartId == cid && o.AccountId == buyer.AccountId && o.PaymentIntentId != null && (o.ActiveKey == null || o.ActiveKey != key)
-                && (o.Status == OrderStatus.PendingPayment || o.Status == OrderStatus.PaymentProcessing)).Select(o => new { o.Status, o.PaymentIntentId }).ToListAsync(ct);
+                && (o.Status == OrderStatus.PendingPayment || o.Status == OrderStatus.PaymentProcessing)).Select(o => new { o.Number, o.Status, o.PaymentIntentId }).ToListAsync(ct);
             foreach (var o in others)
             {
                 if (o.Status == OrderStatus.PaymentProcessing) return (CheckoutStatus.InProgress, null, null);
@@ -86,8 +86,10 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
                 {
                     if (await payments.GetIntentStatusAsync(o.PaymentIntentId!, ct) is "processing" or "requires_capture") return (CheckoutStatus.InProgress, null, null);
                 }
-                catch (PaymentsUnavailableException) { return (CheckoutStatus.PaymentsUnavailable, null, null); }
+                catch (PaymentsUnavailableException ex) { log.LogWarning("Payments are unavailable while checking the buyer's earlier pending order {Number}: {Code}", o.Number, ex.Message); return (CheckoutStatus.PaymentsUnavailable, null, null); }
                 catch (PaymentRejectedException ex) when (ex.Code == "resource_missing") { /* gone at Stripe: nothing in flight */ }
+                // Any other refusal (an invalid or rotated API key above all) is a setting to fix, not something the buyer caused: a 502 with the code in the log, never a 500 (M8-12).
+                catch (PaymentRejectedException ex) { log.LogError("The payment provider refused to look up the buyer's earlier pending order {Number}: {Code}. Check Stripe:SecretKey (an invalid_api_key means the key is wrong or was rotated)", o.Number, ex.Code); return (CheckoutStatus.PaymentRejected, null, ex.Code); }
             }
         }
         if (hooks.AfterQuote is { } afterQuote) await afterQuote();
@@ -111,8 +113,8 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
             if (row.PaymentIntentId != intent.Id) { log.LogError("Order {Number} has two different payment intents (stored {Stored}, returned {Returned})", existing.Number, row.PaymentIntentId, intent.Id); await QueueCancelAsync(intent.Id, ct); return (CheckoutStatus.PaymentsUnavailable, null, "intent_mismatch"); }
             return (CheckoutStatus.Ok, new CheckoutResult(existing.Number, existing.Status, quote, new CheckoutPayment("stripe", intent.ClientSecret, stripe.Value.PublishableKey)), null);
         }
-        catch (PaymentsUnavailableException) { return (CheckoutStatus.PaymentsUnavailable, null, null); }   // the order stays pending; the same request later finds it and retries the intent
-        catch (PaymentRejectedException ex) { log.LogWarning("Payment provider refused order {Number}: {Code}", existing.Number, ex.Code); return (CheckoutStatus.PaymentRejected, null, ex.Code); }
+        catch (PaymentsUnavailableException ex) { log.LogWarning("Payments are unavailable for order {Number}: {Code} (not_configured: Stripe:SecretKey is unset; unreachable or stripe_5xx: the processor)", existing.Number, ex.Message); return (CheckoutStatus.PaymentsUnavailable, null, null); }   // the order stays pending; the same request later finds it and retries the intent
+        catch (PaymentRejectedException ex) { log.LogError("Payment provider refused order {Number}: {Code}. Check Stripe:SecretKey (an invalid_api_key means the key is wrong or was rotated)", existing.Number, ex.Code); return (CheckoutStatus.PaymentRejected, null, ex.Code); }
     }
 
     private MarketplaceOrder Build(CheckoutActor buyer, Guid? cartId, CheckoutAddress a, string? gift, QuoteView quote)
