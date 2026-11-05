@@ -53,6 +53,10 @@ builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Notifications
 builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.OrderReconcileHandler>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Account.AccountProfileExporter>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Messaging.MessagingDataExporter>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Messaging.NotificationsDataExporter>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Fulfilment.AfterSalesDataExporter>();
 builder.Services.AddSingleton<PasswordService>();
 builder.Services.AddSingleton<GateKeys>();
 builder.Services.AddSingleton<GuestLinks>();
@@ -230,6 +234,7 @@ app.MapCart();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
 Solvelt.Marketplace.Api.Fulfilment.GuestOrderEndpoints.MapGuestOrders(app);
+Solvelt.Marketplace.Api.Account.AccountDataExportEndpoint.MapAccountDataExport(app);
 Solvelt.Marketplace.Api.Fulfilment.ProofEndpoints.MapProofs(app);
 Solvelt.Marketplace.Api.Notifications.NotificationEndpoints.MapNotifications(app);
 Solvelt.Marketplace.Api.Messaging.MessageEndpoints.MapMessages(app);

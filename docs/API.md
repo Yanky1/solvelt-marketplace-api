@@ -267,6 +267,7 @@ All endpoints need `Authorization: Bearer <token>` (`401 unauthorized` otherwise
 | `POST /api/v1/account/addresses/{id}/default` | none | `204`; the address is now the only default; `404` for another buyer's, unknown or malformed ids |
 | `POST /api/v1/account/password` | `{ currentPassword, newPassword }` | `204`; `403 reauthentication_required` (sign in again within 10 minutes: call `/auth/reauthenticate`, then repeat); `401 invalid_credentials`; `409 account_changed` (the account changed while this ran, for example a reset: sign in again); `422` weak password; `429` with `Retry-After`; other sessions are revoked |
 | `POST /api/v1/account/delete` | `{ password }` | `204`; same errors as the password change (including `409 account_changed`); the session and every other one stop at once and the email address is free for a new sign-up at once, the rest of the personal data is erased by a job shortly after |
+| `POST /api/v1/account/data-export` | (no body) | `200` a JSON file `{ generatedAt, sections }` (attachment, no-store) with the buyer's own data per module (`account`, `messages`, `notifications`, `cancellations-and-returns`, and whatever M3/M4 register); `403 reauthentication_required` when the sign-in is older than 10 minutes; `401` without a session. Decision M5-32. |
 
 US addresses (`country: "US"`) need a 5 or 9 digit ZIP and a state code; other countries a plain postal code. `lat` and `lng` come together or not at all.
 

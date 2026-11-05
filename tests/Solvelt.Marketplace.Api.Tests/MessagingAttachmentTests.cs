@@ -347,6 +347,39 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task Privacy_the_buyer_downloads_their_own_data_as_a_file_after_a_recent_sign_in_and_nothing_of_anyone_else_or_any_secret()
+    {
+        var (o, g) = await Placed();
+        var (thread, msg, att, pid) = await Reported(o, g);                                               // a thread with a seller message and a file
+        var now = _k.F.Clock.GetUtcNow();
+        var account = await _k.Account("ing1@example.com");
+        await _k.Db(async db => { db.OrderCancelRequests.Add(new OrderCancelRequest { Id = Guid.NewGuid(), RequestId = "rq-x", OrderId = o.Id, GroupId = g.Id, AccountId = account.Id, Reason = "changed_mind", Note = "please cancel", Status = CancelRequestStatus.Requested, CreatedAt = now, UpdatedAt = now }); await db.SaveChangesAsync(); return 0; });
+        // another buyer with data of their own
+        var other = await _k.VerifiedSession("other@example.com");
+        var listing = await _k.Db(db => db.CatalogListings.AsNoTracking().Where(l => l.Visible).OrderBy(l => l.Slug).FirstAsync());
+        Assert.Equal(HttpStatusCode.Accepted, (await As(other, HttpMethod.Post, "/api/v1/messages", new { listingId = listing.Id, text = "SECRET-OF-THE-OTHER-BUYER" })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _k.Http.PostAsync("/api/v1/account/data-export", null)).StatusCode);
+        var res = await As(_session, HttpMethod.Post, "/api/v1/account/data-export");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        Assert.Contains("attachment", res.Content.Headers.ContentDisposition!.ToString());
+        Assert.Contains("no-store", res.Headers.CacheControl!.ToString());
+        var text = await res.Content.ReadAsStringAsync();
+        var d = JsonDocument.Parse(text).RootElement.GetProperty("sections");
+        Assert.Equal(new[] { "account", "cancellations-and-returns", "messages", "notifications" }, d.EnumerateObject().Select(p => p.Name).Order().ToArray());
+        Assert.Equal("ing1@example.com", d.GetProperty("account").GetProperty("profile").GetProperty("email").GetString());
+        Assert.Contains("pay me on venmo", text);                                                         // their own thread (the seller's text)
+        Assert.Contains("x.png", text);                                                                   // and the file's name
+        Assert.Contains("please cancel", text);                                                           // their cancel request
+        Assert.Contains("order_", text);                                                                  // their notifications
+        // nothing of anyone else and no secret
+        foreach (var leak in new[] { "SECRET-OF-THE-OTHER-BUYER", "other@example.com", "passwordHash", "PasswordHash", "sessionEpoch", "token" }) Assert.DoesNotContain(leak, text, StringComparison.OrdinalIgnoreCase);
+        // a sign-in older than ten minutes must be confirmed again
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(11));
+        Assert.Equal(HttpStatusCode.Forbidden, (await As(_session, HttpMethod.Post, "/api/v1/account/data-export")).StatusCode);
+    }
+
+    [Fact]
     public async Task P1_An_erased_account_gets_no_new_thread_and_no_notification_from_a_late_seller_message_or_order_event()
     {
         var (o, g) = await Placed();
