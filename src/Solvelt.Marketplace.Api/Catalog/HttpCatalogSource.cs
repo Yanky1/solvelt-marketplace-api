@@ -219,8 +219,19 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
         }
     }
 
-    private static ListingTombstone? Tombstone(JsonElement e)
-        => Guid_(e, "listingId") is { } id && Long(e, "version") is { } v && v >= 1 ? new ListingTombstone(id, v, Str(e, "reason") ?? "unlisted") : null;   // any reason, known or not, means "unlisted"
+    /// <summary>
+    /// Any reason, known or not, means "unlisted". A tombstone with a listing id but an unreadable version is NOT dropped (the listing would stay public while the cursor
+    /// moves on): it becomes a tombstone of <see cref="ListingTombstone.UnknownVersion"/>, which hides the listing at the version we hold, and the id is logged.
+    /// Without even an id there is nothing to hide: null.
+    /// </summary>
+    private ListingTombstone? Tombstone(JsonElement e)
+    {
+        if (Guid_(e, "listingId") is not { } id) return null;
+        var reason = Str(e, "reason") ?? "unlisted";
+        if (Long(e, "version") is { } v && v >= 1) return new ListingTombstone(id, v, reason);
+        log.LogWarning("A catalog tombstone for listing {ListingId} has no readable version; hiding the listing at the version we hold", id);
+        return new ListingTombstone(id, ListingTombstone.UnknownVersion, reason);
+    }
 
     private ListingSnapshot? Fail(Guid? id, string why) { log.LogWarning("Skipping a catalog document that could not be read ({Why}) for listing {ListingId}", why, id); return null; }
 

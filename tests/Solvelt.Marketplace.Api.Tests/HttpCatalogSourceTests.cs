@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -21,8 +22,18 @@ public class HttpCatalogSourceTests
     private static readonly DateTimeOffset Start = new(2026, 11, 4, 12, 0, 0, TimeSpan.Zero);
     private static Guid G(int n) => new(n, 0, 0, new byte[8]);
 
+    private sealed class LineLog : ILogger<HttpCatalogSource>
+    {
+        public List<string> Lines { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Add(formatter(state, exception));
+    }
+
     private sealed class Rig
     {
+        private readonly LineLog log = new();
+        public List<string> Logs => log.Lines;
         public FakeTimeProvider Clock { get; } = new(Start);
         public FakePortal Portal { get; }
         public HttpCatalogSource Source { get; }
@@ -31,7 +42,7 @@ public class HttpCatalogSourceTests
             Portal = new FakePortal(Secret, Clock);
             var client = new SignedPortalClient(new HttpClient(Portal) { BaseAddress = new Uri("https://portal.test"), Timeout = Timeout.InfiniteTimeSpan },
                 Options.Create(new PortalOptions { BaseUrl = "https://portal.test", InboundSecret = Secret, RetryBaseDelayMs = 0, MaxAttempts = 1 }), Clock);
-            Source = new HttpCatalogSource(client, Clock, NullLogger<HttpCatalogSource>.Instance);
+            Source = new HttpCatalogSource(client, Clock, log);
         }
         public Rig Feed(string json) { Portal.RespondAlways(_ => FakePortal.Json(HttpStatusCode.OK, json)); return this; }
     }
@@ -437,6 +448,89 @@ public class HttpCatalogSourceTests
         await Run(f, rig.Source);
         Assert.Equal(1, WithDb(f, db => db.CatalogListings.Count()));                                // G(9) was never created
         Assert.True(CatalogKit.Row(f, G(1)).Visible);                                                // version 5 < 10: stale
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("zero")]
+    [InlineData("text")]
+    public async Task A_tombstone_with_an_unreadable_version_still_hides_the_listing_and_a_newer_snapshot_shows_it_again(string kind)
+    {
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        var published = true; var relisted = false;
+        var tomb = kind switch
+        {
+            "missing" => (object)new { listingId = G(1), listed = false, reason = "deleted" },
+            "zero" => new { listingId = G(1), version = 0, listed = false, reason = "deleted" },
+            _ => new { listingId = G(1), version = "twenty", listed = false, reason = "deleted" },
+        };
+        var rig = PortalFor(f, since =>
+            since is null ? Page([Doc(1, 10), Doc(2, 10)], "10")
+            : since == "10" ? (published ? Page([], "10") : Page([tomb], "11"))
+            : relisted ? Page([Doc(1, 30, d => d["title"] = "Mug 1 again")], "30") : Page([], "11"));
+        await Run(f, rig.Source);
+        published = false;
+        var r = await Run(f, rig.Source);
+        Assert.Equal(1, r.Applied);                                                                  // the listing is hidden, not dropped
+        var row = CatalogKit.Row(f, G(1));
+        Assert.False(row.Visible);
+        Assert.Equal((10L, 10L), (row.Version, row.KnownVersion));                                   // hidden at the version we hold: nothing to fetch
+        Assert.True(row.IsUnlisted);
+        Assert.True(CatalogKit.Row(f, G(2)).Visible);                                                // only the named listing
+        Assert.Contains(rig.Logs, m => m.Contains(G(1).ToString()));                                 // the id is logged
+        Assert.Equal(0, (await Run(f, rig.Source)).Applied);                                         // idempotent
+        relisted = true;
+        await Run(f, rig.Source);
+        Assert.True(CatalogKit.Row(f, G(1)).Visible);                                                // a re-listing at a newer version shows it
+        Assert.Equal("Mug 1 again", CatalogKit.Row(f, G(1)).Title);
+    }
+
+    [Fact]
+    public async Task A_tombstone_without_a_listing_id_is_skipped_and_the_page_still_applies()
+    {
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        var rig = PortalFor(f, _ => Page([Doc(1, 10), new { listed = false, version = 12, reason = "deleted" }], "12"));
+        await Run(f, rig.Source);
+        Assert.True(CatalogKit.Row(f, G(1)).Visible);
+    }
+
+    [Fact]
+    public async Task A_stale_tombstone_after_a_re_listing_changes_nothing_not_the_row_and_not_a_pending_fetch()
+    {
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        var step = 0;
+        var rig = PortalFor(f, _ => step++ switch
+        {
+            0 => Page([Doc(1, 10)], "10"),
+            1 => Page([new { listingId = G(1), version = 30, listed = false, reason = "deleted" }], "30"),   // unlisted at 30
+            2 => Page([Doc(1, 40, d => d["title"] = "Mug 1 relisted")], "40"),                                 // re-listed at 40
+            _ => Page([new { listingId = G(1), version = 30, listed = false, reason = "deleted" }], "40"),    // a late copy of the tombstone
+        });
+        await Run(f, rig.Source); await Run(f, rig.Source); await Run(f, rig.Source);
+        // a newer version is known and waiting to be fetched
+        WithDb(f, db => db.CatalogListings.Where(l => l.Id == G(1)).ExecuteUpdate(s => s.SetProperty(l => l.KnownVersion, 50L).SetProperty(l => l.FetchAttempts, 2).SetProperty(l => l.NextFetchAt, f.Clock.GetUtcNow().AddHours(1))));
+        var before = CatalogKit.Row(f, G(1));
+        Assert.True(before.Visible);
+        var r = await Run(f, rig.Source);
+        Assert.Equal(0, r.Applied);
+        var after = CatalogKit.Row(f, G(1));
+        Assert.Equal((before.Visible, before.Version, before.KnownVersion, before.UnlistedVersion, before.FetchAttempts, before.NextFetchAt, before.Row),
+                     (after.Visible, after.Version, after.KnownVersion, after.UnlistedVersion, after.FetchAttempts, after.NextFetchAt, after.Row));
+    }
+
+    [Fact]
+    public async Task A_huge_description_is_clipped_at_ingest_without_cutting_a_surrogate_pair_and_a_normal_one_is_kept_whole()
+    {
+        using var f = new TestFactory(new() { ["Catalog:Source"] = "None" });
+        var huge = new string('a', SnapshotLimits.Description - 1) + "\U0001F36F" + new string('b', 70_000);       // the emoji straddles the limit
+        var rig = PortalFor(f, _ => Page([Doc(1, 10, d => d["description"] = huge), Doc(2, 10, d => d["description"] = "# Hand made\nA **lovely** mug.")], "10"));
+        await Run(f, rig.Source);
+        var big = CatalogKit.Row(f, G(1)).Description;
+        Assert.True(big.Length <= SnapshotLimits.Description);
+        Assert.True(big.Length >= SnapshotLimits.Description - 1);
+        Assert.False(char.IsHighSurrogate(big[^1]));                                                              // no lone surrogate (invalid UTF-8)
+        Assert.Equal("# Hand made\nA **lovely** mug.", CatalogKit.Row(f, G(2)).Description);
+        Assert.InRange(SnapshotLimits.Description, 20_000, 50_000);                                              // the agreed range
     }
 
     [Fact]
