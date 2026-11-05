@@ -306,7 +306,9 @@ public class AccountTests
             })).ToList();
             var results = await Task.WhenAll(ops);
             // a write that kept hitting lock contention is refused as busy (503 with Retry-After): allowed under a storm, a 500 is not; the one-default invariant below is unchanged
-            Assert.All(results, r => Assert.True(r.StatusCode is HttpStatusCode.OK or HttpStatusCode.NoContent or HttpStatusCode.Created or HttpStatusCode.NotFound or HttpStatusCode.Conflict or HttpStatusCode.ServiceUnavailable, r.StatusCode.ToString()));
+            var unexpected = results.Where(r => r.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.NoContent or HttpStatusCode.Created or HttpStatusCode.NotFound or HttpStatusCode.Conflict or HttpStatusCode.ServiceUnavailable)).ToList();
+            // if a status nobody expects shows up, the failure carries the server's own log (type and stack of the unhandled exception, never a message), so the next flake names its cause
+            Assert.True(unexpected.Count == 0, $"unexpected statuses: {string.Join(", ", unexpected.Select(r => (int)r.StatusCode))}; server log: {string.Join(" || ", k.F.Logs.Lines.Where(l => l.Contains("Unhandled") || l.Contains("Too busy") || l.Contains("ex:")).Take(10))}");
             Assert.All(results.Where(r => r.StatusCode == HttpStatusCode.ServiceUnavailable), r => Assert.True(r.Headers.RetryAfter is not null));
             var total = await k.Db(db => db.BuyerAddresses.CountAsync(a => a.AccountId == accountId));
             Assert.Equal(total > 0 ? 1 : 0, await Defaults(k, accountId));
