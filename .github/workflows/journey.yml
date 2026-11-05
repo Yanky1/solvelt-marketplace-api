@@ -113,3 +113,86 @@ jobs:
             ${{ runner.temp }}/journey-run/*.png
             ${{ runner.temp }}/journey-run/env.json
           retention-days: 7
+
+  # Opt-in: a REAL Stripe test-mode key from the repository secret STRIPE_TEST_SECRET_KEY (a sk_test_ key; the API refuses live keys at start-up). Without the secret this job is
+  # SKIPPED and says so in its summary: it never fails for a missing key (brief M8). The fake-provider job above always runs.
+  journey-real-stripe:
+    name: Buyer journey with real Stripe test keys (opt-in)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+    steps:
+      - name: Is a Stripe test key configured?
+        id: key
+        run: |
+          if [ -n "$STRIPE_TEST_SECRET_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Real-Stripe journey skipped::The repository secret STRIPE_TEST_SECRET_KEY is not set, so the opt-in real-Stripe journey did not run (the fake-provider journeys did). Add a Stripe TEST secret key to enable it."
+            echo "### Real-Stripe journey: SKIPPED (secret STRIPE_TEST_SECRET_KEY not set)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.present == 'true'
+      - name: Check out the seller-portal backend (read-only)
+        if: steps.key.outputs.present == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Yanky1/Yanky1-test-login-backend
+          ref: main
+          token: ${{ secrets.BACKEND_REPO_TOKEN || github.token }}
+          path: _portal
+      - name: Check out the web app
+        if: steps.key.outputs.present == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Yanky1/solvelt-marketplace-web
+          ref: main
+          path: _web
+      - name: Move the checkouts out of the workspace
+        if: steps.key.outputs.present == 'true'
+        run: |
+          mv _portal "$RUNNER_TEMP/portal"
+          mv _web "$RUNNER_TEMP/web"
+          echo "PORTAL_DIR=$RUNNER_TEMP/portal" >> "$GITHUB_ENV"
+          echo "WEB_DIR=$RUNNER_TEMP/web" >> "$GITHUB_ENV"
+          echo "JOURNEY_RUN_DIR=$RUNNER_TEMP/journey-run" >> "$GITHUB_ENV"
+      - uses: actions/setup-dotnet@v4
+        if: steps.key.outputs.present == 'true'
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@v4
+        if: steps.key.outputs.present == 'true'
+        with:
+          node-version: 22
+      - name: Install the web app
+        if: steps.key.outputs.present == 'true'
+        working-directory: ${{ runner.temp }}/web
+        run: npm ci
+      - name: Run the real-Stripe journey
+        if: steps.key.outputs.present == 'true'
+        run: JOURNEY_REAL_STRIPE=1 tools/journey/run.sh stripe
+        env:
+          CI: "true"
+      - name: Keep the logs of a failed run
+        if: failure() && steps.key.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-stripe-logs
+          path: |
+            ${{ runner.temp }}/journey-run/*.log
+          retention-days: 7
