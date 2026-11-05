@@ -17,7 +17,8 @@ public static class BookingCalendar
     private static readonly string[] Included = [BookingStatus.Requested, BookingStatus.Confirmed, BookingStatus.Rescheduled, BookingStatus.InProgress];
 
     public static string Escape(string s)
-        => s.Replace("\\", "\\\\").Replace(";", "\\;").Replace(",", "\\,").Replace("\r\n", "\\n").Replace("\n", "\\n").Replace("\r", "\\n");
+        => new string(s.Replace("\\", "\\\\").Replace(";", "\\;").Replace(",", "\\,").Replace("\r\n", "\\n").Replace("\n", "\\n").Replace("\r", "\\n")
+            .Where(c => c == '\t' || (c >= ' ' && c != '\u007f')).ToArray());     // no other control character can ride into the file (it is calendar TEXT, not a place for them)
 
     /// <summary>Lines are folded at 75 octets (RFC 5545 §3.1) on character boundaries, with CRLF endings.</summary>
     public static string Fold(string line)

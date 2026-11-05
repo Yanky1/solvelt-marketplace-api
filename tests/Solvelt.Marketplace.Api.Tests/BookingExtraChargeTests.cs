@@ -115,4 +115,21 @@ public sealed class BookingExtraChargeTests : BookingFlowBase
         Assert.Equal("amount_too_small", await Code(r));
         Assert.Single(Stripe.Intents);
     }
+
+    [Fact]
+    public async Task Consent_names_the_amount_the_buyer_saw_and_a_changed_request_is_refused_not_charged_under_the_old_label()
+    {
+        var b = await Completed();
+        await RequestExtra(b, 3750);
+        await RequestExtra(b, 5200, minute: 9);                                          // the provider asks for MORE before the buyer pressed the button
+        var stale = await Accept(b.Id, body: new { expectedAmountCents = 3750 });
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        Assert.Equal("amount_changed", await Code(stale));
+        Assert.DoesNotContain(Stripe.Intents, i => i.Metadata["kind"] == "booking_extra_charge");      // nothing was charged, nothing consented
+        Assert.Equal("requested", (await Row(b.Id)).ExtraChargeState);
+        var ok = await Accept(b.Id, body: new { expectedAmountCents = 5200 });
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        Assert.Equal(5200, (await Json(ok)).GetProperty("amountCents").GetInt64());
+        Assert.Equal(5200, ExtraIntent(b.MarketplaceBookingId).AmountCents);
+    }
 }
