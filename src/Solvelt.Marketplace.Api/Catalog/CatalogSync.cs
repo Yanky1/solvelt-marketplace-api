@@ -435,11 +435,12 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.CompareAtFromCents = basis.Where(v => v.CompareAtCents > v.PriceCents).Select(v => v.CompareAtCents).Min();
         listing.Available = s.Variants.Any(v => v.Available);
         listing.RecomputeVisibility();
-        await Lists.WishlistWatcher.OnListingAppliedAsync(db, time, new Lists.CatalogListingView(listing.Id, listing.Slug, listing.Title, listing.Currency, listing.PriceFromCents, listing.Available, listing.Visible, listing.Version), ct);
+        // (the wishlist watch is queued after the variants are in the unit of work, below)
 
         var brandName = (await db.CatalogBrands.FindAsync([s.Brand.Id], ct))?.Name ?? s.Brand.Name;
         SearchIndexer.Upsert(db, s.Id, s.Brand.Id, title, brandName, s.SearchTerms, listing.Description);
         SyncVariants(listing, s);
+        if (listing.Visible) await Lists.WishlistWatchQueue.QueueAsync(db, time, listing.Id, listing.Version, ct);
         SyncImages(listing, s);
         db.CatalogAttributes.RemoveRange(listing.Attributes);
         listing.Attributes = s.Attributes.Where(a => !string.IsNullOrWhiteSpace(a.Key) && !string.IsNullOrWhiteSpace(a.Value)).Take(SnapshotLimits.MaxAttributes)

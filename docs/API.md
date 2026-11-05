@@ -392,9 +392,9 @@ All routes are the signed-in buyer's own (`Authorization: Bearer`), `Cache-Contr
 | `GET /api/v1/wishlists/membership?listingIds=a,b` | up to 50 ids: `{ membership: { "<listingId>": ["<listId>", ...] } }` (for the heart buttons) |
 | `POST /api/v1/wishlists/{id}/share` | `{ shareKey }`, shown once; replaces any earlier link. The link is `<web>/wishlists/shared/<shareKey>` |
 | `DELETE /api/v1/wishlists/{id}/share` | `204`, the link stops working |
-| `GET /api/v1/shared-wishlists/{key}` | anonymous: `{ name, items: [{ addedAt, listing }] }`, `404` for a wrong or revoked key; `no-store`, `noindex`, `no-referrer` |
+| `GET /api/v1/shared-wishlists/{key}` | anonymous: `{ name, items: [{ listing }] }`, `404` for a wrong or revoked key; `no-store`, `noindex`, `no-referrer` |
 | `GET /api/v1/recently-viewed` | `{ items: [{ viewedAt, listing }] }`, newest first, at most 20, hidden listings left out |
 | `PUT /api/v1/recently-viewed/{listingId}` | `204`; the time is ours; `404` for a listing not on the storefront |
 | `POST /api/v1/recently-viewed/merge` `{ listingIds }` | `204`; the guest's ids newest first (the rest of the body is ignored), never replaces a view the server has |
 | `DELETE /api/v1/recently-viewed` | `204` |
-Notifications: kinds `wishlist_price_drop` and `wishlist_back_in_stock` (`parameters`: listingId, slug, title, currency, priceCents, previousPriceCents); email category `wishlist` in `GET/PUT /notifications/preferences`.
+Notifications (one mail per kind per listing per 7 days; demo and off-storefront listings are never announced): kinds `wishlist_price_drop` and `wishlist_back_in_stock` (`parameters`: listingId, slug, title, currency, priceCents, previousPriceCents); email category `wishlist` in `GET/PUT /notifications/preferences`.

@@ -48,6 +48,7 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScann
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Demo.DemoAccountEraser>();   // first: demo rows are removed outright (M9)
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Messaging.MessagingAccountEraser>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Lists.ListsAccountEraser>();
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Lists.WishlistWatchHandler>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Lists.WishlistsDataExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Lists.RecentlyViewedDataExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>();

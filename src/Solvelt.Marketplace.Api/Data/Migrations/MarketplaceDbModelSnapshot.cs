@@ -2712,6 +2712,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<long>("BaselinePriceCents")
                         .HasColumnType("bigint");
 
+                    b.Property<DateTimeOffset?>("LastPriceNotifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("LastStockNotifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid>("ListingId")
                         .HasColumnType("uuid");
 

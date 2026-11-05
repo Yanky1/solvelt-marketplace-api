@@ -33,6 +33,9 @@ public sealed class WishlistItem
     public long BaselinePriceCents { get; set; }
     public string BaselineCurrency { get; set; } = "";
     public bool BaselineAvailable { get; set; }
+    /// <summary>When the buyer was last told of a price drop / a restock of this listing: at most one mail per kind per cooldown (M6-03).</summary>
+    public DateTimeOffset? LastPriceNotifiedAt { get; set; }
+    public DateTimeOffset? LastStockNotifiedAt { get; set; }
 }
 
 /// <summary>A listing a signed-in buyer looked at: at most <see cref="ListLimits.MaxRecentlyViewed"/> per account, newest first. The time is ours, never the client's.</summary>

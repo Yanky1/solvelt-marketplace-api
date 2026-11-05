@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105110536_InitialCreate")]
+    [Migration("20261105121945_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2714,6 +2714,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<long>("BaselinePriceCents")
                         .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("LastPriceNotifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("LastStockNotifiedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid>("ListingId")
                         .HasColumnType("uuid");

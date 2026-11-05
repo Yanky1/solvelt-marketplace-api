@@ -1151,7 +1151,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     AddedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     BaselinePriceCents = table.Column<long>(type: "bigint", nullable: false),
                     BaselineCurrency = table.Column<string>(type: "character varying(3)", maxLength: 3, nullable: false),
-                    BaselineAvailable = table.Column<bool>(type: "boolean", nullable: false)
+                    BaselineAvailable = table.Column<bool>(type: "boolean", nullable: false),
+                    LastPriceNotifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    LastStockNotifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
                 },
                 constraints: table =>
                 {

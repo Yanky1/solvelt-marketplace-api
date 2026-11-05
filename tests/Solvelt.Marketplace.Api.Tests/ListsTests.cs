@@ -149,46 +149,159 @@ public sealed class ListsTests : IDisposable
         Assert.False((await Call(HttpMethod.Get, $"/api/v1/wishlists/{id}", t)).Body.GetProperty("wishlist").GetProperty("shared").GetBoolean());
     }
 
-    [Fact]
-    public async Task A_price_drop_and_a_back_in_stock_are_each_one_notification_and_the_baseline_moves()
+    /// <summary>Applies the catalog change and runs the queued wishlist watches (the sync only queues them).</summary>
+    private async Task SyncAndWatch()
     {
-        var t = await _k.VerifiedSession("l7@example.com");
-        var other = await _k.VerifiedSession("l7b@example.com");
+        await CatalogKit.Sync(_k.F);
+        while (await _k.Dispatch() > 0) { }
+    }
+
+    private Task<int> Count(string kind, Guid? account = null) => _k.Db(db => db.Notifications.CountAsync(n => n.Kind == kind && (account == null || n.AccountId == account)));
+
+    private async Task<(string Token, Guid Account)> Buyer(string email, params string[] slugs)
+    {
+        var t = await _k.VerifiedSession(email);
         var id = await NewList(t);
-        await Call(HttpMethod.Put, $"/api/v1/wishlists/{id}/items/{Listing()}", t);
+        foreach (var slug in slugs) Assert.Equal(HttpStatusCode.NoContent, (await Call(HttpMethod.Put, $"/api/v1/wishlists/{id}/items/{Listing(slug)}", t)).Status);
+        return (t, (await _k.Account(email)).Id);
+    }
+
+    private void Reprice(long delta, string slug = "challah-classic")
+    {
+        var fx = CatalogKit.Fixture(_k.F);
+        fx.Upsert(Listing(slug), l => l with { Variants = l.Variants.Select(x => x with { PriceCents = x.PriceCents + delta }).ToList() });
+    }
+
+    [Fact]
+    public async Task Two_buyers_with_the_same_listing_are_both_told_and_the_catalog_still_gets_the_new_price()
+    {
+        var (_, a) = await Buyer("w1a@example.com", "challah-classic");
+        var (_, b) = await Buyer("w1b@example.com", "challah-classic");
+        var (_, c) = await Buyer("w1c@example.com", "babka-chocolate");   // another listing: not told
+        Reprice(-100);
+        await SyncAndWatch();
+        Assert.Equal(550, (await _k.Db(db => db.CatalogListings.AsNoTracking().FirstAsync(l => l.Id == Listing()))).PriceFromCents);   // the snapshot was applied (H1: it used to be skipped)
+        Assert.Equal((1, 1, 0), (await Count(NotificationKinds.WishlistPriceDrop, a), await Count(NotificationKinds.WishlistPriceDrop, b), await Count(NotificationKinds.WishlistPriceDrop, c)));
+        await SyncAndWatch();   // nothing new: no second notification
+        Assert.Equal(2, await Count(NotificationKinds.WishlistPriceDrop));
+        var mail = await _k.Mail("w1a@example.com");
+        Assert.Contains(mail, m => m.Subject.StartsWith("Price drop"));
+    }
+
+    [Fact]
+    public async Task A_notification_that_cannot_be_written_for_one_buyer_never_stops_the_catalog_or_the_other_buyers()
+    {
+        var (_, a) = await Buyer("w2a@example.com", "challah-classic");
+        var (_, b) = await Buyer("w2b@example.com", "challah-classic");
+        Reprice(-100);
+        await CatalogKit.Sync(_k.F);
+        var version = (await _k.Db(db => db.CatalogListings.AsNoTracking().FirstAsync(l => l.Id == Listing()))).Version;
+        // buyer A's key is already taken by something else: A's insert violates the unique index
+        await _k.Db(async db => { db.Notifications.Add(new Notification { Id = Guid.NewGuid(), AccountId = Guid.NewGuid(), Kind = "x", DedupeKey = $"wishlist:{a:N}:{Listing():N}:{version}:{NotificationKinds.WishlistPriceDrop}", CreatedAt = _k.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
+        while (await _k.Dispatch() > 0) { }
+        Assert.Equal(550, (await _k.Db(db => db.CatalogListings.AsNoTracking().FirstAsync(l => l.Id == Listing()))).PriceFromCents);
+        Assert.Equal(1, await Count(NotificationKinds.WishlistPriceDrop, b));
+        Assert.Equal(0, await Count(NotificationKinds.WishlistPriceDrop, a));
+    }
+
+    [Fact]
+    public async Task A_cheaper_variant_coming_back_in_stock_is_not_a_price_drop_and_a_restock_is_a_restock()
+    {
+        var (_, a) = await Buyer("w3@example.com", "challah-classic");
         var fx = CatalogKit.Fixture(_k.F);
         var v = fx.All().First(l => l.Id == Listing()).Variants;
+        var cheapest = v.OrderBy(x => x.PriceCents).First();
+        // the cheapest variant goes out of stock: the "from" price over available variants rises, the lowest price over all variants does not move
+        fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x.Id == cheapest.Id ? x with { Available = false } : x).ToList() });
+        await SyncAndWatch();
+        // ... and comes back: that is NOT a price drop
+        fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x.Id == cheapest.Id ? x with { Available = true } : x).ToList() });
+        await SyncAndWatch();
+        Assert.Equal(0, await Count(NotificationKinds.WishlistPriceDrop, a));
+        Assert.Equal(0, await Count(NotificationKinds.WishlistBackInStock, a));   // the listing stayed available through the other variants
 
-        fx.Upsert(Listing(), l => l with { Variants = v.Select(x => x with { PriceCents = x.PriceCents - 100 }).ToList() });
-        await CatalogKit.Sync(_k.F);
-        await CatalogKit.Sync(_k.F);   // nothing new: no second notification
-        var notes = await _k.Db(db => db.Notifications.AsNoTracking().Where(n => n.Kind == NotificationKinds.WishlistPriceDrop).ToListAsync());
-        var n1 = Assert.Single(notes);
-        Assert.Equal((await _k.Account("l7@example.com")).Id, n1.AccountId);
-        Assert.Contains("\"previousPriceCents\":650", n1.ParamsJson);
-        Assert.Contains("\"priceCents\":550", n1.ParamsJson);
+        // everything out of stock, then back: ONE back-in-stock
+        fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x with { Available = false }).ToList() });
+        await SyncAndWatch();
+        Assert.Equal(0, await Count(NotificationKinds.WishlistBackInStock, a));
+        fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x with { Available = true }).ToList() });
+        await SyncAndWatch();
+        Assert.Equal(1, await Count(NotificationKinds.WishlistBackInStock, a));
+    }
 
-        // a price that goes up quietly raises the baseline; the next drop below it is announced again
-        fx.Upsert(Listing(), l => l with { Variants = v.Select(x => x with { PriceCents = x.PriceCents + 300 }).ToList() });
-        await CatalogKit.Sync(_k.F);
-        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == NotificationKinds.WishlistPriceDrop)));
-        fx.Upsert(Listing(), l => l with { Variants = v.Select(x => x with { PriceCents = x.PriceCents + 200 }).ToList() });
-        await CatalogKit.Sync(_k.F);
-        Assert.Equal(2, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == NotificationKinds.WishlistPriceDrop)));
+    [Fact]
+    public async Task A_buyer_is_told_at_most_once_per_week_per_kind_however_often_the_listing_flaps()
+    {
+        var (_, a) = await Buyer("w4@example.com", "challah-classic");
+        var fx = CatalogKit.Fixture(_k.F);
+        for (var i = 0; i < 5; i++)
+        {
+            fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x with { Available = false }).ToList() });
+            await SyncAndWatch();
+            fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x with { Available = true }).ToList() });
+            await SyncAndWatch();
+        }
+        Assert.Equal(1, await Count(NotificationKinds.WishlistBackInStock, a));
+        _k.F.Clock.Advance(WishlistWatchHandler.Cooldown + TimeSpan.FromHours(1));
+        fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x with { Available = false }).ToList() });
+        await SyncAndWatch();
+        fx.Upsert(Listing(), l => l with { Variants = l.Variants.Select(x => x with { Available = true }).ToList() });
+        await SyncAndWatch();
+        Assert.Equal(2, await Count(NotificationKinds.WishlistBackInStock, a));
 
-        // back in stock
-        fx.Upsert(Listing(), l => l with { Variants = v.Select(x => x with { Available = false }).ToList() });
-        await CatalogKit.Sync(_k.F);
-        Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == NotificationKinds.WishlistBackInStock)));
-        fx.Upsert(Listing(), l => l with { Variants = v.ToList() });
-        await CatalogKit.Sync(_k.F);
-        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == NotificationKinds.WishlistBackInStock)));
-        Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync(n => n.AccountId != n1.AccountId && n.Kind.StartsWith("wishlist"))));   // the other buyer got nothing
-        _ = other;
+        // price: a drop, a rise and another drop inside the cooldown are one mail
+        Reprice(-100); await SyncAndWatch();
+        Reprice(+300); await SyncAndWatch();
+        Reprice(-200); await SyncAndWatch();
+        Assert.Equal(1, await Count(NotificationKinds.WishlistPriceDrop, a));
+    }
 
-        // the mail honours the "wishlist" preference
-        Assert.Contains(await _k.Mail("l7@example.com"), m => m.Subject.StartsWith("Back in stock"));
-        Assert.Equal(HttpStatusCode.OK, (await Call(HttpMethod.Put, "/api/v1/notifications/preferences", t, new { email = new Dictionary<string, bool> { ["wishlist"] = false } })).Status);
+    [Fact]
+    public async Task Demo_listings_and_listings_off_the_storefront_are_never_announced_and_the_baseline_stays()
+    {
+        var (_, a) = await Buyer("w5@example.com", "challah-classic", "babka-chocolate");
+        var fx = CatalogKit.Fixture(_k.F);
+        fx.Upsert(Listing(), l => l with { Demo = true, Variants = l.Variants.Select(x => x with { PriceCents = x.PriceCents - 100 }).ToList() });
+        await SyncAndWatch();
+        Assert.Equal(0, await Count(NotificationKinds.WishlistPriceDrop, a));
+        var other = fx.All().First(l => l.Id == Listing("babka-chocolate"));
+        fx.Upsert(Listing("babka-chocolate"), l => l with { Variants = l.Variants.Select(x => x with { PriceCents = x.PriceCents - 100 }).ToList() });
+        await CatalogKit.Sync(_k.F);   // the sync applies the price (and the seller as the feed has it) ...
+        await _k.Db(async db => { await db.CatalogSellers.Where(s => s.Id == other.Seller.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.Active, false)); return 0; });   // ... then the seller is suspended before the watch runs
+        while (await _k.Dispatch() > 0) { }
+        Assert.Equal(0, await Count(NotificationKinds.WishlistPriceDrop, a));
+        Assert.All(await _k.Db(db => db.WishlistItems.AsNoTracking().ToListAsync()), i => Assert.True(i.BaselinePriceCents > 0));
+    }
+
+    [Fact]
+    public async Task A_price_in_another_currency_is_no_drop_and_a_list_holds_at_most_two_hundred_items_even_in_parallel()
+    {
+        var (t, a) = await Buyer("w6@example.com", "challah-classic");
+        CatalogKit.Fixture(_k.F).Upsert(Listing(), l => l with { Currency = "EUR", Variants = l.Variants.Select(x => x with { PriceCents = 1 }).ToList() });
+        await SyncAndWatch();
+        Assert.Equal(0, await Count(NotificationKinds.WishlistPriceDrop, a));
+
+        var fx = CatalogKit.Fixture(_k.F);
+        var proto = fx.All()[0];
+        var ids = Enumerable.Range(0, ListLimits.MaxItemsPerList + 5).Select(i => fx.Add(CatalogKit.Copy(proto, Guid.NewGuid(), "Cap " + i)).Id).ToList();
+        await CatalogKit.Sync(_k.F);
+        var list = await NewList(t, "Big");
+        var rs = await Task.WhenAll(ids.Select(id => Call(HttpMethod.Put, $"/api/v1/wishlists/{list}/items/{id}", t)));
+        var held = await _k.Db(db => db.WishlistItems.CountAsync(i => i.WishlistId == list));
+        Assert.InRange(held, ListLimits.MaxItemsPerList - 5, ListLimits.MaxItemsPerList);   // the post-insert check is fail-closed: a race can leave a little room, never more than the cap (M6-01)
+        Assert.All(rs.Where(r => r.Status != HttpStatusCode.NoContent), r => Assert.Equal(HttpStatusCode.UnprocessableEntity, r.Status));
+    }
+
+    [Fact]
+    public async Task The_same_listing_on_two_lists_of_one_buyer_is_one_notification()
+    {
+        var t = await _k.VerifiedSession("w7@example.com");
+        var one = await NewList(t, "One"); var two = await NewList(t, "Two");
+        foreach (var l in new[] { one, two }) await Call(HttpMethod.Put, $"/api/v1/wishlists/{l}/items/{Listing()}", t);
+        Reprice(-100);
+        await SyncAndWatch();
+        Assert.Equal(1, await Count(NotificationKinds.WishlistPriceDrop));
+        Assert.All(await _k.Db(db => db.WishlistItems.AsNoTracking().ToListAsync()), i => Assert.Equal(550, i.BaselinePriceCents));
     }
 
     [Fact]

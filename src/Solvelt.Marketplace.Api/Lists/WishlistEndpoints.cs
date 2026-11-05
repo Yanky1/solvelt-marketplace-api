@@ -68,7 +68,7 @@ public static class WishlistEndpoints
         var w = new Wishlist { Id = Guid.NewGuid(), AccountId = accountId, Name = name, NameKey = NameKey(name), CreatedAt = now, UpdatedAt = now };
         db.Wishlists.Add(w);
         try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException) { db.ChangeTracker.Clear(); return Private(Problems.Json(409, "name_taken", "You already have a list with that name."), ctx); }
+        catch (DbUpdateException ex) when (Solvelt.Marketplace.Api.Account.AccountService.IsUniqueViolation(ex)) { db.ChangeTracker.Clear(); return Private(Problems.Json(409, "name_taken", "You already have a list with that name."), ctx); }
         // The count is checked after the insert, so parallel requests cannot all slip under the limit; the list that went over is removed again.
         if (await db.Wishlists.CountAsync(x => x.AccountId == accountId, ct) > ListLimits.MaxLists)
         {
@@ -104,7 +104,7 @@ public static class WishlistEndpoints
         if (NameProblem(body?.Name, out var name) is { } p) return Private(Problems.Validation(new Dictionary<string, string> { ["name"] = p }), ctx);
         w.Name = name; w.NameKey = NameKey(name); w.UpdatedAt = time.GetUtcNow().ToUniversalTime();
         try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException) { db.ChangeTracker.Clear(); return Private(Problems.Json(409, "name_taken", "You already have a list with that name."), ctx); }
+        catch (DbUpdateException ex) when (Solvelt.Marketplace.Api.Account.AccountService.IsUniqueViolation(ex)) { db.ChangeTracker.Clear(); return Private(Problems.Json(409, "name_taken", "You already have a list with that name."), ctx); }
         return Private(Results.Json(Summary(w, await db.WishlistItems.CountAsync(i => i.WishlistId == id, ct))), ctx);
     }
 
@@ -120,13 +120,14 @@ public static class WishlistEndpoints
     private static async Task<IResult> AddItem(Guid id, Guid listingId, HttpContext ctx, MarketplaceDb db, TimeProvider time, CancellationToken ct)
     {
         if (await Own(db, ctx, id, ct) is null) return Private(Problems.NotFound(), ctx);
-        var listing = await CatalogEndpoints.Visible(db).Where(l => l.Id == listingId).Select(l => new { l.PriceFromCents, l.Currency, l.Available }).FirstOrDefaultAsync(ct);
+        var listing = await CatalogEndpoints.Visible(db).Where(l => l.Id == listingId).Select(l => new { l.Currency, l.Available }).FirstOrDefaultAsync(ct);
         if (listing is null) return Private(Problems.NotFound("That item is not available."), ctx);
+        var lowest = await WishlistWatchHandler.LowestPriceAsync(db, listingId, ct) ?? 0;   // the baseline is the lowest price over ALL variants (M6-03)
         if (await db.WishlistItems.AnyAsync(i => i.WishlistId == id && i.ListingId == listingId, ct)) return Private(Results.NoContent(), ctx);
-        var item = new WishlistItem { Id = Guid.NewGuid(), WishlistId = id, ListingId = listingId, AddedAt = time.GetUtcNow().ToUniversalTime(), BaselinePriceCents = listing.PriceFromCents, BaselineCurrency = listing.Currency, BaselineAvailable = listing.Available };
+        var item = new WishlistItem { Id = Guid.NewGuid(), WishlistId = id, ListingId = listingId, AddedAt = time.GetUtcNow().ToUniversalTime(), BaselinePriceCents = lowest, BaselineCurrency = listing.Currency, BaselineAvailable = listing.Available };
         db.WishlistItems.Add(item);
         try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException) { db.ChangeTracker.Clear(); return Private(Results.NoContent(), ctx); }   // a parallel request added it first
+        catch (DbUpdateException ex) when (Solvelt.Marketplace.Api.Account.AccountService.IsUniqueViolation(ex)) { db.ChangeTracker.Clear(); return Private(Results.NoContent(), ctx); }   // a parallel request added it first
         if (await db.WishlistItems.CountAsync(i => i.WishlistId == id, ct) > ListLimits.MaxItemsPerList)
         {
             await db.WishlistItems.Where(i => i.Id == item.Id).ExecuteDeleteAsync(ct);
@@ -185,6 +186,6 @@ public static class WishlistEndpoints
         if (await db.Wishlists.AsNoTracking().FirstOrDefaultAsync(w => w.ShareKeyHash == hash, ct) is not { } w) return Problems.NotFound();
         var items = await db.WishlistItems.AsNoTracking().Where(i => i.WishlistId == w.Id).OrderByDescending(i => i.AddedAt).ThenBy(i => i.Id).ToListAsync(ct);
         var cards = await ListCards.LoadAsync(db, items.Select(i => i.ListingId).ToList(), ct);
-        return Results.Json(new { name = w.Name, items = items.Where(i => cards.ContainsKey(i.ListingId)).Select(i => new { addedAt = i.AddedAt, listing = cards[i.ListingId] }) });
+        return Results.Json(new { name = w.Name, items = items.Where(i => cards.ContainsKey(i.ListingId)).Select(i => new { listing = cards[i.ListingId] }) });
     }
 }
