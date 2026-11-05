@@ -24,6 +24,8 @@ public sealed class StaffOptions
     public int AuditRetentionDays { get; set; } = 730;
     /// <summary>Break-glass reveals one staff member may make per hour (counted from the audit log).</summary>
     public int RevealsPerHour { get; set; } = 20;
+    /// <summary>Buyer and order lookups one staff member may make per hour (counted from the audit log), so a stolen session cannot walk the customer base.</summary>
+    public int LookupsPerHour { get; set; } = 120;
     /// <summary>A paid order the portal has not accepted after this many minutes shows in the stuck-ingest list.</summary>
     public int StuckIngestMinutes { get; set; } = 15;
 }
@@ -41,6 +43,8 @@ public static class StaffConfig
             var email = config["Staff:BootstrapEmail"];
             if (string.IsNullOrWhiteSpace(email) || Auth.AuthValidation.EmailProblem(email) is not null) yield return "Staff:BootstrapEmail (env Staff__BootstrapEmail) must be a valid address when Staff:BootstrapToken is set.";
         }
+        // The list form only: `Staff__AllowedIps=1.2.3.4/32` (or a JSON string) binds to NO children, which used to mean "no list, allow everyone" (security review, residual MED-1).
+        if (config.GetSection("Staff:AllowedIps").Value is not null) yield return "Staff:AllowedIps must be a list: use Staff__AllowedIps__0, Staff__AllowedIps__1 ... (a single value is refused, it would silently allow every address).";
         // An allow-list that is SET but blank must never mean "everyone" (security review MED-1): a blank entry is refused at start instead of being dropped.
         foreach (var entry in config.GetSection("Staff:AllowedIps").GetChildren().Select(c => c.Value))
         {
@@ -54,7 +58,10 @@ public static class StaffConfig
 public sealed class IpAllowList(IReadOnlyList<IPNetwork> networks)
 {
     public bool IsEmpty => networks.Count == 0;
-    public static IpAllowList FromConfig(IConfiguration config) => From(config.GetSection("Staff:AllowedIps").GetChildren().Select(c => c.Value ?? ""));
+    public static IpAllowList FromConfig(IConfiguration config)
+        => config.GetSection("Staff:AllowedIps").Value is not null
+            ? throw new InvalidOperationException("Staff:AllowedIps must be a list (Staff__AllowedIps__0 ...), not a single value.")   // fail closed: never "no list"
+            : From(config.GetSection("Staff:AllowedIps").GetChildren().Select(c => c.Value ?? ""));
 
     public static bool TryParseEntry(string entry, out IPNetwork network)
     {

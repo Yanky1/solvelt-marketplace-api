@@ -30,7 +30,7 @@ public static class Masking
 public sealed record BuyerView(Guid Id, string? Email, string Name, string RelayEmail, bool EmailVerified, bool Locked, DateTimeOffset? LockedAt, bool Deleted, bool Redacted, DateTimeOffset CreatedAt,
     int Passkeys, int ActiveSessions, int Addresses, int Orders, bool HasPassword, bool Demo);
 
-public enum BuyerOutcome { Ok, NotFound, RevealLimit, InvalidFields }
+public enum BuyerOutcome { Ok, NotFound, RevealLimit, InvalidFields, LookupLimit }
 
 /// <summary>Buyer account tools for staff (decisions M7-07..M7-09): masked lookup, break-glass reveal, lock and unlock, sign-out everywhere. Each one audits in its own transaction.</summary>
 public sealed class StaffBuyerService(MarketplaceDb db, TimeProvider time, IOptions<StaffOptions> options)
@@ -65,15 +65,26 @@ public sealed class StaffBuyerService(MarketplaceDb db, TimeProvider time, IOpti
         var addresses = await db.BuyerAddresses.CountAsync(x => x.AccountId == id, ct);
         var orders = await db.Orders.CountAsync(o => o.AccountId == id, ct);
         var demo = a.DemoVerifiedAt != null || await db.BuyerAddresses.AnyAsync(x => x.AccountId == id && x.IsDemo, ct) || await db.Orders.AnyAsync(o => o.AccountId == id && o.IsDemo, ct);
-        return new BuyerView(a.Id, Masking.Email(a.Email), a.RedactedAt is null ? Masking.Name(a.DisplayName) : a.DisplayName, a.RelayEmail, a.EmailVerifiedAt != null, a.StaffLockedAt != null, a.StaffLockedAt,
+        return new BuyerView(a.Id, Masking.Email(a.Email), a.RedactedAt is null ? Masking.Name(a.DisplayName) : a.DisplayName, Masking.Email(a.RelayEmail) ?? "", a.EmailVerifiedAt != null, a.StaffLockedAt != null, a.StaffLockedAt,
             a.DeletedAt != null, a.RedactedAt != null, a.CreatedAt, passkeys, sessions, addresses, orders, a.PasswordHash != null, demo);
     }
 
-    /// <summary>The audit row for a lookup names the buyer found (an id), never the text the staff member typed.</summary>
-    public async Task AuditLookupAsync(StaffPrincipal who, Guid? found, string reason, CancellationToken ct)
+    public sealed record LookupResult(bool Limited, BuyerView? View);
+
+    /// <summary>
+    /// One lookup, as one unit (security review LOW 7): the hourly cap is checked first (under the staff row's lock, from the audit log), then the buyer is found and shown, and the audit row names
+    /// the buyer found (an id) or none, never what was typed. A miss counts against the cap like a hit.
+    /// </summary>
+    public async Task<LookupResult> LookupAsync(StaffPrincipal who, Guid? id, string? email, string? order, string reason, CancellationToken ct)
     {
-        StaffAudit.Add(db, time, who, found is null ? "buyer.lookup_miss" : "buyer.lookup", found is null ? null : "buyer", found?.ToString("D"), reason);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (await StaffLookupCap.ReachedAsync(db, who, Now, options.Value.LookupsPerHour, ct)) return new(true, null);
+        var found = await FindAsync(id, email, order, ct);
+        var view = found is { } f ? await ViewAsync(f, ct) : null;
+        StaffAudit.Add(db, time, who, view is null ? "buyer.lookup_miss" : "buyer.lookup", view is null ? null : "buyer", view?.Id.ToString("D"), reason);
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return new(false, view);
     }
 
     public sealed record Revealed(string? Email, string? Name, string? Phone, List<RevealedAddress>? Addresses, bool Redacted);
@@ -83,10 +94,10 @@ public sealed class StaffBuyerService(MarketplaceDb db, TimeProvider time, IOpti
     /// Break-glass (decision M7-08): shows the real values of the chosen fields. The audit row (which fields, why, who) is saved in the SAME transaction that reads them, so a read that
     /// is not recorded cannot happen; an hourly cap per staff member (from the audit log, under the staff row's lock so parallel calls count each other) bounds a stolen session.
     /// </summary>
-    public async Task<(BuyerOutcome Outcome, Revealed? Data)> RevealAsync(StaffPrincipal who, Guid id, IReadOnlyList<string> fields, string reason, CancellationToken ct)
+    public async Task<(BuyerOutcome Outcome, Revealed? Data)> RevealAsync(StaffPrincipal who, Guid id, IReadOnlyList<string?> fields, string reason, CancellationToken ct)
     {
-        var chosen = fields.Select(f => f.Trim().ToLowerInvariant()).Distinct().ToList();
-        if (chosen.Count == 0 || chosen.Any(f => !RevealFields.Contains(f))) return (BuyerOutcome.InvalidFields, null);
+        var chosen = fields.Select(f => f?.Trim().ToLowerInvariant()).Distinct().ToList();   // a null entry in the list is just an invalid field, never an exception
+        if (chosen.Count == 0 || chosen.Any(f => f is null || !RevealFields.Contains(f))) return (BuyerOutcome.InvalidFields, null);
         var now = Now;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.StaffAccounts.Where(a => a.Id == who.StaffId).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct);
@@ -142,13 +153,14 @@ public sealed class StaffBuyerService(MarketplaceDb db, TimeProvider time, IOpti
 
 public static class StaffBuyerEndpoints
 {
-    public sealed record RevealBody(string[]? Fields, string? Reason);
+    public sealed record RevealBody(string?[]? Fields, string? Reason);
+    public sealed record LookupBody(string? Email, string? Order, Guid? Id, string? Reason);
 
     public static IEndpointRouteBuilder MapStaffBuyers(this IEndpointRouteBuilder app)
     {
         var g = app.StaffGroup().MapGroup("/buyers");
-        g.MapGet("", Lookup).StaffCan(StaffPermissions.BuyersView);
-        g.MapGet("/{id:guid}", Detail).StaffCan(StaffPermissions.BuyersView);
+        g.MapPost("/lookup", Lookup).StaffCan(StaffPermissions.BuyersView);
+        g.MapPost("/{id:guid}/lookup", Detail).StaffCan(StaffPermissions.BuyersView);
         g.MapPost("/{id:guid}/reveal", Reveal).StaffCan(StaffPermissions.BuyersReveal);
         g.MapPost("/{id:guid}/lock", (Guid id, StaffEndpoints.ReasonBody? b, HttpContext c, StaffBuyerService s, TimeProvider t, IOptions<StaffOptions> o, CancellationToken ct) => Lock(id, b, true, c, s, t, o, ct)).StaffCan(StaffPermissions.BuyersLock);
         g.MapPost("/{id:guid}/unlock", (Guid id, StaffEndpoints.ReasonBody? b, HttpContext c, StaffBuyerService s, TimeProvider t, IOptions<StaffOptions> o, CancellationToken ct) => Lock(id, b, false, c, s, t, o, ct)).StaffCan(StaffPermissions.BuyersLock);
@@ -162,24 +174,26 @@ public static class StaffBuyerEndpoints
         createdAt = v.CreatedAt, passkeys = v.Passkeys, activeSessions = v.ActiveSessions, addresses = v.Addresses, orders = v.Orders, hasPassword = v.HasPassword, demo = v.Demo,
     };
 
-    /// <summary><c>GET /buyers?email=…|order=…|id=…&amp;reason=…</c>: one buyer or 404. The reason is required (a lookup is an action) and is in the query, which the logs never keep.</summary>
-    private static async Task<IResult> Lookup(HttpContext ctx, StaffBuyerService buyers, TimeProvider time, IOptions<StaffOptions> o, string? email, string? order, Guid? id, string? reason, CancellationToken ct)
+    /// <summary>
+    /// <c>POST /buyers/lookup { email | order | id, reason }</c>: one buyer or 404. A POST with a body, NOT a query string: the typed address and the reason must not appear in a URL, which proxy,
+    /// CDN and BFF access logs keep (security review LOW 7). The reason is required (a lookup is an action) and `429 lookup_limit` follows the hourly cap.
+    /// </summary>
+    private static async Task<IResult> Lookup(LookupBody? body, HttpContext ctx, StaffBuyerService buyers, TimeProvider time, IOptions<StaffOptions> o, CancellationToken ct)
     {
-        if (StaffEndpoints.Guard(ctx, time, o, reason, stepUp: false) is { } refused) return refused;
-        var given = (email is not null ? 1 : 0) + (order is not null ? 1 : 0) + (id is not null ? 1 : 0);
+        if (StaffEndpoints.Guard(ctx, time, o, body?.Reason, stepUp: false) is { } refused) return refused;
+        var given = (body!.Email is not null ? 1 : 0) + (body.Order is not null ? 1 : 0) + (body.Id is not null ? 1 : 0);
         if (given != 1) return Problems.BadRequest("one_key", "Give exactly one of email, order or id.");
-        var found = await buyers.FindAsync(id, email, order, ct);
-        await buyers.AuditLookupAsync(ctx.Staff(), found, StaffReason.Clean(reason), ct);
-        return found is { } f && await buyers.ViewAsync(f, ct) is { } view ? Results.Json(Shape(view)) : Problems.NotFound();
+        return Shown(await buyers.LookupAsync(ctx.Staff(), body.Id, body.Email, body.Order, StaffReason.Clean(body.Reason), ct));
     }
 
-    private static async Task<IResult> Detail(Guid id, HttpContext ctx, StaffBuyerService buyers, TimeProvider time, IOptions<StaffOptions> o, string? reason, CancellationToken ct)
+    private static async Task<IResult> Detail(Guid id, StaffEndpoints.ReasonBody? body, HttpContext ctx, StaffBuyerService buyers, TimeProvider time, IOptions<StaffOptions> o, CancellationToken ct)
     {
-        if (StaffEndpoints.Guard(ctx, time, o, reason, stepUp: false) is { } refused) return refused;
-        var view = await buyers.ViewAsync(id, ct);
-        await buyers.AuditLookupAsync(ctx.Staff(), view?.Id, StaffReason.Clean(reason), ct);
-        return view is null ? Problems.NotFound() : Results.Json(Shape(view));
+        if (StaffEndpoints.Guard(ctx, time, o, body?.Reason, stepUp: false) is { } refused) return refused;
+        return Shown(await buyers.LookupAsync(ctx.Staff(), id, null, null, StaffReason.Clean(body!.Reason), ct));
     }
+
+    private static IResult Shown(StaffBuyerService.LookupResult r)
+        => r.Limited ? Problems.Json(429, "lookup_limit", "Too many lookups this hour.") : r.View is null ? Problems.NotFound() : Results.Json(Shape(r.View));
 
     private static async Task<IResult> Reveal(Guid id, RevealBody? body, HttpContext ctx, StaffBuyerService buyers, TimeProvider time, IOptions<StaffOptions> o, CancellationToken ct)
     {
