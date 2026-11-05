@@ -91,6 +91,13 @@ A database made without migrations is baselined only if it is EXACTLY what the m
 Logging never contains URLs, query strings or paths (filters are enforced in code, see decision M1-29).
 Outside Development/Testing (any other environment name, Staging included) the app refuses to start when a required value is missing, a key is short, any two keys are equal, or a dev default is used in any slot.
 
+### Staff area: making the first admin (for Ronald)
+There is no built-in staff account and no password. In plain words:
+1. Make up a long secret (`openssl rand -base64 48`). On the API set `Staff__BootstrapToken` to it and `Staff__BootstrapEmail` to your email, then start the API.
+2. Open the website at `/staff/enrol`, paste the secret, and let your phone or laptop create a passkey. You are now signed in as admin.
+3. Delete `Staff__BootstrapToken` and `Staff__BootstrapEmail` from the settings. The secret already stopped working the moment you made the passkey.
+4. Add a second passkey on another device, then invite the rest of the staff from "Staff accounts". Lost a device? An admin sends a new one-time link. Full details: [docs/STAFF.md](docs/STAFF.md).
+
 ### Test site (demo data)
 
 `Demo__Enabled=true` turns on test mode (M9): the public config says so (the web shows a TEST MODE badge), buyers get a "Fill with demo data" button, and an unverified account can be verified without email. **The API refuses to start with it on unless `ASPNETCORE_ENVIRONMENT` is exactly Development, Testing or Staging (trimmed, case-insensitive; an allowlist, so "Prod", " Production" and "Live" are refused too), with no override.** A test site therefore runs with `ASPNETCORE_ENVIRONMENT=Staging` (every production check still applies in Staging) and the web with `APP_ENV=staging` and `DEMO_ENABLED=true`. A production build with `Demo__Enabled` off or unset starts normally. **A test site must send its mail to a sandbox (Mailpit, a catch-all mailbox), never to real addresses:** an unverified account can be demo-verified without mailbox proof, and its notifications go to the address it typed. Details: docs/API.md "Demo data", docs/DECISIONS.md M9-01 to M9-08.
