@@ -584,6 +584,19 @@ public class AuthTests
     }
 
     [Fact]
+    public void The_public_base_url_of_the_web_site_must_be_https_in_production()
+    {
+        Assert.Empty(Validate(GoodProd()));
+        foreach (var bad in new[] { "http://shop.example", "shop.example", "ftp://shop.example" })
+        {
+            var d = GoodProd(); d["Marketplace:PublicBaseUrl"] = bad;
+            Assert.Contains(Validate(d), p => p.Contains("Marketplace:PublicBaseUrl") && p.Contains("https"));
+        }
+        var none = GoodProd(); none.Remove("Marketplace:PublicBaseUrl");
+        Assert.Contains(Validate(none), p => p.Contains("Marketplace:PublicBaseUrl") && p.Contains("required"));
+    }
+
+    [Fact]
     public void The_unsubscribe_key_is_required_long_distinct_and_never_a_dev_default_in_production()
     {
         var missing = GoodProd(); missing.Remove("Notifications:UnsubscribeKey");

@@ -202,6 +202,9 @@ public static class StartupValidator
         }
         if (string.IsNullOrWhiteSpace(config["Marketplace:RelayDomain"])) problems.Add("Marketplace:RelayDomain (env Marketplace__RelayDomain) is required.");
         if (string.IsNullOrWhiteSpace(config["Marketplace:PublicBaseUrl"])) problems.Add("Marketplace:PublicBaseUrl (env Marketplace__PublicBaseUrl) is required.");
+        // The origin of every link in mail (verify e-mail, password reset, order links, calendar): behind a TLS-terminating proxy the API cannot see the buyer's scheme, so the configured one is the only truth (M8-13).
+        else if (!Uri.TryCreate(config["Marketplace:PublicBaseUrl"], UriKind.Absolute, out var publicBase) || publicBase.Scheme != Uri.UriSchemeHttps)
+            problems.Add("Marketplace:PublicBaseUrl (env Marketplace__PublicBaseUrl) must be an absolute https URL: the web site's address, which every link in e-mail starts with.");
         // the origin of the one-click List-Unsubscribe URL in every notification mail: a wrong default would put dead links into mail clients' unsubscribe buttons (M5 review, info)
         if (!Uri.TryCreate(config["Notifications:PublicApiBaseUrl"], UriKind.Absolute, out var apiBase) || apiBase.Scheme != Uri.UriSchemeHttps)
             problems.Add("Notifications:PublicApiBaseUrl (env Notifications__PublicApiBaseUrl) is required and must be an absolute https URL.");
