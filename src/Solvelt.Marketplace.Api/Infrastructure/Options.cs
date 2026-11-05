@@ -232,7 +232,7 @@ public sealed class CheckoutOptions
 }
 
 /// <summary>
-/// Test-mode demo data for buyers (M9). Off by default; the API refuses to start with it on outside Development and Testing (StartupValidator), with no override.
+/// Test-mode demo data for buyers (M9). Off by default; the API refuses to start with it on in Production (StartupValidator), with no override. A test site runs as Staging.
 /// While it is off every demo endpoint answers 404.
 /// </summary>
 public sealed class DemoOptions
