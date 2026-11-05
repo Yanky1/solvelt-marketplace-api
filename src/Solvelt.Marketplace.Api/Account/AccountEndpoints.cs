@@ -10,7 +10,7 @@ namespace Solvelt.Marketplace.Api.Account;
 public static class AccountEndpoints
 {
     public sealed record ProfileBody(string? DisplayName, string? Phone);
-    public sealed record ChangePasswordBody(string? CurrentPassword, string? NewPassword);
+    public sealed record ChangePasswordBody(string? CurrentPassword, string? NewPassword, bool? RemovePasskeys = null);
     public sealed record DeleteBody(string? Password);
     public sealed record PasskeyRegisterBody(Guid? ChallengeId, string? Name, System.Text.Json.JsonElement? Credential);
     public sealed record PasskeyRenameBody(string? Name);
@@ -35,6 +35,7 @@ public static class AccountEndpoints
         g.MapPost("/passkeys", RegisterPasskey).RequireRateLimiting(RateLimitPolicies.Auth);
         g.MapPatch("/passkeys/{id:guid}", RenamePasskey);
         g.MapDelete("/passkeys/{id:guid}", RemovePasskey).RequireRateLimiting(RateLimitPolicies.Auth);
+        g.MapDelete("/passkeys", RemoveAllPasskeys).RequireRateLimiting(RateLimitPolicies.Auth);
         return app;
     }
 
@@ -107,6 +108,10 @@ public static class AccountEndpoints
     private static async Task<IResult> RemovePasskey(Guid id, HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
         => PasskeyOutcomeToResult(await passkeys.RemoveAsync(ctx.Buyer(), id, ct));
 
+    /// <summary>Removes every passkey of the account (a recent sign-in; refused when the account has no password, so it is never left without a way in). The answer to "I do not recognise one of them".</summary>
+    private static async Task<IResult> RemoveAllPasskeys(HttpContext ctx, PasskeyService passkeys, CancellationToken ct)
+        => PasskeyOutcomeToResult(await passkeys.RemoveAllAsync(ctx.Buyer(), ct));
+
     private static IResult PasskeyOutcomeToResult(PasskeyOutcome outcome) => outcome == PasskeyOutcome.Ok ? Results.NoContent() : PasskeyProblem(outcome);
 
     internal static IResult PasskeyProblem(PasskeyOutcome outcome) => outcome switch
@@ -146,7 +151,7 @@ public static class AccountEndpoints
         if (string.IsNullOrEmpty(body?.NewPassword)) errors["newPassword"] = "Enter a new password.";
         if (errors.Count > 0) return Problems.Validation(errors);
         if (body!.CurrentPassword!.Length > 128) return Problems.Json(401, "invalid_credentials", "The password is not correct.");
-        return Map(await a.ChangePasswordAsync(ctx.Buyer(), body.CurrentPassword, body.NewPassword!, ips.Resolve(ctx), ct), ctx, "newPassword");
+        return Map(await a.ChangePasswordAsync(ctx.Buyer(), body.CurrentPassword, body.NewPassword!, ips.Resolve(ctx), ct, body.RemovePasskeys == true), ctx, "newPassword");
     }
 
     /// <summary>Deletes the account (soft delete now, erasure by the redaction job). Needs a recent sign-in and the password.</summary>
