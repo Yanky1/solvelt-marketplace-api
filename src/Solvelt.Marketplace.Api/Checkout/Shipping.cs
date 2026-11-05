@@ -87,7 +87,7 @@ public static class ShippingRates
 /// Portal shipping settings, cached at most <see cref="ShippingOptions.SettingsCacheSeconds"/> (5 min) per (seller, brand) and fetched once for a burst of
 /// concurrent checkouts (decision M1-11). A failed answer is never cached and drops the entry (invalidate on error).
 /// </summary>
-public sealed class ShippingSettingsCache(IServiceScopeFactory scopes, TimeProvider time, IOptions<ShippingOptions> options)
+public sealed class ShippingSettingsCache(IServiceScopeFactory scopes, TimeProvider time, IOptions<ShippingOptions> options, ILogger<ShippingSettingsCache>? log = null)
 {
     private sealed record Entry(ShippingSettings Settings, DateTimeOffset FetchedAt);
     private readonly ConcurrentDictionary<(Guid, Guid), Entry> Cache = new();
@@ -107,8 +107,26 @@ public sealed class ShippingSettingsCache(IServiceScopeFactory scopes, TimeProvi
             using var scope = scopes.CreateScope();
             var portal = scope.ServiceProvider.GetRequiredService<ISignedPortalClient>();
             try { r = await portal.GetShippingSettingsAsync(sellerId, brandId, ct); }
-            catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException or PortalResponseTooLargeException) { Cache.TryRemove(key, out _); throw new ShippingUnavailableException(); }
-            if (!r.IsSuccess || r.Value is null) { Cache.TryRemove(key, out _); throw new ShippingUnavailableException(); }
+            catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException or PortalResponseTooLargeException)
+            {
+                Cache.TryRemove(key, out _);
+                // the buyer sees "delivery options are unavailable"; the log says why (never the URL or a secret): a checkout that cannot quote is nearly always one of these settings (M8-12)
+                log?.LogError("The portal's shipping settings could not be read ({Kind}). Check Portal:BaseUrl (scheme, host, port) and that the portal is reachable from this server", ex.GetType().Name);
+                throw new ShippingUnavailableException();
+            }
+            if (!r.IsSuccess || r.Value is null)
+            {
+                Cache.TryRemove(key, out _);
+                log?.LogError("The portal answered {Status} to the shipping settings call.{Hint}", r.Status, r.Status switch
+                {
+                    401 => " Its signature check refused ours: Portal:InboundSecret must equal the portal's Orders:InboundSecret, and this server's clock must be within 5 minutes of the portal's.",
+                    403 or 404 => " Check Portal:BaseUrl: it may point at something that is not the portal's API.",
+                    429 => " The portal is rate limiting this server.",
+                    >= 500 => " The portal is failing.",
+                    _ => "",
+                });
+                throw new ShippingUnavailableException();
+            }
             Cache[key] = new Entry(r.Value, time.GetUtcNow());
             return r.Value;
         }
