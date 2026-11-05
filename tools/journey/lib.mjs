@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const env = JSON.parse(readFileSync(process.env.JOURNEY_ENV ?? join(HERE, "..", "..", ".journey", "env.json"), "utf8"));
+export const env = JSON.parse(readFileSync(process.env.JOURNEY_ENV ?? join(process.env.JOURNEY_RUN_DIR ?? join(HERE, "..", "..", ".journey"), "env.json"), "utf8"));
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const uniq = () => randomBytes(4).toString("hex");
