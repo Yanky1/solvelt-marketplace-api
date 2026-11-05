@@ -46,6 +46,7 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Infrastructure.MessageRate
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner, Solvelt.Marketplace.Api.Messaging.AllowAllAttachmentScanner>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Messaging.MessagingAccountEraser>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.IOrderReconcileObserver, Solvelt.Marketplace.Api.Checkout.OrderMoneyReconcileObserver>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>());
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDeletionHook>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>());
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Fulfilment.AfterSalesAccountEraser>();
