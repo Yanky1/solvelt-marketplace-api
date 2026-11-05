@@ -66,35 +66,6 @@ public static class DatabaseSetup
         return rows;
     }
 
-    /// <summary>What the model has and the database lacks (or has differently): tables, columns (store type, nullability), keys, foreign keys, indexes. Empty when the database can be baselined.</summary>
-    public static List<string> SchemaProblems(MarketplaceDb db)
-    {
-        var model = db.GetService<IDesignTimeModel>().Model.GetRelationalModel();
-        var columns = Query(db, """
-            SELECT c.relname || '|' || a.attname || '|' || format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull::text
-            FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = current_schema() AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped
-            """).ToHashSet(StringComparer.Ordinal);
-        var tables = columns.Select(c => c.Split('|')[0]).ToHashSet(StringComparer.Ordinal);
-        var constraints = Query(db, "SELECT con.conname FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname = current_schema()").ToHashSet(StringComparer.Ordinal);
-        var indexes = Query(db, "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()").ToHashSet(StringComparer.Ordinal);
-
-        var problems = new List<string>();
-        foreach (var t in model.Tables)
-        {
-            if (!tables.Contains(t.Name)) { problems.Add($"table {t.Name} is missing"); continue; }
-            foreach (var c in t.Columns)
-            {
-                var want = $"{t.Name}|{c.Name}|{c.StoreType}|{(!c.IsNullable).ToString().ToLowerInvariant()}";
-                if (columns.Contains(want)) continue;
-                var have = columns.FirstOrDefault(x => x.StartsWith($"{t.Name}|{c.Name}|", StringComparison.Ordinal));
-                problems.Add(have is null ? $"column {t.Name}.{c.Name} is missing" : $"column {t.Name}.{c.Name} is {have.Split('|')[2]}{(have.EndsWith("true") ? " not null" : " null")}, the model says {c.StoreType}{(c.IsNullable ? " null" : " not null")}");
-            }
-            if (t.PrimaryKey is { } pk && !constraints.Contains(pk.Name)) problems.Add($"primary key {pk.Name} is missing");
-            foreach (var fk in t.ForeignKeyConstraints) if (!constraints.Contains(fk.Name)) problems.Add($"foreign key {fk.Name} is missing");
-            foreach (var u in t.UniqueConstraints) if (!constraints.Contains(u.Name)) problems.Add($"unique constraint {u.Name} is missing");
-            foreach (var i in t.Indexes) if (!indexes.Contains(i.Name)) problems.Add($"index {i.Name} is missing");
-        }
-        return problems;
-    }
+    /// <summary>What the model has and the database lacks or has differently (the same comparison as the start-up schema check, <see cref="SchemaCheck"/>). Empty when the database can be baselined.</summary>
+    public static List<string> SchemaProblems(MarketplaceDb db) => SchemaCheck.Differences(db);
 }

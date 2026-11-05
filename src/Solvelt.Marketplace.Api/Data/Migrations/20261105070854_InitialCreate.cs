@@ -65,6 +65,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    IsDemo = table.Column<bool>(type: "boolean", nullable: false),
+                    DemoBatchId = table.Column<Guid>(type: "uuid", nullable: true),
                     MarketplaceBookingId = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                     PortalBookingId = table.Column<Guid>(type: "uuid", nullable: true),
                     Number = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: true),
@@ -151,6 +153,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    IsDemo = table.Column<bool>(type: "boolean", nullable: false),
+                    DemoBatchId = table.Column<Guid>(type: "uuid", nullable: true),
                     AccountId = table.Column<Guid>(type: "uuid", nullable: false),
                     FullName = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
                     Line1 = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
@@ -216,6 +220,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    IsDemo = table.Column<bool>(type: "boolean", nullable: false),
+                    DemoBatchId = table.Column<Guid>(type: "uuid", nullable: true),
                     AccountId = table.Column<Guid>(type: "uuid", nullable: true),
                     GuestTokenHash = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: true),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -284,6 +290,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     Visible = table.Column<bool>(type: "boolean", nullable: false),
                     WasPublic = table.Column<bool>(type: "boolean", nullable: false),
                     IsStub = table.Column<bool>(type: "boolean", nullable: false),
+                    IsDemoListing = table.Column<bool>(type: "boolean", nullable: false),
                     LengthMm = table.Column<int>(type: "integer", nullable: true),
                     WidthMm = table.Column<int>(type: "integer", nullable: true),
                     HeightMm = table.Column<int>(type: "integer", nullable: true),
@@ -367,6 +374,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    IsDemo = table.Column<bool>(type: "boolean", nullable: false),
+                    DemoBatchId = table.Column<Guid>(type: "uuid", nullable: true),
                     Number = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
                     AccountId = table.Column<Guid>(type: "uuid", nullable: true),
                     GuestEmail = table.Column<string>(type: "character varying(254)", maxLength: 254, nullable: true),
@@ -423,12 +432,15 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    IsDemo = table.Column<bool>(type: "boolean", nullable: false),
+                    DemoBatchId = table.Column<Guid>(type: "uuid", nullable: true),
                     ConversationKey = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                     AccountId = table.Column<Guid>(type: "uuid", nullable: false),
                     Kind = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
                     OrderId = table.Column<Guid>(type: "uuid", nullable: true),
                     GroupId = table.Column<Guid>(type: "uuid", nullable: true),
                     ListingId = table.Column<Guid>(type: "uuid", nullable: true),
+                    BookingId = table.Column<Guid>(type: "uuid", nullable: true),
                     SellerName = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
                     Subject = table.Column<string>(type: "character varying(300)", maxLength: 300, nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -463,6 +475,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: table => new
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    IsDemo = table.Column<bool>(type: "boolean", nullable: false),
+                    DemoBatchId = table.Column<Guid>(type: "uuid", nullable: true),
                     AccountId = table.Column<Guid>(type: "uuid", nullable: false),
                     Kind = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
                     OrderNumber = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: true),
@@ -654,6 +668,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     AggregateType = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
                     AggregateKey = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
                     Note = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: true),
                     AppliedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     PayloadJson = table.Column<string>(type: "text", nullable: true),
                     PayloadPurgedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
@@ -847,7 +862,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     VariantId = table.Column<Guid>(type: "uuid", nullable: false),
                     Quantity = table.Column<int>(type: "integer", nullable: false),
                     SeenUnitPriceCents = table.Column<long>(type: "bigint", nullable: false),
-                    AddedAtMs = table.Column<long>(type: "bigint", nullable: false)
+                    AddedAtMs = table.Column<long>(type: "bigint", nullable: false),
+                    IsDemo = table.Column<bool>(type: "boolean", nullable: false, defaultValue: false)
                 },
                 constraints: table =>
                 {
@@ -1387,6 +1403,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 column: "Status");
 
             migrationBuilder.CreateIndex(
+                name: "IX_message_threads_AccountId_BookingId",
+                table: "message_threads",
+                columns: new[] { "AccountId", "BookingId" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
                 name: "IX_message_threads_AccountId_GroupId",
                 table: "message_threads",
                 columns: new[] { "AccountId", "GroupId" },
@@ -1491,6 +1513,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 name: "IX_outbox_messages_Status_NextAttemptAt",
                 table: "outbox_messages",
                 columns: new[] { "Status", "NextAttemptAt" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_portal_inbound_events_AccountId",
+                table: "portal_inbound_events",
+                column: "AccountId");
 
             migrationBuilder.CreateIndex(
                 name: "IX_portal_inbound_events_ReceivedAt",
