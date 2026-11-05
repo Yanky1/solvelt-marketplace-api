@@ -12,19 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-<<<<<<<< HEAD:src/Solvelt.Marketplace.Api/Data/Migrations/20261105153318_InitialCreate.Designer.cs
-<<<<<<<< HEAD:src/Solvelt.Marketplace.Api/Data/Migrations/20261105153318_InitialCreate.Designer.cs
-<<<<<<<< HEAD:src/Solvelt.Marketplace.Api/Data/Migrations/20261105153318_InitialCreate.Designer.cs
-    [Migration("20261105153318_InitialCreate")]
-========
-    [Migration("20261105150828_InitialCreate")]
->>>>>>>> d2404df (M6-04: reviews and ratings API (eligibility, one per line/booking, 30-day edit, atomic aggregates, votes, reports, moderation, seller reply relay, erasure/export)):src/Solvelt.Marketplace.Api/Data/Migrations/20261105150828_InitialCreate.Designer.cs
-========
-    [Migration("20261105151304_InitialCreate")]
->>>>>>>> b370b16 (M6-05: review photos (sniffed, re-encoded, 1600 px, 5 per review, served only while published)):src/Solvelt.Marketplace.Api/Data/Migrations/20261105151304_InitialCreate.Designer.cs
-========
-    [Migration("20261105152021_InitialCreate")]
->>>>>>>> f8b0249 (M6-06: product questions (C1): throttled, stored, sent through the outbox with our id, erased and exported):src/Solvelt.Marketplace.Api/Data/Migrations/20261105152021_InitialCreate.Designer.cs
+    [Migration("20261105161608_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
