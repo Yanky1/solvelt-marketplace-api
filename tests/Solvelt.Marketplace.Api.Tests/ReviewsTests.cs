@@ -731,4 +731,27 @@ public sealed class ReviewsTests : IDisposable
         Assert.Equal(ReviewStatus.Hidden, review.Status);
         Assert.Equal(0, (await Agg("listing", Listing()))!.Count);
     }
+
+    [Fact]
+    public async Task A_review_photo_is_cached_for_minutes_not_a_day_revalidated_cheaply_and_a_hidden_reviews_photo_is_never_answered_with_a_304()
+    {
+        var (a, ida) = await Buyer("m3a@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var (st, ph) = await Upload(a, id, Png(30, 30));
+        Assert.Equal(HttpStatusCode.Created, st);
+        var url = $"/api/v1/reviews/photos/{ph.GetProperty("id").GetGuid()}";
+        var first = await _k.Http.GetAsync(url);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var cc = first.Headers.CacheControl!;
+        Assert.True(cc.Public && cc.MustRevalidate);
+        Assert.Equal(TimeSpan.FromMinutes(5), cc.MaxAge);
+        var etag = first.Headers.ETag;
+        Assert.NotNull(etag);
+        Assert.Equal("nosniff", first.Headers.GetValues("X-Content-Type-Options").Single());
+        var again = new HttpRequestMessage(HttpMethod.Get, url); again.Headers.IfNoneMatch.Add(etag!);
+        Assert.Equal(HttpStatusCode.NotModified, (await _k.Http.SendAsync(again)).StatusCode);                 // asking again is cheap while it is shown
+        await _k.Db(async db => { await db.Reviews.Where(r => r.Id == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, ReviewStatus.Hidden)); return 0; });
+        var stale = new HttpRequestMessage(HttpMethod.Get, url); stale.Headers.IfNoneMatch.Add(etag!);
+        Assert.Equal(HttpStatusCode.NotFound, (await _k.Http.SendAsync(stale)).StatusCode);                    // a cache that holds it is told it is gone, not "unchanged"
+    }
 }
