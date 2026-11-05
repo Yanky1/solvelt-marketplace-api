@@ -429,7 +429,7 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
         await Drain();
         Assert.DoesNotContain(_portal.PaymentEvents, e => e.Contains("dispute"));    // the portal has no sale to book it against yet
         _portal.ConfirmDown = false;
-        _k.F.Clock.Advance(TimeSpan.FromHours(2));
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(2));   // inside the 10 minute hold: the realistic fake answers a lapsed hold with 409 hold_expired (M8-10)
         await Drain();
         Assert.Contains(_portal.PaymentEvents, e => e.Contains("payment.captured"));
         Assert.Contains(_portal.PaymentEvents, e => e.Contains("dispute.created") && e.Contains(b.MarketplaceBookingId));
