@@ -16,6 +16,15 @@ public sealed record PortalEvent(string Id, string Type, DateTimeOffset CreatedA
     /// <summary>Top-level <c>predecessorDead</c> (portal ordering, C14/C15): an earlier event of the same aggregate went dead, so this one means "reconcile" (read the record and apply it).</summary>
     public bool PredecessorDead { get; init; }
 
+    /// <summary>
+    /// C17.1: the scope the portal numbers this event in (a string such as <c>review:R-1</c>) and its <c>sequence</c> in that scope (an integer that increases within it). Both or neither: an event without
+    /// them (legacy, catalog), or with either malformed, has none, and its handler falls back to arrival order. Parsed here for every event type; a handler decides what to do with them.
+    /// </summary>
+    public string? SequenceScope { get; init; }
+    public long? Sequence { get; init; }
+
+    public const int MaxScopeLength = 200;
+
     /// <summary>The ordering time: <c>min(createdAt, receivedAt + 5 min)</c>. Dates in the past are never changed.</summary>
     public static DateTimeOffset EffectiveTime(DateTimeOffset raw, DateTimeOffset receivedAt)
     {
@@ -39,7 +48,10 @@ public sealed record PortalEvent(string Id, string Type, DateTimeOffset CreatedA
                 !DateTimeOffset.TryParse(created, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var at))
             { error = "createdAt is required (ISO 8601)."; return false; }
             var data = root.TryGetProperty("data", out var d) ? d.Clone() : JsonDocument.Parse("{}").RootElement.Clone();
-            evt = new PortalEvent(id, type, at.ToUniversalTime(), data) { RawCreatedAt = at.ToUniversalTime(), PredecessorDead = root.TryGetProperty("predecessorDead", out var pd) && pd.ValueKind == JsonValueKind.True };
+            var scope = Str(root, "sequenceScope");
+            long? sequence = root.TryGetProperty("sequence", out var sq) && sq.ValueKind == JsonValueKind.Number && sq.TryGetInt64(out var n) && n >= 0 ? n : null;
+            if (string.IsNullOrWhiteSpace(scope) || scope.Length > MaxScopeLength || sequence is null) { scope = null; sequence = null; }
+            evt = new PortalEvent(id, type, at.ToUniversalTime(), data) { RawCreatedAt = at.ToUniversalTime(), PredecessorDead = root.TryGetProperty("predecessorDead", out var pd) && pd.ValueKind == JsonValueKind.True, SequenceScope = scope, Sequence = sequence };
             return true;
         }
         catch (JsonException) { error = "The body is not valid JSON."; return false; }

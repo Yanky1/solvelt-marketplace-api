@@ -6,6 +6,7 @@ using Solvelt.Marketplace.Api.Account;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Fulfilment;
 using Solvelt.Marketplace.Api.Outbox;
+using Solvelt.Marketplace.Api.Portal.Webhooks;
 using Solvelt.Marketplace.Api.Reviews;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
 using static Solvelt.Marketplace.Api.Tests.Infrastructure.WebhookTestKit;
@@ -500,5 +501,109 @@ public sealed class ReviewsTests : IDisposable
         var row = await _k.Db(db => db.PortalInboundEvents.AsNoTracking().SingleAsync(e => e.Id == "rd-dead"));
         Assert.DoesNotContain("predecessor_dead", row.Note ?? "");
         Assert.Empty(await _k.Db(db => db.OutboxMessages.AsNoTracking().Where(m => m.Type == OrderReconcileHandler.Type).ToListAsync()));
+    }
+
+    // ---------------------------------------------------------------- C17.1: the portal's sequence on the event
+    private async Task<string> Numbered(string eventId, string type, Guid reviewId, string replyId, string? text, DateTimeOffset at, string? raw)
+    {
+        var data = new Dictionary<string, object?> { ["reviewId"] = reviewId.ToString(), ["replyId"] = replyId, ["text"] = text, ["repliedAt"] = at, ["editedAt"] = null, ["removedAt"] = at, ["reason"] = "seller_deleted" };
+        var body = Body(eventId, type, at, data);
+        if (raw is not null) body = body.Insert(1, raw + ",");
+        var (status, json) = await Post(_k.Http, Request(_k.F, body));
+        Assert.Equal(HttpStatusCode.OK, status);
+        return StatusOf(json);
+    }
+    private static string Seq(Guid reviewId, long sequence, string? scope = null) => $"\"sequenceScope\":\"{scope ?? $"review:{reviewId}"}\",\"sequence\":{sequence}";
+    private async Task<string?> ReplyNow() => (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).ReplyText;
+
+    [Fact]
+    public async Task Events_of_one_review_are_ordered_by_the_sequence_whatever_the_arrival_the_time_or_the_event_ids()
+    {
+        var (a, ida) = await Buyer("c171a@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var at = _k.F.Clock.GetUtcNow();                                  // three edits in the SAME instant
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Numbered("a-3", "review.reply_posted", id, rid, "third", at, Seq(id, 3)));        // arrives first, though it is the newest
+        Assert.Equal("skipped", await Numbered("z-2", "review.reply_posted", id, rid, "second", at, Seq(id, 2)));       // a late older one (its id would sort after "a-3": the id is no order)
+        Assert.Equal("skipped", await Numbered("m-1", "review.reply_posted", id, rid, "first", at, Seq(id, 1)));
+        Assert.Equal("third", await ReplyNow());
+        Assert.Equal("skipped", await Numbered("b-3", "review.reply_posted", id, rid, "third again", at, Seq(id, 3)));  // the same sequence under another event id: not newer
+        Assert.Equal("third", await ReplyNow());
+        Assert.Equal("applied", await Numbered("c-4", "review.reply_posted", id, rid, "fourth", at, Seq(id, 4)));
+        Assert.Equal("fourth", await ReplyNow());
+        // a removal is ordered the same way: an older one does not take down a newer reply, a newer one does
+        Assert.Equal("skipped", await Numbered("d-2", "review.reply_removed", id, rid, null, at, Seq(id, 2)));
+        Assert.Equal("fourth", await ReplyNow());
+        Assert.Equal("applied", await Numbered("e-5", "review.reply_removed", id, rid, null, at, Seq(id, 5)));
+        Assert.Null(await ReplyNow());
+        Assert.Equal("skipped", await Numbered("f-4b", "review.reply_posted", id, rid, "a dead event re-queued late", at.AddMinutes(1), Seq(id, 4)));   // even with a later time
+        Assert.Null(await ReplyNow());
+    }
+
+    [Fact]
+    public async Task The_same_event_id_is_applied_once_with_or_without_a_sequence()
+    {
+        var (a, ida) = await Buyer("c171b@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var at = _k.F.Clock.GetUtcNow();
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Numbered("dup-1", "review.reply_posted", id, rid, "Thanks", at, Seq(id, 1)));
+        Assert.Equal("duplicate", await Numbered("dup-1", "review.reply_posted", id, rid, "Thanks", at, Seq(id, 1)));
+        Assert.Equal("applied", await Numbered("dup-2", "review.reply_posted", id, rid, "Thanks a lot", at.AddSeconds(1), null));
+        Assert.Equal("duplicate", await Numbered("dup-2", "review.reply_posted", id, rid, "Thanks a lot", at.AddSeconds(1), null));
+        Assert.Equal("Thanks a lot", await ReplyNow());
+    }
+
+    [Fact]
+    public async Task Without_a_sequence_the_arrival_order_decides_for_the_same_instant_and_a_strictly_older_event_is_still_refused()
+    {
+        var (a, ida) = await Buyer("c171c@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var at = _k.F.Clock.GetUtcNow();
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Numbered("z-first", "review.reply_posted", id, rid, "first edit", at, null));
+        Assert.Equal("applied", await Numbered("a-second", "review.reply_posted", id, rid, "second edit", at, null));   // the same instant: the later ARRIVAL wins (its id sorts before "z-first", which used to lose)
+        Assert.Equal("second edit", await ReplyNow());
+        Assert.Equal("skipped", await Numbered("old-1", "review.reply_posted", id, rid, "a re-queued old one", at.AddSeconds(-30), null));   // strictly older than what was applied
+        Assert.Equal("second edit", await ReplyNow());
+        Assert.Equal("applied", await Numbered("new-1", "review.reply_posted", id, rid, "third edit", at.AddSeconds(5), null));
+        Assert.Equal("third edit", await ReplyNow());
+    }
+
+    [Theory]
+    [InlineData("\"sequenceScope\":\"review:{id}\"")]                                  // a scope without a sequence
+    [InlineData("\"sequence\":9")]                                                       // a sequence without a scope
+    [InlineData("\"sequenceScope\":\"review:{id}\",\"sequence\":\"9\"")]               // a sequence that is a string
+    [InlineData("\"sequenceScope\":\"review:{id}\",\"sequence\":1.5")]                 // not an integer
+    [InlineData("\"sequenceScope\":\"review:{id}\",\"sequence\":-1")]                  // negative
+    [InlineData("\"sequenceScope\":7,\"sequence\":9")]                                  // a scope that is not a string
+    [InlineData("\"sequenceScope\":\"review:someone-else\",\"sequence\":1")]            // another scope than this review's: not comparable, so not used
+    public async Task A_missing_or_malformed_or_foreign_sequence_is_ignored_and_the_arrival_order_applies(string raw)
+    {
+        var (a, ida) = await Buyer("c171d@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var at = _k.F.Clock.GetUtcNow();
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal("applied", await Numbered("seq-ok", "review.reply_posted", id, rid, "numbered", at, Seq(id, 10)));
+        Assert.Equal("applied", await Numbered("seq-odd", "review.reply_posted", id, rid, "by arrival", at.AddSeconds(1), raw.Replace("{id}", id.ToString())));   // not compared with the stored 10
+        Assert.Equal("by arrival", await ReplyNow());
+    }
+
+    [Fact]
+    public void The_envelope_carries_the_sequence_for_every_event_type_and_only_when_both_fields_are_valid()
+    {
+        PortalEvent? Parse(string extra)
+        {
+            Assert.True(PortalEvent.TryParse(System.Text.Encoding.UTF8.GetBytes("{\"id\":\"e1\",\"type\":\"order.shipped\",\"createdAt\":\"2026-11-05T10:00:00Z\",\"data\":{}" + extra + "}"), out var e, out _));
+            return e;
+        }
+        var ok = Parse(",\"sequenceScope\":\"so:abc\",\"sequence\":7");
+        Assert.Equal(("so:abc", 7L), (ok!.SequenceScope, ok.Sequence));
+        Assert.Equal((null, null), (Parse("")!.SequenceScope, Parse("")!.Sequence));                                                       // legacy and catalog events have none
+        Assert.Null(Parse(",\"sequenceScope\":\"so:abc\"")!.Sequence);
+        Assert.Null(Parse(",\"sequence\":3")!.SequenceScope);
+        Assert.Null(Parse(",\"sequenceScope\":\"" + new string('x', PortalEvent.MaxScopeLength + 1) + "\",\"sequence\":3")!.Sequence);   // an absurd scope is dropped with its sequence
+        Assert.Equal(9_000_000_000L, Parse(",\"sequenceScope\":\"s\",\"sequence\":9000000000")!.Sequence);                              // beyond 32 bits
+        Assert.Null(Parse(",\"sequenceScope\":\"s\",\"sequence\":\"7\"")!.Sequence);
     }
 }
