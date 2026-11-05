@@ -162,6 +162,9 @@ public sealed class MessagingTests : OrderFlowBase
         Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = "xyz", sellerId = listing.SellerId }));                        // not an id
         Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = listing.Id }));                                               // no seller
         Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = listing.Id, sellerId = Guid.NewGuid() }));                   // another seller
+        // P5: the same seller, but ANOTHER of its listings: not this thread's product
+        var sibling = await _k.Db(async db => { var c = await db.CatalogListings.AsNoTracking().FirstAsync(l => l.Id == listing.Id); c.Id = Guid.NewGuid(); c.Slug = c.Slug + "-twin"; db.CatalogListings.Add(c); await db.SaveChangesAsync(); return c.Id; });
+        Assert.Equal("skipped", await SellerMessage(null!, null!, "No.", kind: "product", conv: key, extra: new { productId = sibling, sellerId = listing.SellerId }));
         Assert.Equal(0, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "seller")));
         Assert.Equal("applied", await SellerMessage(null!, null!, "Yes, we do.", kind: "product", conv: key, extra: new { productId = listing.Id, sellerId = listing.SellerId }));
         var thread = await _k.Db(db => db.MessageThreads.Select(t => t.Id).SingleAsync());

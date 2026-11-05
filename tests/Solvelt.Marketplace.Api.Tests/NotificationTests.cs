@@ -281,8 +281,8 @@ public sealed class NotificationTests : OrderFlowBase
     [Fact]
     public void X7_The_subject_cut_never_splits_a_surrogate_pair()
     {
-        // 199 letters then an emoji (two UTF-16 units) make the cut fall between them
-        var n = new Notification { Kind = NotificationKinds.OrderAccepted, OrderNumber = "O-1", ParamsJson = JsonSerializer.Serialize(new { sellerName = new string('a', 190) + "\U0001F600\U0001F600\U0001F600" }) };
+        // the subject starts with the seller name: 199 letters, then an emoji whose HIGH surrogate is at index 199, so a cut at 200 would split it
+        var n = new Notification { Kind = NotificationKinds.OrderAccepted, OrderNumber = "O-1", ParamsJson = JsonSerializer.Serialize(new { sellerName = new string('a', 199) + "\U0001F600" }) };
         var subject = Solvelt.Marketplace.Api.Notifications.NotificationEmails.Build("a@example.com", "A", n, "https://shop.test", "https://shop.test/u", "https://shop.test/u2").Subject;
         Assert.True(subject.Length <= 200);
         Assert.All(subject.Select((c, i) => (c, i)), x => { if (char.IsHighSurrogate(x.c)) Assert.True(x.i + 1 < subject.Length && char.IsLowSurrogate(subject[x.i + 1])); if (char.IsLowSurrogate(x.c)) Assert.True(x.i > 0 && char.IsHighSurrogate(subject[x.i - 1])); });
