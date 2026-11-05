@@ -27,6 +27,17 @@ public sealed class TestFactory : WebApplicationFactory<Program>
     public Func<HttpRequestMessage, HttpResponseMessage>? PublicResponder { get; set; }
     /// <summary>The attachment scanner seam (decision M5-22): null allows every file, as the default does.</summary>
     public Func<byte[], string, bool>? ScannerVerdict { get; set; }
+    /// <summary>Order reconcile observers (M3 compares refunds): what they were called with, and whether they should throw.</summary>
+    public System.Collections.Concurrent.ConcurrentQueue<(string Order, Solvelt.Marketplace.Api.Portal.PortalOrderState State)> Observed { get; } = new();
+    public bool ObserverThrows { get; set; }
+    private sealed class TestObserver(TestFactory f) : Solvelt.Marketplace.Api.Fulfilment.IOrderReconcileObserver
+    {
+        public Task ObserveAsync(string marketplaceOrderId, Solvelt.Marketplace.Api.Portal.PortalOrderState state, CancellationToken ct)
+        {
+            f.Observed.Enqueue((marketplaceOrderId, state));
+            return f.ObserverThrows ? throw new InvalidOperationException("observer boom") : Task.CompletedTask;
+        }
+    }
     private sealed class TestScanner(TestFactory f) : Solvelt.Marketplace.Api.Messaging.IAttachmentScanner
     {
         public Task<bool> AllowsAsync(byte[] bytes, string contentType, CancellationToken ct) => Task.FromResult(f.ScannerVerdict?.Invoke(bytes, contentType) ?? true);
@@ -86,6 +97,7 @@ public sealed class TestFactory : WebApplicationFactory<Program>
             _services?.Invoke(s);
             s.RemoveAll<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner>();
             s.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner>(new TestScanner(this));
+            s.AddSingleton<Solvelt.Marketplace.Api.Fulfilment.IOrderReconcileObserver>(new TestObserver(this));
             s.RemoveAll<TimeProvider>();
             s.AddSingleton<TimeProvider>(Clock);
             s.AddHttpClient<ISignedPortalClient, SignedPortalClient>().ConfigurePrimaryHttpMessageHandler(() => Portal);

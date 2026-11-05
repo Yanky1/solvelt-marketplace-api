@@ -327,6 +327,23 @@ public sealed class M5ReviewTests : OrderFlowBase
         Assert.Equal("delivered", await Status(g));
     }
 
+    [Fact]
+    public async Task C16_Observers_see_the_portals_state_after_the_apply_and_one_that_throws_does_not_fail_the_reconcile()
+    {
+        var (o, g) = await Placed();
+        _orderState = _ => State(o, g, "shipped", shipped: 2);
+        _k.F.ObserverThrows = true;
+        await DeadEvt("order.accepted", o, g, new { acceptedAt = DateTimeOffset.UtcNow }, "dead-obs");
+        await Drain();
+        var seen = Assert.Single(_k.F.Observed);
+        Assert.Equal(o.Number, seen.Order);
+        Assert.Equal(g.SellerOrderId, seen.State.SellerOrders!.Single().SellerOrderId);
+        Assert.Equal("shipped", await Status(g));                                                          // applied before the observer ran
+        var msg = await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == "portal.order-reconcile"));
+        Assert.Equal(("delivered", 1), (msg.Status, msg.Attempts));                                        // the observer's failure did not fail or retry the job
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("observer failed"));
+    }
+
     [Theory]
     [InlineData(404)]
     [InlineData(501)]

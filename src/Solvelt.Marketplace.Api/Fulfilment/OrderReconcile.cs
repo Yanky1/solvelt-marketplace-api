@@ -13,7 +13,13 @@ namespace Solvelt.Marketplace.Api.Fulfilment;
 /// terminal state), missing shipments are added. Money is never touched here (M3 compares refunds and alerts). Parked events are replayed afterwards. A portal that cannot answer yet (404,
 /// 405, 501) is logged as an error (the alert) and the message is done: nothing is retried against a portal that does not have the endpoint. Decision M5-29.
 /// </summary>
-public sealed class OrderReconcileHandler(MarketplaceDb db, ISignedPortalClient portal, PortalEventProcessor events, TimeProvider time, ILogger<OrderReconcileHandler> log) : IOutboxHandler
+/// <summary>Called with the portal's view of an order after M5 applied the fulfilment state (decision M5-29): M3 compares refunds and alerts. An observer's failure is logged and never fails the reconcile.</summary>
+public interface IOrderReconcileObserver
+{
+    Task ObserveAsync(string marketplaceOrderId, PortalOrderState state, CancellationToken ct);
+}
+
+public sealed class OrderReconcileHandler(MarketplaceDb db, ISignedPortalClient portal, PortalEventProcessor events, TimeProvider time, ILogger<OrderReconcileHandler> log, IEnumerable<IOrderReconcileObserver> observers) : IOutboxHandler
 {
     public const string Type = "portal.order-reconcile";
     public sealed record Payload(string MarketplaceOrderId);
@@ -81,6 +87,11 @@ public sealed class OrderReconcileHandler(MarketplaceDb db, ISignedPortalClient 
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(CancellationToken.None);
         db.ChangeTracker.Clear();
+        foreach (var o in observers)
+        {
+            try { await o.ObserveAsync(p.MarketplaceOrderId, state, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { log.LogError("An order reconcile observer failed ({ExceptionType}); the reconcile goes on", ex.GetType().FullName); db.ChangeTracker.Clear(); }
+        }
         await events.ReplayParkedAsync("order", p.MarketplaceOrderId, ct);
         return OutboxResult.Delivered();
     }
