@@ -25,6 +25,11 @@ public sealed class BuyerAccount
     public long SessionEpoch { get; set; }
     /// <summary>When the account was soft-deleted: sign-in and every session stop at once; the personal data goes in the redaction job (<see cref="RedactedAt"/>).</summary>
     public DateTimeOffset? DeletedAt { get; set; }
+    /// <summary>
+    /// The address of a deleted account until the redaction job has run: the delete frees <see cref="Email"/> at once (a sign-up for it works), while the job and the
+    /// modules' erasers still need the address (to clear the sign-in gate, to find guest orders placed with it). Personal data: erased by the job (review of 1725a68, items 1 and 2).
+    /// </summary>
+    public string? PendingErasureEmail { get; set; }
     /// <summary>When the personal data of a deleted account was erased (email, name, phone, password hash, addresses, links). The row stays as an opaque id for orders.</summary>
     public DateTimeOffset? RedactedAt { get; set; }
 }
@@ -161,6 +166,7 @@ internal sealed class BuyerAccountConfiguration : IEntityTypeConfiguration<Buyer
         b.Property(a => a.DisplayName).HasMaxLength(60).IsRequired();
         b.Property(a => a.PasswordHash).HasMaxLength(400);
         b.Property(a => a.Phone).HasMaxLength(30);
+        b.Property(a => a.PendingErasureEmail).HasMaxLength(254);
         b.Property(a => a.RelayEmail).HasMaxLength(120).IsRequired();
         b.HasIndex(a => a.Email).IsUnique();
         b.HasIndex(a => a.RelayEmail).IsUnique();

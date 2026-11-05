@@ -16,7 +16,7 @@ public sealed record AccountResult(AccountOutcome Outcome, string? Problem = nul
 /// The buyer's own data: profile, address book, password change, account deletion. Another buyer's address is simply not found. The address book keeps exactly one
 /// default under parallel requests: the database refuses a second one (partial unique index) and every writer that loses that race starts again from what it now sees.
 /// </summary>
-public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthService auth, PasswordService passwords, SignInGate gate, GateKeys gateKeys, OutboxWriter outbox, IOptions<AuthOptions> authOptions)
+public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthService auth, PasswordService passwords, SignInGate gate, GateKeys gateKeys, OutboxWriter outbox, IOptions<AuthOptions> authOptions, ErasureContext erasure)
 {
     /// <summary>How recently the buyer must have proven who they are for a sensitive change (decision O-11).</summary>
     public static readonly TimeSpan RecentSignIn = TimeSpan.FromMinutes(10);
@@ -236,8 +236,10 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         // Only if the account is still what the password was checked against (a reset in between means somebody else holds the account now), and the address is
         // freed at once (L2: a sign-up for it used to be swallowed until the redaction job ran). The rest of the personal data goes in the job.
         var rows = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == checkedHash && a.SessionEpoch == checkedEpoch)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now).SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.Email, (string?)null).SetProperty(a => a.UpdatedAt, now), ct);
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now).SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.PendingErasureEmail, a => a.Email).SetProperty(a => a.Email, (string?)null).SetProperty(a => a.UpdatedAt, now), ct);
         if (rows != 1) return new AccountResult(AccountOutcome.Conflict);
+        // the gate forgets the address in the same transaction: the job can no longer be the only one to do it, and a row made by an attempt between the password check and here does not outlive the account
+        await gate.ClearAddressAsync(gateKeys.Address(AuthValidation.NormaliseEmail(who.Email)), ct);
         await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         await outbox.TryEnqueueAsync(AccountRedactionHandler.Type, new AccountRedactionPayload(who.AccountId), $"redact:{who.AccountId:N}", ct: ct);
         await tx.CommitAsync(ct);
@@ -252,22 +254,34 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
     /// </summary>
     public async Task<bool> RedactAsync(Guid accountId, IEnumerable<IAccountEraser> erasers, CancellationToken ct)
     {
-        var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId && a.DeletedAt != null && a.RedactedAt == null).Select(a => new { a.Id, a.Email }).FirstOrDefaultAsync(ct);
+        var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId && a.DeletedAt != null && a.RedactedAt == null).Select(a => new { a.Id, Email = a.PendingErasureEmail ?? a.Email }).FirstOrDefaultAsync(ct);
         if (account is null) return false;
         var now = Now;
         var tombstone = RelayIdentity.Tombstone(accountId);   // the relay address stops working and is never issued again (L1)
         await using var tx = await db.Database.BeginTransactionAsync(ct);
+        erasure.Set(accountId, account.Email);   // what erasers that look things up by address need (the account's own Email is already null)
         foreach (var e in erasers) await e.EraseAsync(accountId, ct);
         await db.BuyerAddresses.Where(a => a.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.EmailTokens.Where(t => t.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerSessions.Where(s => s.AccountId == accountId).ExecuteDeleteAsync(ct);
         if (account.Email is { } email) await gate.ClearAddressAsync(gateKeys.Address(email), ct);
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.RedactedAt == null).ExecuteUpdateAsync(s => s
-            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null)
+            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.PendingErasureEmail, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null)
             .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
         await tx.CommitAsync(ct);
         return true;
     }
+}
+
+/// <summary>
+/// What an <see cref="IAccountEraser"/> may need besides the account id: the address the account had (the account's own Email is already null, the delete freed it). Scoped:
+/// an eraser that looks things up by address (guest orders placed with it) injects this and reads <see cref="Email"/> (normalised, null when the account never had one).
+/// </summary>
+public sealed class ErasureContext
+{
+    public Guid AccountId { get; private set; }
+    public string? Email { get; private set; }
+    internal void Set(Guid accountId, string? email) { AccountId = accountId; Email = email; }
 }
 
 /// <summary>Implemented by modules that hold personal data of a buyer (carts, orders, messages). Called when the account is erased, inside the erasure transaction on the shared DbContext (a throw rolls everything back and the job is retried); must be idempotent.</summary>

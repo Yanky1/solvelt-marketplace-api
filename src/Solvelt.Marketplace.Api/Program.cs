@@ -55,6 +55,7 @@ builder.Services.AddScoped<GuestClaims>();
 builder.Services.AddScoped<SignInGate>();
 builder.Services.AddScoped<AuthMaintenance>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.AccountService>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.ErasureContext>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Account.AccountRedactionHandler>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));

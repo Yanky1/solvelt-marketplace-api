@@ -4,7 +4,9 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Solvelt.Marketplace.Api.Account;
 using Solvelt.Marketplace.Api.Auth;
 using Solvelt.Marketplace.Api.Data;
@@ -144,16 +146,27 @@ public class AccountReviewTests
     // ---------- A3: every table that holds a buyer's data is accounted for in the erasure ----------
 
     [Fact]
-    public async Task Every_table_with_a_buyer_account_id_belongs_to_a_module_and_every_registered_eraser_is_wired()
+    public async Task Every_table_that_may_hold_a_buyers_data_is_claimed_or_cleared_and_every_registered_eraser_is_wired()
     {
         using var k = new AuthKit();
         await k.Db(async db =>
         {
-            var linked = db.Model.GetEntityTypes().Where(e => e.FindProperty("AccountId") is not null).Select(e => e.ClrType).ToHashSet();
-            var mapped = PiiRegistry.Modules.SelectMany(m => m.Entities).ToList();
-            Assert.Empty(linked.Except(mapped));                                                       // a new buyer-linked table must be given a module (and an eraser)
-            Assert.Empty(mapped.Except(linked));                                                       // and the list does not name tables that are not there
-            Assert.Equal(mapped.Count, mapped.Distinct().Count());
+            var entities = db.Model.GetEntityTypes().ToList();
+            var claimed = PiiRegistry.Modules.SelectMany(m => m.Entities).ToList();
+            var allowed = PiiRegistry.NoBuyerData.Select(n => n.Entity).ToList();
+            Assert.Empty(claimed.Intersect(allowed));                                                  // claimed or "no buyer data", not both
+            Assert.Equal(claimed.Count, claimed.Distinct().Count());
+            Assert.Equal(allowed.Count, allowed.Distinct().Count());
+            Assert.All(PiiRegistry.NoBuyerData, n => Assert.False(string.IsNullOrWhiteSpace(n.Reason)));
+            // what looks like it holds a buyer's data: an AccountId, a property that looks like personal data, or a child (EF foreign key) of a claimed entity
+            string[] looksLike = ["Email", "Phone", "Line1", "PostalCode", "FullName", "BuyerName", "FileName", "Lat", "Lng"];
+            var suspect = entities.Where(e =>
+                e.FindProperty("AccountId") is not null
+                || e.GetProperties().Any(p => looksLike.Any(t => p.Name.Contains(t, StringComparison.OrdinalIgnoreCase)))
+                || e.GetForeignKeys().Any(f => claimed.Contains(f.PrincipalEntityType.ClrType))).Select(e => e.ClrType).ToHashSet();
+            Assert.Empty(suspect.Except(claimed).Except(allowed));                                     // a table nobody has decided about: give it a module (and an eraser) or a reason
+            Assert.Empty(claimed.Except(entities.Select(e => e.ClrType)));                             // the registry does not name tables that are not there
+            Assert.Empty(allowed.Except(suspect));                                                     // and an allow-list entry that is no longer needed goes
             return 0;
         });
         var registered = k.F.Services.GetServices<IAccountEraser>().Select(e => e.GetType()).ToList();
@@ -201,6 +214,101 @@ public class AccountReviewTests
         var done = await k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Id == id));
         Assert.NotNull(done.RedactedAt);
         Assert.Equal("Deleted buyer", done.DisplayName);
+    }
+
+    // ---------- review of 1725a68: items 1 to 5 ----------
+
+    /// <summary>A gate row for the address appears right after the password check, as an attempt from another client would leave one.</summary>
+    private static Func<Task> GateRowAppears(AuthKit k, string email) => async () =>
+    {
+        using var scope = k.F.Services.CreateScope();
+        var keys = scope.ServiceProvider.GetRequiredService<GateKeys>();
+        await scope.ServiceProvider.GetRequiredService<SignInGate>().ClaimAsync(keys.Address(email), keys.Ip("198.51.100.9"), CancellationToken.None);
+    };
+
+    public sealed class EmailSpy { public string? Email; public Guid AccountId; public int Calls; }
+
+    /// <summary>An eraser that, like M3's guest-order eraser, needs the address the account had (the account's own Email is already null when it runs).</summary>
+    public sealed class EmailSeeingEraser(ErasureContext context, EmailSpy spy) : IAccountEraser
+    {
+        public Task EraseAsync(Guid accountId, CancellationToken ct) { spy.Email = context.Email; spy.AccountId = context.AccountId; spy.Calls++; return Task.CompletedTask; }
+    }
+
+    [Fact]
+    public async Task Deleting_clears_the_sign_in_gate_for_the_address_in_its_own_transaction_and_the_job_still_knows_the_address()
+    {
+        var hook = new BeforeStatement(); var spy = new EmailSpy();
+        using var k = new AuthKit(Open(), s => { s.AddSingleton(spy); s.AddScoped<IAccountEraser, EmailSeeingEraser>(); s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)); });
+        var token = await k.VerifiedSession(Email);
+        var id = (await k.Account(Email)).Id;
+        hook.When = AfterThePasswordCheck; hook.Then = GateRowAppears(k, Email);
+        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/delete", new { password = Pw }, token)).StatusCode);
+        Assert.Null(hook.When);                                                                          // the attempt did land in the middle
+        Assert.Equal(0, await k.Db(db => db.SignInAttempts.CountAsync()));                                // ... and the delete took the gate's memory of the address with it
+        var soft = await k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Id == id));
+        Assert.Null(soft.Email);                                                                         // free for a new sign-up at once
+        Assert.Equal(Email, soft.PendingErasureEmail);                                                   // kept for the job, never in the outbox
+        Assert.DoesNotContain("@", string.Concat((await k.Db(db => db.OutboxMessages.AsNoTracking().ToListAsync())).Select(m => m.Payload)));
+        while (await k.Dispatch() > 0) { }
+        Assert.Equal((Email, id, 1), (spy.Email, spy.AccountId, spy.Calls));                             // erasers can find what was filed under the address (item 2)
+        var done = await k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Id == id));
+        Assert.Null(done.PendingErasureEmail);                                                           // and the job erases the copy too
+        Assert.NotNull(done.RedactedAt);
+    }
+
+    [Fact]
+    public async Task A_sign_in_with_an_old_password_does_not_write_its_old_hash_back_over_a_reset_that_landed_meanwhile()
+    {
+        var hook = new BeforeStatement();
+        var config = Open(); config["Auth:PasswordIterations"] = "5000";                                // today's hashing is stronger than the 1000 iterations stored below
+        using var k = new AuthKit(config, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)));
+        await k.VerifiedSession(Email);
+        // an account whose stored hash is weaker than today's, so a right password triggers the silent rehash
+        var weak = new PasswordHasher<object>(Options.Create(new PasswordHasherOptions { IterationCount = 1000 })).HashPassword(new object(), Pw);
+        await k.Db(async db => { await db.BuyerAccounts.ExecuteUpdateAsync(a => a.SetProperty(x => x.PasswordHash, weak)); return 0; });
+        hook.When = sql => sql.TrimStart().StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase) && sql.Contains("buyer_accounts") && sql.Contains("PasswordHash");   // the rehash write
+        hook.Then = ResetLanding(k);
+        var r = await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw });
+        Assert.Null(hook.When);                                                                          // the reset did land between the check and the rehash
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "owner chose this one" })).StatusCode);   // the owner's password stands
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);              // the old one is not back
+    }
+
+    [Fact]
+    public async Task A_password_change_does_not_restamp_a_session_that_is_no_longer_on_the_epoch_the_check_saw()
+    {
+        var hook = new BeforeStatement();
+        using var k = new AuthKit(Open(), s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)));
+        var token = await k.VerifiedSession(Email);
+        hook.When = AfterThePasswordCheck;
+        hook.Then = async () => { using var scope = k.F.Services.CreateScope(); await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().BuyerSessions.ExecuteUpdateAsync(x => x.SetProperty(y => y.Epoch, 99L)); };
+        var r = await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = NewPw }, token);
+        Assert.Equal(HttpStatusCode.NoContent, r.StatusCode);                                            // the account itself was unchanged, so the change goes through
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);   // but the session that had moved is not given the new epoch
+    }
+
+    [Fact]
+    public void Forbidden_characters_are_judged_per_character_not_per_code_unit()
+    {
+        Assert.False(AuthValidation.HasForbiddenCharacters("Jane Brown"));
+        Assert.False(AuthValidation.HasForbiddenCharacters("Jane 😀"));                  // emoji: a valid surrogate pair
+        Assert.False(AuthValidation.HasForbiddenCharacters("𠀀 Chen"));                 // CJK Extension B: a letter outside the basic plane
+        Assert.True(AuthValidation.HasForbiddenCharacters("Jane\ud800"));               // a high half with no partner
+        Assert.True(AuthValidation.HasForbiddenCharacters("\udc00Jane"));               // a low half with no partner
+        Assert.True(AuthValidation.HasForbiddenCharacters("a\ud800b"));
+        Assert.True(AuthValidation.HasForbiddenCharacters("Jane\U000F0000"));           // supplementary private use
+        Assert.True(AuthValidation.HasForbiddenCharacters("Jane\u200BBrown"));          // zero width space
+    }
+
+    [Fact]
+    public async Task A_name_with_characters_outside_the_basic_plane_is_accepted_deliberately()
+    {
+        using var k = new AuthKit(Open());
+        var token = await k.VerifiedSession(Email);
+        var r = await k.Send(HttpMethod.Put, "/api/v1/account/profile", new { displayName = "Ada 😀 𠀀", phone = (string?)null }, token);
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal("Ada 😀 𠀀", (await Json(r)).GetProperty("displayName").GetString());
     }
 
     // ---------- L1, L2: the relay address is retired, the email is free at once ----------

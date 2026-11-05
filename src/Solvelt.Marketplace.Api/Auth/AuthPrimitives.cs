@@ -120,7 +120,26 @@ public static class AuthValidation
         return null;
     }
 
-    /// <summary>Control, format (zero-width, bidi overrides), surrogate-half and private-use characters: text that looks like something it is not, or breaks a mail or a label (L3). Used for every free-text field a buyer types.</summary>
+    /// <summary>
+    /// Control, format (zero-width, bidi overrides), private-use characters and lone surrogate halves: text that looks like something it is not, or that cannot be encoded
+    /// (L3). Works on whole characters, so a valid pair (emoji, CJK Extension B) is judged by what it is: letters, emoji and symbols outside the basic plane are accepted.
+    /// Used for every free-text field a buyer types.
+    /// </summary>
     public static bool HasForbiddenCharacters(string s)
-        => s.Any(c => char.IsControl(c) || char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.Surrogate or System.Globalization.UnicodeCategory.PrivateUse);
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                var category = System.Text.Rune.GetUnicodeCategory(new System.Text.Rune(c, s[i + 1]));
+                if (category is System.Globalization.UnicodeCategory.PrivateUse or System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.Control) return true;
+                i++;
+                continue;
+            }
+            if (char.IsSurrogate(c)) return true;   // a half with no partner
+            if (char.IsControl(c) || char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.PrivateUse) return true;
+        }
+        return false;
+    }
 }
