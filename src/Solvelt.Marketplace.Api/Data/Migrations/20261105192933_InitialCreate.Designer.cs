@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105192519_InitialCreate")]
+    [Migration("20261105192933_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2453,6 +2453,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<long?>("LastSequence")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("TerminalState")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");
@@ -2696,6 +2699,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<Guid>("ReviewId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("TargetId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.HasKey("Id");
 

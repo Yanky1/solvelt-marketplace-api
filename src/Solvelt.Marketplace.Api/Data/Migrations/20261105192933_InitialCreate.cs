@@ -728,6 +728,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     LastAppliedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     LastEventId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     TerminalState = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: true),
+                    LastSequence = table.Column<long>(type: "bigint", nullable: true),
                     Version = table.Column<int>(type: "integer", nullable: false)
                 },
                 constraints: table =>
@@ -852,6 +853,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     AccountId = table.Column<Guid>(type: "uuid", nullable: false),
                     Kind = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
                     ReportId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    TargetId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     Reason = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
                     Note = table.Column<string>(type: "character varying(1000)", maxLength: 1000, nullable: true),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
