@@ -23,6 +23,8 @@ TEST_DB_PROVIDER=postgres \
 TEST_POSTGRES_CONNECTION="Host=localhost;Username=postgres;Password=postgres;Database=postgres" \
   dotnet test                                             # the same tests against PostgreSQL (a fresh database per factory)
 ```
+Tests that need PostgreSQL (the schema check against a real server, the migrations) return at once when `TEST_DB_PROVIDER=postgres` and `TEST_POSTGRES_CONNECTION` are not set, so a plain `dotnet test` passes them WITHOUT having run them; only CI's PostgreSQL job (or a local run with those variables) runs them. Nothing in CI is skipped or filtered out.
+
 CI (`.github/workflows/ci.yml`) restores, builds with warnings as errors, runs the tests on SQLite, and runs them again against a PostgreSQL service container.
 It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 
