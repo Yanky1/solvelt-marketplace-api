@@ -366,7 +366,7 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         Assert.Contains("no-store", res.Headers.CacheControl!.ToString());
         var text = await res.Content.ReadAsStringAsync();
         var d = JsonDocument.Parse(text).RootElement.GetProperty("sections");
-        Assert.Equal(new[] { "account", "cancellations-and-returns", "messages", "notifications", "orders" }, d.EnumerateObject().Select(p => p.Name).Order().ToArray());
+        Assert.Equal(new[] { "account", "bookings", "cancellations-and-returns", "messages", "notifications", "orders" }, d.EnumerateObject().Select(p => p.Name).Order().ToArray());
         Assert.Equal("ing1@example.com", d.GetProperty("account").GetProperty("profile").GetProperty("email").GetString());
         Assert.Contains("pay me on venmo", text);                                                         // their own thread (the seller's text)
         Assert.Contains("x.png", text);                                                                   // and the file's name
