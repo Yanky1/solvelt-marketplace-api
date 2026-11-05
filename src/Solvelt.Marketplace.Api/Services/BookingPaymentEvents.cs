@@ -330,6 +330,13 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
             await events.ReplayParkedAsync(BookingEventHandler.Aggregate, b.MarketplaceBookingId, ct);
             return OutboxResult.Delivered();
         }
+        // A 2xx is never a refusal: if its body is unreadable (no booking in it) or names another booking, the portal may well have confirmed this one. Never void and refund the buyer's money on a
+        // "maybe" (review MED-2; the same failure mode as the confirm-shape bug M8-07): log it for a person and retry, which dead-letters after the usual attempts, with the payment untouched.
+        if (r.IsSuccess)
+        {
+            log.LogError("The portal answered {Status} to the confirm of booking {Mid} but the answer could not be read or does not name this booking; the payment is NOT refunded, the confirm is retried", r.Status, b.MarketplaceBookingId);
+            return OutboxResult.Retry("confirm_unreadable");
+        }
         // Transient: try again later (never refund on a maybe).
         if (r.Retryable || r.Status is 408 or 429 or >= 500 or 401 or 413) return PortalOutcome.From(r);
 

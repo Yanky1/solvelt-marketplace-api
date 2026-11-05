@@ -40,6 +40,21 @@ public sealed class FakeCaptureOnWebhookOffTests : OrderFlowBase
     }
 }
 
+/// <summary>The run-time guard: with a Stripe secret key configured the processor is the real one, so the option must do nothing to the in-process fake (mutant M8 of the review survived without this).</summary>
+public sealed class FakeCaptureOnWebhookWithAKeyTests : OrderFlowBase
+{
+    public FakeCaptureOnWebhookWithAKeyTests() : base(new Dictionary<string, string?> { ["Stripe:FakeCaptureOnWebhook"] = "true", ["Stripe:SecretKey"] = "sk_test_journeyfakekey000000000000", ["Stripe:WebhookSecret"] = "whsec_dev_only_not_for_production_0000000" }) { }
+
+    [Fact]
+    public async Task With_a_secret_key_a_success_event_does_not_capture_the_fake()
+    {
+        var intent = await Stripe.CreateIntentAsync(5000, "usd", "guard-1", new Dictionary<string, string> { ["marketplace_order_id"] = "MP-GUARD-1" }, CancellationToken.None);
+        await PostStripe(Event("payment_intent.succeeded", intent.Id, "MP-GUARD-1", 5000));   // (an unknown young order is a 5xx for Stripe to retry: only the fake's state matters here)
+        var ex = await Assert.ThrowsAsync<PaymentRejectedException>(() => Stripe.RefundAsync(intent.Id, 5000, "guard-refund-1", new Dictionary<string, string>(), CancellationToken.None));
+        Assert.Equal("charge_exceeds_amount", ex.Code);
+    }
+}
+
 public sealed class FakeCaptureOnWebhookStartupTests
 {
     private static IReadOnlyList<string> Problems(string environment, string? flag)
@@ -49,9 +64,18 @@ public sealed class FakeCaptureOnWebhookStartupTests
     }
 
     [Theory]
-    [InlineData("Production")]
-    [InlineData("Staging")]
-    public void It_is_refused_outside_development_and_testing(string environment) => Assert.Contains(Problems(environment, "true"), p => p.Contains("FakeCaptureOnWebhook"));
+    [InlineData("Production", "true")]
+    [InlineData("Staging", "true")]
+    [InlineData("Production", " true")]          // the options binder trims: these ARE "on" at run time, so the refusal must see them too (review LOW-1)
+    [InlineData("Staging", "True\t")]
+    [InlineData("Production", "TRUE ")]
+    public void It_is_refused_outside_development_and_testing(string environment, string value) => Assert.Contains(Problems(environment, value), p => p.Contains("FakeCaptureOnWebhook"));
+
+    [Theory]
+    [InlineData("false")]
+    [InlineData("")]
+    [InlineData("yes")]
+    public void Anything_that_is_not_true_is_not_a_request(string value) => Assert.DoesNotContain(Problems("Production", value), p => p.Contains("FakeCaptureOnWebhook"));
 
     [Theory]
     [InlineData("Development")]
