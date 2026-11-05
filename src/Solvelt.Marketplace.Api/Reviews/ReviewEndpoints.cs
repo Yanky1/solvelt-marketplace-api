@@ -162,9 +162,11 @@ public static class ReviewEndpoints
         if (p is null) return Problems.NotFound();
         var bytes = await db.ReviewPhotoData.AsNoTracking().Where(d => d.PhotoId == photoId).Select(d => d.Bytes).FirstOrDefaultAsync(ct);
         if (bytes is null) return Problems.NotFound();
-        ctx.Response.Headers.CacheControl = "public, max-age=86400";
+        // The picture itself never changes (the id is unique per upload), but whether it may be shown does: a hidden or removed review's photos must stop being served soon, so caches keep it for five minutes at most
+        // and must ask again; the ETag makes the asking cheap (a 304), and the visibility check above runs BEFORE any 304, so a hidden review's photo is a 404 even for a cache that holds it.
+        ctx.Response.Headers.CacheControl = "public, max-age=300, must-revalidate";
         ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
         ctx.Response.Headers["Content-Security-Policy"] = "default-src 'none'";
-        return Results.File(bytes, p.ContentType);
+        return Results.File(bytes, p.ContentType, entityTag: new Microsoft.Net.Http.Headers.EntityTagHeaderValue($"\"{photoId:N}\""));
     }
 }
