@@ -15,10 +15,14 @@ public sealed record HoldAddress(string? Name, string? Line1, string? Line2, str
 /// <summary>The hold request. There is deliberately no price, total or end time: the slot's start is the only time the client names, and the portal validates it.</summary>
 public sealed record HoldRequest(Guid? ListingId, Guid? ProviderId, DateTimeOffset? Start, int? DurationMinutes, string? Location, IReadOnlyList<string>? AddOnIds, HoldAddress? Address, string? Phone);
 
+/// <summary>Optional body of the consent to an additional charge: the amount the buyer SAW (a different current amount is refused, never charged under the old figure).</summary>
+public sealed record ExtraAcceptBody(long? ExpectedAmountCents);
+
 public sealed record BookingView(Guid Id, string? Number, Guid ListingId, string Status, string Location, DateTimeOffset? StartAt, DateTimeOffset? EndAt, int DurationMinutes,
     string Currency, long PriceCents, long AddOnsCents, long TravelFeeCents, long TotalCents, DateTimeOffset? HoldExpiresAt, bool HoldExpired, DateTimeOffset? ApprovalDeadline,
     DateTimeOffset? ProposedStartAt, long CancellationFeeCents, long RefundDueCents, long NoShowFeeCents, long AdditionalChargeCents, int RescheduleCount, IReadOnlyList<string> AddOnIds,
-    string? OnlineInstructions, string? FailureCode, DateTimeOffset CreatedAt, bool RequiresBuyerConsent = false, DateTimeOffset? RescheduleRequestedStartAt = null, string? ExtraChargeState = null, PolicyView? Policy = null);
+    string? OnlineInstructions, string? FailureCode, DateTimeOffset CreatedAt, bool RequiresBuyerConsent = false, DateTimeOffset? RescheduleRequestedStartAt = null, string? ExtraChargeState = null, PolicyView? Policy = null,
+    DateTimeOffset? PaymentDueAt = null, bool NeedsPayment = false, string? ListingSlug = null);
 
 public enum HoldStatus { Ok, NotFound, Invalid, IdempotencyConflict, TooManyHolds, SlotUnavailable, PortalRefused, Unavailable }
 public sealed record HoldResult(HoldStatus Status, BookingView? Booking = null, bool Created = false, string? Code = null, IReadOnlyDictionary<string, string>? Errors = null);
@@ -246,7 +250,15 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         b.TravelFeeCents, b.TotalCents, b.HoldExpiresAt, b.Status == BookingStatus.Expired || (b.Status == BookingStatus.Hold && b.HoldExpiresAt is { } h && h <= now), b.ApprovalDeadline, b.ProposedStartAt,
         b.CancellationFeeCents, b.RefundDueCents, b.NoShowFeeCents, b.AdditionalChargeCents, b.RescheduleCount, b.AddOnIds.Length == 0 ? [] : b.AddOnIds.Split(','),
         BookingStatuses.RevealsMeetingLink(b.Status) ? b.OnlineInstructions : null, b.Status == BookingStatus.Failed ? b.FailureCode : null, b.CreatedAt,
-        b.RequiresBuyerConsent, b.RescheduleRequestedStartAt, b.ExtraChargeState, PolicyOf(b));
+        b.RequiresBuyerConsent, b.RescheduleRequestedStartAt, b.ExtraChargeState, PolicyOf(b),
+        PaymentDue(b, now), PaymentDue(b, now) is not null);
+
+    /// <summary>
+    /// When a CONFIRMED-but-unpaid booking (an older quote accepted before portal C13) must be paid by, or null: a hold has its own expiry, a paid booking has no timer left, and after the time the booking is
+    /// cancelled (decision M4-13). The web shows its payment panel whenever this is set.
+    /// </summary>
+    private static DateTimeOffset? PaymentDue(Booking b, DateTimeOffset now)
+        => b.PaymentDueAt is { } due && due > now && b.Status is BookingStatus.Confirmed or BookingStatus.Requested or BookingStatus.Rescheduled ? due : null;
 
     /// <summary>The cancellation policy the portal froze on this booking (C11), or null while we have not been told any of it.</summary>
     private static PolicyView? PolicyOf(Booking b)
@@ -257,15 +269,21 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
     public async Task<BookingView?> GetAsync(Guid accountId, Guid id, CancellationToken ct)
     {
         var b = await db.Bookings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id && x.AccountId == accountId && x.Status != BookingStatus.Failed, ct);
-        return b is null ? null : ToView(b, time.GetUtcNow());
+        return b is null ? null : ToView(b, time.GetUtcNow()) with { ListingSlug = await SlugOfAsync(b.ListingId, ct) };
     }
+
+    /// <summary>The slug of a service listing (so a page can link back to it), or null when it is not in the catalog any more.</summary>
+    private async Task<string?> SlugOfAsync(Guid listingId, CancellationToken ct)
+        => await db.CatalogListings.AsNoTracking().Where(l => l.Id == listingId).Select(l => l.Slug).FirstOrDefaultAsync(ct);
 
     public async Task<IReadOnlyList<BookingView>> ListAsync(Guid accountId, CancellationToken ct)
     {
         var rows = await db.Bookings.AsNoTracking().Where(x => x.AccountId == accountId && x.Status != BookingStatus.HoldPending && x.Status != BookingStatus.Failed)
             .OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync(ct);
         var now = time.GetUtcNow();
-        return rows.Select(b => ToView(b, now) with { OnlineInstructions = null }).ToList();   // the meeting link is only on the detail view
+        var ids = rows.Select(b => b.ListingId).Distinct().ToList();
+        var slugs = await db.CatalogListings.AsNoTracking().Where(l => ids.Contains(l.Id)).Select(l => new { l.Id, l.Slug }).ToDictionaryAsync(l => l.Id, l => l.Slug, ct);
+        return rows.Select(b => ToView(b, now) with { OnlineInstructions = null, ListingSlug = slugs.GetValueOrDefault(b.ListingId) }).ToList();   // the meeting link is only on the detail view
     }
 }
 
@@ -335,15 +353,16 @@ public static class BookingEndpoints
     }
 
     /// <summary>The buyer's consent to an additional charge the provider asked for: creates the intent for the amount the portal sent (the body has none). Nothing is charged before this.</summary>
-    private static async Task<IResult> ExtraAccept(Guid id, HttpContext ctx, ExtraChargeService extra, CancellationToken ct)
+    private static async Task<IResult> ExtraAccept(Guid id, ExtraAcceptBody? body, HttpContext ctx, ExtraChargeService extra, CancellationToken ct)
     {
-        var (status, payment, amount) = await extra.AcceptAsync(ctx.Buyer().AccountId, id, ct);
+        var (status, payment, amount) = await extra.AcceptAsync(ctx.Buyer().AccountId, id, body?.ExpectedAmountCents, ct);
         ctx.Response.Headers.CacheControl = "private, no-store";
         return status switch
         {
             ExtraChargeStatus.Ok => Results.Json(new { amountCents = amount, payment }),
             ExtraChargeStatus.NotFound => Problems.NotFound(),
             ExtraChargeStatus.AlreadyPaid => Problems.Json(409, "already_paid", "This charge is already paid."),
+            ExtraChargeStatus.AmountChanged => Problems.Json(409, "amount_changed", "The provider changed the amount. Please look at it again."),
             ExtraChargeStatus.AmountTooSmall => Problems.Unprocessable("amount_too_small", "The amount is below the minimum we can charge."),
             ExtraChargeStatus.PaymentRejected => Problems.Unprocessable("payment_rejected", "The payment provider could not start this payment."),
             ExtraChargeStatus.PaymentsUnavailable => Problems.Json(503, "payments_unavailable", "Payments are unavailable right now. Please try again in a moment."),
