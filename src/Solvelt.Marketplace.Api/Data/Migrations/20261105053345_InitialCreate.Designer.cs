@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105040044_InitialCreate")]
+    [Migration("20261105053345_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -92,6 +92,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(3)
                         .HasColumnType("character varying(3)");
 
+                    b.Property<Guid?>("DemoBatchId")
+                        .HasColumnType("uuid");
+
                     b.Property<int>("DurationMinutes")
                         .HasColumnType("integer");
 
@@ -117,6 +120,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<string>("IntakeJson")
                         .HasMaxLength(8000)
                         .HasColumnType("character varying(8000)");
+
+                    b.Property<bool>("IsDemo")
+                        .HasColumnType("boolean");
 
                     b.Property<Guid>("ListingId")
                         .HasColumnType("uuid");
@@ -439,12 +445,18 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<Guid?>("DemoBatchId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("FullName")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
                     b.Property<bool>("IsDefault")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsDemo")
                         .HasColumnType("boolean");
 
                     b.Property<double?>("Lat")
@@ -745,9 +757,15 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<Guid?>("DemoBatchId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("GuestTokenHash")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<bool>("IsDemo")
+                        .HasColumnType("boolean");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -991,6 +1009,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<int?>("HeightMm")
                         .HasColumnType("integer");
+
+                    b.Property<bool>("IsDemoListing")
+                        .HasColumnType("boolean");
 
                     b.Property<bool>("IsStub")
                         .HasColumnType("boolean");
@@ -1311,6 +1332,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(3)
                         .HasColumnType("character varying(3)");
 
+                    b.Property<Guid?>("DemoBatchId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("FailureCode")
                         .HasMaxLength(60)
                         .HasColumnType("character varying(60)");
@@ -1322,6 +1346,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<string>("GuestEmail")
                         .HasMaxLength(254)
                         .HasColumnType("character varying(254)");
+
+                    b.Property<bool>("IsDemo")
+                        .HasColumnType("boolean");
 
                     b.Property<long>("ItemsCents")
                         .HasColumnType("bigint");
@@ -1508,6 +1535,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("BookingId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("ConversationKey")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -1516,8 +1546,14 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<Guid?>("DemoBatchId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid?>("GroupId")
                         .HasColumnType("uuid");
+
+                    b.Property<bool>("IsDemo")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Kind")
                         .IsRequired()
@@ -1550,6 +1586,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasIndex("ConversationKey")
                         .IsUnique();
 
+                    b.HasIndex("AccountId", "BookingId")
+                        .IsUnique();
+
                     b.HasIndex("AccountId", "GroupId")
                         .IsUnique();
 
@@ -1576,6 +1615,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
+
+                    b.Property<Guid?>("DemoBatchId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsDemo")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Kind")
                         .IsRequired()
@@ -2237,6 +2282,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<Guid?>("AccountId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("AggregateKey")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
@@ -2285,6 +2333,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AccountId");
 
                     b.HasIndex("ReceivedAt");
 
