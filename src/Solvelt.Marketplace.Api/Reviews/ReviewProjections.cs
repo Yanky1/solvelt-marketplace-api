@@ -75,7 +75,7 @@ public static class ReviewModeration
 /// The seller's reply to a review, relayed by the portal (C17: <c>review.reply_posted</c>, re-sent on every edit with a stable reply id; <c>review.reply_removed</c>). One reply per review, kept by the
 /// portal's event order (an older event never overwrites a newer one); none on a review that is not published. Matching is by OUR review id.
 /// </summary>
-public sealed class ReviewReplyHandler : IProjectionHandler
+public sealed class ReviewReplyHandler(ILogger<ReviewReplyHandler> log) : IProjectionHandler
 {
     public const int MaxReplyLength = 2000;
     public IReadOnlyCollection<string> EventTypes { get; } = ["review.reply_posted", "review.reply_removed"];
@@ -89,6 +89,9 @@ public sealed class ReviewReplyHandler : IProjectionHandler
         var review = await c.Db.Reviews.FirstOrDefaultAsync(r => r.Id == reviewId, ct);
         if (review is null) return HandlerOutcome.Skipped("unknown review");
         // C17.1: the portal numbers the events of one review in the scope "review:{reviewId}"; the greater sequence wins, without one the arrival order does.
+        // A sequence in ANOTHER scope should never happen (the portal names the review's own scope): it is not used, and it is worth a person's look.
+        if (c.Event is { Sequence: not null, SequenceScope: { } foreign } && !string.Equals(foreign, $"review:{reviewId}", StringComparison.Ordinal))
+            log.LogWarning("Portal event {EventId} of type {Type} carries the sequence scope {Scope} instead of the review's own; its sequence is ignored and arrival order applies", c.Event.Id, c.Event.Type, foreign.Length <= 100 ? foreign : foreign[..100]);
         if (!await c.AdvanceBySequenceAsync("review", reviewId.ToString(), "reply", $"review:{reviewId}", ct)) return HandlerOutcome.Skipped("older than the applied reply state");
         if (c.Event.Type == "review.reply_removed")
         {

@@ -831,4 +831,16 @@ public sealed class ReviewsTests : IDisposable
         Assert.Equal(0, await _k.Db(db => db.ReviewVotes.CountAsync()));
         Assert.Equal(0, (await _k.Db(db => db.Reviews.AsNoTracking().SingleAsync())).HelpfulCount);
     }
+
+    [Fact]
+    public async Task A_sequence_in_another_scope_than_the_reviews_own_is_ignored_and_logged_as_a_warning()
+    {
+        var (a, ida) = await Buyer("c171w@example.com");
+        var id = await Reviewed(a, await Delivered(ida), 5);
+        var at = _k.F.Clock.GetUtcNow();
+        Assert.Equal("applied", await Numbered("warn-1", "review.reply_posted", id, Guid.NewGuid().ToString(), "Thanks", at, "\"sequenceScope\":\"review:not-this-one\",\"sequence\":4"));
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("ReviewReplyHandler") && l.Contains("instead of the review's own") && l.Contains("warn-1") && l.Contains("review:not-this-one"));
+        Assert.Equal("applied", await Numbered("warn-2", "review.reply_posted", id, Guid.NewGuid().ToString(), "Thanks again", at, Seq(id, 5)));   // the review's own scope: no warning for it
+        Assert.DoesNotContain(_k.F.Logs.Lines, l => l.Contains("instead of the review's own") && l.Contains("warn-2"));
+    }
 }
