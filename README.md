@@ -57,4 +57,8 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 
 Logging never contains URLs, query strings or paths (filters are enforced in code, see decision M1-29).
 Outside Development/Testing (any other environment name, Staging included) the app refuses to start when a required value is missing, a key is short, any two keys are equal, or a dev default is used in any slot.
+
+### Test site (demo data)
+
+`Demo__Enabled=true` turns on test mode (M9): the public config says so (the web shows a TEST MODE badge), buyers get a "Fill with demo data" button, and an unverified account can be verified without email. **The API refuses to start with it on in Production, with no override.** A test site therefore runs with `ASPNETCORE_ENVIRONMENT=Staging` (every production check still applies in Staging) and the web with `APP_ENV=staging` and `DEMO_ENABLED=true`. A production build with `Demo__Enabled` off or unset starts normally. Details: docs/API.md "Demo data", docs/DECISIONS.md M9-01 to M9-03.
 No secrets are stored in the repository.

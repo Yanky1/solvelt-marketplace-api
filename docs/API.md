@@ -362,7 +362,7 @@ Buyer routes need the session and answer `private, no-store`; another buyer's th
 
 ## Demo data (test mode, M9)
 
-Only while `Demo:Enabled` is on (Development and Testing only; the API refuses to start with it on anywhere else). While it is off every `/api/v1/demo/*` route answers `404`, to everyone, before anything else is looked at.
+Only while `Demo:Enabled` is on (every environment except Production; the API refuses to start with it on in Production, with no override; the test site runs as `ASPNETCORE_ENVIRONMENT=Staging`). While it is off every `/api/v1/demo/*` route answers `404`, to everyone, before anything else is looked at.
 
 | Route | Auth | Answer |
 |---|---|---|

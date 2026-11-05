@@ -27,13 +27,17 @@ public sealed class DemoFoundationTests
     private static bool Refused(string env, string? demo) => StartupValidator.Validate(Config(demo), new Env(env)).Any(p => p.Contains("Demo:Enabled"));
 
     [Theory]
-    [InlineData("Production")] [InlineData("Staging")] [InlineData("production")] [InlineData("")] [InlineData("Anything")]
-    public void The_application_refuses_to_start_with_demo_data_on_outside_development_and_testing(string env)
+    [InlineData("Production")] [InlineData("production")] [InlineData("PRODUCTION")]
+    public void The_application_refuses_to_start_with_demo_data_on_in_production(string env)
     {
         Assert.True(Refused(env, "true"), env);
         Assert.True(Refused(env, "TRUE"), env);
         Assert.True(Refused(env, " True "), env);
     }
+
+    [Theory]
+    [InlineData("Staging")] [InlineData("staging")] [InlineData("Development")] [InlineData("Testing")] [InlineData("Anything")] [InlineData("Demo")]
+    public void Every_other_environment_may_switch_it_on_so_the_test_site_can_run_as_staging(string env) => Assert.False(Refused(env, "true"), env);
 
     [Theory]
     [InlineData("Production")] [InlineData("Staging")]
@@ -44,9 +48,9 @@ public sealed class DemoFoundationTests
         Assert.False(Refused(env, ""));
     }
 
-    [Theory]
-    [InlineData("Development")] [InlineData("Testing")]
-    public void Development_and_testing_may_switch_it_on(string env) => Assert.False(Refused(env, "true"));
+    [Fact]
+    public void The_message_says_what_to_do()
+        => Assert.Contains(StartupValidator.Validate(Config("true"), new Env("Production")), p => p.Contains("Demo:Enabled") && p.Contains("Staging"));
 
     [Fact]
     public void There_is_no_override_that_lets_production_start_with_it_on()
