@@ -18,8 +18,12 @@ public static class OrderStatus
 /// Our order (<c>MP-...</c>): what the buyer is charged once, split into one group per (seller, brand) exactly like the portal's seller orders.
 /// Every amount is computed by the server (QuoteService) and stored in <c>long</c> cents; the intent amount is <see cref="TotalCents"/>, which equals the sum of the groups.
 /// </summary>
-public sealed class MarketplaceOrder
+public sealed class MarketplaceOrder : Solvelt.Marketplace.Api.Demo.IDemoMarked
 {
+    /// <summary>Created by "Fill with demo data" (M9): removed by "Remove demo data", never sent to the portal, a payment provider or a mailbox.</summary>
+    public bool IsDemo { get; set; }
+    /// <summary>Which press of the button created it.</summary>
+    public Guid? DemoBatchId { get; set; }
     public Guid Id { get; set; }
     /// <summary><c>MP-yyyyMMdd-XXXXXXXX</c>: our idempotency id towards the portal (<c>marketplaceOrderId</c>) and Stripe.</summary>
     public string Number { get; set; } = "";

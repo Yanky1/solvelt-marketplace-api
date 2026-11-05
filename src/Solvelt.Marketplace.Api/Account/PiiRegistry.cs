@@ -16,6 +16,7 @@ public static class PiiRegistry
 
     public static readonly IReadOnlyList<Module> Modules =
     [
+        new("demo-data", "M2", [], typeof(Demo.DemoAccountEraser)),   // marked rows of the modules below (M9); first, so a demo row is removed outright, not redacted
         new("account", "M1", [typeof(BuyerAccount), typeof(BuyerAddress), typeof(BuyerSession), typeof(EmailToken), typeof(BuyerPasskey), typeof(WebAuthnChallenge)], null),   // erased by AccountService.RedactAsync itself
         new("messaging", "M5", [typeof(Notification), typeof(NotificationPreference), typeof(MessageThread), typeof(ThreadMessage), typeof(MessageAttachment), typeof(MessageAttachmentData)], typeof(Messaging.MessagingAccountEraser)),
         new("orders-and-carts", "M3", [typeof(MarketplaceOrder), typeof(Cart)], typeof(Checkout.OrdersAccountEraser)),   // decision M3-35

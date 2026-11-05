@@ -45,6 +45,7 @@ builder.Services.Configure<NotificationOptions>(o => OptionsSetup.Notifications(
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Notifications.UnsubscribeTokens>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Infrastructure.MessageRateLimiter>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Messaging.IAttachmentScanner, Solvelt.Marketplace.Api.Messaging.AllowAllAttachmentScanner>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Demo.DemoAccountEraser>();   // first: demo rows are removed outright (M9)
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Messaging.MessagingAccountEraser>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.IOrderReconcileObserver, Solvelt.Marketplace.Api.Checkout.OrderMoneyReconcileObserver>();
@@ -77,6 +78,8 @@ builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Account.Accou
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
 builder.Services.Configure<DemoOptions>(builder.Configuration.GetSection("Demo"));
+builder.Services.AddScoped<DemoService>();
+builder.Services.AddScoped<DemoVerifier>();
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
 builder.Services.AddSingleton(TimeProvider.System);

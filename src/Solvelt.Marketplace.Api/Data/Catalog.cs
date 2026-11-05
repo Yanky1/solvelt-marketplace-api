@@ -82,6 +82,8 @@ public sealed class CatalogListing
     /// <summary>True once the listing has ever been <see cref="Visible"/>. Only a listing that was public can be "gone" (410); a draft, or one first seen archived, is a plain 404 (M2-16).</summary>
     public bool WasPublic { get; set; }
     public bool IsStub { get; set; }
+    /// <summary>The portal's feed marks this listing as demo data (document field <c>demo: true</c>): shown with a "Demo" pill, and preferred when demo data is filled for a buyer (M9).</summary>
+    public bool IsDemoListing { get; set; }
     /// <summary>Size in millimetres (portal C7); all three are set or none.</summary>
     public int? LengthMm { get; set; }
     public int? WidthMm { get; set; }

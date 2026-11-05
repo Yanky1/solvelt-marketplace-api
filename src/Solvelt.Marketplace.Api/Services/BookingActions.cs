@@ -116,15 +116,15 @@ public static class BookingActionEndpoints
             ctx.Response.Headers.CacheControl = "private, no-store";
             return await a.PreviewAsync(ctx.Buyer().AccountId, id, ct) is { } p ? Results.Json(p) : Problems.NotFound();
         });
-        g.MapPost("/{id:guid}/cancel", async (Guid id, CancelBody? body, HttpContext ctx, BookingActions a, CancellationToken ct) => Reply(ctx, await a.CancelAsync(ctx.Buyer(), id, body?.Reason, ct)));
+        g.MapPost("/{id:guid}/cancel", async (Guid id, CancelBody? body, HttpContext ctx, BookingActions a, CancellationToken ct) => Reply(ctx, await a.CancelAsync(ctx.Buyer(), id, body?.Reason, ct))).AddEndpointFilter<Demo.DemoBookingGuard>();
         g.MapPost("/{id:guid}/reschedule", async (Guid id, RescheduleBody? body, HttpContext ctx, BookingActions a, CancellationToken ct) =>
         {
             var key = ctx.Request.Headers["Idempotency-Key"].ToString().Trim();
             if (key.Length is < 8 or > 60 || key.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))) return Problems.Validation(new Dictionary<string, string> { ["Idempotency-Key"] = "Send an Idempotency-Key header (8 to 60 letters, digits, - _)." });
             return Reply(ctx, await a.RescheduleAsync(ctx.Buyer(), id, body?.NewStart, key, ct));
-        });
-        g.MapPost("/{id:guid}/proposal", async (Guid id, ProposalBody? body, HttpContext ctx, BookingActions a, CancellationToken ct) => Reply(ctx, await a.RespondToProposalAsync(ctx.Buyer(), id, body?.Accept, ct)));
-        g.MapPost("/{id:guid}/acknowledge-reschedule", async (Guid id, HttpContext ctx, BookingActions a, CancellationToken ct) => Reply(ctx, await a.AcknowledgeRescheduleAsync(ctx.Buyer(), id, ct)));
+        }).AddEndpointFilter<Demo.DemoBookingGuard>();
+        g.MapPost("/{id:guid}/proposal", async (Guid id, ProposalBody? body, HttpContext ctx, BookingActions a, CancellationToken ct) => Reply(ctx, await a.RespondToProposalAsync(ctx.Buyer(), id, body?.Accept, ct))).AddEndpointFilter<Demo.DemoBookingGuard>();
+        g.MapPost("/{id:guid}/acknowledge-reschedule", async (Guid id, HttpContext ctx, BookingActions a, CancellationToken ct) => Reply(ctx, await a.AcknowledgeRescheduleAsync(ctx.Buyer(), id, ct))).AddEndpointFilter<Demo.DemoBookingGuard>();
         return g;
     }
 
