@@ -95,11 +95,18 @@ public static class OutboxAdmin
         var now = time.GetUtcNow().ToUniversalTime();
         // Only a dead message with its payload still present can be re-sent; the compare is in the UPDATE so two clicks revive it once.
         // LastError is kept on purpose: it says why the message died until the next attempt replaces it.
-        var rows = await db.OutboxMessages.Where(m => m.Id == id && m.Status == OutboxStatus.Dead && m.Payload != null).ExecuteUpdateAsync(s => s
-            .SetProperty(m => m.Status, OutboxStatus.Pending).SetProperty(m => m.Attempts, 0).SetProperty(m => m.NextAttemptAt, now).SetProperty(m => m.DeadAt, (DateTimeOffset?)null)
-            .SetProperty(m => m.LockedUntil, (DateTimeOffset?)null).SetProperty(m => m.Version, m => m.Version + 1), ct);
+        var rows = await ReviveDeadAsync(db, m => m.Id == id, now, ct);
         if (rows == 1) return Results.NoContent();
         var exists = await db.OutboxMessages.AnyAsync(m => m.Id == id, ct);
         return exists ? Problems.Json(409, "not_retryable", "Only a dead message that still has its payload can be retried.") : Problems.NotFound();
     }
+
+    /// <summary>
+    /// Puts DEAD messages that still have their payload back in the queue (attempts reset, due now). The status compare is part of the UPDATE, so two clicks revive a message once. LastError is kept
+    /// on purpose: it says why the message died until the next attempt replaces it. Shared by this endpoint and the staff area, so there is one way to retry.
+    /// </summary>
+    public static Task<int> ReviveDeadAsync(MarketplaceDb db, System.Linq.Expressions.Expression<Func<OutboxMessage, bool>> which, DateTimeOffset now, CancellationToken ct)
+        => db.OutboxMessages.Where(which).Where(m => m.Status == OutboxStatus.Dead && m.Payload != null).ExecuteUpdateAsync(s => s
+            .SetProperty(m => m.Status, OutboxStatus.Pending).SetProperty(m => m.Attempts, 0).SetProperty(m => m.NextAttemptAt, now).SetProperty(m => m.DeadAt, (DateTimeOffset?)null)
+            .SetProperty(m => m.LockedUntil, (DateTimeOffset?)null).SetProperty(m => m.Version, m => m.Version + 1), ct);
 }
