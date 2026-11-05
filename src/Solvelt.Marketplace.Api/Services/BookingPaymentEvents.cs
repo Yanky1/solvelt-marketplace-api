@@ -352,7 +352,7 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
                 outbox.EnqueueEmail(new EmailMessage(account.Email, "We couldn't confirm your booking",
                     held == 0
                         ? "The time you chose could not be confirmed, so your payment is being refunded in full to your card (it can take a few days to show). Please choose another time.\n"
-                        : "The time you chose could not be confirmed, so your payment is being refunded to your card (it can take a few days to show). Part of it is held while your card issuer decides a dispute, and it will follow when that is decided. Please choose another time.\n"), "mail:void:" + pay.Key);
+                        : "The time you chose could not be confirmed, so your payment is being refunded to your card (it can take a few days to show). Part of it is on hold while a dispute with your card issuer is decided; it is returned to your card only if the money is left with us afterwards. Please choose another time.\n"), "mail:void:" + pay.Key);
                 await db.SaveChangesAsync(ct);
             }
             await tx.CommitAsync(ct);

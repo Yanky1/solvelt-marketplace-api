@@ -213,7 +213,7 @@ public sealed class BookingActionTests : BookingFlowBase
         await Drain();
         var mails = await _k.Mail("jane@example.com");
         Assert.Equal(before + 1, mails.Count);
-        Assert.Contains("Reminder", mails.Last().Subject); Assert.Contains($"/account/bookings/{b.Id}", mails.Last().TextBody);
+        Assert.Contains("Reminder", mails.Last().Subject); Assert.Contains($"/bookings/{b.Id}", mails.Last().TextBody); Assert.DoesNotContain("/account/bookings/", mails.Last().TextBody);   // the page the web has
         Assert.Contains("/account/notifications", mails.Last().TextBody);                       // M5's notifier: preferences and unsubscribe come with the mail
         Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == "booking_reminder")));   // and the in-app entry
         Assert.DoesNotContain("meet.example", mails.Last().TextBody);

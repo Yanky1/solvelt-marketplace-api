@@ -54,9 +54,19 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
             }
         }
         db.ChangeTracker.Clear();
-        var cancelled = await CancelUnpaidQuoteBookingsAsync(now, ct);
-        await ResolveRequestingQuotesAsync(now, ct);
-        return new Result(resolved, failed, await RedactAsync(now, ct), cancelled, await ReleaseDeferredAsync(ct), await EraseDeletedAccountsAsync(ct));
+        // Each step on its own: one that throws is logged and never skips the others for this run (they all retry next minute).
+        async Task<int> Step(string name, Func<Task<int>> run)
+        {
+            try { return await run(); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { log.LogError("Booking upkeep step {Step} failed: {ExceptionType}", name, ex.GetType().Name); db.ChangeTracker.Clear(); return 0; }
+        }
+        var cancelled = await Step("cancel-unpaid", () => CancelUnpaidQuoteBookingsAsync(now, ct));
+        await Step("resolve-quotes", async () => { await ResolveRequestingQuotesAsync(now, ct); return 0; });
+        var redacted = await Step("redact", () => RedactAsync(now, ct));
+        var released = await Step("release-deferred", () => ReleaseDeferredAsync(ct));
+        var erased = await Step("erase-deleted-accounts", () => EraseDeletedAccountsAsync(ct));
+        return new Result(resolved, failed, redacted, cancelled, released, erased);
     }
 
     /// <summary>
@@ -119,10 +129,12 @@ public sealed class BookingMaintenance(MarketplaceDb db, ISignedPortalClient por
     /// </summary>
     public async Task<int> ReleaseDeferredAsync(CancellationToken ct)
     {
+        // oldest deferred refund first, so a payment that cannot release (still disputed elsewhere) never starves the others; only REAL releases are counted
         var ids = await db.BookingRefunds.AsNoTracking().Where(r => r.Status == RefundStatus.Deferred && db.BookingPayments.Any(p => p.Id == r.PaymentId && p.DisputedCents == 0))
-            .Select(r => r.PaymentId).Distinct().Take(Batch).ToListAsync(ct);
-        foreach (var id in ids) { db.ChangeTracker.Clear(); await refunds.ReleaseDeferredAsync(id, ct); }
-        return ids.Count;
+            .GroupBy(r => r.PaymentId).Select(g => new { Id = g.Key, Oldest = g.Min(x => x.CreatedAt) }).OrderBy(x => x.Oldest).Select(x => x.Id).Take(Batch).ToListAsync(ct);
+        var released = 0;
+        foreach (var id in ids) { db.ChangeTracker.Clear(); released += await refunds.ReleaseDeferredAsync(id, ct); }
+        return released;
     }
 
     /// <summary>

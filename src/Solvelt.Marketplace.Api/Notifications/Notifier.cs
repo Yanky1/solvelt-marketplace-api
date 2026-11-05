@@ -157,7 +157,7 @@ public static class NotificationEmails
         };
         subject = System.Text.RegularExpressions.Regex.Replace(subject, @"[\p{Cc}\u2028\u2029]+", " ").Trim();   // a seller/listing name can never add a header line (review P7)
         if (subject.Length > 200) subject = subject[..(char.IsHighSurrogate(subject[199]) ? 199 : 200)];   // never cut a surrogate pair in half (review X7)
-        var link = n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? (Guid.TryParse(P("bookingId"), out var bid) ? $"{baseUrl}/account/bookings/{bid}" : $"{baseUrl}/account/bookings") : $"{baseUrl}/account/orders/{n.OrderNumber}";
+        var link = n.Kind == NotificationKinds.MessageReceived ? $"{baseUrl}/account/messages/{P("threadId")}" : n.Kind.StartsWith("booking_") ? (Guid.TryParse(P("bookingId"), out var bid) ? $"{baseUrl}/bookings/{bid}" : $"{baseUrl}/account/bookings") : $"{baseUrl}/account/orders/{n.OrderNumber}";
         var footer = unsubscribeCategory is null || unsubscribeAll is null
             ? $"This email is required for your orders and account, so it cannot be switched off. You can choose which other emails you get at {baseUrl}/account/notifications/preferences.\n"
             : $"You get this email because of your notification settings ({baseUrl}/account/notifications).\nStop these emails: {unsubscribeCategory}\nStop all notification emails: {unsubscribeAll}\n";

@@ -49,8 +49,8 @@ public static class BookingCalendar
             $"STATUS:{(b.Status == BookingStatus.Requested ? "TENTATIVE" : "CONFIRMED")}",
             $"SUMMARY:{Escape(title)}",
             $"LOCATION:{Escape(place)}",
-            $"DESCRIPTION:{Escape($"Booking {b.Number ?? ""}".Trim() + $"\nDetails and changes: {baseUrl}/account/bookings/{b.Id}")}",
-            $"URL:{baseUrl}/account/bookings/{b.Id}",
+            $"DESCRIPTION:{Escape($"Booking {b.Number ?? ""}".Trim() + $"\nDetails and changes: {baseUrl}/bookings/{b.Id}")}",
+            $"URL:{baseUrl}/bookings/{b.Id}",
             "END:VEVENT", "END:VCALENDAR",
         };
         return string.Join("\r\n", lines.Select(Fold)) + "\r\n";
