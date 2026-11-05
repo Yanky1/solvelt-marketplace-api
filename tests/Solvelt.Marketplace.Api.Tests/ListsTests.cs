@@ -41,6 +41,7 @@ public sealed class ListsTests : IDisposable
     {
         var t = await _k.VerifiedSession("l1@example.com");
         var id = await NewList(t, "Birthday");
+        _k.F.Clock.Advance(TimeSpan.FromSeconds(1));   // lists are listed by creation time: two lists made in the same instant would tie
         Assert.Equal(HttpStatusCode.Conflict, (await Call(HttpMethod.Post, "/api/v1/wishlists", t, new { name = "  BIRTHDAY " })).Status);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Post, "/api/v1/wishlists", t, new { name = "   " })).Status);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Post, "/api/v1/wishlists", t, new { name = new string('x', 61) })).Status);
