@@ -50,6 +50,9 @@ public static class StartupValidator
             if (value.Contains("_live_", StringComparison.OrdinalIgnoreCase)) problems.Add($"{name} is a LIVE key. Only Stripe test keys are allowed (test mode only).");
             else if (!prefixes.Any(p => value.StartsWith(p, StringComparison.Ordinal))) problems.Add($"{name} must be a Stripe test key ({string.Join(" or ", prefixes)}...).");
         }
+        // Demo data is test-mode data (M9): never outside Development and Testing, with no override. Checked first, before the dev-like early return below.
+        if (!IsDevLike(env) && string.Equals(config["Demo:Enabled"]?.Trim(), "true", StringComparison.OrdinalIgnoreCase))
+            problems.Add("Demo:Enabled (env Demo__Enabled) must not be true outside Development and Testing: demo data is test-mode data and cannot be switched on here.");
         // In every environment: a handler (a portal call, a mail) must always finish well inside the lease that protects its message,
         // otherwise a second dispatcher takes the message over while the first is still sending it (review of af8d339, item 7).
         var lease = IntOr(config["Outbox:LeaseSeconds"], 120);

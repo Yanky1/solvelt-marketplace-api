@@ -218,3 +218,12 @@ public sealed class CheckoutOptions
 {
     public string? QuoteKey { get; set; }
 }
+
+/// <summary>
+/// Test-mode demo data for buyers (M9). Off by default; the API refuses to start with it on outside Development and Testing (StartupValidator), with no override.
+/// While it is off every demo endpoint answers 404.
+/// </summary>
+public sealed class DemoOptions
+{
+    public bool Enabled { get; set; }
+}

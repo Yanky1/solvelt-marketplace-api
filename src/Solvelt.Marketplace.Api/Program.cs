@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Catalog;
+using Solvelt.Marketplace.Api.Demo;
 using Solvelt.Marketplace.Api.Infrastructure;
 using Solvelt.Marketplace.Api.Account;
 using Solvelt.Marketplace.Api.Auth;
@@ -63,6 +64,7 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.AccountService>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Account.AccountRedactionHandler>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
+builder.Services.Configure<DemoOptions>(builder.Configuration.GetSection("Demo"));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
 builder.Services.AddSingleton(TimeProvider.System);
@@ -227,6 +229,7 @@ app.MapOutboxAdmin();
 app.MapAuth();
 app.MapAccount();
 app.MapCart();
+app.MapDemo();
 app.MapCheckout();
 Solvelt.Marketplace.Api.Fulfilment.OrderEndpoints.MapBuyerOrders(app);
 Solvelt.Marketplace.Api.Fulfilment.ProofEndpoints.MapProofs(app);
