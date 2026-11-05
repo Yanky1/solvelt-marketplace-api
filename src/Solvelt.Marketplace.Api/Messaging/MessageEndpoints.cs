@@ -6,7 +6,7 @@ using Solvelt.Marketplace.Api.Infrastructure;
 
 namespace Solvelt.Marketplace.Api.Messaging;
 
-public sealed record SendBody(Guid? ThreadId, string? OrderNumber, string? SellerOrderNumber, Guid? ListingId, string? Text, bool? AcknowledgeWarning);
+public sealed record SendBody(Guid? ThreadId, string? OrderNumber, string? SellerOrderNumber, Guid? ListingId, string? Text, bool? AcknowledgeWarning, string? MarketplaceBookingId = null);
 public sealed record ReportBody(string? Reason, string? Note);
 
 /// <summary>The buyer's messages inbox (M5). Every route is the signed-in buyer's own: another buyer's thread or message is a 404. Responses are <c>private, no-store</c>.</summary>
@@ -45,12 +45,13 @@ public static class MessageEndpoints
             if (m is not null) last[t.Id] = m.HiddenAt is not null ? "" : m.Text.Length > 120 ? m.Text[..120] : m.Text;
         }
         var orderNumbers = await db.Orders.AsNoTracking().Where(o => page.Select(t => t.OrderId).Contains(o.Id)).ToDictionaryAsync(o => o.Id, o => o.Number, ct);
+        var bookingIds = await db.Bookings.AsNoTracking().Where(b => b.AccountId == buyer.AccountId && page.Select(t => t.BookingId).Contains(b.Id)).ToDictionaryAsync(b => b.Id, b => b.MarketplaceBookingId, ct);
         return Private(Results.Json(new
         {
             unreadCount = totalUnread,
             threads = page.Select(t => new
             {
-                id = t.Id, kind = t.Kind, subject = t.Subject, sellerName = t.SellerName, orderNumber = t.OrderId is { } o && orderNumbers.TryGetValue(o, out var n) ? n : null, listingId = t.ListingId,
+                id = t.Id, kind = t.Kind, subject = t.Subject, sellerName = t.SellerName, orderNumber = t.OrderId is { } o && orderNumbers.TryGetValue(o, out var n) ? n : null, listingId = t.ListingId, marketplaceBookingId = t.BookingId is { } bk && bookingIds.TryGetValue(bk, out var mb) ? mb : null,
                 lastMessageAt = t.LastMessageAt, unreadCount = unread.GetValueOrDefault(t.Id), preview = last.GetValueOrDefault(t.Id),
             }),
             next = rows.Count > take ? new { before = page[^1].LastMessageAt, beforeId = page[^1].Id } : null,
@@ -70,7 +71,7 @@ public static class MessageEndpoints
         var page = rows.Take(take).Reverse().ToList();
         return Private(Results.Json(new
         {
-            thread = new { id = t.Id, kind = t.Kind, subject = t.Subject, sellerName = t.SellerName, listingId = t.ListingId },
+            thread = new { id = t.Id, kind = t.Kind, subject = t.Subject, sellerName = t.SellerName, listingId = t.ListingId, marketplaceBookingId = t.BookingId is { } bkId ? await db.Bookings.AsNoTracking().Where(b => b.Id == bkId && b.AccountId == buyer.AccountId).Select(b => b.MarketplaceBookingId).FirstOrDefaultAsync(ct) : null },
             messages = page.Select(m => new
             {
                 id = m.Id, direction = m.Direction, status = m.Status, sentAt = m.SentAt, read = m.ReadAt != null, reported = m.ReportedAt != null,
@@ -83,7 +84,7 @@ public static class MessageEndpoints
     }
 
     private static async Task<IResult> Send(SendBody? body, HttpContext ctx, MessageService svc, CancellationToken ct)
-        => OrderEndpoints.Respond(await svc.SendAsync(ctx.Buyer(), new SendMessageInput(body?.ThreadId, body?.OrderNumber, body?.SellerOrderNumber, body?.ListingId, body?.Text, body?.AcknowledgeWarning == true), ct), ctx);
+        => OrderEndpoints.Respond(await svc.SendAsync(ctx.Buyer(), new SendMessageInput(body?.ThreadId, body?.OrderNumber, body?.SellerOrderNumber, body?.ListingId, body?.Text, body?.AcknowledgeWarning == true, body?.MarketplaceBookingId), ct), ctx);
 
     private static async Task<IResult> Read(Guid id, HttpContext ctx, MessageService svc, CancellationToken ct)
         => Private(await Task.FromResult(Map(await svc.MarkReadAsync(ctx.Buyer(), id, ct))), ctx);

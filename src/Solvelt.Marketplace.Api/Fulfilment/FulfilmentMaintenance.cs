@@ -76,7 +76,7 @@ public sealed class FulfilmentMaintenance(MarketplaceDb db, TimeProvider time, M
         {
             due = await db.MessageThreads.Where(t => t.RedactedAt == null
                     && ((t.Kind == ThreadKinds.Order && db.SellerOrderStates.Any(s => s.GroupId == t.GroupId && closedStates.Contains(s.Status) && s.UpdatedAt <= cutoff))
-                        || (t.Kind == ThreadKinds.Product && t.LastMessageAt <= cutoff)))
+                        || ((t.Kind == ThreadKinds.Product || t.Kind == ThreadKinds.Booking) && t.LastMessageAt <= cutoff)))
                 .OrderBy(t => t.LastMessageAt).Select(t => t.Id).Take(200).ToListAsync(ct);
             foreach (var tid in due)
             {

@@ -10,7 +10,7 @@ using Solvelt.Marketplace.Api.Portal;
 
 namespace Solvelt.Marketplace.Api.Messaging;
 
-public sealed record SendMessageInput(Guid? ThreadId, string? OrderNumber, string? SellerOrderNumber, Guid? ListingId, string? Text, bool AcknowledgeWarning);
+public sealed record SendMessageInput(Guid? ThreadId, string? OrderNumber, string? SellerOrderNumber, Guid? ListingId, string? Text, bool AcknowledgeWarning, string? MarketplaceBookingId = null);
 
 /// <summary>
 /// The buyer's side of messaging (M5): start or continue a thread, read it, mark it read (receipts to the portal), report a message. Every message is stored BEFORE the portal call (our
@@ -79,6 +79,19 @@ public sealed class MessageService(MarketplaceDb db, OutboxWriter outbox, TimePr
             db.MessageThreads.Add(t);
             return (t, null);
         }
+        if (i.MarketplaceBookingId is { Length: > 0 } mbid)
+        {
+            // a booking of THIS buyer that the portal knows (a hold the portal has not answered yet has no portal id): one thread per buyer and booking
+            var bk = await (from b in db.Bookings.AsNoTracking() join l in db.CatalogListings.AsNoTracking() on b.ListingId equals l.Id join s in db.CatalogSellers.AsNoTracking() on l.SellerId equals s.Id
+                            where b.MarketplaceBookingId == mbid && b.AccountId == buyer.AccountId && b.PortalBookingId != null && b.RedactedAt == null
+                            select new { b.Id, b.Number, b.MarketplaceBookingId, l.Title, s.DisplayName }).FirstOrDefaultAsync(ct);
+            if (bk is null) return (null, ActionResult.NotFound());
+            var existingB = await db.MessageThreads.FirstOrDefaultAsync(x => x.AccountId == buyer.AccountId && x.BookingId == bk.Id, ct);
+            if (existingB is not null) return existingB.RedactedAt is null ? (existingB, null) : (null, ActionResult.Conflict("thread_closed", "This conversation has been closed."));
+            var tb = new MessageThread { Id = Guid.NewGuid(), ConversationKey = NewKey("CV-"), AccountId = buyer.AccountId, Kind = ThreadKinds.Booking, BookingId = bk.Id, SellerName = bk.DisplayName, Subject = $"Booking {bk.Number ?? bk.MarketplaceBookingId}: {bk.Title}", CreatedAt = now, LastMessageAt = now };
+            db.MessageThreads.Add(tb);
+            return (tb, null);
+        }
         if (i.ListingId is { } lid)
         {
             var l = await (from x in db.CatalogListings.AsNoTracking() join s in db.CatalogSellers.AsNoTracking() on x.SellerId equals s.Id where x.Id == lid && x.Visible && s.Active select new { x.Id, x.Title, s.DisplayName }).FirstOrDefaultAsync(ct);
@@ -102,12 +115,13 @@ public sealed class MessageService(MarketplaceDb db, OutboxWriter outbox, TimePr
         var now = time.GetUtcNow().ToUniversalTime();
         var unread = await db.ThreadMessages.AsNoTracking().Where(m => m.ThreadId == threadId && m.Direction == MessageDirections.Seller && m.ReadAt == null && m.RedactedAt == null).Select(m => new { m.Id, m.PortalMessageId }).ToListAsync(ct);
         if (unread.Count == 0) return new ActionResult(204);
+        var isBooking = await db.MessageThreads.AsNoTracking().AnyAsync(t => t.Id == threadId && t.Kind == ThreadKinds.Booking, ct);   // booking messages have no receipts endpoint (M5-31)
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         foreach (var m in unread)
         {
             var id = m.Id;
             var claimed = await db.ThreadMessages.Where(x => x.Id == id && x.ReadAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.ReadAt, (DateTimeOffset?)now), ct);
-            if (claimed == 1 && m.PortalMessageId is { } pid)
+            if (claimed == 1 && m.PortalMessageId is { } pid && !isBooking)
                 await outbox.TryEnqueueAsync(ReceiptType, new ReceiptPayload(pid, "read"), $"receipt:{pid}:read", ct: ct);
         }
         await tx.CommitAsync(ct);
@@ -121,6 +135,7 @@ public sealed class MessageService(MarketplaceDb db, OutboxWriter outbox, TimePr
         if (note is { Length: > 1000 }) return ActionResult.Invalid("note", "Keep the note under 1000 characters.");
         var m = await (from x in db.ThreadMessages join t in db.MessageThreads on x.ThreadId equals t.Id where x.Id == messageId && t.AccountId == buyer.AccountId select x).FirstOrDefaultAsync(ct);
         if (m is null || m.RedactedAt is not null) return ActionResult.NotFound();
+        if (await db.MessageThreads.AsNoTracking().AnyAsync(t => t.Id == m.ThreadId && t.Kind == ThreadKinds.Booking, ct)) return new ActionResult(422, Code: "not_supported", Message: "Reporting a message about a booking is not available yet.");   // the portal has its own endpoint for it (M5-31)
         if (m.ReportedAt is not null) return new ActionResult(202, new { reported = true });   // idempotent
         m.ReportedAt = time.GetUtcNow().ToUniversalTime();
         // the portal's target id is the marketplace message id: ours for a buyer message, the portal's own for a seller message
@@ -160,10 +175,19 @@ public sealed class MessageSendOutboxHandler(MarketplaceDb db, ISignedPortalClie
             var o = await db.Orders.AsNoTracking().FirstAsync(x => x.Id == t.OrderId, ct);
             (mid, son) = (o.Number, g.SellerOrderNumber);
         }
+        else if (t.Kind == ThreadKinds.Booking) { }
         else pid = t.ListingId;
-        var body = new BuyerMessageBody(m.MessageKey!, t.ConversationKey, t.Kind, mid, son, pid, buyerName, m.Text, m.SentAt);
         PortalResult<JsonElement> res;
-        try { res = await portal.SendMessageAsync(body, ct); }
+        try
+        {
+            if (t.Kind == ThreadKinds.Booking)
+            {
+                var mbid = await db.Bookings.AsNoTracking().Where(x => x.Id == t.BookingId).Select(x => x.MarketplaceBookingId).FirstOrDefaultAsync(ct);
+                if (mbid is null) return OutboxResult.Dead("booking_missing");
+                res = await portal.SendBookingMessageAsync(mbid, new BookingMessageBody(m.MessageKey!, t.ConversationKey, buyerName, m.Text, m.SentAt), ct);
+            }
+            else res = await portal.SendMessageAsync(new BuyerMessageBody(m.MessageKey!, t.ConversationKey, t.Kind, mid, son, pid, buyerName, m.Text, m.SentAt), ct);
+        }
         catch (Exception ex) when (ex is PortalUnavailableException or PortalNotConfiguredException) { return OutboxResult.Retry("portal_unavailable"); }
         if (res.IsSuccess) { m.Status = MessageStatuses.Sent; await db.SaveChangesAsync(ct); return OutboxResult.Delivered(); }
         var outcome = PortalOutcome.From(res);

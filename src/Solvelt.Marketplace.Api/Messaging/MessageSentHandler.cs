@@ -67,6 +67,26 @@ public sealed class MessageSentHandler : IProjectionHandler
             if (!Guid.TryParse(FulfilmentProjector.Str(d, "productId"), out var productId) || thread.ListingId != productId) return HandlerOutcome.Skipped("conversation is about another product");
             if (!Guid.TryParse(FulfilmentProjector.Str(d, "sellerId"), out var sellerId) || !await c.Db.CatalogListings.AsNoTracking().AnyAsync(l => l.Id == productId && l.SellerId == sellerId, ct)) return HandlerOutcome.Skipped("seller does not own the product");
         }
+        else if (kind == "booking")
+        {
+            // matched on OUR marketplace booking id AND the portal's booking id, and always on the booking's own account (M5-31)
+            if (EventRefs.Booking(d) is not { } bref) return HandlerOutcome.Skipped("booking reference missing");
+            var bk = await c.Db.Bookings.AsNoTracking().FirstOrDefaultAsync(b => b.MarketplaceBookingId == bref.MarketplaceBookingId, ct);
+            if (bk is null) return HandlerOutcome.Skipped("unknown booking");
+            if (bk.PortalBookingId is null) return HandlerOutcome.Parked(Services.BookingEventHandler.Aggregate, bk.MarketplaceBookingId, "the portal's booking id is not stored yet");
+            if (!EventRefs.Matches(bref, bk.MarketplaceBookingId, bk.PortalBookingId.Value)) return HandlerOutcome.Skipped("booking ids do not match");
+            if (await c.Db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == bk.AccountId && a.DeletedAt != null, ct)) return HandlerOutcome.Skipped("account deleted");
+            thread = await c.Db.MessageThreads.FirstOrDefaultAsync(t => t.AccountId == bk.AccountId && t.BookingId == bk.Id, ct);
+            if (thread is null)
+            {
+                // a seller-started thread: ours is created now; the buyer's first reply joins it
+                var info = await (from l in c.Db.CatalogListings.AsNoTracking() join s in c.Db.CatalogSellers.AsNoTracking() on l.SellerId equals s.Id where l.Id == bk.ListingId select new { l.Title, s.DisplayName }).FirstOrDefaultAsync(ct);
+                thread = new MessageThread { Id = Guid.NewGuid(), ConversationKey = "CV-" + Guid.NewGuid().ToString("N")[..24].ToUpperInvariant(), AccountId = bk.AccountId, Kind = ThreadKinds.Booking, BookingId = bk.Id,
+                    SellerName = info?.DisplayName, Subject = $"Booking {bk.Number ?? bk.MarketplaceBookingId}: {info?.Title}", CreatedAt = now, LastMessageAt = now };
+                c.Db.MessageThreads.Add(thread);
+            }
+            else if (convKey is not null && convKey != thread.ConversationKey) return HandlerOutcome.Skipped("conversation id does not match the booking's thread");
+        }
         else return HandlerOutcome.Skipped("unsupported message kind");
         if (thread.RedactedAt is not null) return HandlerOutcome.Skipped("thread closed");
 
@@ -87,7 +107,7 @@ public sealed class MessageSentHandler : IProjectionHandler
         var outbox = new OutboxWriter(c.Db, c.Time);
         Notifier.AddForAccount(c.Db, outbox, c.Time, thread.AccountId, NotificationKinds.MessageReceived, c.Event.Id, orderNumber, sellerOrderNumber,
             new Dictionary<string, object?> { ["sellerName"] = thread.SellerName, ["subject"] = thread.Subject, ["threadId"] = thread.Id });
-        outbox.Enqueue(MessageService.ReceiptType, new MessageService.ReceiptPayload(pmid, "delivered"), $"receipt:{pmid}:delivered");
+        if (thread.Kind != ThreadKinds.Booking) outbox.Enqueue(MessageService.ReceiptType, new MessageService.ReceiptPayload(pmid, "delivered"), $"receipt:{pmid}:delivered");   // booking messages have no receipts endpoint (M5-31)
         return HandlerOutcome.Applied();
     }
 

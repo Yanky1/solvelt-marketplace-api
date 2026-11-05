@@ -59,6 +59,8 @@ public sealed record PortalBytes(int Status, byte[]? Body, string? ContentType, 
 /// <summary><c>kind</c> is <c>order</c> or <c>product</c>; the buyer is shown to the seller by display name only.</summary>
 public sealed record BuyerMessageBody(string MessageId, string ConversationId, string Kind, string? MarketplaceOrderId, string? SellerOrderNumber, Guid? ProductId,
     string BuyerName, string Text, DateTimeOffset SentAt);
+/// <summary>POST /bookings/{mid}/messages (SERVICES.md §6): the buyer writes to the seller about a booking.</summary>
+public sealed record BookingMessageBody(string MessageId, string ConversationId, string BuyerName, string Text, DateTimeOffset SentAt);
 /// <summary><c>reporterRef</c> is an opaque reference for the reporter (never a name or e-mail).</summary>
 public sealed record ContentReportBody(string ReportId, string Kind, string TargetId, string Reason, string? Note, string ReporterRef);
 

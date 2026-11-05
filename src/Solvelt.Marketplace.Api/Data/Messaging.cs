@@ -23,6 +23,8 @@ public sealed class MessageThread
     public Guid? GroupId { get; set; }
     /// <summary>Product threads: our catalog listing id (one thread per listing and buyer).</summary>
     public Guid? ListingId { get; set; }
+    /// <summary>Booking threads: our booking (one thread per buyer and booking).</summary>
+    public Guid? BookingId { get; set; }
     public string? SellerName { get; set; }
     /// <summary>"Order MP-…" / the listing title: what the thread is about, shown in the inbox.</summary>
     public string Subject { get; set; } = "";
@@ -110,6 +112,7 @@ internal sealed class MessagingConfiguration : IEntityTypeConfiguration<MessageT
         b.HasIndex(t => t.ConversationKey).IsUnique();
         b.HasIndex(t => new { t.AccountId, t.GroupId }).IsUnique();       // one thread per buyer and seller order (NULLs are allowed)
         b.HasIndex(t => new { t.AccountId, t.ListingId }).IsUnique();     // one thread per buyer and listing
+        b.HasIndex(t => new { t.AccountId, t.BookingId }).IsUnique();     // one thread per buyer and booking
         b.HasIndex(t => new { t.AccountId, t.LastMessageAt });
     }
 

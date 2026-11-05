@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -21,6 +22,7 @@ public sealed class MessagingTests : OrderFlowBase
         _onOther = c =>
         {
             if (c.PathAndQuery == "/api/internal/v1/messages") return FakePortal.Json(_messageAnswer, _messageAnswer is HttpStatusCode.Created or HttpStatusCode.OK ? "{\"duplicate\":false}" : "{\"code\":\"not_found\"}");
+            if (c.PathAndQuery.StartsWith("/api/internal/v1/bookings/") && c.PathAndQuery.EndsWith("/messages")) return FakePortal.Json(HttpStatusCode.Created, "{\"duplicate\":false}");
             if (c.PathAndQuery.EndsWith("/receipts")) return FakePortal.Json(HttpStatusCode.OK, "{\"status\":\"delivered\"}");
             if (c.PathAndQuery == "/api/internal/v1/content/reports") return FakePortal.Json(_reportAnswer, "{\"status\":\"open\"}", r => { if (_reportAnswer == HttpStatusCode.TooManyRequests) r.Headers.RetryAfter = new(TimeSpan.FromSeconds(60)); });
             return null;
@@ -205,6 +207,82 @@ public sealed class MessagingTests : OrderFlowBase
         var body = Body("dup-2", "message.sent", _k.F.Clock.GetUtcNow().AddSeconds(-5), new Dictionary<string, object?> { ["messageId"] = "pm-dup-3", ["kind"] = "order", ["text"] = "x", ["marketplaceOrderId"] = o.Number, ["sellerOrderNumber"] = g.SellerOrderNumber });
         Assert.Equal(HttpStatusCode.BadRequest, (await Post(_k.Http, Request(_k.F, body, eventId: "dup-1"))).Item1);
         Assert.Equal(1, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "seller")));
+    }
+
+    // ------------------------------------------------------------------ booking messages (decision M5-31)
+
+    private async Task<(Guid Id, string Mid, Guid PortalId)> BookingFor(string email, bool portalKnows = true)
+    {
+        var account = (await _k.Account(email)).Id;
+        var listing = await _k.Db(db => db.CatalogListings.AsNoTracking().Where(l => l.Visible).OrderBy(l => l.Slug).FirstAsync());
+        var id = Guid.NewGuid(); var mid = "BK-" + id.ToString("N")[..12].ToUpperInvariant(); var portalId = Guid.NewGuid();
+        await _k.Db(async db => { db.Bookings.Add(new Booking { Id = id, MarketplaceBookingId = mid, PortalBookingId = portalKnows ? portalId : null, Number = "B-1001", AccountId = account, IdempotencyKey = "k-" + mid, RequestHash = "h", ListingId = listing.Id,
+            Status = BookingStatus.Confirmed, CreatedAt = _k.F.Clock.GetUtcNow(), UpdatedAt = _k.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
+        return (id, mid, portalId);
+    }
+
+    private async Task<string> BookingReply(string mid, Guid portalId, string text, string pid, string? conv = null, string? eventId = null, Guid? portalIdOverride = null)
+    {
+        var data = new Dictionary<string, object?> { ["messageId"] = pid, ["kind"] = "booking", ["text"] = text, ["sentAt"] = _k.F.Clock.GetUtcNow().AddSeconds(30), ["marketplaceConversationId"] = conv,
+            ["booking"] = new { marketplaceBookingId = mid, bookingId = portalIdOverride ?? portalId, number = "B-1001" } };
+        var (status, json) = await Post(_k.Http, Request(_k.F, Body(eventId ?? $"bm-{++_n:D3}", "message.sent", _k.F.Clock.GetUtcNow().AddSeconds(-500 + _n), data)));
+        Assert.Equal(HttpStatusCode.OK, status);
+        return StatusOf(json);
+    }
+
+    [Fact]
+    public async Task Booking_a_buyer_writes_about_their_own_booking_and_the_seller_answers_matched_on_both_booking_ids()
+    {
+        await Login();
+        var (id, mid, portalId) = await BookingFor("ing1@example.com");
+        var res = await Call(HttpMethod.Post, "/api/v1/messages", new { marketplaceBookingId = mid, text = "Can you bring a ladder?" });
+        Assert.Equal(HttpStatusCode.Accepted, res.StatusCode);
+        await Drain();
+        var sent = Assert.Single(_k.F.Portal.VerifiedCalls, c => c.PathAndQuery == $"/api/internal/v1/bookings/{mid}/messages");
+        var body = JsonDocument.Parse(sent.BodyText).RootElement;
+        Assert.StartsWith("MG-", body.GetProperty("messageId").GetString());
+        Assert.Equal("Can you bring a ladder?", body.GetProperty("text").GetString());
+        var thread = await _k.Db(db => db.MessageThreads.AsNoTracking().SingleAsync());
+        Assert.Equal((ThreadKinds.Booking, id), (thread.Kind, thread.BookingId));
+        Assert.Equal("sent", await _k.Db(db => db.ThreadMessages.Select(m => m.Status).SingleAsync()));
+        var listed = (await Json(await Call(HttpMethod.Get, "/api/v1/messages/threads"))).GetProperty("threads")[0];
+        Assert.Equal(mid, listed.GetProperty("marketplaceBookingId").GetString());
+        // another buyer cannot write about it; a booking the portal does not know yet cannot be written about
+        var other = await _k.VerifiedSession("other@example.com");
+        Assert.Equal(HttpStatusCode.NotFound, (await Call(HttpMethod.Post, "/api/v1/messages", new { marketplaceBookingId = mid, text = "hi" }, other)).StatusCode);
+        var (_, mid2, _) = await BookingFor("ing1@example.com", portalKnows: false);
+        Assert.Equal(HttpStatusCode.NotFound, (await Call(HttpMethod.Post, "/api/v1/messages", new { marketplaceBookingId = mid2, text = "hi" })).StatusCode);
+        // the seller answers: both ids must match, the conversation id must match the thread's
+        Assert.Equal("skipped", await BookingReply("BK-NOPE00000001", portalId, "x", "pm-b0"));
+        Assert.Equal("skipped", await BookingReply(mid, portalId, "x", "pm-b1", portalIdOverride: Guid.NewGuid()));
+        Assert.Equal("skipped", await BookingReply(mid, portalId, "x", "pm-b2", conv: "CV-OTHER"));
+        Assert.Equal("applied", await BookingReply(mid, portalId, "Yes, a ladder is included.", "pm-b3", conv: thread.ConversationKey));
+        Assert.Equal(1, await _k.Db(db => db.ThreadMessages.CountAsync(m => m.Direction == "seller")));
+        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.Kind == "message_received")));
+        // booking messages have no receipts endpoint: none is sent, and opening the thread sends none either
+        await Call(HttpMethod.Post, $"/api/v1/messages/threads/{thread.Id}/read");
+        await Drain();
+        Assert.DoesNotContain(_k.F.Portal.VerifiedCalls, c => c.PathAndQuery.Contains("/receipts"));
+        // and a booking message cannot be reported through the message-report endpoint
+        var sellerMsg = await _k.Db(db => db.ThreadMessages.AsNoTracking().SingleAsync(m => m.Direction == "seller"));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Post, $"/api/v1/messages/{sellerMsg.Id}/report", new { reason = "rude" })).StatusCode);
+    }
+
+    [Fact]
+    public async Task Booking_a_seller_who_writes_first_makes_the_thread_a_reply_before_the_portal_id_is_stored_waits_and_old_booking_threads_are_redacted()
+    {
+        await Login();
+        var (id, mid, portalId) = await BookingFor("ing1@example.com");
+        Assert.Equal("applied", await BookingReply(mid, portalId, "Hello, what time suits you?", "pm-first"));       // a seller-started thread
+        var thread = await _k.Db(db => db.MessageThreads.AsNoTracking().SingleAsync());
+        Assert.Equal((ThreadKinds.Booking, id), (thread.Kind, thread.BookingId));
+        // a booking whose portal id is not stored yet: the reply waits (parked), it is not lost and not applied to anything else
+        var (_, midWait, portalWait) = await BookingFor("ing1@example.com", portalKnows: false);
+        Assert.Equal("parked", await BookingReply(midWait, portalWait, "early", "pm-early"));
+        // retention: 90 days after the last message the texts are gone
+        _k.F.Clock.Advance(TimeSpan.FromDays(91));
+        using (var sc = _k.F.Services.CreateScope()) Assert.True((await sc.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Fulfilment.FulfilmentMaintenance>().RunAsync()).ThreadsRedacted >= 1);
+        Assert.All(await _k.Db(db => db.ThreadMessages.AsNoTracking().ToListAsync()), m => Assert.Equal("", m.Text));
     }
 
     [Fact]
