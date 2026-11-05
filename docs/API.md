@@ -355,7 +355,7 @@ Not endpoints of their own: services other modules call (decision M1-70).
 Buyer routes need the session and answer `private, no-store`; another buyer's thread or message is 404.
 * `GET /api/v1/messages/threads?limit=&before=&beforeId=` → `{ unreadCount, threads: [{ id, kind, subject, sellerName, orderNumber, listingId, lastMessageAt, unreadCount, preview }], next }`.
 * `GET /api/v1/messages/threads/{id}?limit=&before=` → `{ thread, messages: [{ id, direction, status, sentAt, read, reported, hidden, text, attachments }], older }` (oldest first; a hidden message has no text).
-* `POST /api/v1/messages` `{ threadId | orderNumber (+ sellerOrderNumber) | listingId, text, acknowledgeWarning? }` → `202 { threadId, messageId, status }`; `409 contact_details_warning` (kinds in `errors`) until acknowledged; `422` for empty or over-long text.
+* `POST /api/v1/messages` `{ threadId | orderNumber (+ sellerOrderNumber) | listingId | marketplaceBookingId, text, acknowledgeWarning? }` (`marketplaceBookingId`: a booking of the buyer's own that the portal knows; the thread has `kind: "booking"` and `marketplaceBookingId`; no receipts and no reports for booking messages, M5-31) → `202 { threadId, messageId, status }`; `409 contact_details_warning` (kinds in `errors`) until acknowledged; `422` for empty or over-long text.
 * `POST /api/v1/messages/threads/{id}/read` → 204 (sends the portal read receipts once).
 * `POST /api/v1/messages/{messageId}/report` `{ reason, note? }` → 202, idempotent.
 * `GET /api/v1/messages/attachments/{id}` → the file as `Content-Disposition: attachment` (sniffed type, `nosniff`, CSP `default-src 'none'`, `private, no-store`); 404 unless it is the buyer's own, stored and not hidden.
