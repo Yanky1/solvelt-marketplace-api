@@ -75,6 +75,7 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffService>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffPasskeyService>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffMaintenance>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffBuyerService>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Staff.StaffOpsService>();
 builder.Services.AddSingleton<PasswordService>();
 builder.Services.AddSingleton<GateKeys>();
 builder.Services.AddSingleton<GuestLinks>();
@@ -272,6 +273,7 @@ app.MapOutboxAdmin();
 app.MapAuth();
 app.MapStaff();   // M7
 app.MapStaffBuyers();
+app.MapStaffOps();
 app.MapAccount();
 app.MapCart();
 Solvelt.Marketplace.Api.Lists.WishlistEndpoints.MapWishlists(app);

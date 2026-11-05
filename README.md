@@ -73,7 +73,7 @@ A database made without migrations is baselined only if it is EXACTLY what the m
 | `Admin__Host` | yes when `Admin__ApiKey` is set; must not be the public host | The host (and port) the operations endpoints answer on; everything else gets 404 (decision O-12). Never proxy `/api/admin` from the web server |
 | `Staff__BootstrapToken`, `Staff__BootstrapEmail`, `Staff__BootstrapName` | no | One-time creation of the FIRST staff admin (>= 32 chars, different from every other key; the address is required with it). Never a default account or password; remove after the first passkey is registered. Steps: [docs/STAFF.md](docs/STAFF.md) (decision M7-04) |
 | `Staff__AllowedIps__0`... | no | Addresses or CIDR ranges allowed to reach `/api/v1/staff`; unset allows all; anyone else gets 404 (M7-06) |
-| `Staff__SessionIdleMinutes`, `Staff__SessionAbsoluteHours`, `Staff__StepUpMinutes`, `Staff__EnrolmentHours`, `Staff__MaxPasskeys`, `Staff__AuditRetentionDays`, `RateLimits__StaffPerMinute` | no | Defaults 30, 8, 5, 24, 5, 730, 60 |
+| `Staff__SessionIdleMinutes`, `Staff__SessionAbsoluteHours`, `Staff__StepUpMinutes`, `Staff__EnrolmentHours`, `Staff__MaxPasskeys`, `Staff__AuditRetentionDays`, `Staff__RevealsPerHour`, `Staff__StuckIngestMinutes`, `RateLimits__StaffPerMinute` | no | Defaults 30, 8, 5, 24, 5, 730, 20, 15, 60 |
 | `Email__Provider` | yes, `Smtp` (Development/Testing use an in-memory sink) | Without it the application does not start (decision M1-50) |
 | `Email__SmtpHost`, `Email__From` | yes with `Smtp` | SMTP server and the sender address |
 | `Email__SmtpPort`, `Email__SmtpUserName`, `Email__SmtpPassword`, `Email__SmtpUseTls`, `Email__SendTimeoutSeconds` | no | Defaults 587, none, none, true, 20 |

@@ -24,6 +24,8 @@ public sealed class StaffOptions
     public int AuditRetentionDays { get; set; } = 730;
     /// <summary>Break-glass reveals one staff member may make per hour (counted from the audit log).</summary>
     public int RevealsPerHour { get; set; } = 20;
+    /// <summary>A paid order the portal has not accepted after this many minutes shows in the stuck-ingest list.</summary>
+    public int StuckIngestMinutes { get; set; } = 15;
 }
 
 public static class StaffConfig

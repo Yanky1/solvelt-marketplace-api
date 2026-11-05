@@ -283,4 +283,23 @@ public static class StaffCursor
         }
         catch (FormatException) { return false; }
     }
+
+    /// <summary>Cursor for lists keyed by (time, text id), such as Stripe event ids.</summary>
+    public static string EncodeText(DateTimeOffset at, string id) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{at.UtcTicks}|{id}")).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    public static bool TryDecodeText(string cursor, out DateTimeOffset at, out string id)
+    {
+        at = default; id = "";
+        try
+        {
+            var padded = cursor.Replace('-', '+').Replace('_', '/');
+            padded = padded.PadRight(padded.Length + (4 - padded.Length % 4) % 4, '=');
+            var text = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+            var bar = text.IndexOf('|');
+            if (bar < 1 || !long.TryParse(text[..bar], out var ticks) || ticks < DateTime.MinValue.Ticks || ticks > DateTime.MaxValue.Ticks) return false;
+            at = new DateTimeOffset(ticks, TimeSpan.Zero); id = text[(bar + 1)..];
+            return id.Length is > 0 and <= 100;
+        }
+        catch (FormatException) { return false; }
+    }
 }
