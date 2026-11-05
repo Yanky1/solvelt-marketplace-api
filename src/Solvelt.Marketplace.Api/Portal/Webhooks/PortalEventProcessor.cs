@@ -59,6 +59,19 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
         log.LogError("Portal event of type {Type} says an earlier event of its seller order went dead; the order view may have a gap and needs a person to reconcile", evt.Type);
     }
 
+    /// <summary>
+    /// Records which account the event is about (decision M1-82) and drops the payload at once when that account is already deleted and the event is not parked: erasure cannot
+    /// reach a row that is stored after it ran. A parked event keeps its payload (it is replayed from it); the replay ends here too, so it loses it when it is finished.
+    /// </summary>
+    private async Task StampAccountAsync(PortalInboundEvent row, PortalEvent evt, CancellationToken ct)
+    {
+        row.AccountId ??= await EventAccounts.FindAsync(db, evt, ct);
+        if (row.AccountId is not { } accountId || row.Status == InboundStatus.Parked || row.PayloadJson is null) return;
+        if (!await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == accountId && a.DeletedAt != null, ct)) return;
+        row.PayloadJson = null;
+        row.PayloadPurgedAt = time.GetUtcNow().ToUniversalTime();
+    }
+
     private async Task<ProcessOutcome> ApplyAsync(PortalInboundEvent row, PortalEvent evt, CancellationToken ct)
     {
         var handler = registry.Find(evt.Type);
@@ -66,6 +79,7 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
         {
             row.Status = InboundStatus.Stored;
             MarkPredecessorDead(row, evt);   // an unknown type still carries the portal's warning about the gap (review L-a)
+            await StampAccountAsync(row, evt, ct);
             row.Version++;
             return ProcessOutcome.Stored;
         }
@@ -79,6 +93,7 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
         // writes the note, so a replay of a parked event (which re-runs this) keeps it, and it goes FIRST so the 500-character limit can never cut it (review M2).
         MarkPredecessorDead(row, evt);
         row.AppliedAt = result.Status == InboundStatus.Applied ? time.GetUtcNow().ToUniversalTime() : null;
+        await StampAccountAsync(row, evt, ct);
         row.Version++;
         return result.Status switch
         {

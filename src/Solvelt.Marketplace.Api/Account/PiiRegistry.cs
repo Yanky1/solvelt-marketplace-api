@@ -21,6 +21,7 @@ public static class PiiRegistry
         new("messaging", "M5", [typeof(Notification), typeof(NotificationPreference), typeof(MessageThread), typeof(ThreadMessage), typeof(MessageAttachment), typeof(MessageAttachmentData)], typeof(Messaging.MessagingAccountEraser)),
         new("orders-and-carts", "M3", [typeof(MarketplaceOrder), typeof(Cart)], typeof(Checkout.OrdersAccountEraser)),   // decision M3-35
         new("order-cancellations-and-returns", "M5", [typeof(OrderCancelRequest), typeof(OrderReturn)], typeof(Fulfilment.AfterSalesAccountEraser)),
+        new("portal-inbound-events", "M1", [typeof(PortalInboundEvent)], typeof(Portal.Webhooks.PortalEventsAccountEraser)),   // decision M1-82: the raw bodies of events about the account's orders, bookings, quotes and conversations
         new("bookings", "M4", [typeof(Booking), typeof(BuyerQuote)], typeof(Services.BookingsAccountEraser)),
     ];
 

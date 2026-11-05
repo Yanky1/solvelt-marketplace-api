@@ -52,6 +52,7 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Fulfilment.IOrderReconcileObs
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>());
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDeletionHook>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Checkout.OrdersAccountEraser>());
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Fulfilment.AfterSalesAccountEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventsAccountEraser>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Notifications.NotificationMailHandler>();
 builder.Services.AddSingleton<LinkTokens>();
 builder.Services.AddScoped<IOutboxHandler, AuthMailHandler>();
