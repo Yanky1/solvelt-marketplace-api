@@ -211,7 +211,7 @@ app.Use(async (ctx, next) =>
 
 {
     using var scope = app.Services.CreateScope();
-    DatabaseSetup.Prepare(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), devLike, builder.Configuration.GetValue("Database:MigrateOnStart", true));
+    DatabaseSetup.Prepare(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), devLike, builder.Configuration.GetValue("Database:MigrateOnStart", true), app.Logger);
 }
 
 app.MapGet("/health", (ClientIpResolver forwarding, OpsCounters ops) => Results.Json(new
