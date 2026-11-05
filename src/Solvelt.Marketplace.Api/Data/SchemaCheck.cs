@@ -26,9 +26,35 @@ public static class SchemaCheck
             if (problems.Count == 0) return;
             var shown = string.Join("; ", problems.Take(15)) + (problems.Count > 15 ? $"; and {problems.Count - 15} more" : "");
             log.LogCritical("The database schema does not match the model ({Count} differences), so requests that use the missing parts will fail with 500. EnsureCreated never alters an existing database. Differences: {Differences}. " +
-                "Print the SQL that fixes it with: dotnet run --project tools/SchemaTool -- \"<connection string>\" <postgres|sqlite>  (see README, Database schema)", problems.Count, shown);
+                "Print the SQL that fixes it with: MARKETPLACE_DB=\"<connection string>\" dotnet run --project tools/SchemaTool -- <postgres|sqlite>  (see README, Database schema)", problems.Count, shown);
         }
-        catch (Exception ex) { log.LogWarning("The schema could not be compared with the model ({ExceptionType})", ex.GetType().Name); }
+        catch (Exception ex) { log.LogWarning("The schema could not be compared with the model ({ExceptionType}: {Reason}); it is not known whether it matches", ex.GetType().Name, Sanitise(ex.Message)); }
+    }
+
+    /// <summary>
+    /// The reason of a failure, safe for a log line: any <c>key=value</c> pair of a connection string (Password, Pwd, User ID, Host, Server, Data Source, ...) is replaced, line breaks are dropped and the
+    /// text is cut at 300 characters, so "cannot connect" and "permission denied" can be told apart without the connection string reaching the log.
+    /// </summary>
+    public static string Sanitise(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return "no detail";
+        var clean = System.Text.RegularExpressions.Regex.Replace(message, @"(?i)\b(password|pwd|user id|uid|username|host|server|data source|database|port|connection string)\s*=\s*[^;\r\n]*", "$1=***");
+        clean = System.Text.RegularExpressions.Regex.Replace(clean, @"\s+", " ").Trim();
+        return clean.Length <= 300 ? clean : clean[..300] + "...";
+    }
+
+    /// <summary>
+    /// A context for reading only (decision M1-83): SQLite is opened with <c>Mode=ReadOnly</c>, so a mistyped path fails instead of creating an empty database; PostgreSQL gets
+    /// <c>default_transaction_read_only=on</c> for the session. <paramref name="provider"/> is <c>postgres</c> or <c>sqlite</c>.
+    /// </summary>
+    public static MarketplaceDb OpenReadOnly(string provider, string connectionString)
+    {
+        var options = new DbContextOptionsBuilder<MarketplaceDb>();
+        if (provider.Equals("postgres", StringComparison.OrdinalIgnoreCase))
+            options.UseNpgsql(new Npgsql.NpgsqlConnectionStringBuilder(connectionString) { Options = "-c default_transaction_read_only=on" }.ConnectionString);
+        else
+            options.UseSqlite(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connectionString) { Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly }.ConnectionString);
+        return new MarketplaceDb(options.Options);
     }
 
     public static List<string> Differences(MarketplaceDb db)

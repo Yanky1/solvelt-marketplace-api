@@ -27,10 +27,11 @@ CI (`.github/workflows/ci.yml`) restores, builds with warnings as errors, runs t
 It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 
 ## Database schema (existing databases)
-Development and Testing build the schema from the model with `EnsureCreated`, which creates a database once and never alters it. A database made by an earlier build therefore lacks the tables and columns added since, and the first request that touches one answers 500. At start the API compares the database with the model and logs ONE critical line naming the differences (it does not stop). To see them and get the SQL that adds what is missing (read-only; review it and run it in a transaction on a copy first):
+Development and Testing build the schema from the model with `EnsureCreated`, which creates a database once and never alters it. A database made by an earlier build therefore lacks the tables and columns added since, and the first request that touches one answers 500. At start the API compares the database with the model and logs ONE critical line naming the differences (it does not stop). To see them and get the SQL that adds what is missing (read-only: SQLite is opened with `Mode=ReadOnly`, so a mistyped path fails instead of creating an empty database, and PostgreSQL with `default_transaction_read_only`; the connection string is taken from `MARKETPLACE_DB` or standard input, never from the command line; review the SQL and run it in a transaction on a copy first):
 ```bash
-dotnet run --project tools/SchemaTool -- "Data Source=marketplace-dev.db" sqlite
-dotnet run --project tools/SchemaTool -- "Host=...;Database=...;Username=...;Password=..." postgres
+MARKETPLACE_DB="Data Source=marketplace-dev.db" dotnet run --project tools/SchemaTool -- sqlite
+MARKETPLACE_DB="Host=...;Database=...;Username=...;Password=..." dotnet run --project tools/SchemaTool -- postgres
+echo "Host=...;Database=...;Username=...;Password=..." | dotnet run --project tools/SchemaTool -- postgres -     # from standard input
 ```
 Or recreate the development database (delete the file) when its data does not matter.
 
