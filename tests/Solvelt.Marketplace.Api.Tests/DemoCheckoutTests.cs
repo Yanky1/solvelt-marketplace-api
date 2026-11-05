@@ -54,7 +54,11 @@ public sealed class DemoCheckoutTests : OrderFlowBase
         await FillDemo();
         // the buyer adds a REAL line (a variant the demo cart does not hold) to the same cart
         var held = (await Lines()).Select(l => l.VariantId).ToHashSet();
-        var real = await _k.Db(db => (from v in db.CatalogVariants join l in db.CatalogListings on v.ListingId equals l.Id where l.Visible && l.Available && v.Available && l.Type == "product" select v.Id).ToListAsync());
+        // A variant the cart accepts: the listing is visible AND its seller is active (the fixture has a closed shop whose listings are "visible" but answer 404 to a cart add), in a fixed order (the query had none, so
+        // on PostgreSQL the first row varied and the test failed now and then in CI with NotFound).
+        var real = await _k.Db(db => (from v in db.CatalogVariants join l in db.CatalogListings on v.ListingId equals l.Id
+                                      where l.Visible && l.Available && v.Available && l.Type == "product" && !l.IsDemoListing && db.CatalogSellers.Any(s => s.Id == l.SellerId && s.Active)
+                                      orderby v.Id select v.Id).ToListAsync());
         var realVariant = real.First(v => !held.Contains(v));
         Assert.Equal(HttpStatusCode.OK, (await Call(HttpMethod.Post, "/api/v1/cart/lines", new { variantId = realVariant, quantity = 1 })).StatusCode);
         Assert.Equal("demo_data", await Refusal(HttpMethod.Post, "/api/v1/checkout/quote", new { address = Address() }));      // still demo lines in it
