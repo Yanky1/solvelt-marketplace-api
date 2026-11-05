@@ -1206,4 +1206,36 @@ public sealed class RefundEventTests : OrderFlowBase
         var after = await Order(o.Number);
         Assert.Equal((6000L, 0L), (after.RefundedCents, after.Groups.Single().RefundedCents));                          // the dashboard money stays, the cut refund is fully given back
     }
+
+    [Fact]
+    public async Task M2_the_predecessor_dead_mark_survives_a_park_and_the_replay_and_always_comes_first()
+    {
+        await Login();
+        await AddToCart("kiddush-cup-pewter", 3);
+        var (number, intent, total) = await Checkout();
+        await Pay(number, intent, total);                                                    // paid, the ingest has NOT run: the seller orders are not stored yet
+        var data = new Dictionary<string, object?> { ["order"] = new { sellerOrderId = Guid.NewGuid(), sellerOrderNumber = "SO-X", marketplaceOrderId = number },
+            ["refundId"] = "rf-park", ["amountCents"] = 500, ["shippingCents"] = 500 };
+        var body = Body("pe-park-dead", "refund.issued", _k.F.Clock.GetUtcNow(), data).Insert(1, "\"predecessorDead\":true,");
+        var (status, json) = await Post(_k.Http, Request(_k.F, body));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal("parked", JsonDocument.Parse(json).RootElement.GetProperty("status").GetString());
+        var first = await _k.Db(db => db.PortalInboundEvents.AsNoTracking().SingleAsync(e => e.Id == "pe-park-dead"));
+        Assert.StartsWith(Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadMark, first.Note);
+        await Drain();                                                                       // the ingest stores the seller orders and replays the parked event
+        var replayed = await _k.Db(db => db.PortalInboundEvents.AsNoTracking().SingleAsync(e => e.Id == "pe-park-dead"));
+        Assert.NotEqual("parked", replayed.Status);                                          // it was applied or skipped by the replay
+        Assert.StartsWith(Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadMark, replayed.Note);   // the handler's note did not overwrite the mark
+    }
+
+    [Fact]
+    public void M2_the_note_keeps_the_mark_first_and_never_exceeds_the_column()
+    {
+        var mark = Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadMark;
+        var n = Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadNote(new string('x', 900));
+        Assert.StartsWith(mark, n);
+        Assert.Equal(500, n.Length);
+        Assert.Equal(mark, Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadNote(null));
+        Assert.Equal(Solvelt.Marketplace.Api.Portal.Webhooks.PortalEventProcessor.PredecessorDeadNote(mark), mark);          // not doubled on a second pass
+    }
 }

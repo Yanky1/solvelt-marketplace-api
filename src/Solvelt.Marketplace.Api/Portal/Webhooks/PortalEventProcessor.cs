@@ -36,18 +36,20 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
         }
 
         var outcome = await ApplyAsync(row, evt, ct);
-        // C14: an earlier event of this seller order went Dead at the portal, so our view of it may have a gap. Booking events reconcile by themselves (BookingEventHandler); for orders the portal offers no
-        // read we can use, so the event is applied as usual and the stored row says "reconcile" where staff look (and the log carries an error): never silent.
-        if (evt.PredecessorDead && !evt.Type.StartsWith("booking.", StringComparison.Ordinal))
-        {
-            const string mark = "predecessor_dead: an earlier event of this seller order never arrived; reconcile it";
-            row.Note = row.Note is { Length: > 0 } n ? (n + "; " + mark)[..Math.Min(500, n.Length + 2 + mark.Length)] : mark;
-            log.LogError("Portal event of type {Type} says an earlier event of its seller order went dead; the order view may have a gap and needs a person to reconcile", evt.Type);
-        }
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(CancellationToken.None);   // a client disconnect must not leave the commit ambiguous
         log.LogInformation("Portal event of type {Type} {Outcome}", evt.Type, outcome);
         return outcome;
+    }
+
+    public const string PredecessorDeadMark = "predecessor_dead: an earlier event of this seller order never arrived; reconcile it";
+
+    /// <summary>The note with the predecessor-dead mark FIRST (the rest follows, cut to the column's 500 characters).</summary>
+    public static string PredecessorDeadNote(string? note)
+    {
+        var rest = note is { Length: > 0 } && !note.StartsWith(PredecessorDeadMark, StringComparison.Ordinal) ? "; " + note : "";
+        var all = PredecessorDeadMark + rest;
+        return all.Length <= 500 ? all : all[..500];
     }
 
     private async Task<ProcessOutcome> ApplyAsync(PortalInboundEvent row, PortalEvent evt, CancellationToken ct)
@@ -64,6 +66,14 @@ public sealed class PortalEventProcessor(MarketplaceDb db, ProjectionRegistry re
         row.AggregateType = result.AggregateType;
         row.AggregateKey = result.AggregateKey;
         row.Note = result.Note;
+        // C14: an earlier event of this seller order went Dead at the portal, so our view of it may have a gap. Booking events reconcile by themselves (BookingEventHandler); for orders the portal offers no read
+        // we can use here, so the event is applied as usual and the stored row says "reconcile" where staff look (and the log carries an error): never silent. The mark is set HERE, in the one place that
+        // writes the note, so a replay of a parked event (which re-runs this) keeps it, and it goes FIRST so the 500-character limit can never cut it (review M2).
+        if (evt.PredecessorDead && !evt.Type.StartsWith("booking.", StringComparison.Ordinal))
+        {
+            row.Note = PredecessorDeadNote(row.Note);
+            log.LogError("Portal event of type {Type} says an earlier event of its seller order went dead; the order view may have a gap and needs a person to reconcile", evt.Type);
+        }
         row.AppliedAt = result.Status == InboundStatus.Applied ? time.GetUtcNow().ToUniversalTime() : null;
         row.Version++;
         return result.Status switch
