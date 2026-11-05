@@ -48,6 +48,8 @@ public sealed class FakeBookingPortal
     public (HttpStatusCode Status, string Code)? ConfirmFailNext { get; set; }
     /// <summary>Every confirm answers 503 while set (an outage between the payment and the confirmation).</summary>
     public bool ConfirmDown { get; set; }
+    /// <summary>Test hook: the next confirm answers with exactly this status and body (a proxy page, a redirect, an error with no portal code).</summary>
+    public (HttpStatusCode Status, string Body)? ConfirmRawNext { get; set; }
     /// <summary>Test hook: the next confirm of a live hold answers 200 with exactly this body (an unreadable or foreign answer).</summary>
     public string? ConfirmBodyOverride { get; set; }
     /// <summary>The portal confirms the booking but the answer never arrives (a timeout after the write): the ambiguous confirm.</summary>
@@ -219,6 +221,7 @@ public sealed class FakeBookingPortal
         {
             ConfirmBodies.Add(c.BodyText);
             if (ConfirmDown) return FakePortal.Json(HttpStatusCode.ServiceUnavailable, "{}");
+            if (ConfirmRawNext is { } rawAnswer) { ConfirmRawNext = null; return FakePortal.Json(rawAnswer.Status, rawAnswer.Body); }
             if (ConfirmFailNext is { } f) { ConfirmFailNext = null; return FakePortal.Json(f.Status, JsonSerializer.Serialize(new { code = f.Code })); }
             if (!_byMid.TryGetValue(mid, out var h)) return FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
             // the real portal (BookingService.ConfirmHoldAsync): a confirmed/requested booking answers 200 (idempotent); a hold that is no longer live is 409 hold_expired (decided under the provider lock);

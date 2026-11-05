@@ -6,6 +6,11 @@
 # A missing or unbuildable checkout, or a service that does not become healthy, FAILS with a message: there is no mock-portal fallback (brief M8).
 set -euo pipefail
 
+# The real Stripe TEST key (opt-in job) is for the API process ONLY: take it out of the environment before anything else starts, so the portal's MSBuild and publish, npm, the web server and the
+# mail sink never see it (review LOW-1). The API subshell below exports it as Stripe__SecretKey; env.json never holds it.
+REAL_STRIPE_KEY="${STRIPE_TEST_SECRET_KEY:-}"
+unset STRIPE_TEST_SECRET_KEY
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="$(cd "$HERE/../.." && pwd)"
 PORTAL_DIR="${PORTAL_DIR:-$(cd "$API_DIR/.." && pwd)/yanky1/yanky1-test-login-backend}"
@@ -97,9 +102,9 @@ cmd_up() {
     export Demo__Enabled=true Catalog__Source=Http
     if [ "${JOURNEY_REAL_STRIPE:-0}" = "1" ]; then
       # the opt-in job: a REAL Stripe test-mode key from the environment (never a file, never printed). The API refuses live keys (sk_live_/rk_live_) at start-up in every environment.
-      [ -n "${STRIPE_TEST_SECRET_KEY:-}" ] || die "JOURNEY_REAL_STRIPE=1 needs STRIPE_TEST_SECRET_KEY (a sk_test_ key)"
-      case "$STRIPE_TEST_SECRET_KEY" in sk_test_*|rk_test_*) ;; *) die "STRIPE_TEST_SECRET_KEY must be a Stripe TEST key (sk_test_ or rk_test_)";; esac
-      export Stripe__SecretKey="$STRIPE_TEST_SECRET_KEY"
+      [ -n "$REAL_STRIPE_KEY" ] || die "JOURNEY_REAL_STRIPE=1 needs STRIPE_TEST_SECRET_KEY (a sk_test_ key)"
+      case "$REAL_STRIPE_KEY" in sk_test_*|rk_test_*) ;; *) die "STRIPE_TEST_SECRET_KEY must be a Stripe TEST key (sk_test_ or rk_test_)";; esac
+      export Stripe__SecretKey="$REAL_STRIPE_KEY"
     else
       export Stripe__FakeCaptureOnWebhook=true
     fi
@@ -132,6 +137,7 @@ case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
   status) for n in mail portal api web; do [ -e "$RUN_DIR/$n.pid" ] && kill -0 "$(cat "$RUN_DIR/$n.pid")" 2>/dev/null && echo "$n running" || echo "$n stopped"; done ;;
+  child-env) env | grep -c "STRIPE_TEST_SECRET_KEY\|sk_test_" || true ;;   # what every child process of this script sees of the key (the check in tools/journey/test-key-scope.sh)
   logs) tail -n 80 "$RUN_DIR/${2:?name}.log" ;;
   *) echo "usage: $0 up|down|status|logs <name>"; exit 2 ;;
 esac

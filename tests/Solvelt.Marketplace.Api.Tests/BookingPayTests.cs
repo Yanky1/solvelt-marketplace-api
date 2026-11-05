@@ -208,6 +208,66 @@ public sealed class BookingPayTests : IDisposable
         Assert.Empty(Stripe.Refunds);
     }
 
+    // ---- review MED-1: only the portal's own refusals refund a paid booking ------------------------------------------------------------------------------------------------
+    private async Task<Booking> PaidWithRawConfirmAnswer(HttpStatusCode status, string body)
+    {
+        await Ready();
+        var b = await NewHold();
+        Assert.True((await Checkout(b.Id)).IsSuccessStatusCode);
+        var intent = IntentOf(b.MarketplaceBookingId);
+        _portal.ConfirmRawNext = (status, body);
+        Stripe.Capture(intent.Id);
+        await PostStripe(StripeEvent("payment_intent.succeeded", intent.Id, b.MarketplaceBookingId, 24000));
+        await _k.Dispatch();
+        return b;
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Found, "<html>moved</html>")]                                      // a redirect (auto-redirect is off, so it arrives as a status)
+    [InlineData(HttpStatusCode.NotFound, "<html><h1>404 Not Found</h1></html>")]                  // an ingress page during a deploy: a 404 with no portal code
+    [InlineData(HttpStatusCode.Forbidden, "<html>Access denied by the firewall</html>")]
+    [InlineData(HttpStatusCode.BadRequest, "{}")]                                                 // a 400 with no portal code
+    [InlineData(HttpStatusCode.NotFound, "{\"code\":\"order_not_found\"}")]                         // a portal code, but not the one a confirm refusal carries
+    [InlineData(HttpStatusCode.UnprocessableEntity, "<html>proxy</html>")]                        // a 422 without a portal code is a proxy
+    public async Task An_answer_that_is_not_a_portal_refusal_never_refunds_and_is_retried(HttpStatusCode status, string body)
+    {
+        var b = await PaidWithRawConfirmAnswer(status, body);
+        var pay = await Pay(b.Id);
+        Assert.Equal(BookingPaymentStatus.Captured, pay.Status);          // not voided
+        Assert.Equal(0, pay.RefundedCents);
+        Assert.Empty(Stripe.Refunds);
+        Assert.Equal(BookingStatus.Hold, (await Row(b.Id)).Status);        // not failed or expired: asked again
+        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("which is not one of its refusals"));
+        _k.F.Clock.Advance(TimeSpan.FromMinutes(2));                       // the deploy is over: the next attempt gets the real answer
+        await Drain();
+        Assert.Equal(BookingStatus.Confirmed, (await Row(b.Id)).Status);
+        Assert.Empty(Stripe.Refunds);
+    }
+
+    [Fact]
+    public async Task A_409_version_conflict_means_send_it_again_the_client_resends_and_nothing_is_refunded()
+    {
+        var b = await PaidWithRawConfirmAnswer(HttpStatusCode.Conflict, "{\"code\":\"version_conflict\"}");
+        await Drain();
+        Assert.Equal(BookingStatus.Confirmed, (await Row(b.Id)).Status);   // the portal client re-sends a version_conflict (contract 1.1) and the second answer is the real one
+        Assert.Empty(Stripe.Refunds);
+        Assert.Equal(BookingPaymentStatus.Captured, (await Pay(b.Id)).Status);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, "{\"code\":\"booking_not_found\"}")]
+    [InlineData(HttpStatusCode.Conflict, "{\"code\":\"hold_not_confirmable\"}")]
+    [InlineData(HttpStatusCode.Conflict, "{\"code\":\"service_unavailable\"}")]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "{\"code\":\"buyer_required\"}")]
+    public async Task A_real_portal_refusal_still_voids_and_refunds_the_payment(HttpStatusCode status, string body)
+    {
+        var b = await PaidWithRawConfirmAnswer(status, body);
+        await Drain();
+        Assert.Equal(BookingPaymentStatus.Void, (await Pay(b.Id)).Status);
+        Assert.Equal(24000, Assert.Single(Stripe.Refunds).AmountCents);
+        Assert.Empty(_portal.PaymentEvents);                               // never a sale
+    }
+
     // ---- the fakes now answer like the real portal (ConfirmHoldAsync): final or lapsed holds are a 409, never a 200 ---------------------------------------------------------
     [Fact]
     public async Task A_hold_that_ran_out_in_the_portal_answers_409_hold_expired_and_the_payment_is_refunded()
