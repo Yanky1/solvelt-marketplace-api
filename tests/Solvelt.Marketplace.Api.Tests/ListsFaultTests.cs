@@ -13,14 +13,14 @@ namespace Solvelt.Marketplace.Api.Tests;
 /// <summary>What the wishlist watch does when the database or the connection fails (review MED-2): a transient fault is retried, never silently dropped; a buyer's own constraint failure is skipped.</summary>
 public sealed class ListsFaultTests
 {
-    /// <summary>Throws once for the first command whose text contains <see cref="Match"/> while <see cref="Armed"/>.</summary>
+    /// <summary>Throws once for the first command whose text (quotes removed: PostgreSQL and SQLite quote differently) contains <see cref="Match"/> while <see cref="Armed"/>.</summary>
     private sealed class Fault : DbCommandInterceptor
     {
         public volatile bool Armed;
         public string Match = "";
         public Func<Exception> Make = () => new TimeoutException();
         public int Thrown;
-        private void Check(DbCommand c) { if (Armed && Thrown == 0 && c.CommandText.Contains(Match, StringComparison.Ordinal)) { Interlocked.Increment(ref Thrown); throw Make(); } }
+        private void Check(DbCommand c) { if (Armed && Thrown == 0 && c.CommandText.Replace("\"", "").Contains(Match, StringComparison.Ordinal)) { Interlocked.Increment(ref Thrown); throw Make(); } }
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken ct = default) { Check(command); return base.ReaderExecutingAsync(command, eventData, result, ct); }
         public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken ct = default) { Check(command); return base.NonQueryExecutingAsync(command, eventData, result, ct); }
     }
@@ -39,8 +39,8 @@ public sealed class ListsFaultTests
     private static async Task<int> Drops(AuthKit k) => await k.Db(db => db.Notifications.CountAsync(n => n.Kind == NotificationKinds.WishlistPriceDrop));
 
     [Theory]
-    [InlineData("INSERT INTO \"notifications\"", "write")]   // a buyer's own save fails with a timeout
-    [InlineData("FROM \"wishlist_items\"", "read")]          // the read of who wishes for the listing fails
+    [InlineData("INSERT INTO notifications", "write")]   // a buyer's own save fails with a timeout
+    [InlineData("FROM wishlist_items", "read")]          // the read of who wishes for the listing fails
     public async Task A_transient_fault_is_retried_not_dropped_and_the_retry_tells_every_buyer_exactly_once(string match, string where)
     {
         var fault = new Fault { Match = match };
@@ -74,7 +74,7 @@ public sealed class ListsFaultTests
     [Fact]
     public async Task A_constraint_failure_of_one_buyers_own_write_is_skipped_and_the_message_is_delivered()
     {
-        var fault = new Fault { Match = "INSERT INTO \"notifications\"", Make = () => new DbUpdateException("unique", new InvalidOperationException("not transient")) };
+        var fault = new Fault { Match = "INSERT INTO notifications", Make = () => new DbUpdateException("unique", new InvalidOperationException("not transient")) };
         using var k = new AuthKit(null, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(fault)));
         await CatalogKit.Sync(k.F);
         await Wisher(k, "f2a@example.com");
