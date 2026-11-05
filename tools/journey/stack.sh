@@ -115,7 +115,7 @@ cmd_up() {
 
   cat >"$RUN_DIR/env.json" <<JSON
 { "portal": "http://127.0.0.1:$PORTAL_PORT", "api": "http://127.0.0.1:$API_PORT", "web": "http://localhost:$WEB_PORT", "mail": "http://127.0.0.1:$MAIL_HTTP_PORT",
-  "webDir": "$WEB_DIR", "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "stripeWebhookSecret": "$STRIPE_WEBHOOK", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
+  "webDir": "$WEB_DIR", "pg": { "host": "$PG_HOST", "port": $PG_PORT, "user": "$PG_USER", "password": "$PG_PASSWORD", "db": "$DB_NAME" }, "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "stripeWebhookSecret": "$STRIPE_WEBHOOK", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
 JSON
   echo "stack is up: $RUN_DIR/env.json"
 }

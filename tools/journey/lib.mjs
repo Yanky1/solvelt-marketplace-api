@@ -144,3 +144,49 @@ export async function portalOrderFor(seller, marketplaceOrderNumber) {
   const hit = Array.isArray(items) ? items.find((o) => JSON.stringify(o).includes(marketplaceOrderNumber)) : null;
   return hit ?? null;
 }
+
+// ---- the database (read-only look-ups the API does not expose: our own ids behind a Stripe metadata field) --------------------------------------------------------------------
+import { execFileSync } from "node:child_process";
+export function sql(query) {
+  const pg = env.pg;
+  return execFileSync("psql", ["-h", pg.host, "-p", String(pg.port), "-U", pg.user, "-d", pg.db, "-At", "-c", query], { env: { ...process.env, PGPASSWORD: pg.password }, encoding: "utf8" }).trim();
+}
+
+// ---- a seller SERVICE (portal) ------------------------------------------------------------------------------------------------------------------------------------------------------
+/** Makes the seller's owner a provider (Mon-Fri 9-17, New York), creates a service with one add-on and activates it. Returns the product (listing) id. */
+export async function sellerService(seller, { title, price = 60 } = {}) {
+  const t = seller.token;
+  const members = await must(portal("GET", "/api/v1/seller/providers", { token: t }), 200, "providers");
+  const list = members.body.items ?? members.body.providers ?? members.body;
+  const memberId = (list.find((m) => m.role === "Owner") ?? list[0]).id ?? list[0].membershipId;
+  await must(portal("PUT", `/api/v1/seller/providers/${memberId}`, { token: t, body: { isProvider: true, timeZone: "America/New_York" } }), 200, "make provider");
+  await must(portal("PUT", `/api/v1/seller/providers/${memberId}/availability`, { token: t, body: { weekly: [1, 2, 3, 4, 5].map((day) => ({ day, intervals: [{ start: "09:00", end: "17:00" }] })), overrides: [] } }), 200, "provider hours");
+  const cats = (await must(portal("GET", "/api/v1/categories", { token: t }), 200, "categories")).body;
+  const category = cats.find((c) => c.slug === "home-services") ?? cats[0];
+  const created = await must(portal("POST", "/api/v1/seller/products", { token: t, body: { title, brandId: seller.brandId, categoryId: category.id, type: "service" } }), 201, "create service");
+  const id = created.body.id;
+  const form = new FormData();
+  form.append("file", new Blob([png(1200, 1200, [40, 150, 120])], { type: "application/octet-stream" }), "photo.png");
+  check((await fetch(`${env.portal}/api/v1/seller/products/${id}/images?alt=${encodeURIComponent(title)}`, { method: "POST", headers: { authorization: `Bearer ${t}` }, body: form })).status === 201, "service photo upload");
+  const cur = (await must(portal("GET", `/api/v1/seller/products/${id}`, { token: t }), 200, "read service")).body;
+  const details = {
+    version: cur.version, pricingModel: "hourly", price, minMinutes: 60, maxMinutes: 480, incrementMinutes: 30, defaultDurationMinutes: 120, bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
+    minNoticeHours: 1, maxAdvanceDays: 120, slotGranularityMinutes: 60, online: true, onlineInstructions: "https://meet.example.test/journey", atCustomer: true,
+    serviceArea: { postalCodes: ["11201", "112*"] }, travelFee: 10, travelBufferMinutes: 30, atSeller: false, bookingMode: "instant", approvalHours: 24,
+    intake: [{ id: "pets", label: "Any pets?", type: "yesno", required: false }], requirements: "Clear the area first.",
+    addOns: [{ id: "deep", name: "Deep clean", price: 25, extraMinutes: 30 }], cancelFreeHours: 24, cancelFeePercent: 50, maxReschedules: 2, noShowFeePercent: 100, assignmentRule: "buyerChoice",
+  };
+  await must(portal("PUT", `/api/v1/seller/services/${id}/details`, { token: t, body: details }), 200, "service details");
+  await must(portal("PUT", `/api/v1/seller/services/${id}/providers`, { token: t, body: { membershipIds: [memberId] } }), 200, "service providers");
+  await must(portal("POST", `/api/v1/seller/products/${id}/status`, { token: t, body: { status: "active" } }), 200, "activate service");
+  return id;
+}
+
+/** A verified buyer without the mail round trip (the product journey covers that): sign-up + the test-mode verify. Returns { email, token }. */
+export async function newBuyer(tag = "buyer") {
+  const email = `${tag}-${uniq()}@example.test`;
+  await must(api("POST", "/api/v1/auth/sign-up", { body: { email, password: BUYER_PASSWORD, displayName: "Journey Buyer" } }), 204, "buyer sign-up");
+  await must(api("POST", "/api/v1/demo/verify", { body: { email, password: BUYER_PASSWORD } }), 204, "buyer verify (test mode)");
+  const s = await must(api("POST", "/api/v1/auth/sign-in", { body: { email, password: BUYER_PASSWORD } }), 200, "buyer sign-in");
+  return { email, token: s.body.token };
+}
