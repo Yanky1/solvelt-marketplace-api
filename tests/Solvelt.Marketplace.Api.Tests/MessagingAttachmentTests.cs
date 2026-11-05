@@ -347,6 +347,23 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
     }
 
     [Fact]
+    public async Task P1_An_erased_account_gets_no_new_thread_and_no_notification_from_a_late_seller_message_or_order_event()
+    {
+        var (o, g) = await Placed();
+        var account = await _k.Account("ing1@example.com");
+        Assert.Equal(HttpStatusCode.NoContent, (await As(_session, HttpMethod.Post, "/api/v1/account/delete", new { password = AuthKit.Password })).StatusCode);
+        while (await _k.Dispatch() > 0) { }
+        var threads = await _k.Db(db => db.MessageThreads.CountAsync(t => t.AccountId == account.Id));
+        Assert.Equal("skipped", await SellerMessage(o, g, "Hello, are you there?"));                       // no thread is made for an erased account
+        var (status, json) = await Post(_k.Http, Request(_k.F, Body("p1-acc", "order.accepted", _k.F.Clock.GetUtcNow().AddSeconds(-5), new { order = new { sellerOrderId = g.SellerOrderId, sellerOrderNumber = g.SellerOrderNumber, marketplaceOrderId = o.Number } })));
+        Assert.Equal(HttpStatusCode.OK, status);
+        await _k.Dispatch();
+        Assert.Equal(threads, await _k.Db(db => db.MessageThreads.CountAsync(t => t.AccountId == account.Id)));
+        Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync(n => n.AccountId == account.Id)));   // and no in-app entry (so no mail) for the event either
+        Assert.Equal(0, await _k.Db(db => db.OutboxMessages.CountAsync(x => x.Type == "notification.mail" && x.CreatedAt > account.CreatedAt.AddYears(-1) && x.Status == "pending")));
+    }
+
+    [Fact]
     public async Task Q1_Deleting_the_account_clears_the_free_text_and_label_links_of_its_cancel_requests_and_returns_and_keeps_status_and_numbers()
     {
         var (o, g) = await Placed();
