@@ -302,31 +302,75 @@ public sealed class MessagingAttachmentTests : OrderFlowBase
         Assert.NotNull(row.HiddenAt);                                                                      // the message stays hidden
     }
 
+    private async Task<HttpResponseMessage> As(string session, HttpMethod m, string path, object? body = null)
+    {
+        var r = new HttpRequestMessage(m, path) { Content = body is null ? null : JsonContent.Create(body) };
+        r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session);
+        return await _k.Http.SendAsync(r);
+    }
+
     [Fact]
-    public async Task G5_Deleting_the_account_redacts_all_its_threads_at_once_and_deletes_its_notifications_and_email_settings()
+    public async Task G5_Deleting_the_account_redacts_all_its_threads_at_once_deletes_its_notifications_email_settings_and_moderation_notes_and_touches_nobody_else()
     {
         var (o, g) = await Placed();                                                                      // an open order: its thread would never be redacted by retention
         var (thread, msg, att, pid) = await Reported(o, g);
-        var prefs = new HttpRequestMessage(HttpMethod.Put, "/api/v1/notifications/preferences") { Content = JsonContent.Create(new { email = new { shipped = false } }) };
-        prefs.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
-        Assert.Equal(HttpStatusCode.OK, (await _k.Http.SendAsync(prefs)).StatusCode);
+        Assert.Equal("applied", await Decided("message", "MR-" + pid, pid, "removed", "Asked for payment off the platform"));   // a staff reason is stored on the message (P4)
+        Assert.NotNull(await _k.Db(db => db.ThreadMessages.Where(m => m.Id == msg).Select(m => m.ModerationNote).SingleAsync()));
+        Assert.Equal(HttpStatusCode.OK, (await As(_session, HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { shipped = false } })).StatusCode);
         Assert.True(await _k.Db(db => db.Notifications.AnyAsync()));
         var account = await _k.Account("ing1@example.com");
+        // another buyer with a thread, a notification and email settings of their own (P3)
         var other = await _k.VerifiedSession("other@example.com");
+        var otherId = (await _k.Account("other@example.com")).Id;
+        var listing = await _k.Db(db => db.CatalogListings.AsNoTracking().Where(l => l.Visible).OrderBy(l => l.Slug).FirstAsync());
+        Assert.Equal(HttpStatusCode.Accepted, (await As(other, HttpMethod.Post, "/api/v1/messages", new { listingId = listing.Id, text = "Do you ship to Canada?" })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await As(other, HttpMethod.Put, "/api/v1/notifications/preferences", new { email = new { messages = false } })).StatusCode);
+        await _k.Db(async db => { db.Notifications.Add(new Notification { Id = Guid.NewGuid(), AccountId = otherId, Kind = "order_shipped", DedupeKey = "other:shipped", CreatedAt = _k.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
         // delete the account (M1) and run the redaction job
-        var del = new HttpRequestMessage(HttpMethod.Post, "/api/v1/account/delete") { Content = JsonContent.Create(new { password = AuthKit.Password }) };
-        del.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
-        Assert.Equal(HttpStatusCode.NoContent, (await _k.Http.SendAsync(del)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await As(_session, HttpMethod.Post, "/api/v1/account/delete", new { password = AuthKit.Password })).StatusCode);
         while (await _k.Dispatch() > 0) { }
-        Assert.All(await _k.Db(db => db.ThreadMessages.AsNoTracking().ToListAsync()), m => { Assert.Equal("", m.Text); Assert.NotNull(m.RedactedAt); });
+        Assert.All(await _k.Db(db => db.ThreadMessages.AsNoTracking().Where(m => m.ThreadId == thread).ToListAsync()), m => { Assert.Equal("", m.Text); Assert.NotNull(m.RedactedAt); Assert.Null(m.ModerationNote); });
         Assert.All(await _k.Db(db => db.MessageThreads.AsNoTracking().Where(t => t.AccountId == account.Id).ToListAsync()), t => Assert.NotNull(t.RedactedAt));
         Assert.Equal(0, await _k.Db(db => db.MessageAttachments.CountAsync()));
         Assert.Equal(0, await _k.Db(db => db.MessageAttachmentData.CountAsync()));
         Assert.Equal(0, await _k.Db(db => db.Notifications.CountAsync(n => n.AccountId == account.Id)));
         Assert.Equal(0, await _k.Db(db => db.NotificationPreferences.CountAsync(p => p.AccountId == account.Id)));
-        // running it again changes nothing and fails nothing; another buyer is untouched
-        using (var s = _k.F.Services.CreateScope()) await new MessagingAccountEraser(s.ServiceProvider.GetRequiredService<MarketplaceDb>(), _k.F.Clock).EraseAsync(account.Id, default);
-        Assert.NotNull(other);
+        // the other buyer's thread (unredacted, text intact), notification and email settings all survive
+        var theirs = await _k.Db(db => db.MessageThreads.AsNoTracking().SingleAsync(t => t.AccountId == otherId));
+        Assert.Null(theirs.RedactedAt);
+        Assert.Equal("Do you ship to Canada?", await _k.Db(db => db.ThreadMessages.Where(m => m.ThreadId == theirs.Id).Select(m => m.Text).SingleAsync()));
+        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.AccountId == otherId)));
+        Assert.Equal(1, await _k.Db(db => db.NotificationPreferences.CountAsync(p => p.AccountId == otherId)));
+        // running the eraser again changes nothing and fails nothing
+        using (var sc = _k.F.Services.CreateScope()) await new MessagingAccountEraser(sc.ServiceProvider.GetRequiredService<MarketplaceDb>(), _k.F.Clock).EraseAsync(account.Id, default);
+        Assert.Equal(1, await _k.Db(db => db.Notifications.CountAsync(n => n.AccountId == otherId)));
+    }
+
+    [Fact]
+    public async Task Q1_Deleting_the_account_clears_the_free_text_and_label_links_of_its_cancel_requests_and_returns_and_keeps_status_and_numbers()
+    {
+        var (o, g) = await Placed();
+        var account = await _k.Account("ing1@example.com");
+        var now = _k.F.Clock.GetUtcNow();
+        var cancelId = Guid.NewGuid();
+        var returnId = Guid.NewGuid();
+        await _k.Db(async db =>
+        {
+            db.OrderCancelRequests.Add(new OrderCancelRequest { Id = cancelId, RequestId = "rq-q1", OrderId = o.Id, GroupId = g.Id, AccountId = account.Id, Reason = "changed_mind", Note = "my name is Jane, call me", Status = CancelRequestStatus.Rejected, DecisionNote = "seller: phone 555-0100", CreatedAt = now, UpdatedAt = now });
+            db.OrderReturns.Add(new OrderReturn { Id = returnId, ReturnId = "rt-q1", OrderId = o.Id, GroupId = g.Id, AccountId = account.Id, Reason = "damaged", Comment = "it arrived broken at 12 Main St", Status = ReturnStatus.Approved, ClientKey = "client-key-1", DecisionNote = "send it back",
+                LabelUrl = "https://portal.test/label/1", LabelUrlExpiresAt = now.AddHours(1), LabelCarrier = "USPS", LabelTrackingNumber = "9400", LabelTrackingUrl = "https://tools.usps.com/x", CreatedAt = now, UpdatedAt = now });
+            await db.SaveChangesAsync(); return 0;
+        });
+        Assert.Equal(HttpStatusCode.NoContent, (await As(_session, HttpMethod.Post, "/api/v1/account/delete", new { password = AuthKit.Password })).StatusCode);
+        while (await _k.Dispatch() > 0) { }
+        var c = await _k.Db(db => db.OrderCancelRequests.AsNoTracking().SingleAsync(r => r.Id == cancelId));
+        var r = await _k.Db(db => db.OrderReturns.AsNoTracking().SingleAsync(x => x.Id == returnId));
+        Assert.Equal((null, null), (c.Note, c.DecisionNote));
+        Assert.Equal((null, null, null, null, null, null, null), (r.Comment, r.DecisionNote, r.ClientKey, r.LabelUrl, r.LabelCarrier, r.LabelTrackingNumber, r.LabelTrackingUrl));
+        Assert.Null(r.LabelUrlExpiresAt);
+        // what is the order's accounting and audit trail stays
+        Assert.Equal((CancelRequestStatus.Rejected, "changed_mind", "rq-q1", account.Id), (c.Status, c.Reason, c.RequestId, c.AccountId));
+        Assert.Equal((ReturnStatus.Approved, "damaged", "rt-q1", account.Id), (r.Status, r.Reason, r.ReturnId, r.AccountId));
     }
 
     // ------------------------------------------------------------------ portal N3: ids are unique per seller only

@@ -160,7 +160,7 @@ public class AccountReviewTests
         foreach (var m in PiiRegistry.Modules.Where(m => m.Eraser is not null)) Assert.Contains(m.Eraser!, registered);
         Assert.Empty(registered.Except(PiiRegistry.Modules.Where(m => m.Eraser is not null).Select(m => m.Eraser!)));   // an eraser nobody listed is a module nobody reviewed
         // The launch gate: these modules still hold buyer data with no eraser. When one registers its eraser it must move out of this list (and this assertion forces it).
-        Assert.Equal(new[] { "order-cancellations-and-returns" }, PiiRegistry.Pending.Select(m => m.Name).Order().ToArray());
+        Assert.Empty(PiiRegistry.Pending);   // every module that holds buyer data has its eraser (the launch gate is open)
     }
 
     // ---------- the erasure is one transaction: a failure halfway changes nothing ----------
