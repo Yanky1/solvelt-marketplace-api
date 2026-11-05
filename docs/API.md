@@ -409,3 +409,16 @@ Everything is under `/api/v1/staff`, bearer `stf_…` token, `private, no-store`
 | `GET /me`, `GET /me/passkeys`, `POST /me/passkeys/options`, `POST /me/passkeys`, `DELETE /me/passkeys/{id}` | signed in | `me` has `role`, `permissions[]`, `stepUpUntil`; adding and removing need a recent check; the last passkey stays (`409 last_passkey`) |
 | `GET /accounts`, `POST /accounts {email, displayName, role, reason}` (`201 { account, enrolmentToken, expiresAt }`), `POST /accounts/{id}/enrolment {reason, revokePasskeys}`, `/role {role, reason}`, `/disable`, `/enable`, `/sign-out {reason}` | `staff.manage` | `409 last_admin` when no active admin would remain, `409 email_in_use` |
 | `GET /audit?action&actor&targetType&target&limit&before` | `audit.view` | `{ entries[], next }`, newest first |
+
+
+## Reviews and ratings (M6)
+Reading is public; writing needs a signed-in buyer (`Authorization: Bearer`, `Cache-Control: private, no-store`). Another buyer's line, booking or review is 404.
+| Route | Answer |
+|---|---|
+| `GET /api/v1/reviews?listingId=&sort=recent\|helpful\|high\|low&rating=1..5&page=` | public: `{ summary: { count, average, distribution: [1..5 stars] }, reviews: [{ id, listingId, rating, text, displayName, verified, createdAt, editedAt, helpfulCount, reply: { id, text, at } \| null }], page, pageSize: 10, total }` (published reviews only) |
+| `GET /api/v1/reviews/eligible?listingId=` | `{ items: [{ kind: "order_line" \| "booking", id, label, at }] }`: what the buyer can still review for that listing |
+| `POST /api/v1/reviews` `{ kind, targetId, rating, text }` | `201` the review (with `status`, `canEdit`); `422 validation_failed` (`errors.rating`, `errors.text`), `422 not_eligible`, `409 already_reviewed`, `404` |
+| `PATCH /api/v1/reviews/{id}` `{ rating, text }` | `200`; `422 review_locked` after 30 days or when not published |
+| `PUT` / `DELETE /api/v1/reviews/{id}/helpful` | `204`, one vote per buyer; `422 own_review` |
+| `POST /api/v1/reviews/{id}/report` `{ reason: spam\|personal_information\|offensive\|fake\|off_topic\|other, note? }` | `204`; `/reply/report` reports the seller's reply |
+| `GET /api/v1/account/reviews` | the buyer's own reviews with status, moderation note and listing title |

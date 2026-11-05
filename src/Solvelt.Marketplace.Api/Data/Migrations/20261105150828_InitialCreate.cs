@@ -745,6 +745,25 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "rating_aggregates",
+                columns: table => new
+                {
+                    Scope = table.Column<string>(type: "character varying(12)", maxLength: 12, nullable: false),
+                    ScopeId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Count = table.Column<int>(type: "integer", nullable: false),
+                    Sum = table.Column<long>(type: "bigint", nullable: false),
+                    Stars1 = table.Column<int>(type: "integer", nullable: false),
+                    Stars2 = table.Column<int>(type: "integer", nullable: false),
+                    Stars3 = table.Column<int>(type: "integer", nullable: false),
+                    Stars4 = table.Column<int>(type: "integer", nullable: false),
+                    Stars5 = table.Column<int>(type: "integer", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_rating_aggregates", x => new { x.Scope, x.ScopeId });
+                });
+
+            migrationBuilder.CreateTable(
                 name: "recently_viewed",
                 columns: table => new
                 {
@@ -756,6 +775,68 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_recently_viewed", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "review_reports",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    ReviewId = table.Column<Guid>(type: "uuid", nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Kind = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    ReportId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Reason = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
+                    Note = table.Column<string>(type: "character varying(1000)", maxLength: 1000, nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Decision = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    DecidedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_review_reports", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "review_votes",
+                columns: table => new
+                {
+                    ReviewId = table.Column<Guid>(type: "uuid", nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_review_votes", x => new { x.ReviewId, x.AccountId });
+                });
+
+            migrationBuilder.CreateTable(
+                name: "reviews",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: false),
+                    ListingId = table.Column<Guid>(type: "uuid", nullable: false),
+                    SellerId = table.Column<Guid>(type: "uuid", nullable: false),
+                    BrandId = table.Column<Guid>(type: "uuid", nullable: false),
+                    OrderLineId = table.Column<Guid>(type: "uuid", nullable: true),
+                    BookingId = table.Column<Guid>(type: "uuid", nullable: true),
+                    Rating = table.Column<int>(type: "integer", nullable: false),
+                    Text = table.Column<string>(type: "character varying(8000)", maxLength: 8000, nullable: false),
+                    DisplayName = table.Column<string>(type: "character varying(240)", maxLength: 240, nullable: false),
+                    Status = table.Column<string>(type: "character varying(12)", maxLength: 12, nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    EditedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    StatusAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    ModerationNote = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: true),
+                    HelpfulCount = table.Column<int>(type: "integer", nullable: false),
+                    ReplyText = table.Column<string>(type: "character varying(8000)", maxLength: 8000, nullable: true),
+                    ReplyId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    ReplyAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_reviews", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -1725,6 +1806,45 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "AccountId", "ViewedAt" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_review_reports_ReportId",
+                table: "review_reports",
+                column: "ReportId",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_review_reports_ReviewId_AccountId_Kind",
+                table: "review_reports",
+                columns: new[] { "ReviewId", "AccountId", "Kind" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_review_votes_AccountId",
+                table: "review_votes",
+                column: "AccountId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_reviews_AccountId",
+                table: "reviews",
+                column: "AccountId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_reviews_AccountId_BookingId",
+                table: "reviews",
+                columns: new[] { "AccountId", "BookingId" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_reviews_AccountId_OrderLineId",
+                table: "reviews",
+                columns: new[] { "AccountId", "OrderLineId" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_reviews_ListingId_Status_CreatedAt",
+                table: "reviews",
+                columns: new[] { "ListingId", "Status", "CreatedAt" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_seller_order_states_OrderId",
                 table: "seller_order_states",
                 column: "OrderId");
@@ -1963,7 +2083,19 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 name: "quotes");
 
             migrationBuilder.DropTable(
+                name: "rating_aggregates");
+
+            migrationBuilder.DropTable(
                 name: "recently_viewed");
+
+            migrationBuilder.DropTable(
+                name: "review_reports");
+
+            migrationBuilder.DropTable(
+                name: "review_votes");
+
+            migrationBuilder.DropTable(
+                name: "reviews");
 
             migrationBuilder.DropTable(
                 name: "seller_order_states");

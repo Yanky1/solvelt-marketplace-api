@@ -32,6 +32,10 @@ public interface ISignedPortalClient
     Task<PortalBytes> GetAttachmentAsync(Guid attachmentId, CancellationToken ct = default);
     /// <summary><c>POST /content/reports</c> (CATALOG.md §6): idempotent on <c>reportId</c>.</summary>
     Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody body, CancellationToken ct = default);
+    /// <summary><c>POST /reviews</c> (C17): a buyer review for the seller; idempotent on the review id.</summary>
+    Task<PortalResult<JsonElement>> UpsertReviewAsync(ReviewUpsertBody body, CancellationToken ct = default);
+    /// <summary><c>POST /reviews/{id}/state</c> (C17): visible, hidden or removed; an unknown id is 404.</summary>
+    Task<PortalResult<JsonElement>> SetReviewStateAsync(string reviewId, ReviewStateBody body, CancellationToken ct = default);
     Task<PortalResult<ShippingSettings>> GetShippingSettingsAsync(Guid sellerId, Guid brandId, CancellationToken ct = default);
     Task<PortalResult<LocalDeliveryEligibility>> CheckLocalDeliveryEligibilityAsync(LocalDeliveryEligibilityRequest request, CancellationToken ct = default);
     Task<PortalResult<ServiceAvailability>> GetServiceAvailabilityAsync(ServiceAvailabilityQuery query, CancellationToken ct = default);
@@ -143,6 +147,12 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<JsonElement>> ReportContentAsync(ContentReportBody b, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/content/reports", b, Retry.Standard, ct);
+
+    public Task<PortalResult<JsonElement>> UpsertReviewAsync(ReviewUpsertBody b, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/reviews", b, Retry.Standard, ct);
+
+    public Task<PortalResult<JsonElement>> SetReviewStateAsync(string reviewId, ReviewStateBody b, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Post, $"{ApiBase}/reviews/{Uri.EscapeDataString(reviewId)}/state", b, Retry.Standard, ct);
 
     public Task<PortalResult<ReturnLabelLink>> GetReturnLabelLinkAsync(string mid, CancellationToken ct = default)
         => Call<ReturnLabelLink>(HttpMethod.Post, $"{ApiBase}/returns/{Id(mid)}/label-link", new { }, Retry.Standard, ct);

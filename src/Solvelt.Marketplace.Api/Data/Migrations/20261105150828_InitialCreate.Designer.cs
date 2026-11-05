@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105140559_InitialCreate")]
+    [Migration("20261105150828_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2390,6 +2390,41 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.ToTable("projection_states", (string)null);
                 });
 
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.RatingAggregate", b =>
+                {
+                    b.Property<string>("Scope")
+                        .HasMaxLength(12)
+                        .HasColumnType("character varying(12)");
+
+                    b.Property<Guid>("ScopeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Stars1")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Stars2")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Stars3")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Stars4")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Stars5")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("Sum")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Scope", "ScopeId");
+
+                    b.ToTable("rating_aggregates", (string)null);
+                });
+
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.RecentlyViewedItem", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2412,6 +2447,158 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasIndex("AccountId", "ViewedAt");
 
                     b.ToTable("recently_viewed", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.Review", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("BookingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BrandId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(240)
+                        .HasColumnType("character varying(240)");
+
+                    b.Property<DateTimeOffset?>("EditedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("HelpfulCount")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("ListingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ModerationNote")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<Guid?>("OrderLineId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Rating")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("ReplyAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReplyId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("ReplyText")
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.Property<Guid>("SellerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(12)
+                        .HasColumnType("character varying(12)");
+
+                    b.Property<DateTimeOffset?>("StatusAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId");
+
+                    b.HasIndex("AccountId", "BookingId")
+                        .IsUnique();
+
+                    b.HasIndex("AccountId", "OrderLineId")
+                        .IsUnique();
+
+                    b.HasIndex("ListingId", "Status", "CreatedAt");
+
+                    b.ToTable("reviews", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.ReviewReport", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("DecidedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Decision")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("ReportId")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("ReviewId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ReportId")
+                        .IsUnique();
+
+                    b.HasIndex("ReviewId", "AccountId", "Kind")
+                        .IsUnique();
+
+                    b.ToTable("review_reports", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.ReviewVote", b =>
+                {
+                    b.Property<Guid>("ReviewId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("ReviewId", "AccountId");
+
+                    b.HasIndex("AccountId");
+
+                    b.ToTable("review_votes", (string)null);
                 });
 
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.SellerOrderState", b =>

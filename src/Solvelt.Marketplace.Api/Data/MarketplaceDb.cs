@@ -60,6 +60,10 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<StaffSession> StaffSessions => Set<StaffSession>();
     public DbSet<StaffEnrolment> StaffEnrolments => Set<StaffEnrolment>();
     public DbSet<StaffAuditEntry> StaffAudit => Set<StaffAuditEntry>();
+    public DbSet<Review> Reviews => Set<Review>();
+    public DbSet<ReviewVote> ReviewVotes => Set<ReviewVote>();
+    public DbSet<ReviewReport> ReviewReports => Set<ReviewReport>();
+    public DbSet<RatingAggregate> RatingAggregates => Set<RatingAggregate>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

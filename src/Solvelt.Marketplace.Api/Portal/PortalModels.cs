@@ -62,6 +62,10 @@ public sealed record BuyerMessageBody(string MessageId, string ConversationId, s
 /// <summary>POST /bookings/{mid}/messages (SERVICES.md §6): the buyer writes to the seller about a booking.</summary>
 public sealed record BookingMessageBody(string MessageId, string ConversationId, string BuyerName, string Text, DateTimeOffset SentAt);
 /// <summary><c>reporterRef</c> is an opaque reference for the reporter (never a name or e-mail).</summary>
+/// <summary>C17: a review for the seller's dashboard, idempotent on <c>reviewId</c> (a newer <c>editedAt</c> updates, an older or equal one is ignored). Text at most 5000, name at most 60.</summary>
+public sealed record ReviewUpsertBody(string ReviewId, Guid ListingId, Guid SellerId, int Rating, string Text, string BuyerDisplayName, DateTimeOffset CreatedAt, DateTimeOffset? EditedAt);
+/// <summary>C17: <c>visible | hidden | removed</c>; removed also redacts the text and name at the portal and removes the reply.</summary>
+public sealed record ReviewStateBody(string State, string? Reason);
 public sealed record ContentReportBody(string ReportId, string Kind, string TargetId, string Reason, string? Note, string ReporterRef);
 
 /// <summary>The answer to <c>POST /returns/{id}/label-link</c>: a signed link valid about 24 h, bound to that one label.</summary>
