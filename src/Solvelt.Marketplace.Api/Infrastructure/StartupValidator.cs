@@ -122,6 +122,7 @@ public static class StartupValidator
         if (lease < portalDeadline + LeaseMarginSeconds) problems.Add($"Outbox:LeaseSeconds ({lease}) must be at least Portal:TotalDeadlineSeconds ({portalDeadline}) + {LeaseMarginSeconds}.");
         if (lease < emailTimeout + LeaseMarginSeconds) problems.Add($"Outbox:LeaseSeconds ({lease}) must be at least Email:SendTimeoutSeconds ({emailTimeout}) + {LeaseMarginSeconds}.");
         if (emailTimeout < 1) problems.Add("Email:SendTimeoutSeconds must be at least 1.");
+        problems.AddRange(Solvelt.Marketplace.Api.Staff.StaffConfig.Problems(config));   // M7: bootstrap token and IP allow-list (every environment)
         problems.AddRange(Solvelt.Marketplace.Api.Services.ServicesModule.ConfigProblems(config));   // M4: availability window and limits (every environment)
         if (IsDevLike(env)) return problems;
 
@@ -132,6 +133,7 @@ public static class StartupValidator
             ("Portal:ImageKey", "Portal__ImageKey", config["Portal:ImageKey"]),
             ("Web:ForwardingKey", "Web__ForwardingKey", config["Web:ForwardingKey"]),
             ("Admin:ApiKey", "Admin__ApiKey", config["Admin:ApiKey"]),
+            ("Staff:BootstrapToken", "Staff__BootstrapToken", config["Staff:BootstrapToken"]),
             ("Auth:EmailLinkKey", "Auth__EmailLinkKey", config["Auth:EmailLinkKey"]),
             ("Auth:GuestLinkKey", "Auth__GuestLinkKey", config["Auth:GuestLinkKey"]),
             ("Checkout:QuoteKey", "Checkout__QuoteKey", config["Checkout:QuoteKey"]),
@@ -146,7 +148,7 @@ public static class StartupValidator
             if (string.IsNullOrWhiteSpace(value))
             {
                 if (name == "Portal:ImageKey") { if (string.Equals(config["Portal:RequireImageKey"], "true", StringComparison.OrdinalIgnoreCase)) problems.Add($"{name} (env {envName}) is required because Portal:RequireImageKey is true (the portal no longer accepts the inbound key for image downloads)."); continue; }
-                if (name is not ("Admin:ApiKey" or "Stripe:WebhookSecret")) problems.Add($"{name} (env {envName}) is required.");
+                if (name is not ("Admin:ApiKey" or "Stripe:WebhookSecret" or "Staff:BootstrapToken")) problems.Add($"{name} (env {envName}) is required.");
                 continue;
             }
             if (value.Length < 32) problems.Add($"{name} must be at least 32 characters.");

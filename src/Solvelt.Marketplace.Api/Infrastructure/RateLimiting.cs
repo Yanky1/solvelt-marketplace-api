@@ -12,6 +12,8 @@ public static class RateLimitPolicies
     public const string Public = "public";
     /// <summary>Operations endpoints: its own bucket, per client IP, so buyer traffic and operator traffic never share a limit.</summary>
     public const string Admin = "admin";
+    /// <summary>The staff area: its own bucket per client IP (<c>RateLimits:StaffPerMinute</c>, 60).</summary>
+    public const string Staff = "staff";
 
     public static IServiceCollection AddMarketplaceRateLimiting(this IServiceCollection services)
     {
@@ -26,6 +28,7 @@ public static class RateLimitPolicies
             var adminPerMinute = config.GetValue("RateLimits:AdminPerMinute", 30);
             o.AddPolicy(Public, ctx => Fixed(ctx, "public", publicPerMinute));
             o.AddPolicy(Admin, ctx => Fixed(ctx, "admin", adminPerMinute));
+            o.AddPolicy(Staff, ctx => Fixed(ctx, "staff", config.GetValue("RateLimits:StaffPerMinute", 60)));
             o.OnRejected = async (c, _) => await ProblemExceptionMiddleware.Write(c.HttpContext, 429, "rate_limited", "Too many requests. Try again shortly.",
                 headers: r => { r.Headers.RetryAfter = "60"; r.Headers.CacheControl = "no-store"; });     // set after Write's Clear(), which would otherwise drop them
         });

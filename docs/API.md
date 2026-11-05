@@ -398,3 +398,14 @@ All routes are the signed-in buyer's own (`Authorization: Bearer`), `Cache-Contr
 | `POST /api/v1/recently-viewed/merge` `{ listingIds }` | `204`; the guest's ids newest first (the rest of the body is ignored), never replaces a view the server has |
 | `DELETE /api/v1/recently-viewed` | `204` |
 Notifications (one mail per kind per listing per 7 days; demo and off-storefront listings are never announced): kinds `wishlist_price_drop` and `wishlist_back_in_stock` (`parameters`: listingId, slug, title, currency, priceCents, previousPriceCents); email category `wishlist` in `GET/PUT /notifications/preferences`.
+## Staff (M7; the web's `/staff` area, never public)
+Everything is under `/api/v1/staff`, bearer `stf_…` token, `private, no-store`, `noindex`, optional IP allow-list (404 outside it). Roles and permissions: [STAFF.md](STAFF.md). Mutations need `reason` (5-300 characters, no email or long number: `422 reason`) and, for sensitive ones, a passkey check within 5 minutes (`403 reauthentication_required`).
+
+| Endpoint | Who | Notes |
+|---|---|---|
+| `POST /auth/enrol/options {token}` then `POST /auth/enrol {token, challengeId, name, credential}` | anonymous | The one-time link (or the bootstrap token): registers the first passkey, `201 { token, staff }` |
+| `POST /auth/passkey/options` then `POST /auth/passkey/sign-in {challengeId, credential}` | anonymous | `200 { token, staff }`; every failure is `401 invalid_credentials` |
+| `POST /auth/reauthenticate/options`, `POST /auth/reauthenticate`, `POST /auth/sign-out` | signed in | Step-up and sign-out |
+| `GET /me`, `GET /me/passkeys`, `POST /me/passkeys/options`, `POST /me/passkeys`, `DELETE /me/passkeys/{id}` | signed in | `me` has `role`, `permissions[]`, `stepUpUntil`; adding and removing need a recent check; the last passkey stays (`409 last_passkey`) |
+| `GET /accounts`, `POST /accounts {email, displayName, role, reason}` (`201 { account, enrolmentToken, expiresAt }`), `POST /accounts/{id}/enrolment {reason, revokePasskeys}`, `/role {role, reason}`, `/disable`, `/enable`, `/sign-out {reason}` | `staff.manage` | `409 last_admin` when no active admin would remain, `409 email_in_use` |
+| `GET /audit?action&actor&targetType&target&limit&before` | `audit.view` | `{ entries[], next }`, newest first |
