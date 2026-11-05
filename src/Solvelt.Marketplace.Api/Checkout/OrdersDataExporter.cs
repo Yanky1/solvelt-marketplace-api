@@ -18,12 +18,12 @@ public sealed class OrdersDataExporter(MarketplaceDb db) : IAccountDataExporter
         var orders = await db.Orders.AsNoTracking().Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery()
             .Where(o => o.AccountId == accountId).OrderBy(o => o.CreatedAt).ThenBy(o => o.Number).ToListAsync(ct);
         var ids = orders.Select(o => o.Id).ToList();
-        var refunds = await db.OrderRefunds.AsNoTracking().Where(r => ids.Contains(r.OrderId) && r.Status == RefundStatus.Succeeded).OrderBy(r => r.CreatedAt).ThenBy(r => r.Key).ToListAsync(ct);
+        var refunds = (await db.OrderRefunds.AsNoTracking().Where(r => ids.Contains(r.OrderId) && r.Status == RefundStatus.Succeeded).OrderBy(r => r.CreatedAt).ThenBy(r => r.Key).ToListAsync(ct)).ToLookup(r => r.OrderId);
         return new
         {
             orders = orders.Select(o => new
             {
-                o.Number, o.Status, o.Currency, o.CreatedAt, o.PaidAt, o.PlacedAt,
+                o.Number, demo = o.IsDemo, o.Status, o.Currency, o.CreatedAt, o.PaidAt, o.PlacedAt,
                 o.ItemsCents, o.ShippingCents, o.TaxCents, o.TotalCents, o.PaidCents, o.RefundedCents,
                 buyerName = o.BuyerName, o.Phone, o.GiftMessage, o.GuestEmail,
                 shippingAddress = new { name = o.ShipName, line1 = o.ShipLine1, line2 = o.ShipLine2, city = o.ShipCity, region = o.ShipRegion, postalCode = o.ShipPostalCode, country = o.ShipCountry, latitude = o.ShipLat, longitude = o.ShipLng },
@@ -33,7 +33,7 @@ public sealed class OrdersDataExporter(MarketplaceDb db) : IAccountDataExporter
                     g.ItemsCents, g.ShippingCents, g.TaxCents, g.TotalCents, g.RefundedCents,
                 }),
                 lines = o.Lines.OrderBy(l => l.MarketplaceLineId).Select(l => new { l.Title, variant = l.VariantName, l.Quantity, l.UnitPriceCents, l.LineTotalCents, l.TaxCents, l.RefundedQuantity }),
-                refunds = refunds.Where(r => r.OrderId == o.Id).Select(r => new { r.AmountCents, r.ShippingCents, r.TaxCents, r.Reason, date = r.CreatedAt }),
+                refunds = refunds[o.Id].Select(r => new { r.AmountCents, r.ShippingCents, r.TaxCents, r.Reason, date = r.CreatedAt }),
             }),
         };
     }
