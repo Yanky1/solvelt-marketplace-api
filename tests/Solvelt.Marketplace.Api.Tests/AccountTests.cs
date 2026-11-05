@@ -423,14 +423,16 @@ public class AccountTests
     // ---------- password change ----------
 
     [Fact]
-    public async Task Changing_the_password_needs_the_current_one_ends_other_sessions_keeps_this_one_and_mails_the_owner()
+    public async Task Changing_the_password_needs_the_current_one_ends_every_session_returns_a_fresh_token_and_mails_the_owner()
     {
         using var k = new AuthKit(new() { ["Auth:SignInIpFailuresPerHour"] = "100000" });
         var here = await k.VerifiedSession(Email);
         var elsewhere = (await (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).Content.ReadFromJsonAsync<AuthKit.SignInResponse>())!.Token;
         var r = await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = "a brand new password" }, here);
-        Assert.Equal(HttpStatusCode.NoContent, r.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", here)).StatusCode);                  // this device stays signed in
+        var fresh = await FreshToken(r);
+        Assert.NotEqual(here, fresh);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", here)).StatusCode);        // the token that asked is dead too: a thief holding a copy of it is out (M1-87)
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);                 // the new one signs this device in
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", elsewhere)).StatusCode);   // every other one is out
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = Pw })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await k.Post("/api/v1/auth/sign-in", new { email = Email, password = "a brand new password" })).StatusCode);
@@ -461,10 +463,11 @@ public class AccountTests
             await db.SaveChangesAsync(); return 0;
         });
         Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", raced)).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = "a brand new password" }, here)).StatusCode);
+        var fresh = await FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = "a brand new password" }, here));
         await k.Db(db => db.BuyerSessions.Where(s => s.TokenHash == Tokens.Hash(raced)).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)null)));   // as if the change's UPDATE had missed it
         Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", raced)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", here)).StatusCode);                  // the session that asked lives on
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", here)).StatusCode);        // the session that asked ended too (M1-87) ...
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);                 // ... and its replacement lives
         Assert.Equal(account.SessionEpoch + 1, (await k.Account(Email)).SessionEpoch);
     }
 
@@ -509,10 +512,17 @@ public class AccountTests
         Assert.Equal(HttpStatusCode.Forbidden, stale.StatusCode);
         Assert.Equal("reauthentication_required", (await Json(stale)).GetProperty("code").GetString());
         Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/auth/reauthenticate", new { password = Pw }, token)).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = "a brand new password" }, token)).StatusCode);
+        Assert.False(string.IsNullOrEmpty(await FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = "a brand new password" }, token))));
     }
 
     private static string Wrong() => "wrong password!!";
+
+    /// <summary>The fresh session token of a password change or passkey removal (M1-87): <c>200 { token }</c>.</summary>
+    internal static async Task<string> FreshToken(HttpResponseMessage r)
+    {
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        return JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement.GetProperty("token").GetString()!;
+    }
 
     [Fact]
     public async Task A_wrong_current_password_a_weak_new_one_and_missing_fields_change_nothing()

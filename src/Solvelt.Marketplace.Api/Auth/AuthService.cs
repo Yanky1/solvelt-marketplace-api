@@ -219,6 +219,19 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         return token;
     }
 
+    /// <summary>
+    /// Ends EVERY session of the account (the epoch moves up, so even one being created right now is dead, and the rows are revoked) and opens a fresh one, returning its token (decision M1-87).
+    /// For the actions a buyer takes because they fear someone else holds a session: changing the password, removing a passkey. The caller holds the account row lock and runs this in its transaction,
+    /// so the epoch read here is the one this call wrote.
+    /// </summary>
+    public async Task<string> RotateSessionsAsync(Guid accountId, CancellationToken ct)
+    {
+        var now = Now;
+        await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.SessionEpoch, x => x.SessionEpoch + 1), ct);
+        await db.BuyerSessions.Where(s => s.AccountId == accountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        return await CreateSessionAsync(accountId, ct);
+    }
+
     /// <summary>The signed-in buyer for a bearer token, or null. Slides the idle expiry (at most every 5 minutes, to spare the database).</summary>
     public async Task<BuyerPrincipal?> AuthenticateAsync(string? token, CancellationToken ct)
     {

@@ -85,36 +85,38 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
     }
 
     /// <summary>Needs a recent sign-in (O-11). The last way to sign in is never removed: an account with no password and one passkey keeps it.</summary>
-    public async Task<PasskeyOutcome> RemoveAsync(BuyerPrincipal who, Guid id, CancellationToken ct)
+    public async Task<(PasskeyOutcome Outcome, string? Token)> RemoveAsync(BuyerPrincipal who, Guid id, CancellationToken ct)
     {
-        if (!Recent(who, Now)) return PasskeyOutcome.ReauthenticationRequired;
+        if (!Recent(who, Now)) return (PasskeyOutcome.ReauthenticationRequired, null);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         // the account's row lock (a no-op UPDATE) puts two removals of one buyer in a row, so two parallel removals cannot both see "another one is left"
-        if (await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct) != 1) return PasskeyOutcome.NotFound;
-        if (!await db.BuyerPasskeys.AnyAsync(p => p.Id == id && p.AccountId == who.AccountId, ct)) return PasskeyOutcome.NotFound;
+        if (await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct) != 1) return (PasskeyOutcome.NotFound, null);
+        if (!await db.BuyerPasskeys.AnyAsync(p => p.Id == id && p.AccountId == who.AccountId, ct)) return (PasskeyOutcome.NotFound, null);
         var hasPassword = await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == who.AccountId && a.PasswordHash != null, ct);
         var count = await db.BuyerPasskeys.CountAsync(p => p.AccountId == who.AccountId, ct);
-        if (!hasPassword && count <= 1) return PasskeyOutcome.LastSignInMethod;
+        if (!hasPassword && count <= 1) return (PasskeyOutcome.LastSignInMethod, null);
         await db.BuyerPasskeys.Where(p => p.Id == id && p.AccountId == who.AccountId).ExecuteDeleteAsync(ct);
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasskeyRemoved, who.AccountId));
+        var token = await auth.RotateSessionsAsync(who.AccountId, ct);   // every session ends, a fresh one is opened (M1-87)
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        return PasskeyOutcome.Ok;
+        return (PasskeyOutcome.Ok, token);
     }
 
     /// <summary>Every passkey of the account, in one transaction under the account's row lock. Needs a recent sign-in and a password (an account whose only way in is its passkeys keeps them: <see cref="PasskeyOutcome.LastSignInMethod"/>).</summary>
-    public async Task<PasskeyOutcome> RemoveAllAsync(BuyerPrincipal who, CancellationToken ct)
+    public async Task<(PasskeyOutcome Outcome, string? Token)> RemoveAllAsync(BuyerPrincipal who, CancellationToken ct)
     {
-        if (!Recent(who, Now)) return PasskeyOutcome.ReauthenticationRequired;
+        if (!Recent(who, Now)) return (PasskeyOutcome.ReauthenticationRequired, null);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        if (await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct) != 1) return PasskeyOutcome.NotFound;
-        if (!await db.BuyerPasskeys.AnyAsync(p => p.AccountId == who.AccountId, ct)) return PasskeyOutcome.NoPasskeys;
-        if (!await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == who.AccountId && a.PasswordHash != null, ct)) return PasskeyOutcome.LastSignInMethod;
+        if (await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedAt, a => a.UpdatedAt), ct) != 1) return (PasskeyOutcome.NotFound, null);
+        if (!await db.BuyerPasskeys.AnyAsync(p => p.AccountId == who.AccountId, ct)) return (PasskeyOutcome.NoPasskeys, null);
+        if (!await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == who.AccountId && a.PasswordHash != null, ct)) return (PasskeyOutcome.LastSignInMethod, null);
         await db.BuyerPasskeys.Where(p => p.AccountId == who.AccountId).ExecuteDeleteAsync(ct);
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasskeyRemoved, who.AccountId));
+        var token = await auth.RotateSessionsAsync(who.AccountId, ct);   // every session ends, a fresh one is opened (M1-87)
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        return PasskeyOutcome.Ok;
+        return (PasskeyOutcome.Ok, token);
     }
 
     // ---------- registration ----------

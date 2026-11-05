@@ -261,7 +261,7 @@ public class AccountReviewTests
     }
 
     [Fact]
-    public async Task A_password_change_does_not_restamp_a_session_that_is_no_longer_on_the_epoch_the_check_saw()
+    public async Task A_password_change_does_not_revive_a_session_that_moved_while_the_check_ran()
     {
         var hook = new BeforeStatement();
         using var k = new AuthKit(Open(), s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(hook)));
@@ -269,8 +269,9 @@ public class AccountReviewTests
         hook.When = AfterThePasswordCheck;
         hook.Then = async () => { using var scope = k.F.Services.CreateScope(); await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().BuyerSessions.ExecuteUpdateAsync(x => x.SetProperty(y => y.Epoch, 99L)); };
         var r = await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = NewPw }, token);
-        Assert.Equal(HttpStatusCode.NoContent, r.StatusCode);                                            // the account itself was unchanged, so the change goes through
-        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);   // but the session that had moved is not given the new epoch
+        var fresh = await AccountTests.FreshToken(r);                                                    // the account itself was unchanged, so the change goes through
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);   // the session that had moved is not revived (it is not given the new epoch) ...
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);              // ... the fresh session replaces it
     }
 
     [Fact]
@@ -371,9 +372,11 @@ public class AccountReviewTests
         var token = (await signIn.Content.ReadFromJsonAsync<AuthKit.SignInResponse>())!.Token;
         Assert.Equal(big, (await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync(s => s.TokenHash == Tokens.Hash(token)))).Epoch);
         Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", token)).StatusCode);
-        // a password change adds one without wrapping, and the session that asked lives on
-        Assert.Equal(HttpStatusCode.NoContent, (await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = NewPw }, token)).StatusCode);
+        // a password change adds one without wrapping, ends the session that asked and returns a fresh one on the new epoch (M1-87)
+        var fresh = await AccountTests.FreshToken(await k.Send(Post, "/api/v1/account/password", new { currentPassword = Pw, newPassword = NewPw }, token));
         Assert.Equal(big + 1, (await k.Account(Email)).SessionEpoch);
-        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", token)).StatusCode);
+        Assert.Equal(big + 1, (await k.Db(db => db.BuyerSessions.AsNoTracking().SingleAsync(s => s.TokenHash == Tokens.Hash(fresh)))).Epoch);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await k.Get("/api/v1/account/me", token)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await k.Get("/api/v1/account/me", fresh)).StatusCode);
     }
 }

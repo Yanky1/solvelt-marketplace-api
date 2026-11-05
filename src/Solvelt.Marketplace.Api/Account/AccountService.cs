@@ -10,7 +10,7 @@ namespace Solvelt.Marketplace.Api.Account;
 public sealed record ProfileView(Guid Id, string DisplayName, string Email, string? Phone);
 public sealed record AddressView(Guid Id, string FullName, string Line1, string? Line2, string City, string? Region, string PostalCode, string Country, string? Phone, double? Lat, double? Lng, bool IsDefault);
 public enum AccountOutcome { Ok, NotFound, TooMany, ReauthenticationRequired, InvalidCredentials, RateLimited, WeakPassword, Conflict }
-public sealed record AccountResult(AccountOutcome Outcome, string? Problem = null, int RetryAfterSeconds = 0);
+public sealed record AccountResult(AccountOutcome Outcome, string? Problem = null, int RetryAfterSeconds = 0, string? Token = null);
 
 /// <summary>
 /// The buyer's own data: profile, address book, password change, account deletion. Another buyer's address is simply not found. The address book keeps exactly one
@@ -212,7 +212,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
     // ---------- password change ----------
 
     /// <summary>
-    /// Needs a sign-in in the last 10 minutes (O-11) AND the current password, checked through the same gate as sign-in. Every OTHER session ends; this one goes on.
+    /// Needs a sign-in in the last 10 minutes (O-11) AND the current password, checked through the same gate as sign-in. EVERY session ends, this one included, and a fresh session token is returned (M1-87).
     /// <paramref name="removePasskeys"/> also removes every passkey in the same transaction (the account has a password now, so it keeps a way in). A mail tells the owner (ids only in the outbox).
     /// </summary>
     public async Task<AccountResult> ChangePasswordAsync(BuyerPrincipal who, string currentPassword, string newPassword, string clientIp, CancellationToken ct, bool removePasskeys = false)
@@ -232,15 +232,15 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         var changed = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == checkedHash && a.SessionEpoch == checkedEpoch)
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, checkedEpoch + 1), ct);
         if (changed != 1) return new AccountResult(AccountOutcome.Conflict);
-        // this session joins the new epoch, but only if it was still on the one the check saw
-        await db.BuyerSessions.Where(s => s.Id == who.SessionId && s.RevokedAt == null && s.Epoch == checkedEpoch).ExecuteUpdateAsync(s => s.SetProperty(x => x.Epoch, checkedEpoch + 1), ct);
-        await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.Id != who.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        // EVERY session ends, this one too, and the caller gets a fresh token (M1-87): someone who changes the password because they think a cookie was stolen must also kill the thief's copy
+        await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        var token = await auth.CreateSessionAsync(who.AccountId, ct, checkedEpoch + 1);
         // passkeys are a way in of their own and survive a password change unless the owner asks otherwise (M1-85): a buyer who fears one was added from a stolen session ticks "remove my passkeys" here
         if (removePasskeys) await db.BuyerPasskeys.Where(p => p.AccountId == who.AccountId).ExecuteDeleteAsync(ct);
         outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasswordChanged, who.AccountId));
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        return new AccountResult(AccountOutcome.Ok);
+        return new AccountResult(AccountOutcome.Ok, Token: token);
     }
 
     // ---------- account deletion ----------
