@@ -121,6 +121,8 @@ public sealed class FakeBookingPortal
             if (!_quotes.TryGetValue(qid, out var q)) return Err(HttpStatusCode.NotFound, "quote_not_found");
             if (!accept) { if (q.Status is "Requested" or "Quoted") { q.Status = "Withdrawn"; return FakePortal.Json(HttpStatusCode.OK, "{}"); } return q.Status == "Withdrawn" ? FakePortal.Json(HttpStatusCode.OK, "{}") : Err(HttpStatusCode.Conflict, "quote_not_open"); }
             Interlocked.Increment(ref QuoteAcceptCalls);
+            // a hold that lapsed frees the slot and puts the quote back to Quoted (portal C13); a quote that was already Confirmed by the older flow stays Accepted
+            if (q.Status == "Accepted" && q.AcceptedMid is { } am && _byMid.TryGetValue(am, out var lapsed) && lapsed.Status == "Expired") { q.Status = "Quoted"; q.AcceptedMid = null; }
             var mid = j.GetProperty("marketplaceBookingId").GetString()!;
             if (q.Status == "Accepted" && q.AcceptedMid == mid && _byMid.TryGetValue(mid, out var done)) return FakePortal.Json(HttpStatusCode.OK, Wrap(done, false));
             if (AcceptFailNext is { } f) { AcceptFailNext = null; return Err(f.Status, f.Code); }

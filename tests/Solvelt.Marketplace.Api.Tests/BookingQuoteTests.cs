@@ -296,4 +296,61 @@ public sealed class BookingQuoteTests : BookingFlowBase
         using var scope = _k.F.Services.CreateScope();
         Assert.Equal(0, (await scope.ServiceProvider.GetRequiredService<BookingMaintenance>().RunAsync()).Cancelled);
     }
+
+    private async Task<Guid> AcceptAt(Guid quoteId, DateTimeOffset start)
+        => (await Json(await Send(HttpMethod.Post, $"/api/v1/quotes/{quoteId}/accept", _jane, new { start }))).GetProperty("booking").GetProperty("id").GetGuid();
+
+    [Fact]
+    public async Task C13_a_quote_hold_that_lapses_reopens_the_quote_and_it_can_be_accepted_again()
+    {
+        await Ready();
+        _portal.QuoteAcceptCreatesHold = true;
+        var (q, slots) = await Quoted();
+        var first = await AcceptAt(q.Id, slots[0]);
+        var b1 = await Row(first);
+        _portal.Find(b1.MarketplaceBookingId)!.Status = "Expired";
+        Assert.Equal("applied", StatusOf((await PortalEvent("booking.hold_expired", Now.AddMinutes(11), b1)).Json));
+        var open = await QRow(q.Id);
+        Assert.Equal(QuoteStatus.Quoted, open.Status);                                  // the portal put it back to Quoted: so do we
+        Assert.Null(open.BookingId);
+        var second = await AcceptAt(q.Id, slots[1]);                                    // a new hold, not the dead one
+        Assert.NotEqual(first, second);
+        Assert.Equal(BookingStatus.Hold, (await Row(second)).Status);
+        var now = await QRow(q.Id);
+        Assert.Equal((QuoteStatus.Accepted, second), (now.Status, now.BookingId));
+        Assert.Equal(BookingStatus.Expired, (await Row(first)).Status);
+    }
+
+    [Fact]
+    public async Task C13_a_confirm_refused_because_the_hold_lapsed_refunds_and_reopens_the_quote()
+    {
+        await Ready();
+        _portal.QuoteAcceptCreatesHold = true;
+        var (q, slots) = await Quoted();
+        var id = await AcceptAt(q.Id, slots[0]);
+        var b = await Row(id);
+        Assert.True((await Checkout(id)).IsSuccessStatusCode);
+        var intent = IntentOf(b.MarketplaceBookingId);
+        Stripe.Capture(intent.Id);
+        _portal.ConfirmFailNext = (HttpStatusCode.Conflict, "hold_expired");
+        await PostStripe(StripeEvent("payment_intent.succeeded", intent.Id, b.MarketplaceBookingId, 40000));
+        await Drain();
+        Assert.Equal(BookingStatus.Expired, (await Row(id)).Status);
+        Assert.Equal(40000, Stripe.Refunds.Sum(r => r.AmountCents));                    // the money goes back in full
+        Assert.Equal(QuoteStatus.Quoted, (await QRow(q.Id)).Status);                    // "accept the quote again"
+    }
+
+    [Fact]
+    public async Task C13_a_lapsed_hold_does_not_reopen_a_quote_whose_own_validity_has_ended()
+    {
+        await Ready();
+        _portal.QuoteAcceptCreatesHold = true;
+        var (q, slots) = await Quoted();
+        var id = await AcceptAt(q.Id, slots[0]);
+        _k.F.Clock.Advance(TimeSpan.FromDays(4));                                       // the quote was valid for 3 days
+        await PortalEvent("booking.hold_expired", Now, await Row(id));
+        var row = await QRow(q.Id);
+        Assert.NotEqual(QuoteStatus.Quoted, row.Status);
+        Assert.Equal(QuoteStatus.Expired, row.Status);
+    }
 }

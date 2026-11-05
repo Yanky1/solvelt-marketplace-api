@@ -153,7 +153,9 @@ public sealed class BuyerQuoteService(MarketplaceDb db, ISignedPortalClient port
         if (input?.Intake is { } ia && (ia.Count > 30 || ia.Any(x => string.IsNullOrWhiteSpace(x.Id) || x.Id.Length > 60 || (x.Answer ?? "").Length > 2000))) errors["intake"] = "Check your answers.";
         if (errors.Count > 0) return new QuoteResult(QuoteOutcome.Invalid, Errors: errors);
 
-        var attempt = await db.Bookings.CountAsync(b => b.QuoteId == q.Id && b.Status == BookingStatus.Failed, ct) + 1;
+        // One attempt per FINISHED booking of this quote (a refused hold, or a hold that lapsed): the next accept is a new booking with a new id, never the dead one. A booking still being made is not counted, so a parallel tap is the same attempt.
+        string[] attemptDone = [.. BookingStatus.Terminal];
+        var attempt = await db.Bookings.CountAsync(b => b.QuoteId == q.Id && attemptDone.Contains(b.Status), ct) + 1;
         var key = $"quote-accept:{q.Id:N}:{attempt}";
         var booking = await db.Bookings.FirstOrDefaultAsync(b => b.AccountId == buyer.AccountId && b.IdempotencyKey == key, ct);
         if (booking is null)
@@ -369,4 +371,22 @@ public static class QuoteEndpoints
         "outside_service_area" => "This provider doesn't serve that address.",
         _ => "That couldn't be done. Please check your choices and try again.",
     };
+}
+
+
+/// <summary>
+/// Portal C13: accepting a quote creates a HOLD; when the hold lapses (the event, a refused confirm, or the upkeep reading it) the portal puts the quote back to <c>Quoted</c>, so we do the same and the
+/// buyer can accept again, until the quote's own validity ends: then it is <c>Expired</c>. Only the acceptance that is linked to THIS booking is touched. Idempotent.
+/// </summary>
+public static class QuoteReopen
+{
+    public static async Task ReopenAsync(MarketplaceDb db, Booking b, DateTimeOffset now, CancellationToken ct)
+    {
+        if (b.QuoteId is not { } qid) return;
+        var reopened = await db.Quotes.Where(x => x.Id == qid && x.Status == QuoteStatus.Accepted && x.BookingId == b.Id && (x.ExpiresAt == null || x.ExpiresAt > now))
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, QuoteStatus.Quoted).SetProperty(x => x.BookingId, (Guid?)null).SetProperty(x => x.UpdatedAt, now).SetProperty(x => x.Version, x => x.Version + 1), ct);
+        if (reopened == 0)
+            await db.Quotes.Where(x => x.Id == qid && x.Status == QuoteStatus.Accepted && x.BookingId == b.Id && x.ExpiresAt != null && x.ExpiresAt <= now)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, QuoteStatus.Expired).SetProperty(x => x.UpdatedAt, now).SetProperty(x => x.Version, x => x.Version + 1), ct);
+    }
 }
