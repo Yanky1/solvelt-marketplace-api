@@ -40,7 +40,7 @@ public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser, IAcc
     /// <summary>
     /// Only CLOSED orders are redacted at deletion (review M1, decision O-23). An open order (not yet paid, paid but not yet sent to the portal, or with a seller order still to be delivered) still needs its
     /// real address, phone and name: the portal ingest sends them to the seller, and the relay address must keep working for seller messages and refund mail. Those orders are redacted by
-    /// <see cref="SweepDeletedAccountsAsync"/> as soon as they are closed (and by the 90-day retention job, M5-05). Idempotent.
+    /// <see cref="SweepDeletedAccountsAsync"/> as soon as they are closed (the order worker's sweep runs every maintenance tick). Idempotent.
     /// </summary>
     public static Task<int> RedactClosedAsync(MarketplaceDb db, Guid accountId, CancellationToken ct)
         => ClosedOrders(db).Where(o => o.AccountId == accountId).ExecuteUpdateAsync(s => s
@@ -56,7 +56,7 @@ public sealed class OrdersAccountEraser(MarketplaceDb db) : IAccountEraser, IAcc
     public static async Task<int> SweepDeletedAccountsAsync(MarketplaceDb db, CancellationToken ct)
     {
         var accounts = await ClosedOrders(db).Where(o => o.AccountId != null && o.ShipName != Redacted && db.BuyerAccounts.Any(a => a.Id == o.AccountId && a.DeletedAt != null))
-            .Select(o => o.AccountId!.Value).Distinct().Take(200).ToListAsync(ct);
+            .Select(o => o.AccountId!.Value).Distinct().OrderBy(id => id).Take(200).ToListAsync(ct);
         var n = 0;
         foreach (var id in accounts) n += await RedactClosedAsync(db, id, ct);
         return n;
