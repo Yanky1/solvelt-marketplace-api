@@ -22,6 +22,8 @@ try
     Console.WriteLine(differences.Count == 0 ? "-- The database matches the model." : $"-- {differences.Count} differences:");
     foreach (var d in differences) Console.WriteLine("--   " + d);
     if (differences.Count > 0) Console.WriteLine(SchemaCheck.FixScript(db));
+    foreach (var n in SchemaCheck.NfcReport(db))
+        Console.WriteLine(n.NotNfc == 0 ? $"-- NFC: all {n.Values} values of {n.Column} are in NFC." : $"-- NFC: {n.NotNfc} of {n.Values} values of {n.Column} are NOT in NFC (typed with combining marks); sign-in and guest lookups normalise to NFC, so those rows no longer match. Fix them by hand (README, Database schema).");
     return differences.Count == 0 ? 0 : 1;
 }
 catch (Exception ex)

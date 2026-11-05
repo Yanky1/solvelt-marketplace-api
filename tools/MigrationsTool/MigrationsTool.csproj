@@ -2,15 +2,16 @@
   <!--
     Design-time host for `dotnet ef` only (never deployed, never referenced by the API or the tests). Migrations are generated from here for PostgreSQL, the production provider:
       dotnet ef migrations add NAME with the options project = src/Solvelt.Marketplace.Api, startup-project = tools/MigrationsTool, output-dir = Data/Migrations (see docs/DECISIONS.md M1-84)
-    EF's design package pulls System.Security.Cryptography.Pkcs 9.0.0 transitively (NuGet advisories GHSA-846f-f764-76mx, GHSA-2fmv-rv2c-59x7); it is build tooling, and keeping it
-    in this project keeps it out of the API's dependencies. The audit is switched off for THIS project only.
+    EF's design package pulls System.Security.Cryptography.Pkcs and .Xml 9.0.0 transitively (NuGet advisories, several of them high); they are pinned to the patched 10.x builds below, and the
+    NuGet audit stays ON here, so a new advisory fails the build. Keeping the design package in this project keeps it out of the API's dependencies.
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.14" />
     <ProjectReference Include="..\..\src\Solvelt.Marketplace.Api\Solvelt.Marketplace.Api.csproj" />
   </ItemGroup>
 </Project>

@@ -46,6 +46,8 @@ dotnet ef migrations add Name --project src/Solvelt.Marketplace.Api --startup-pr
 ```
 A database made earlier by `EnsureCreated` (no migration history) is checked against the model at start and, if it matches, baselined without touching its data; if it differs the start stops with the list of differences and changes nothing.
 
+A database made without migrations is baselined only if it is EXACTLY what the migrations make (they are replayed into a temporary schema, rolled back, and compared object by object: columns, defaults, constraints, indexes including unique and partial ones); otherwise the start stops with the list of differences and changes nothing. The role needs permission to create a schema. `tools/SchemaTool` also reports, read-only and counts only, how many stored emails are not in NFC (made before the normaliser); sign-in and guest lookups normalise to NFC, so such rows no longer match: fix them by hand, for example `UPDATE buyer_accounts SET "Email" = normalize("Email", NFC) WHERE "Email" IS NOT NFC NORMALIZED;` on PostgreSQL 13+ (check for a clash with an existing address first).
+
 `MigrationTests` (PostgreSQL) fail when the model and the migrations differ (`HasPendingModelChanges`, and a table/column/index/constraint comparison against `EnsureCreated`). The search objects EF cannot model (pg_trgm, the tsvector function and column, GIN indexes) are the frozen `InitialCreate.SearchSchema.cs`; later changes to them are new migrations.
 
 ## Configuration (environment variables, `__` for nesting)

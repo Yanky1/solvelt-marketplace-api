@@ -1,8 +1,7 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
-using Npgsql;
 using Solvelt.Marketplace.Api.Catalog;
 
 namespace Solvelt.Marketplace.Api.Data;
@@ -11,12 +10,18 @@ namespace Solvelt.Marketplace.Api.Data;
 /// How the schema comes to exist (decisions M1-03, M1-26, M1-84). Development and Testing (SQLite or PostgreSQL) build it from the model with EnsureCreated plus the search script.
 /// Production on PostgreSQL applies the EF migrations at start (<c>Database:MigrateOnStart</c>, default true; EF takes a database lock, so several instances starting together are safe;
 /// set it to false to apply them from a pipeline with <c>dotnet ef database update</c> or a migration bundle instead). Production never uses EnsureCreated, and nothing here drops a table.
-/// <para>A database that already has the tables but no migration history (made earlier by EnsureCreated, e.g. a test site) is BASELINED, never re-created: when every table, column (with its
-/// store type and nullability), primary key, foreign key and index of the model is present, the InitialCreate history row is inserted and the search script (idempotent) is run; when anything is
-/// missing or different the start-up stops with the list of differences and changes nothing, so a half-matching database is never marked as migrated.</para>
+/// <para>A database that already has tables but no migration history (made earlier by EnsureCreated, e.g. a test site) is BASELINED, never re-created, and only when it is EXACTLY what the
+/// migrations would have made: the migrations are replayed from scratch into a temporary schema inside a transaction that is always rolled back, and the two schemas are compared object by object
+/// (<see cref="SchemaDescription"/>: columns with type, nullability, default and generated expression, every constraint and index as PostgreSQL prints it, so unique, partial and filtered indexes, defaults
+/// and checks all count). The NEWEST migration whose result the database equals is the one it is baselined at: the history rows of it and of every older migration are written, and the newer ones
+/// are applied by the normal Migrate(). When none matches, the start stops with the list of differences and changes nothing. The search objects EF cannot model are added first (the idempotent
+/// search script), the history last, so a failure leaves nothing marked as done. The whole check runs under a PostgreSQL advisory lock and is repeated after taking it, so instances starting
+/// together do not race: one baselines, the others find the history and carry on. The role needs permission to create a schema (the same level of right it needs to migrate).</para>
 /// </summary>
 public static class DatabaseSetup
 {
+    private const long BaselineLockKey = 0x4D50_4241_5345;   // "MPBASE"
+
     public static void Prepare(MarketplaceDb db, bool devLike, bool migrateOnStart, ILogger? log = null)
     {
         if (devLike)
@@ -26,46 +31,92 @@ public static class DatabaseSetup
         }
         else if (migrateOnStart && db.Database.IsNpgsql())
         {
-            if (!db.Database.GetAppliedMigrations().Any() && HasTables(db))
-            {
-                var problems = SchemaProblems(db);
-                if (problems.Count > 0)
-                {
-                    var shown = string.Join("; ", problems.Take(20)) + (problems.Count > 20 ? $"; and {problems.Count - 20} more" : "");
-                    log?.LogCritical("The database has tables but no migration history, and its schema does not match the model, so it was NOT baselined and nothing was changed. {Count} differences: {Problems}", problems.Count, shown);
-                    throw new InvalidOperationException($"The database has tables but no migration history and does not match the model ({problems.Count} differences, first: {problems[0]}). Nothing was changed. Bring the schema in line by hand (or restore an empty database) and start again; see README, Database schema.");
-                }
-                var first = db.Database.GetMigrations().First();
-                var history = db.GetService<IHistoryRepository>();
-                db.Database.ExecuteSqlRaw(history.GetCreateIfNotExistsScript());
-                db.Database.ExecuteSqlRaw(history.GetInsertScript(new HistoryRow(first, ProductInfo.GetVersion())));
-                SearchSchema.Ensure(db);
-                log?.LogWarning("The database was made without migrations and matches the model: baselined at {Migration}", first);
-            }
+            BaselineIfNeeded(db, log);
             db.Database.Migrate();
         }
     }
 
-    private static bool HasTables(MarketplaceDb db)
-        => Query(db, "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' AND table_name <> '__EFMigrationsHistory'").Count > 0;
-
-    private static List<string> Query(MarketplaceDb db, string sql)
+    private static void BaselineIfNeeded(MarketplaceDb db, ILogger? log)
     {
-        var rows = new List<string>();
+        // a cheap look first, without the lock: the normal case (history exists, or an empty database) leaves at once
+        if (db.Database.GetAppliedMigrations().Any() || !HasTables(db)) return;
+        db.Database.OpenConnection();                                    // one connection for the lock, the checks and the writes
+        var conn = db.Database.GetDbConnection();
+        try
+        {
+            Scalar(conn, null, $"SELECT pg_advisory_lock({BaselineLockKey})");
+            try
+            {
+                if (db.Database.GetAppliedMigrations().Any() || !HasTables(db)) return;   // another instance got there first, or the database is empty after all
+                var ids = db.Database.GetMigrations().ToList();
+                var actual = DescribeCurrent(conn);
+                var (index, problems) = SchemaDescription.Choose(ids, id => ExpectedAfter(db, conn, id), actual);
+                if (index < 0)
+                {
+                    var shown = string.Join("; ", problems.Take(20)) + (problems.Count > 20 ? $"; and {problems.Count - 20} more" : "");
+                    log?.LogCritical("The database has tables but no migration history, and its schema is not what the migrations would have made, so it was NOT baselined and nothing was changed. {Count} differences: {Problems}", problems.Count, shown);
+                    throw new InvalidOperationException($"The database has tables but no migration history and is not what the migrations would have made ({problems.Count} differences, first: {problems[0]}). Nothing was changed. Bring the schema in line by hand (tools/SchemaTool prints the SQL for what is missing) or restore an empty database, and start again; see README, Database schema.");
+                }
+                SearchSchema.Ensure(db);                                  // the objects EF cannot model; before the history, so a failure here is retried at the next start
+                var history = db.GetService<IHistoryRepository>();
+                Scalar(conn, null, history.GetCreateIfNotExistsScript());
+                foreach (var id in ids.Take(index + 1))
+                    Scalar(conn, null, history.GetInsertScript(new HistoryRow(id, ProductInfo.GetVersion())).TrimEnd().TrimEnd(';') + " ON CONFLICT DO NOTHING;");
+                log?.LogWarning("The database was made without migrations and equals what the migrations make: baselined at {Migration} ({Count} migration(s) recorded)", ids[index], index + 1);
+            }
+            finally { Scalar(conn, null, $"SELECT pg_advisory_unlock({BaselineLockKey})"); }
+        }
+        finally { db.Database.CloseConnection(); }
+    }
+
+    /// <summary>The database's own schema (the current one), described inside a read-only transaction.</summary>
+    private static List<string> DescribeCurrent(DbConnection conn)
+    {
+        using var tx = conn.BeginTransaction();
+        try
+        {
+            var schema = (string)Scalar(conn, tx, "SELECT current_schema()")!;
+            return SchemaDescription.Describe(conn, tx, schema);
+        }
+        finally { tx.Rollback(); }
+    }
+
+    /// <summary>
+    /// What the schema is after the migrations up to <paramref name="migrationId"/>: they are replayed from scratch (EF's own script) into a temporary schema inside a transaction that is rolled back,
+    /// so nothing is left behind, not even after a crash.
+    /// </summary>
+    private static List<string> ExpectedAfter(MarketplaceDb db, DbConnection conn, string migrationId)
+    {
+        var script = db.GetService<IMigrator>().GenerateScript(null, migrationId, MigrationsSqlGenerationOptions.NoTransactions);
+        var schema = "mp_baseline_" + Guid.NewGuid().ToString("N")[..12];
+        using var tx = conn.BeginTransaction();
+        try
+        {
+            Scalar(conn, tx, $"CREATE SCHEMA {SchemaDescription.Quote(schema)}");
+            Scalar(conn, tx, $"SET LOCAL search_path TO {SchemaDescription.Quote(schema)}, public");
+            Scalar(conn, tx, script);                                     // a raw command, not ExecuteSqlRaw: the script may contain braces
+            return SchemaDescription.Describe(conn, tx, schema);
+        }
+        finally { tx.Rollback(); }
+    }
+
+    private static object? Scalar(DbConnection conn, DbTransaction? tx, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        return cmd.ExecuteScalar();
+    }
+
+    private static bool HasTables(MarketplaceDb db)
+    {
         var conn = db.Database.GetDbConnection();
         var wasOpen = conn.State == System.Data.ConnectionState.Open;
         if (!wasOpen) conn.Open();
-        try
-        {
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = sql;
-            using var r = cmd.ExecuteReader();
-            while (r.Read()) rows.Add(r.GetString(0));
-        }
+        try { return Convert.ToInt64(Scalar(conn, null, "SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' AND table_name <> '__EFMigrationsHistory'")) > 0; }
         finally { if (!wasOpen) conn.Close(); }
-        return rows;
     }
 
-    /// <summary>What the model has and the database lacks or has differently (the same comparison as the start-up schema check, <see cref="SchemaCheck"/>). Empty when the database can be baselined.</summary>
+    /// <summary>What the model has and the database lacks or has differently (the start-up schema check, <see cref="SchemaCheck"/>): names, types and nullability, for the log and the tool.</summary>
     public static List<string> SchemaProblems(MarketplaceDb db) => SchemaCheck.Differences(db);
 }
