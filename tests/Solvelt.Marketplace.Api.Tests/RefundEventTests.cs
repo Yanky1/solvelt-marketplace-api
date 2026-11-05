@@ -1182,4 +1182,28 @@ public sealed class RefundEventTests : OrderFlowBase
         Assert.Equal((4587L, 1), (done.RefundedCents, done.Lines.Single().RefundedQuantity));
         Assert.Equal(0, await _k.Db(db => db.OrderRefunds.CountAsync(r => r.Reason == "external")));
     }
+
+    [Fact]
+    public async Task M3_a_failed_event_for_an_older_send_of_a_cut_refund_leaves_the_cut_amounts_alone_and_the_current_send_releases_exactly_them()
+    {
+        var (o, g, line) = await Three();
+        await Stripe.RefundAsync(o.PaymentIntentId!, 6000, "dashboard", new Dictionary<string, string>(), default);        // a dashboard refund
+        Assert.Equal("applied", await RefundLines(o, g, "rf-cut", line, 2, 9174));
+        Assert.Equal(OutboxOutcome.Delivered, (await RunRefundHandler("portal:rf-cut", 0)).Outcome);                      // refused and CUT to 8262: attempt 1, reserved
+        var cut = await Refund("portal:rf-cut");
+        Assert.Equal((8262L, 1, "reserved", null), (cut.AmountCents, cut.Attempt, cut.Status, cut.StripeRefundId));
+        var before = await Order(o.Number);
+
+        string Failed(string id, int attempt) => "{\"id\":\"" + id + "\",\"type\":\"charge.refund.updated\",\"data\":{\"object\":{\"id\":\"re_old\",\"object\":\"refund\",\"status\":\"failed\",\"amount\":9174,\"metadata\":{\"refund_key\":\"portal:rf-cut\",\"refund_attempt\":\"" + attempt + "\"}}}}";
+        // attempt 0's refund (never executed) is reported failed: it is not the 8262 that is reserved now
+        Assert.Contains("ignored", await (await PostStripe(Failed("evt_old", 0))).Content.ReadAsStringAsync());
+        var same = await Order(o.Number);
+        Assert.Equal((before.RefundedCents, before.Groups.Single().RefundedCents), (same.RefundedCents, same.Groups.Single().RefundedCents));
+        Assert.Equal("reserved", (await Refund("portal:rf-cut")).Status);
+        // the current send failing releases exactly the cut amounts (never below zero)
+        Assert.Contains("applied", await (await PostStripe(Failed("evt_now", 1))).Content.ReadAsStringAsync());
+        Assert.Equal("failed", (await Refund("portal:rf-cut")).Status);
+        var after = await Order(o.Number);
+        Assert.Equal((6000L, 0L), (after.RefundedCents, after.Groups.Single().RefundedCents));                          // the dashboard money stays, the cut refund is fully given back
+    }
 }
