@@ -353,4 +353,41 @@ public sealed class BookingQuoteTests : BookingFlowBase
         Assert.NotEqual(QuoteStatus.Quoted, row.Status);
         Assert.Equal(QuoteStatus.Expired, row.Status);
     }
+
+    [Fact]
+    public async Task H1_a_legacy_quote_booking_that_is_confirmed_but_unpaid_says_it_needs_payment_and_until_when()
+    {
+        await Ready();
+        _portal.QuoteAcceptCreatesHold = false;                                          // the older portal: the booking is Confirmed at once
+        var (q, slots) = await Quoted();
+        var id = await AcceptAt(q.Id, slots[0]);
+        var b = await Row(id);
+        Assert.Equal(BookingStatus.Confirmed, b.Status);
+        var view = await Json(await Send(HttpMethod.Get, $"/api/v1/bookings/{id}", _jane));
+        Assert.True(view.GetProperty("needsPayment").GetBoolean());
+        Assert.Equal(b.PaymentDueAt, view.GetProperty("paymentDueAt").GetDateTimeOffset());
+        var list = await Json(await Send(HttpMethod.Get, "/api/v1/bookings", _jane));
+        Assert.True(list.GetProperty("bookings").EnumerateArray().Single(x => x.GetProperty("id").GetGuid() == id).GetProperty("needsPayment").GetBoolean());
+        // paid and reported: nothing more is due
+        Assert.True((await Checkout(id)).IsSuccessStatusCode);
+        var intent = IntentOf(b.MarketplaceBookingId);
+        Stripe.Capture(intent.Id);
+        await PostStripe(StripeEvent("payment_intent.succeeded", intent.Id, b.MarketplaceBookingId, 40000));
+        await Drain();
+        var after = await Json(await Send(HttpMethod.Get, $"/api/v1/bookings/{id}", _jane));
+        Assert.False(after.GetProperty("needsPayment").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, after.GetProperty("paymentDueAt").ValueKind);
+    }
+
+    [Fact]
+    public async Task H1_a_hold_does_not_claim_a_payment_due_time_it_has_its_own_expiry()
+    {
+        await Ready();
+        _portal.QuoteAcceptCreatesHold = true;
+        var (q, slots) = await Quoted();
+        var id = await AcceptAt(q.Id, slots[0]);
+        var view = await Json(await Send(HttpMethod.Get, $"/api/v1/bookings/{id}", _jane));
+        Assert.False(view.GetProperty("needsPayment").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, view.GetProperty("paymentDueAt").ValueKind);
+    }
 }
