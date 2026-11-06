@@ -113,15 +113,29 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
         {
             var type = Str(d, "type");
             if (id is not { } listingId || Long(d, "version") is not { } version || Str(d, "title") is not { } title || type is not ("product" or "service")) return Bad("required_field");
-            if (!d.TryGetProperty("price", out var price) || price.ValueKind != JsonValueKind.Object || Long(price, "amountMinor") is not { } amount || Str(price, "currency") is not { } currency) return Bad(QuotePriced(d, type) ? "quote_price" : "price");
+            var hasPrice = d.TryGetProperty("price", out var price) && price.ValueKind == JsonValueKind.Object;
+            var listingAmount = hasPrice ? Long(price, "amountMinor") : null;
+            var currency = hasPrice ? Str(price, "currency") : null;
+            var listingPriced = listingAmount is not null;
+            var amount = listingAmount ?? 0L;                                           // only read when listingPriced
+            if (!listingPriced)
+            {
+                // A quote-priced service has no price by design (its own reason). A PRODUCT can have no listing-level price too: when the seller prices only per variation the portal sends price.amountMinor null and
+                // the variants carry the resolved prices (docs/CATALOG.md): the listing is then priced by its variants, in the one currency they share. No price anywhere is still unreadable.
+                if (QuotePriced(d, type)) return Bad("quote_price");
+                if (type != "product" || !VariantPrices(d, out var variantCurrency)) return Bad("price");
+                if (currency is not null && !string.Equals(currency, variantCurrency, StringComparison.OrdinalIgnoreCase)) return Bad("price");   // the listing and its variants must agree on the currency
+                currency ??= variantCurrency;
+            }
+            if (currency is null) return Bad("price");
             if (!d.TryGetProperty("seller", out var seller) || Guid_(seller, "sellerId") is not { } sellerId) return Bad("seller");
             if (!d.TryGetProperty("brand", out var brand) || Guid_(brand, "brandId") is not { } brandId) return Bad("brand");
             if (!d.TryGetProperty("category", out var category) || Guid_(category, "id") is not { } categoryId) return Bad("category");
 
             // sale and compare-at, on our clock: a window that has not started or has ended does not apply
-            var compareAt = Long(price, "compareAtMinor");
+            var compareAt = hasPrice ? Long(price, "compareAtMinor") : null;
             long? saleAmount = null;
-            if (price.TryGetProperty("sale", out var sale) && sale.ValueKind == JsonValueKind.Object && Long(sale, "amountMinor") is { } sa && sa >= 0 && sa < amount
+            if (listingPriced && price.TryGetProperty("sale", out var sale) && sale.ValueKind == JsonValueKind.Object && Long(sale, "amountMinor") is { } sa && sa >= 0 && sa < amount
                 && (Time(sale, "startsAt") is not { } starts || starts <= now) && (Time(sale, "endsAt") is not { } ends || now < ends))
                 saleAmount = sa;
             var listingState = State(d);
@@ -132,13 +146,15 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
                 {
                     if (Guid_(v, "variantId") is not { } vid) continue;
                     var own = v.TryGetProperty("price", out var vp) ? Long(vp, "amountMinor") : null;
-                    var onListingPrice = own is null || own == amount;                      // a variant with its own price is not part of the listing's sale
+                    if (!listingPriced && own is null) continue;                            // no listing price to fall back on: a variant without its own price cannot be bought
+                    var onListingPrice = listingPriced && (own is null || own == amount);   // a variant with its own price is not part of the listing's sale
                     var cents = onListingPrice ? saleAmount ?? amount : own!.Value;
                     long? was = onListingPrice ? (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) : null;
                     var values = v.TryGetProperty("values", out var vv) && vv.ValueKind == JsonValueKind.Array
                         ? string.Join(" / ", vv.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!.Trim()).Where(x => x.Length > 0)) : "";
                     variants.Add(new VariantDto(vid, values.Length > 0 ? values : "Standard", cents, was > cents ? was : null, Available(State(v) ?? listingState), WeightGrams: Int(v, "weightGrams") is > 0 and var vw ? vw : weight));   // a variant without its own weight carries the product's
                 }
+            if (variants.Count == 0 && !listingPriced) return Bad("price");               // priced by its variants, and none could be read
             if (variants.Count == 0)                                                      // no variants: one buyable line on the listing price (IsDefault: its id is the listing id, never a portal variant id)
                 variants.Add(new VariantDto(listingId, "Standard", saleAmount ?? amount, (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) is { } w && w > (saleAmount ?? amount) ? w : null, Available(listingState), IsDefault: true, WeightGrams: weight));
 
@@ -189,6 +205,25 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
         {
             return Bad("required_field");
         }
+    }
+
+    /// <summary>
+    /// True when at least one variant has a resolved amount and every variant that has one names the SAME currency (returned in <paramref name="currency"/>). A variant that names none, or two currencies in one
+    /// document, makes the document unreadable: a listing is priced in one currency.
+    /// </summary>
+    private static bool VariantPrices(JsonElement d, out string? currency)
+    {
+        currency = null; var any = false;
+        if (d.TryGetProperty("variants", out var vs) && vs.ValueKind == JsonValueKind.Array)
+            foreach (var v in vs.EnumerateArray())
+            {
+                if (!v.TryGetProperty("price", out var vp) || vp.ValueKind != JsonValueKind.Object || Long(vp, "amountMinor") is null) continue;
+                var c = Str(vp, "currency");
+                if (c is null) return false;
+                if (currency is null) currency = c; else if (!string.Equals(currency, c, StringComparison.OrdinalIgnoreCase)) return false;
+                any = true;
+            }
+        return any;
     }
 
     /// <summary>A service the portal prices by quote: <c>service.pricingModel</c> is <c>quote</c> (any case), so the document has no amount to read.</summary>

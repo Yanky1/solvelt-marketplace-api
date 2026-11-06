@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -162,5 +163,32 @@ public sealed class CatalogResilienceTests : IDisposable
         var one = WithDb(_f, db => db.CatalogListings.AsNoTracking().Single(l => l.Id == G(1)));
         Assert.Equal(("Mug 1, fixed", 12L, true, "Active"), (one.Title, one.Version, one.Visible, one.Status));
         Assert.False(WithDb(_f, db => db.CatalogListings.AsNoTracking().Single(l => l.Id == G(2)).Visible));
+    }
+
+    /// <summary>A product the seller prices only per variation: the portal sends price.amountMinor null and the resolved prices on the variants (docs/CATALOG.md).</summary>
+    private static Dictionary<string, object?> VariantPriced(int n, params long?[] amounts) => Doc(n, 10, d =>
+    {
+        d["price"] = new { amountMinor = (long?)null, currency = "USD", compareAtMinor = (long?)null, sale = (object?)null };
+        d["variants"] = amounts.Select((a, i) => (object)new { variantId = G(n * 100 + i), values = new[] { $"Size {i + 1}" }, price = new { amountMinor = a, currency = "USD" }, availability = new { state = "in_stock" } }).ToArray();
+    });
+
+    [Fact]
+    public async Task A_product_priced_only_by_its_variants_is_listed_with_the_lowest_price_and_one_priced_nowhere_is_still_set_aside()
+    {
+        _feed = Page([Doc(1), VariantPriced(2, 2400, 1850), VariantPriced(3, null, null)]);
+        var r = await Run();
+        Assert.Null(r.Error);
+        Assert.Equal(2, r.Applied);
+        Assert.Equal(new[] { (G(3), "price") }, Quarantined().Select(q => (q.ListingId, q.Reason)));                     // priced nowhere: unreadable, as before
+        var two = WithDb(_f, db => db.CatalogListings.AsNoTracking().Include(l => l.Variants).Single(l => l.Id == G(2)));
+        Assert.Equal((true, 1850L, 2400L, "USD"), (two.Visible, two.PriceFromCents, two.PriceToCents, two.Currency));       // the listing's price range comes from its variants
+        Assert.Equal(new long[] { 1850, 2400 }, two.Variants.Select(v => v.PriceCents).OrderBy(c => c));
+        // what the buyer sees follows: the card, the sort, and the price filter (a range that overlaps the variants' prices)
+        var c = _f.CreateClient();
+        var items = async (string q) => (await c.GetFromJsonAsync<JsonElement>($"/api/v1/catalog/listings?pageSize=100&{q}")).GetProperty("items").EnumerateArray().ToList();
+        var asc = await items("sort=price_asc");
+        Assert.Equal(new[] { (G(2), 1850L, 2400L), (G(1), 2000L, 2000L) }, asc.Select(i => (i.GetProperty("id").GetGuid(), i.GetProperty("priceFromCents").GetInt64(), i.GetProperty("priceToCents").GetInt64())));
+        Assert.Equal(new[] { G(2) }, (await items("priceMin=2300&priceMax=2500")).Select(i => i.GetProperty("id").GetGuid()));    // 2400 is a price of Mug 2, and Mug 1 (2000) is out
+        Assert.Equal(new[] { G(2) }, (await items("priceMax=1900")).Select(i => i.GetProperty("id").GetGuid()));                // 1850 is, and Mug 1 (2000) is out
     }
 }

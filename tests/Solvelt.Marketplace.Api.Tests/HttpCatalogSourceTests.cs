@@ -257,6 +257,52 @@ public class HttpCatalogSourceTests
         d["service"] = new { pricingModel = model, priceMinor = (long?)null, minMinutes = 60, maxMinutes = 120, incrementMinutes = 30, defaultDurationMinutes = 60, online = true, atCustomer = false, atSeller = false, bookingMode = "request", travelFeeMinor = 0 };
     });
 
+    // ---------- a product the seller prices only per variation (portal docs/CATALOG.md: price.amountMinor null, read variants[].price) ----------
+    private static object Var(int n, long? amount, string? currency = "USD", string value = "S") => new
+    {
+        variantId = G(n), values = new[] { value }, price = new { amountMinor = amount, currency }, weightGrams = 420, availability = new { state = "in_stock" },
+    };
+    private static Dictionary<string, object?> VariantPriced(int n, long? listingAmount, string? listingCurrency, params object[] variants) => Doc(n, 10, d =>
+    {
+        d["price"] = new { amountMinor = listingAmount, currency = listingCurrency, compareAtMinor = (long?)null, sale = (object?)null };
+        d["variants"] = variants;
+    });
+
+    [Fact]
+    public void A_product_with_no_listing_price_is_priced_by_its_variants_and_one_without_any_price_is_still_unreadable()
+    {
+        var rig = new Rig();
+        var priced = Mapped(rig, VariantPriced(1, null, "USD", Var(11, 2400, value: "L"), Var(12, 1850, value: "S")));
+        Assert.Equal(new[] { (G(11), 2400L), (G(12), 1850L) }, priced.Variants.Select(v => (v.Id, v.PriceCents)));      // each variant keeps its own resolved price
+        Assert.Equal(("USD", 1850L), (priced.Currency, priced.Variants.Min(v => v.PriceCents)));                          // the listing's "from" price is the lowest
+        Assert.All(priced.Variants, v => Assert.Null(v.CompareAtCents));                                                  // no listing price, so no sale and no compare-at to put on a variant
+        Assert.Equal("USD", Mapped(rig, VariantPriced(2, null, null, Var(21, 500))).Currency);                           // the currency may come from the variants alone
+
+        void Unreadable(Dictionary<string, object?> doc, string reason)
+        {
+            var (snapshot, bad) = rig.Source.MapCore(El(doc), rig.Clock.GetUtcNow());
+            Assert.Null(snapshot);
+            Assert.Equal(reason, bad!.Reason);
+        }
+        Unreadable(VariantPriced(3, null, "USD"), "price");                                                               // no listing price and no variants: priced nowhere
+        Unreadable(VariantPriced(4, null, "USD", Var(41, null), Var(42, null)), "price");                                 // variants without an amount: priced nowhere
+        Unreadable(VariantPriced(5, null, "USD", Var(51, 1000, "USD"), Var(52, 1200, "EUR")), "price");                   // two currencies in one listing
+        Unreadable(VariantPriced(6, null, "EUR", Var(61, 1000, "USD")), "price");                                         // the listing and its variants disagree
+        Unreadable(VariantPriced(7, null, "USD", Var(71, 1000, null)), "price");                                          // a priced variant that names no currency
+        // a variant WITHOUT a price next to priced ones cannot be bought and is left out, the others stay
+        Assert.Equal(new[] { G(81) }, Mapped(rig, VariantPriced(8, null, "USD", Var(81, 900), Var(82, null))).Variants.Select(v => v.Id));
+    }
+
+    [Fact]
+    public void A_listing_price_still_rules_when_there_is_one_and_a_quote_service_keeps_its_own_reason()
+    {
+        var rig = new Rig();
+        var withListing = Mapped(rig, Doc(1, 10, d => d["variants"] = new object[] { Var(11, null), Var(12, 2600) }));   // own price null: the listing's 2000; own 2600: its own
+        Assert.Equal(new[] { 2000L, 2600L }, withListing.Variants.Select(v => v.PriceCents));
+        var (_, bad) = rig.Source.MapCore(El(QuoteService(2)), rig.Clock.GetUtcNow());
+        Assert.Equal("quote_price", bad!.Reason);                                                                         // a service priced by quote is not a variant-priced product
+    }
+
     [Fact]
     public async Task A_feed_page_reports_each_unreadable_document_with_a_short_reason_and_still_returns_the_readable_ones()
     {
