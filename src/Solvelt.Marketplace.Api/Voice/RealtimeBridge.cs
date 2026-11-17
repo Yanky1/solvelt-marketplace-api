@@ -43,6 +43,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     private TaskCompletionSource? _fillerDone;
     private CancellationTokenSource _cts = new();
     private Task _calls = Task.CompletedTask;
+    private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);   // the phone's start event has been handled
     private TaskCompletionSource _markEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly VoiceOptions _o = options.Value;
 
@@ -117,6 +118,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
             case "start":
                 _streamSid = m.TryGetProperty("start", out var s) ? Str(s, "streamSid") : null;
                 _streamSid ??= Str(m, "streamSid");
+                _started.TrySetResult();
                 break;
             case "media":
                 if (m.TryGetProperty("media", out var media) && Str(media, "payload") is { Length: > 0 } audio && Str(media, "track") is null or "inbound")
@@ -149,6 +151,8 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
                 _responseActive = true;
                 break;
             case "response.output_audio.delta" or "response.audio.delta":
+                // The two sockets are read concurrently: model audio can win the race with the phone's start event. Wait for it (briefly) instead of dropping the audio.
+                if (_streamSid is null) await Task.WhenAny(_started.Task, Task.Delay(TimeSpan.FromSeconds(3), time, ct));
                 if (Str(m, "delta") is { Length: > 0 } delta && _streamSid is not null)
                 {
                     if (_speechStopped != 0) { await store.AddLatencyAsync(call.Id, (long)time.GetElapsedTime(_speechStopped).TotalMilliseconds, ct); _speechStopped = 0; }
