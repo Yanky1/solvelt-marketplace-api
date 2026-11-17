@@ -78,9 +78,11 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
             KeypadPause = state.KeypadStep is not null;
             cts.Cancel();
             try { await Task.WhenAll(phoneLoop, upLoop, _calls); } catch (Exception) { /* both loops end by cancellation or a closed socket */ }
+            // The call's record is closed FIRST: it must not wait for a close handshake with a peer that may answer slowly or never (that wait once made the end of a call
+            // visible seconds late, and a test of it flaky). Then both sockets are closed without waiting for the peer's acknowledgement.
+            if (!KeypadPause) await store.EndAsync(call.Id, outcome, CancellationToken.None);   // a keypad step pauses the call: the next stream resumes it
             await CloseQuietly(upstream);
             await CloseQuietly(phone);
-            if (!KeypadPause) await store.EndAsync(call.Id, outcome, CancellationToken.None);   // a keypad step pauses the call: the next stream resumes it
         }
         return outcome;
     }
@@ -286,7 +288,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
         try
         {
             using var t = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            if (ws.State is WebSocketState.Open or WebSocketState.CloseReceived) await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", t.Token);
+            if (ws.State is WebSocketState.Open or WebSocketState.CloseReceived) await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", t.Token);   // our close frame; the peer's reply is not awaited
         }
         catch (Exception) { /* already gone */ }
     }

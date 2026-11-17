@@ -62,7 +62,7 @@ public sealed class FakeRealtime : IRealtimeConnector, IDisposable
                 {
                     using var ms = new MemoryStream();
                     WebSocketReceiveResult r;
-                    do { r = await server.ReceiveAsync(buf, CancellationToken.None); if (r.MessageType == WebSocketMessageType.Close) return; ms.Write(buf, 0, r.Count); } while (!r.EndOfMessage);
+                    do { r = await server.ReceiveAsync(buf, CancellationToken.None); if (r.MessageType == WebSocketMessageType.Close) { await server.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); return; } ms.Write(buf, 0, r.Count); } while (!r.EndOfMessage);
                     _received.Enqueue(Encoding.UTF8.GetString(ms.ToArray()));
                 }
             }
@@ -120,7 +120,7 @@ public sealed class FakePhone(WebSocket ws) : IDisposable
             {
                 using var ms = new MemoryStream();
                 WebSocketReceiveResult r;
-                do { r = await ws.ReceiveAsync(buf, CancellationToken.None); if (r.MessageType == WebSocketMessageType.Close) return; ms.Write(buf, 0, r.Count); } while (!r.EndOfMessage);
+                do { r = await ws.ReceiveAsync(buf, CancellationToken.None); if (r.MessageType == WebSocketMessageType.Close) { await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); return; } ms.Write(buf, 0, r.Count); } while (!r.EndOfMessage);
                 _got.Enqueue(JsonNode.Parse(ms.ToArray())!);
             }
         }
