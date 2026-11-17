@@ -31,6 +31,23 @@ public sealed class VoiceScenario : IDisposable
 
     public async Task SyncCatalog() => await CatalogKit.Sync(F);
 
+    /// <summary>The seller portal answers shipping settings: standard flat 500 cents, overnight by weight, free over the threshold (the same shape the quote tests use).</summary>
+    public void PortalShipping(long? threshold = 5000)
+        => F.Portal.RespondAlways(c =>
+        {
+            if (c.PathAndQuery.StartsWith("/api/internal/v1/shipping/settings"))
+            {
+                var q = System.Web.HttpUtility.ParseQueryString(c.PathAndQuery[(c.PathAndQuery.IndexOf('?') + 1)..]);
+                return FakePortal.Json(System.Net.HttpStatusCode.OK, System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    sellerId = Guid.Parse(q["sellerId"]!), brandId = Guid.Parse(q["brandId"]!), handlingDays = 2, shipsFrom = new { country = "US", region = "NY" },
+                    profiles = new[] { new { id = Guid.NewGuid(), name = "Default", isDefault = true, currency = "USD", freeShippingThresholdCents = threshold, zones = new[] { new { name = "Domestic", kind = "domestic", countries = new[] { "US" },
+                        speeds = new object[] { new { speed = "standard", enabled = true, method = "flat", flatCents = 500 }, new { speed = "overnight", enabled = true, method = "weight", baseCents = 1500, perKgCents = 300 } } } } } },
+                }));
+            }
+            return FakePortal.Json(System.Net.HttpStatusCode.NotFound, "{\"code\":\"not_found\"}");
+        });
+
     public static async Task<(string Token, XElement Xml)> StreamFrom(HttpResponseMessage r)
     {
         var xml = XDocument.Parse(await r.Content.ReadAsStringAsync()).Root!;
@@ -75,9 +92,11 @@ public sealed class VoiceScenario : IDisposable
 
     public async Task<XElement> AfterStream() => XDocument.Parse(await (await VoiceFactory.Hook(C, VoiceEndpoints.AfterStreamPath, Sid, From)).Content.ReadAsStringAsync()).Root!;
 
-    public async Task<(XElement Xml, string Token)> Type(string digits)
+    public async Task<(XElement Xml, string Token)> Type(string digits, string? speech = null)
     {
-        var r = await VoiceFactory.Hook(C, VoiceEndpoints.KeypadPath, Sid, From, extra: new() { ["Digits"] = digits });
+        var extra = new Dictionary<string, string> { ["Digits"] = digits };
+        if (speech is not null) extra["SpeechResult"] = speech;
+        var r = await VoiceFactory.Hook(C, VoiceEndpoints.KeypadPath, Sid, From, extra: extra);
         var (token, xml) = await StreamFrom(r);
         return (xml, token);
     }

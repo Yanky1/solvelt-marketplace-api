@@ -55,6 +55,55 @@ public static partial class VoiceSpeech
 
     private static IEnumerable<string> Chunks(string digits) { for (var i = 0; i < digits.Length; i += 3) yield return digits.Substring(i, Math.Min(3, digits.Length - i)); }
 
+    private static readonly Dictionary<string, string> States = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["AL"] = "Alabama", ["AK"] = "Alaska", ["AZ"] = "Arizona", ["AR"] = "Arkansas", ["CA"] = "California", ["CO"] = "Colorado", ["CT"] = "Connecticut", ["DE"] = "Delaware", ["DC"] = "the District of Columbia",
+        ["FL"] = "Florida", ["GA"] = "Georgia", ["HI"] = "Hawaii", ["ID"] = "Idaho", ["IL"] = "Illinois", ["IN"] = "Indiana", ["IA"] = "Iowa", ["KS"] = "Kansas", ["KY"] = "Kentucky", ["LA"] = "Louisiana",
+        ["ME"] = "Maine", ["MD"] = "Maryland", ["MA"] = "Massachusetts", ["MI"] = "Michigan", ["MN"] = "Minnesota", ["MS"] = "Mississippi", ["MO"] = "Missouri", ["MT"] = "Montana", ["NE"] = "Nebraska",
+        ["NV"] = "Nevada", ["NH"] = "New Hampshire", ["NJ"] = "New Jersey", ["NM"] = "New Mexico", ["NY"] = "New York", ["NC"] = "North Carolina", ["ND"] = "North Dakota", ["OH"] = "Ohio", ["OK"] = "Oklahoma",
+        ["OR"] = "Oregon", ["PA"] = "Pennsylvania", ["RI"] = "Rhode Island", ["SC"] = "South Carolina", ["SD"] = "South Dakota", ["TN"] = "Tennessee", ["TX"] = "Texas", ["UT"] = "Utah", ["VT"] = "Vermont",
+        ["VA"] = "Virginia", ["WA"] = "Washington", ["WV"] = "West Virginia", ["WI"] = "Wisconsin", ["WY"] = "Wyoming", ["PR"] = "Puerto Rico",
+    };
+
+    public static string State(string? code) => code is not null && States.TryGetValue(code.Trim(), out var n) ? n : (code ?? "");
+
+    /// <summary>Digits one at a time ("11201" is "one one two zero one"), the way a postal code or a phone number is read.</summary>
+    public static string Digits(string? text) => string.Join(" ", (text ?? "").Where(char.IsLetterOrDigit).Select(c => char.IsDigit(c) ? Ones[c - '0'] : c.ToString().ToUpperInvariant()));
+
+    /// <summary>A street line as a person says it: a leading house number in pairs ("1245 Main Street" is "twelve forty-five Main Street"), other numbers digit by digit.</summary>
+    public static string Street(string? line)
+    {
+        var words = (line ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var spoken = new List<string>();
+        for (var i = 0; i < words.Length; i++)
+        {
+            var w = words[i].Trim(',', '.');
+            if (w.Length > 0 && w.All(char.IsDigit)) spoken.Add(i == 0 && w.Length <= 4 ? HouseNumber(w) : Digits(w));
+            else if (w.Any(char.IsDigit)) spoken.Add(Digits(w));
+            else spoken.Add(w);
+        }
+        return string.Join(" ", spoken);
+    }
+
+    private static string HouseNumber(string w) => w.Length switch
+    {
+        <= 2 => Number(long.Parse(w, CultureInfo.InvariantCulture)),
+        3 => Ones[w[0] - '0'] + " " + Pair(w[1..]),
+        _ => Pair(w[..2]) + " " + (w[2..] == "00" ? "hundred" : Pair(w[2..])),
+    };
+
+    private static string Pair(string two) => two[0] == '0' ? (two[1] == '0' ? "hundred" : "oh " + Ones[two[1] - '0']) : Number(long.Parse(two, CultureInfo.InvariantCulture));
+
+    /// <summary>"Dana Levi, one Main Street, apartment four B, Brooklyn, New York, one one two zero one."</summary>
+    public static string Address(Solvelt.Marketplace.Api.Checkout.CheckoutAddress a)
+        => string.Join(", ", new[] { Plain(a.Name, 60), Street(Plain(a.Line1, 100)), string.IsNullOrWhiteSpace(a.Line2) ? null : Street(Plain(a.Line2, 60)), Plain(a.City, 60),
+            a.Country?.ToUpperInvariant() == "US" ? State(a.Region) : null, Digits(a.PostalCode) }.Where(x => !string.IsNullOrWhiteSpace(x)));
+
+    /// <summary>The delivery window as a person says it: "Tuesday the fourth to Friday the seventh".</summary>
+    public static string DateRange(string earliest, string latest, DateOnly today)
+        => DateOnly.TryParse(earliest, CultureInfo.InvariantCulture, out var a) && DateOnly.TryParse(latest, CultureInfo.InvariantCulture, out var b)
+            ? (a == b ? Date(a, today) : Date(a, today) + " to " + Date(b, today)) : "";
+
     /// <summary>At most three options, then an offer of more: "A, B and C, and 4 more if you like".</summary>
     public static string List(IReadOnlyList<string> items, int max = 3)
     {

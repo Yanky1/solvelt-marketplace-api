@@ -63,7 +63,12 @@ public static class VoiceEndpoints
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         if (call?.TransferRequestedAt is not null && !string.IsNullOrWhiteSpace(v.SupportNumber))
             return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Connecting), new XElement("Dial", v.SupportNumber)));
-        if (call is not null && states.Find(call.Id) is { KeypadStep: "sms_code" }) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.AskCode)));
+        if (call is not null && states.Find(call.Id) is { } st)
+        {
+            if (st.KeypadStep == "sms_code") return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.AskCode)));
+            // the server speaks ITS OWN read-back (built from the fresh quote) and listens for yes / 1: the model is not on the line
+            if (st.KeypadStep == "confirm" && st.ReadBackText is { } text) return Cxml(new XElement("Response", GatherConfirm(v, text)));
+        }
         return Cxml(new XElement("Response", new XElement("Hangup")));
     }
 
@@ -71,6 +76,10 @@ public static class VoiceEndpoints
     private static XElement GatherCode(VoiceOptions v, string prompt)
         => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", PhoneCodeService.Digits), new XAttribute("timeout", 20), new XAttribute("finishOnKey", "#"),
             new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", prompt));
+
+    private static XElement GatherConfirm(VoiceOptions v, string say)
+        => new("Gather", new XAttribute("input", "dtmf speech"), new XAttribute("numDigits", 1), new XAttribute("timeout", 8), new XAttribute("speechTimeout", "auto"), new XAttribute("hints", "yes, no"),
+            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", say));
 
     /// <summary>The digits typed for an SMS code. Checked against the hash held for THIS call; never stored, logged or given to the model.</summary>
     private static async Task<IResult> Keypad(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, PhoneCodeService codes,
@@ -82,8 +91,19 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
+        if (state.KeypadStep == "confirm")
+        {
+            form.TryGetValue("SpeechResult", out var spoken);
+            var answer = ReadBackAnswer.Parse(typed, spoken);
+            if (answer == ConfirmChoice.Unclear && state.CountConfirmFailure() < 2) return Cxml(new XElement("Response", GatherConfirm(v, VoiceScripts.ConfirmRetry)));
+            var yes = answer == ConfirmChoice.Yes && state.ConfirmReadBack();
+            state.SetKeypadOutcome(yes ? "confirmed" : answer == ConfirmChoice.Unclear ? "unclear" : "change_requested");
+            state.EndKeypadStep();
+            state.SetTask(yes ? "confirmed" : "order");
+            return Cxml(new XElement("Response", new XElement("Say", yes ? VoiceScripts.ConfirmThanks : VoiceScripts.ConfirmChange), StreamParts(v, tokens, call.Id)));
+        }
         var result = codes.Verify(state, typed);
         if (result == CodeResult.Wrong) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.WrongCode)));
         var challenge = state.Challenge;

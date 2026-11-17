@@ -1,9 +1,12 @@
 using System.Collections.Concurrent;
 using System.Text;
+using Solvelt.Marketplace.Api.Checkout;
 
 namespace Solvelt.Marketplace.Api.Voice;
 
 public sealed record ProductRef(Guid ListingId, string Slug, string Title);
+public sealed record DeliveryChoice(Guid SellerId, Guid BrandId, string SellerName, IReadOnlyList<DeliveryOption> Options);
+public sealed record DeliveryOption(string Kind, string? Speed, Guid? WindowId, string? Date, long PriceCents, string Spoken);
 public sealed record VariantRef(Guid VariantId, string Name, long PriceCents, bool Available);
 
 public enum CallerLevel { Anonymous, Guest, Verified }
@@ -72,13 +75,66 @@ public sealed class VoiceCallState
     public string? LastKeypadOutcome { get; private set; }
     public void SetKeypadOutcome(string? outcome) { lock (_gate) LastKeypadOutcome = outcome; }
 
+    // ---- delivery, quote and read-back (slice 3, decision V-04) ----
+    /// <summary>The full delivery address. Memory only: the model never receives it, only the server's spoken read-back does.</summary>
+    public CheckoutAddress? DeliveryAddress { get; private set; }
+    /// <summary>The caller has heard the address read back and said it is right (a saved address counts as right when chosen).</summary>
+    public bool AddressConfirmed { get; private set; }
+    public IReadOnlyList<Guid> SavedAddressIds { get; private set; } = [];
+    public IReadOnlyList<GroupSelection> Selections { get; private set; } = [];
+    public IReadOnlyList<DeliveryChoice> Choices { get; private set; } = [];
+    public QuoteView? Quote { get; private set; }
+    public string? ReadBackText { get; private set; }
+    public int ReadBackVersion { get; private set; }
+    public int ConfirmFailures { get; private set; }
+
+    public void SetSavedAddresses(IReadOnlyList<Guid> ids) { lock (_gate) SavedAddressIds = ids; }
+
+    /// <summary>A new delivery address: options and prices may change, so the choices, the quote and any confirmation go.</summary>
+    public void SetDeliveryAddress(CheckoutAddress address, bool confirmed, string label)
+    {
+        lock (_gate) { DeliveryAddress = address; AddressConfirmed = confirmed; Selections = []; Choices = []; Quote = null; AddressLabel = label; Version++; OrderChangedLocked(); }
+    }
+
+    public void ConfirmAddress() { lock (_gate) { if (DeliveryAddress is not null) AddressConfirmed = true; } }
+
+    public void SetChoices(IReadOnlyList<DeliveryChoice> choices) { lock (_gate) Choices = choices; }
+
+    public void SetSelection(GroupSelection pick, string label)
+    {
+        lock (_gate)
+        {
+            Selections = Selections.Where(x => !(x.SellerId == pick.SellerId && x.BrandId == pick.BrandId)).Append(pick).ToList();
+            DeliveryChoice = label; Version++; OrderChangedLocked(); Quote = null;
+        }
+    }
+
+    public void SetQuoteView(QuoteView view) { lock (_gate) { Quote = view; QuoteKey = view.QuoteHash; QuoteTotalCents = view.TotalCents; Confirmation = ConfirmationStatus.None; Version++; } }
+
+    /// <summary>The server is about to speak this read-back; a yes counts only for it, and only while nothing changes.</summary>
+    public void BeginReadBack(string text) { lock (_gate) { ReadBackText = text; ReadBackVersion = Version; Confirmation = QuoteKey is null ? ConfirmationStatus.None : ConfirmationStatus.ReadBack; ConfirmFailures = 0; } }
+
+    /// <summary>A yes (spoken or on the keypad) after the server's own read-back of the CURRENT order. Nothing else confirms.</summary>
+    public bool ConfirmReadBack()
+    {
+        lock (_gate)
+        {
+            if (Confirmation != ConfirmationStatus.ReadBack || QuoteKey is null || Version != ReadBackVersion) return false;
+            Confirmation = ConfirmationStatus.Confirmed;
+            return true;
+        }
+    }
+
+    public int CountConfirmFailure() { lock (_gate) return ++ConfirmFailures; }
+
     public void Connected(DateTimeOffset now) { lock (_gate) { Connections++; LastTouched = now; } }
     public void Touch(DateTimeOffset now) { lock (_gate) LastTouched = now; }
 
-    public void BeginKeypadStep(string step) { lock (_gate) { KeypadStep = step; Version++; } }
-    public void EndKeypadStep() { lock (_gate) { KeypadStep = null; Version++; } }
+    // a keypad step and the current task are not order changes: they must not make a read-back stale
+    public void BeginKeypadStep(string step) { lock (_gate) KeypadStep = step; }
+    public void EndKeypadStep() { lock (_gate) KeypadStep = null; }
 
-    public void SetTask(string task) { lock (_gate) { Task = task; Version++; } }
+    public void SetTask(string task) { lock (_gate) Task = task; }
 
     public void Identify(CallerLevel level, Guid? accountId, bool verifiedNow)
     {
@@ -113,10 +169,14 @@ public sealed class VoiceCallState
             sb.Append(Level switch { CallerLevel.Verified => VerifiedInThisCall ? "The caller is verified by SMS code in this call. " : "The caller is recognised but not verified in this call. ", CallerLevel.Guest => "The caller is a guest" + (VerifiedPhone is not null ? " whose phone is verified. " : ". "), _ => "The caller is not identified yet. " });
             if (FirstName is not null && Level == CallerLevel.Verified) sb.Append("Their first name is ").Append(FirstName).Append(". ");
             sb.Append("Current task: ").Append(Task).Append(". ");
+            if (LastKeypadOutcome == "confirmed") sb.Append("The caller just confirmed the order read-back by keypad or voice. ");
+            if (LastKeypadOutcome == "change_requested") sb.Append("The caller wants to change something in the order after the read-back: ask what. ");
+            if (LastKeypadOutcome == "unclear") sb.Append("The read-back was not confirmed (no clear yes or no): ask what they want to do. ");
             if (LastKeypadOutcome == "failed") sb.Append("The caller typed a wrong code too often or it expired: they are NOT verified. ");
             sb.Append(CartItemCount == 0 ? "The cart is empty. " : $"The cart has {CartItemCount} item{(CartItemCount == 1 ? "" : "s")}. ");
             if (AddressLabel is not null) sb.Append("Delivery address chosen: ").Append(AddressLabel).Append(". ");
             if (DeliveryChoice is not null) sb.Append("Delivery option: ").Append(DeliveryChoice).Append(". ");
+            if (DeliveryAddress is not null) sb.Append(AddressConfirmed ? "The delivery address is set and confirmed. " : "A delivery address was given and still needs the caller to confirm it. ");
             sb.Append(QuoteKey is null ? "There is no current quote. " : "A current quote exists. ");
             sb.Append(Confirmation switch { ConfirmationStatus.Confirmed => "The caller confirmed the read-back. ", ConfirmationStatus.ReadBack => "The order was read back and awaits the caller's yes. ", _ => "The order has not been read back. " });
             if (PendingAccountChange is not null) sb.Append("A pending account change awaits confirmation: ").Append(PendingAccountChange).Append(". ");
