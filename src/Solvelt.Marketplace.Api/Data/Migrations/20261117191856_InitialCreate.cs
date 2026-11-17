@@ -1098,6 +1098,34 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "voice_calls",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    CallSid = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
+                    CallerMasked = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
+                    Model = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Tier = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
+                    StartedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    EndedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    DurationSeconds = table.Column<int>(type: "integer", nullable: false),
+                    AudioInTokens = table.Column<long>(type: "bigint", nullable: false),
+                    AudioOutTokens = table.Column<long>(type: "bigint", nullable: false),
+                    TextInTokens = table.Column<long>(type: "bigint", nullable: false),
+                    TextOutTokens = table.Column<long>(type: "bigint", nullable: false),
+                    EstimatedCostMicros = table.Column<long>(type: "bigint", nullable: false),
+                    LatencySamples = table.Column<int>(type: "integer", nullable: false),
+                    LatencyTotalMs = table.Column<long>(type: "bigint", nullable: false),
+                    Outcome = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    TransferRequestedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    Version = table.Column<int>(type: "integer", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_voice_calls", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "webauthn_challenges",
                 columns: table => new
                 {
@@ -2019,6 +2047,17 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "ThreadId", "SentAt" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_voice_calls_CallSid",
+                table: "voice_calls",
+                column: "CallSid",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_calls_StartedAt",
+                table: "voice_calls",
+                column: "StartedAt");
+
+            migrationBuilder.CreateIndex(
                 name: "IX_webauthn_challenges_AccountId",
                 table: "webauthn_challenges",
                 column: "AccountId");
@@ -2218,6 +2257,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "stripe_events");
+
+            migrationBuilder.DropTable(
+                name: "voice_calls");
 
             migrationBuilder.DropTable(
                 name: "webauthn_challenges");

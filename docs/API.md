@@ -481,3 +481,10 @@ Reading is public; writing needs a signed-in buyer (`Authorization: Bearer`, `Ca
 | `POST /api/v1/questions` `{ listingId, text }` | signed-in buyer: `202 { id, status: "sending", createdAt }`; `422 validation_failed` (`errors.text`, `errors.listingId`), `404` (not a visible listing), `429 too_many_questions` (3 per listing and 10 per day) |
 | `GET /api/v1/account/questions` | `{ questions: [{ id, text, status: sending\|sent\|rejected, rejectedReason, createdAt, listing: { title, slug } }] }` |
 The seller's published answer is part of the listing's `faqs` in the catalog; it is not returned here.
+
+## Voice ordering (V, off unless `Voice:Enabled`)
+Called by SignalWire and by the staff area; not by the web. Decision V-01. The cXML holds only the disclosure and a stream URL with a 120 s token; no personal data is returned.
+- `POST /api/v1/voice/signalwire/inbound` (form, `X-SignalWire-Signature`): `403` unsigned or wrong, `404` when disabled. Answers cXML: `<Say>` disclosure, `<Connect action=".../after-stream"><Stream url="wss://.../api/v1/voice/stream?token=..."/></Connect>`.
+- `POST /api/v1/voice/signalwire/after-stream` (form, signed): `<Dial>` the support number if a transfer was requested and possible, else `<Hangup/>`.
+- `GET /api/v1/voice/stream?token=` (WebSocket upgrade): `401` for a missing, forged, expired or ended-call token, `503` if the model session cannot be opened.
+- `GET /api/v1/staff/voice/report?days=30` (staff permission `voice.view`: finance, admin): per tier (`full`, `mini`): `calls`, `finishedCalls`, `costPerMinuteMicros` (micro-dollars), `averageLatencyMs`, `orderCompletionPercent`, `transferPercent`, `abandonedPercent`, `models`.

@@ -101,6 +101,15 @@ builder.Services.AddSingleton<DemoActionLimiter>();
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection("Database"));
 
 builder.Services.AddSingleton(TimeProvider.System);
+// V: voice ordering (decision V-01). Off unless Voice:Enabled; every secret from the environment.
+builder.Services.Configure<Solvelt.Marketplace.Api.Voice.VoiceOptions>(o => Solvelt.Marketplace.Api.Voice.VoiceConfig.Bind(o, builder.Configuration, devLike));
+builder.Services.Configure<Solvelt.Marketplace.Api.Voice.SignalWireOptions>(builder.Configuration.GetSection("SignalWire"));
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.StreamTokens>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceCallStore>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceToolRunner>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IRealtimeConnector, Solvelt.Marketplace.Api.Voice.OpenAiRealtimeConnector>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TransferToPersonTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.VoiceReportService>();
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();
 Solvelt.Marketplace.Api.Services.ServicesModule.AddMarketplaceServices(builder.Services, builder.Configuration, builder.Environment);   // M4: services and bookings (Services/ServicesModule.cs)
@@ -241,6 +250,7 @@ app.UseMiddleware<SafeRequestLoggingMiddleware>();
 app.UseMiddleware<ProblemExceptionMiddleware>();
 app.UseMiddleware<StatusProblemMiddleware>();
 app.UseMiddleware<AuthBodyLimitMiddleware>();
+app.UseWebSockets();   // V: the voice stream
 app.UseRateLimiter();
 // Personalised JSON is never cacheable, framework-made 400s (malformed bodies) included: the header is set when the response starts, whatever produced it.
 app.Use(async (ctx, next) =>
@@ -290,6 +300,8 @@ app.MapAuth();
 app.MapStaff();   // M7
 app.MapStaffBuyers();
 app.MapStaffOps();
+Solvelt.Marketplace.Api.Voice.VoiceReportEndpoints.MapStaffVoice(app);   // V
+Solvelt.Marketplace.Api.Voice.VoiceEndpoints.MapVoice(app);
 app.MapAccount();
 app.MapCart();
 Solvelt.Marketplace.Api.Lists.WishlistEndpoints.MapWishlists(app);

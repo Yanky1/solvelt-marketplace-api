@@ -9,7 +9,7 @@ public static class StaffPermissions
         OrdersView = "orders.view", PaymentsView = "payments.view", RefundsRetry = "refunds.retry",
         IngestsView = "ingests.view", IngestsRetry = "ingests.retry", OutboxView = "outbox.view", OutboxRetry = "outbox.retry",
         DeadLettersView = "deadletters.view", DeadLettersRetry = "deadletters.retry", StripeFailuresView = "stripe.view",
-        StaffManage = "staff.manage", AuditView = "audit.view";
+        StaffManage = "staff.manage", AuditView = "audit.view", VoiceView = "voice.view";
 
     private const string S = StaffRoleNames.Support, F = StaffRoleNames.Finance, A = StaffRoleNames.Admin;
 
@@ -29,6 +29,7 @@ public static class StaffPermissions
         [DeadLettersView] = [S, F, A],
         [DeadLettersRetry] = [A],
         [StripeFailuresView] = [F, A],
+        [VoiceView] = [F, A],
         [StaffManage] = [A],
         [AuditView] = [A],
     };

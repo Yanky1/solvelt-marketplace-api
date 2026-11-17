@@ -100,7 +100,17 @@ public static class StartupValidator
     }
 
     /// <summary>Everything start-up checks: the shared validation plus the passkey settings (M1-80). Program.cs calls this.</summary>
-    public static IReadOnlyList<string> AllProblems(IConfiguration config, IHostEnvironment env) => Validate(config, env).Concat(WebAuthnProblems(config, env)).ToList();
+    public static IReadOnlyList<string> AllProblems(IConfiguration config, IHostEnvironment env) => Validate(config, env).Concat(WebAuthnProblems(config, env)).Concat(VoiceProblems(config, env)).ToList();
+
+    /// <summary>Voice (V-01): checked only when Voice:Enabled is true.</summary>
+    public static IReadOnlyList<string> VoiceProblems(IConfiguration config, IHostEnvironment env)
+    {
+        var v = new Solvelt.Marketplace.Api.Voice.VoiceOptions();
+        Solvelt.Marketplace.Api.Voice.VoiceConfig.Bind(v, config, IsDevLike(env));
+        var s = new Solvelt.Marketplace.Api.Voice.SignalWireOptions();
+        config.GetSection("SignalWire").Bind(s);
+        return Solvelt.Marketplace.Api.Voice.VoiceConfig.Problems(v, s, IsDevLike(env));
+    }
 
     /// <summary>Returns every configuration problem; empty means the configuration is acceptable.</summary>
     public static IReadOnlyList<string> Validate(IConfiguration config, IHostEnvironment env)

@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261105192933_InitialCreate")]
+    [Migration("20261117191856_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -3160,6 +3160,83 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasIndex("ThreadId", "SentAt");
 
                     b.ToTable("thread_messages", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.VoiceCall", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AudioInTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("AudioOutTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CallSid")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CallerMasked")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<int>("DurationSeconds")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("EndedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("EstimatedCostMicros")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("LatencySamples")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("LatencyTotalMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Model")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("TextInTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("TextOutTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Tier")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.Property<DateTimeOffset?>("TransferRequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CallSid")
+                        .IsUnique();
+
+                    b.HasIndex("StartedAt");
+
+                    b.ToTable("voice_calls", (string)null);
                 });
 
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.WebAuthnChallenge", b =>
