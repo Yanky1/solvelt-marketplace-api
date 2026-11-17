@@ -31,6 +31,7 @@ public static class PiiRegistry
     /// <summary>Entities the scan would otherwise flag that hold no personal data of a buyer, each with the reason. A new entry needs a reviewer who agrees with the reason.</summary>
     public static readonly IReadOnlyList<(Type Entity, string Reason)> NoBuyerData =
     [
+        (typeof(VoiceCall), "voice call metrics (V-01): a masked number (last four digits), model, token counts, cost, duration; no account link, audio, transcript or address; deleted after Voice:CallRetentionDays"),
         (typeof(CartLine), "items and quantities of a cart; the cart (claimed) holds the owner"),
         (typeof(OrderGroup), "per-seller totals, shipping money and seller names of an order; the order (claimed) holds the buyer and the address"),
         (typeof(OrderLine), "items, quantities and prices of an order; the order (claimed) holds the buyer and the address"),

@@ -41,6 +41,7 @@ Enforced in code (`StaffPermissions.Matrix`); a test keeps this table equal to i
 | `deadletters.view` | yes | yes | yes | Inbound portal events that failed or are parked |
 | `deadletters.retry` | - | - | yes | Replay an inbound dead letter |
 | `stripe.view` | - | yes | yes | Stripe webhook events that failed |
+| `voice.view` | - | yes | yes | Voice ordering report: full vs mini cost, latency, completion |
 | `staff.manage` | - | - | yes | Create, disable and re-enrol staff, change roles |
 | `audit.view` | - | - | yes | Read the audit log |
 
