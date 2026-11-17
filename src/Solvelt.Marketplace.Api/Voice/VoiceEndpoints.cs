@@ -6,12 +6,13 @@ namespace Solvelt.Marketplace.Api.Voice;
 
 public static class VoiceEndpoints
 {
-    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", StreamPath = "/api/v1/voice/stream";
+    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", KeypadPath = "/api/v1/voice/signalwire/keypad", StreamPath = "/api/v1/voice/stream";
 
     public static IEndpointRouteBuilder MapVoice(this IEndpointRouteBuilder app)
     {
         app.MapPost(InboundPath, Inbound);
         app.MapPost(AfterStreamPath, AfterStream);
+        app.MapPost(KeypadPath, Keypad);
         app.Map(StreamPath, Stream);
         return app;
     }
@@ -28,7 +29,18 @@ public static class VoiceEndpoints
         return (SignalWireSignature.Verify(s.SigningKey ?? "", url, fields, ctx.Request.Headers[SignalWireSignature.Header].ToString()), fields);
     }
 
-    private static async Task<IResult> Inbound(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, StreamTokens tokens, CancellationToken ct)
+    /// <summary>cXML that connects (or reconnects) the call to a stream: a fresh single-use token in the URL and as the bearer header, and a Redirect that runs when the stream ends.</summary>
+    private static XElement[] StreamParts(VoiceOptions v, StreamTokens tokens, Guid callId)
+    {
+        var token = tokens.Issue(callId);
+        var afterUrl = v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath;
+        var wss = new UriBuilder(v.PublicBaseUrl!) { Scheme = new Uri(v.PublicBaseUrl!).Scheme == "https" ? "wss" : "ws", Path = StreamPath, Query = "token=" + Uri.EscapeDataString(token) };
+        // authBearerToken: SignalWire sends it as "Authorization: Bearer" on the upgrade (documented); the same token is also in the URL. The Connect page documents no "action"
+        // attribute (V-01), so the Redirect after the stream ends is what moves the call on.
+        return [new XElement("Connect", new XElement("Stream", new XAttribute("url", wss.Uri.ToString()), new XAttribute("authBearerToken", token))), new XElement("Redirect", afterUrl)];
+    }
+
+    private static async Task<IResult> Inbound(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -37,19 +49,12 @@ public static class VoiceEndpoints
         if (!form.TryGetValue("CallSid", out var sid) || string.IsNullOrWhiteSpace(sid) || sid.Length > 64) return Results.BadRequest();
         form.TryGetValue("From", out var from);
         var call = await store.StartAsync(sid, from, ct);
-        var token = tokens.Issue(call.Id);
-        var afterUrl = v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath;
-        var wss = new UriBuilder(v.PublicBaseUrl!) { Scheme = new Uri(v.PublicBaseUrl!).Scheme == "https" ? "wss" : "ws", Path = StreamPath, Query = "token=" + Uri.EscapeDataString(token) };
-        return Cxml(new XElement("Response",
-            new XElement("Say", VoiceScripts.Disclosure),
-            // authBearerToken: SignalWire sends it as "Authorization: Bearer" on the upgrade (documented); the same token is also in the URL. The Connect page does not document an
-            // "action" attribute, so the Redirect after the stream ends is what moves the call on; both point to the same idempotent endpoint.
-            new XElement("Connect", new XAttribute("action", afterUrl), new XElement("Stream", new XAttribute("url", wss.Uri.ToString()), new XAttribute("authBearerToken", token))),
-            new XElement("Redirect", afterUrl)));
+        states.GetOrCreate(call.Id).SetCaller(PhoneNumbers.ToE164(from));   // the full number lives only in this call's memory
+        return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Disclosure), StreamParts(v, tokens, call.Id)));
     }
 
     /// <summary>SignalWire calls this when the stream ends: a person was asked for and is reachable, so dial; otherwise hang up.</summary>
-    private static async Task<IResult> AfterStream(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, CancellationToken ct)
+    private static async Task<IResult> AfterStream(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -58,7 +63,56 @@ public static class VoiceEndpoints
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         if (call?.TransferRequestedAt is not null && !string.IsNullOrWhiteSpace(v.SupportNumber))
             return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Connecting), new XElement("Dial", v.SupportNumber)));
+        if (call is not null && states.Find(call.Id) is { KeypadStep: "sms_code" }) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.AskCode)));
         return Cxml(new XElement("Response", new XElement("Hangup")));
+    }
+
+    /// <summary>The caller types the six-digit code on the keypad; SignalWire, not the model, collects the digits and posts them to us.</summary>
+    private static XElement GatherCode(VoiceOptions v, string prompt)
+        => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", PhoneCodeService.Digits), new XAttribute("timeout", 20), new XAttribute("finishOnKey", "#"),
+            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", prompt));
+
+    /// <summary>The digits typed for an SMS code. Checked against the hash held for THIS call; never stored, logged or given to the model.</summary>
+    private static async Task<IResult> Keypad(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, PhoneCodeService codes,
+        StreamTokens tokens, IServiceScopeFactory scopes, CancellationToken ct)
+    {
+        var v = vo.Value;
+        if (!v.Enabled) return Results.NotFound();
+        var (ok, form) = await VerifyAsync(ctx, v, so.Value);
+        if (!ok) return Results.StatusCode(403);
+        var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
+        var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
+        if (call is null || state is not { KeypadStep: "sms_code" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        form.TryGetValue("Digits", out var typed);
+        var result = codes.Verify(state, typed);
+        if (result == CodeResult.Wrong) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.WrongCode)));
+        var challenge = state.Challenge;
+        if (result == CodeResult.Ok) await ApplyVerifiedAsync(state, scopes, ct);
+        else { state.SetKeypadOutcome("failed"); state.SetChallenge(null); }
+        state.EndKeypadStep();
+        return Cxml(new XElement("Response", new XElement("Say", result == CodeResult.Ok ? VoiceScripts.CodeOk : VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
+    }
+
+    /// <summary>A right code proves the caller holds the number: the matching account (if exactly one) is now theirs for this call, otherwise they are a guest with a verified phone. A guest cart moves into the account.</summary>
+    private static async Task ApplyVerifiedAsync(VoiceCallState state, IServiceScopeFactory scopes, CancellationToken ct)
+    {
+        var phone = state.LastChallengePhone;
+        state.SetVerifiedPhone(phone);
+        state.SetKeypadOutcome("verified");
+        if (state.LastChallengeAccount is { } accountId)
+        {
+            using var scope = scopes.CreateScope();
+            var cart = scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Carts.CartService>();
+            var db = scope.ServiceProvider.GetRequiredService<Data.MarketplaceDb>();
+            var name = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.AsNoTracking(db.BuyerAccounts).Where(a => a.Id == accountId).Select(a => a.DisplayName), ct);
+            if (state.CartToken is { } guestToken) await cart.MergeGuestAsync(accountId, guestToken, ct);   // the cart carries over into the account
+            state.SetCartToken(null);
+            state.Identify(CallerLevel.Verified, accountId, verifiedNow: true);
+            state.SetFirstName(name?.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault());
+            state.SetCart("cart", (await cart.GetAsync(new Solvelt.Marketplace.Api.Carts.CartOwner(accountId, null), ct)).ItemCount);
+        }
+        else state.Identify(CallerLevel.Guest, null, verifiedNow: true);
+        state.SetTask("shopping");
     }
 
     private static async Task Stream(HttpContext ctx, IOptions<VoiceOptions> vo, StreamTokens tokens, VoiceCallStore store, VoiceStateStore states, IRealtimeConnector connector, VoiceToolRunner tools,
@@ -68,7 +122,7 @@ public static class VoiceEndpoints
         if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
         var auth = ctx.Request.Headers.Authorization.ToString();
         var bearer = auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? auth[7..].Trim() : null;
-        var id = tokens.Validate(!string.IsNullOrEmpty(bearer) ? bearer : ctx.Request.Query["token"].ToString());
+        var id = tokens.Use(!string.IsNullOrEmpty(bearer) ? bearer : ctx.Request.Query["token"].ToString());
         var call = id is { } g ? await store.FindAsync(g, ctx.RequestAborted) : null;
         if (call is null || call.EndedAt is not null) { ctx.Response.StatusCode = 401; return; }
         var log = logs.CreateLogger("Solvelt.Marketplace.Api.Voice");
@@ -85,8 +139,9 @@ public static class VoiceEndpoints
         log.LogInformation("Voice call {Call} started: caller {Caller}, model tier {Tier}.", call.Id, call.CallerMasked, call.Tier);
         var state = states.GetOrCreate(call.Id);
         state.Connected(time.GetUtcNow());
-        await new RealtimeBridge(phone, upstream, call, state, vo, store, tools, time, log).RunAsync(ctx.RequestAborted);
-        if (state.KeypadStep is null) states.Remove(call.Id);   // the call is over: nothing of it stays in memory
+        var bridge = new RealtimeBridge(phone, upstream, call, state, vo, store, tools, time, log);
+        await bridge.RunAsync(ctx.RequestAborted);
+        if (!bridge.KeypadPause) states.Remove(call.Id);   // the call is over: nothing of it stays in memory
         upstream.Dispose();
     }
 }

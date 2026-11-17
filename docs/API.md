@@ -485,6 +485,7 @@ The seller's published answer is part of the listing's `faqs` in the catalog; it
 ## Voice ordering (V, off unless `Voice:Enabled`)
 Called by SignalWire and by the staff area; not by the web. Decision V-01. The cXML holds only the disclosure and a stream URL with a 120 s token; no personal data is returned.
 - `POST /api/v1/voice/signalwire/inbound` (form, `X-SignalWire-Signature`): `403` unsigned or wrong, `404` when disabled. Answers cXML: `<Say>` disclosure, `<Connect action=".../after-stream"><Stream url="wss://.../api/v1/voice/stream?token=..."/></Connect>`.
-- `POST /api/v1/voice/signalwire/after-stream` (form, signed): `<Dial>` the support number if a transfer was requested and possible, else `<Hangup/>`.
-- `GET /api/v1/voice/stream?token=` (WebSocket upgrade): `401` for a missing, forged, expired or ended-call token, `503` if the model session cannot be opened.
+- `POST /api/v1/voice/signalwire/after-stream` (form, signed): `<Dial>` the support number if a transfer was requested and possible; a `<Gather>` for the SMS code while the call is on its keypad step; else `<Hangup/>`.
+- `POST /api/v1/voice/signalwire/keypad` (form, signed, `Digits`): the six-digit SMS code typed on the keypad. Wrong: another `<Gather>`; right, locked or expired: a `<Say>` and a fresh `<Connect><Stream>` plus `<Redirect>`; no pending code step: `<Hangup/>`. Decision V-03.
+- `GET /api/v1/voice/stream?token=` (WebSocket upgrade; the token may also come as `Authorization: Bearer`, is single use): `401` for a missing, forged, expired, used or ended-call token, `503` if the model session cannot be opened.
 - `GET /api/v1/staff/voice/report?days=30` (staff permission `voice.view`: finance, admin): per tier (`full`, `mini`): `calls`, `finishedCalls`, `costPerMinuteMicros` (micro-dollars), `averageLatencyMs`, `orderCompletionPercent`, `transferPercent`, `abandonedPercent`, `models`.

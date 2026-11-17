@@ -38,6 +38,8 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     private string? _streamSid, _itemId;
     private long _playedBytes, _speechStopped;
     private bool _playing, _endAfterResponse, _dtmfTransfer, _responseActive;
+    /// <summary>True when the stream ended for a keypad step: the call goes on and the next stream resumes it. Decided BEFORE either socket is closed, because SignalWire's next instruction can arrive the moment the phone socket closes and clear the step.</summary>
+    public bool KeypadPause { get; private set; }
     private TaskCompletionSource? _fillerDone;
     private CancellationTokenSource _cts = new();
     private Task _calls = Task.CompletedTask;
@@ -73,11 +75,12 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
         catch (WebSocketException) { logger.LogWarning("Voice call {Call}: a socket closed abnormally.", call.Id); }
         finally
         {
+            KeypadPause = state.KeypadStep is not null;
             cts.Cancel();
             try { await Task.WhenAll(phoneLoop, upLoop, _calls); } catch (Exception) { /* both loops end by cancellation or a closed socket */ }
             await CloseQuietly(upstream);
             await CloseQuietly(phone);
-            if (state.KeypadStep is null) await store.EndAsync(call.Id, outcome, CancellationToken.None);   // a keypad step pauses the call: the next stream resumes it
+            if (!KeypadPause) await store.EndAsync(call.Id, outcome, CancellationToken.None);   // a keypad step pauses the call: the next stream resumes it
         }
         return outcome;
     }

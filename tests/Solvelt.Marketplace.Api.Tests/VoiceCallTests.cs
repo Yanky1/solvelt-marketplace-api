@@ -37,7 +37,8 @@ public class VoiceCallTests
         var stream = xml.Element("Connect")!.Element("Stream")!;
         var url = new Uri(stream.Attribute("url")!.Value);
         Assert.Equal(("wss", "voice.test", VoiceEndpoints.StreamPath), (url.Scheme, url.Host, url.AbsolutePath));
-        Assert.StartsWith(VoiceFactory.BaseUrl + VoiceEndpoints.AfterStreamPath, xml.Element("Connect")!.Attribute("action")!.Value);
+        Assert.Null(xml.Element("Connect")!.Attribute("action"));                                       // the Connect page documents no action: the Redirect continues the call
+        Assert.Equal(VoiceFactory.BaseUrl + VoiceEndpoints.AfterStreamPath, xml.Element("Redirect")!.Value);
         var call = await Call(f);
         Assert.Equal(("CA-1", "***4567", "model-mini", "mini", VoiceOutcome.InProgress), (call.CallSid, call.CallerMasked, call.Model, call.Tier, call.Outcome));
         Assert.DoesNotContain("5551234567", await r.Content.ReadAsStringAsync());

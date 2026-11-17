@@ -65,6 +65,19 @@ public static partial class VoiceSpeech
         return more > 0 ? s + $", and {Number(more)} more if you like" : s;
     }
 
+    /// <summary>Product text made fit for speech: links, markup and symbols removed, whitespace collapsed, cut at a word near <paramref name="max"/> characters.</summary>
+    public static string Plain(string? text, int max = 240)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        var t = Regex.Replace(text, @"https?://\S+|www\.\S+", " ");
+        t = Regex.Replace(t, @"<[^>]*>", " ");
+        t = Regex.Replace(t, @"[*_`#<>{}\[\]|\\~^]", " ");
+        t = Regex.Replace(t, @"\s+", " ").Trim();
+        if (t.Length <= max) return t;
+        var cut = t.LastIndexOf(' ', max);
+        return (cut > max / 2 ? t[..cut] : t[..max]).TrimEnd(',', ';', ':', '-') + ".";
+    }
+
     /// <summary>True when the text is fit to be spoken: no markdown, links, raw ISO dates or symbols a voice would read out.</summary>
     public static bool IsSpeakable(string text) => !Unspeakable().IsMatch(text);
 

@@ -50,6 +50,7 @@ public class VoiceUnitTests
     [InlineData("")]
     [InlineData("a.b")]
     [InlineData("a.b.c")]
+    [InlineData("a.b.c.d")]
     public void Stream_token_garbage_is_refused(string? token) => Assert.Null(Tokens().T.Validate(token));
 
     [Fact]
@@ -61,9 +62,26 @@ public class VoiceUnitTests
         var token = t.Issue(id);
         Assert.Null(other.Validate(token));                                                        // signed by another key
         var parts = token.Split('.');
-        Assert.Null(t.Validate($"{Guid.NewGuid():N}.{parts[1]}.{parts[2]}"));                      // another call id
-        Assert.Null(t.Validate($"{parts[0]}.{long.Parse(parts[1]) + 3600}.{parts[2]}"));           // a later expiry
+        Assert.Null(t.Validate($"{Guid.NewGuid():N}.{parts[1]}.{parts[2]}.{parts[3]}"));           // another call id
+        Assert.Null(t.Validate($"{parts[0]}.{long.Parse(parts[1]) + 3600}.{parts[2]}.{parts[3]}")); // a later expiry
+        Assert.Null(t.Validate($"{parts[0]}.{parts[1]}.0000000000000000.{parts[3]}"));             // another nonce
         Assert.Null(t.Validate(token + "0"));
+    }
+
+    [Fact]
+    public void A_token_is_unique_each_time_and_opens_one_stream_once()
+    {
+        var (t, clock) = Tokens();
+        var id = Guid.NewGuid();
+        var a = t.Issue(id); var b = t.Issue(id);
+        Assert.NotEqual(a, b);                                       // same call, same second: still two different tokens
+        Assert.Equal(id, t.Use(a));
+        Assert.Null(t.Use(a));                                       // replay refused
+        Assert.Equal(id, t.Use(b));                                  // the next token (a keypad resume) is fine
+        Assert.Null(t.Use("garbage"));
+        clock.Advance(TimeSpan.FromMinutes(5));
+        Assert.Null(t.Use(t.Issue(id).Replace(id.ToString("N"), Guid.NewGuid().ToString("N"))));   // a forged id never spends anything
+        Assert.Equal(id, t.Use(t.Issue(id)));
     }
 
     [Fact]
@@ -140,11 +158,15 @@ public class VoiceUnitTests
         Assert.Contains(p, x => x.Contains("Voice:StreamTokenKey")); Assert.Contains(p, x => x.Contains("Voice:PublicBaseUrl"));
         var good = new Dictionary<string, string?>
         {
-            ["Voice:Enabled"] = "true", ["Voice:OpenAiApiKey"] = "x", ["SignalWire:SigningKey"] = "sw-signing-key", ["Voice:StreamTokenKey"] = new string('k', 40), ["Voice:PublicBaseUrl"] = "https://api.example.com",
+            ["Voice:Enabled"] = "true", ["Voice:OpenAiApiKey"] = "x", ["SignalWire:SigningKey"] = "sw-signing-key", ["Voice:StreamTokenKey"] = new string('k', 40), ["Voice:PhoneCodeKey"] = new string('c', 40),
+            ["Voice:PublicBaseUrl"] = "https://api.example.com", ["SignalWire:ProjectId"] = "p", ["SignalWire:ApiToken"] = "t", ["SignalWire:Space"] = "s", ["SignalWire:FromNumber"] = "+15550002222",
         };
         Assert.Empty(Problems(good));
         Assert.Contains(Problems(new(good) { ["Voice:StreamTokenKey"] = new string('s', 40), ["SignalWire:SigningKey"] = new string('s', 40) }), x => x.Contains("must differ"));   // one key per purpose
         Assert.Contains(Problems(new(good) { ["Voice:PublicBaseUrl"] = "http://api.example.com" }), x => x.Contains("PublicBaseUrl"));
+        Assert.Contains(Problems(new(good) { ["Voice:PhoneCodeKey"] = new string('k', 40) }), x => x.Contains("PhoneCodeKey must differ"));          // not the stream token key
+        Assert.Contains(Problems(new(good) { ["Voice:PhoneCodeKey"] = "short" }), x => x.Contains("PhoneCodeKey"));
+        Assert.Contains(Problems(new(good) { ["SignalWire:ApiToken"] = null }), x => x.Contains("login codes are sent by SMS"));                   // production needs the messaging settings
         Assert.Contains(Problems(new(good) { ["Voice:ModelMode"] = "turbo" }), x => x.Contains("ModelMode"));
         Assert.Contains(Problems(new(good) { ["Voice:MiniPercent"] = "101" }), x => x.Contains("MiniPercent"));
     }

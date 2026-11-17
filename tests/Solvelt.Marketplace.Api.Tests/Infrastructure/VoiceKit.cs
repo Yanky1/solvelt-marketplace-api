@@ -160,9 +160,10 @@ public static class VoiceFactory
         => new(Config(extra), s => { s.RemoveAll<IRealtimeConnector>(); s.AddSingleton<IRealtimeConnector>(fake); });
 
     /// <summary>POSTs a signed SignalWire webhook and returns the response.</summary>
-    public static async Task<HttpResponseMessage> Hook(HttpClient c, string path, string callSid, string from = "+15551234567", string? signature = null)
+    public static async Task<HttpResponseMessage> Hook(HttpClient c, string path, string callSid, string from = "+15551234567", string? signature = null, Dictionary<string, string>? extra = null)
     {
         var form = new Dictionary<string, string> { ["CallSid"] = callSid, ["From"] = from, ["To"] = "+15559876543" };
+        if (extra != null) foreach (var kv in extra) form[kv.Key] = kv.Value;
         var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new FormUrlEncodedContent(form) };
         req.Headers.Add(SignalWireSignature.Header, signature ?? SignalWireSignature.Compute(SigningKey, BaseUrl + path, form));
         return await c.SendAsync(req);

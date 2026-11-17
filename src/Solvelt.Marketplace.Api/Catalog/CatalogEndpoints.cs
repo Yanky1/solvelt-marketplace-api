@@ -95,7 +95,7 @@ public static class CatalogEndpoints
             new SellerCard(b.SellerId, sellers.GetValueOrDefault(b.SellerId)?.DisplayName ?? ""), b.LogoImageId, counts[b.Id])));
     }
 
-    private static async Task<IResult> Listings(HttpRequest request, MarketplaceDb db, ISearchIndex index, CategoryMap map, CancellationToken ct)
+    internal static async Task<IResult> Listings(HttpRequest request, MarketplaceDb db, ISearchIndex index, CategoryMap map, CancellationToken ct)
     {
         var (query, error) = await ListingQuery.ParseAsync(request.Query, db, index, map, ct);
         if (query is null) return error!;
@@ -168,7 +168,7 @@ public static class CatalogEndpoints
         return await q.AnyAsync(l => (l.UnlistedVersion != null && l.UnlistedVersion >= l.Version) || l.Status == "Archived" || l.Status == "Removed", ct);
     }
 
-    private static async Task<IResult> Listing(MarketplaceDb db, CategoryMap map, string slugOrId, CancellationToken ct)
+    internal static async Task<IResult> Listing(MarketplaceDb db, CategoryMap map, string slugOrId, CancellationToken ct)
     {
         if (ListingQuery.HasControl(slugOrId)) return Problems.NotFound("Listing not found.");     // no such slug can exist (and PostgreSQL cannot compare a NUL)
         var q = Visible(db).Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).AsSplitQuery();

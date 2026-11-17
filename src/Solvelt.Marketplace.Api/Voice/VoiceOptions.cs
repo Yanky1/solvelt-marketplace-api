@@ -49,6 +49,10 @@ public sealed class VoiceOptions
     /// <summary>Key of the short-lived stream tokens. Its own key (never SignalWire:SigningKey or any other); development generates a random one per process.</summary>
     public string? StreamTokenKey { get; set; }
     public int StreamTokenSeconds { get; set; } = 120;
+    /// <summary>Key of the SMS code hashes (a purpose of its own: never the stream token key or the SignalWire signing key).</summary>
+    public string? PhoneCodeKey { get; set; }
+    public int MaxSmsPerNumberPerHour { get; set; } = 3;
+    public int MaxSmsPerHour { get; set; } = 300;
     /// <summary>Days a call's metrics row is kept (no audio, no transcript, only a masked number).</summary>
     public int CallRetentionDays { get; set; } = 400;
 }
@@ -69,6 +73,7 @@ public static class VoiceConfig
     {
         c.GetSection("Voice").Bind(o);
         if (string.IsNullOrWhiteSpace(o.StreamTokenKey) && devLike) o.StreamTokenKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        if (string.IsNullOrWhiteSpace(o.PhoneCodeKey) && devLike) o.PhoneCodeKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     }
 
     /// <summary>Start-up problems; only checked when the module is enabled.</summary>
@@ -80,6 +85,10 @@ public static class VoiceConfig
         if (string.IsNullOrWhiteSpace(s.SigningKey)) p.Add("SignalWire:SigningKey (env SignalWire__SigningKey) is required when Voice:Enabled.");
         if (string.IsNullOrWhiteSpace(v.StreamTokenKey) || v.StreamTokenKey.Length < 32) p.Add("Voice:StreamTokenKey (env Voice__StreamTokenKey) must be at least 32 characters when Voice:Enabled.");
         else if (!string.IsNullOrEmpty(s.SigningKey) && v.StreamTokenKey == s.SigningKey) p.Add("Voice:StreamTokenKey must differ from SignalWire:SigningKey (one key per purpose).");
+        if (string.IsNullOrWhiteSpace(v.PhoneCodeKey) || v.PhoneCodeKey.Length < 32) p.Add("Voice:PhoneCodeKey (env Voice__PhoneCodeKey) must be at least 32 characters when Voice:Enabled.");
+        else if (v.PhoneCodeKey == v.StreamTokenKey || v.PhoneCodeKey == s.SigningKey || v.PhoneCodeKey == s.ApiToken) p.Add("Voice:PhoneCodeKey must differ from the stream token key and every SignalWire secret (one key per purpose).");
+        if (!devLike && (string.IsNullOrWhiteSpace(s.ProjectId) || string.IsNullOrWhiteSpace(s.ApiToken) || string.IsNullOrWhiteSpace(s.Space) || string.IsNullOrWhiteSpace(s.FromNumber)))
+            p.Add("SignalWire:ProjectId, ApiToken, Space and FromNumber (env SignalWire__...) are required in production when Voice:Enabled: login codes are sent by SMS.");
         if (!Uri.TryCreate(v.PublicBaseUrl, UriKind.Absolute, out var u) || (u.Scheme != "https" && !(devLike && u.Scheme == "http")) || u.AbsolutePath != "/")
             p.Add("Voice:PublicBaseUrl must be the public https origin of this API (no path) when Voice:Enabled.");
         if (!new[] { "full", "mini", "split" }.Contains(v.ModelMode)) p.Add("Voice:ModelMode must be full, mini or split.");

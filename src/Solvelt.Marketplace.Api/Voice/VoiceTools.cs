@@ -80,6 +80,10 @@ public static class VoiceScripts
 {
     /// <summary>Spoken by the telephone platform itself before the AI connects: the AI disclosure cannot depend on the model.</summary>
     public const string Disclosure = "Hello, and thank you for calling Solvelt. You are speaking with an automated A I assistant. You can press zero at any time to reach a person.";
+    public const string AskCode = "Please type the six digit code we just texted you, then press pound.";
+    public const string WrongCode = "That code did not match. Please try typing it again, then press pound.";
+    public const string CodeOk = "Thank you.";
+    public const string CodeFailed = "Sorry, that did not work.";
     public const string Connecting = "Please hold while I connect you to a person.";
     public const string NoPerson = "Our team is not available right now. You can also order on our web site. Goodbye.";
     public const string Trouble = "Sorry, we are having trouble right now. Please try again later. Goodbye.";

@@ -28,7 +28,7 @@ public static class SignalWireSignature
     }
 }
 
-/// <summary>Signed, short-lived token in the stream URL: <c>{callId:N}.{expiryUnix}.{hex hmac}</c>. Authenticates the WebSocket upgrade; it names one call and says nothing else.</summary>
+/// <summary>Signed, short-lived, single-use token in the stream URL: <c>{callId:N}.{expiryUnix}.{nonce}.{hex hmac}</c>. Authenticates the WebSocket upgrade; it names one call and says nothing else.</summary>
 public sealed class StreamTokens(Microsoft.Extensions.Options.IOptions<VoiceOptions> options, TimeProvider time)
 {
     private byte[] Key => Encoding.UTF8.GetBytes(options.Value.StreamTokenKey ?? throw new InvalidOperationException("Voice:StreamTokenKey is not set."));
@@ -41,15 +41,27 @@ public sealed class StreamTokens(Microsoft.Extensions.Options.IOptions<VoiceOpti
 
     public string Issue(Guid callId)
     {
-        var payload = callId.ToString("N") + "." + (time.GetUtcNow().ToUnixTimeSeconds() + options.Value.StreamTokenSeconds).ToString(CultureInfo.InvariantCulture);
+        var payload = callId.ToString("N") + "." + (time.GetUtcNow().ToUnixTimeSeconds() + options.Value.StreamTokenSeconds).ToString(CultureInfo.InvariantCulture) + "." + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(8));
         return payload + "." + Mac(payload);
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _used = new();
+
+    /// <summary>Validates AND spends the token: it opens one stream, once (a copied URL or a replayed upgrade is refused). Spent marks are kept until the token would have expired anyway.</summary>
+    public Guid? Use(string? token)
+    {
+        var id = Validate(token);
+        if (id is null) return null;
+        var now = time.GetUtcNow().ToUnixTimeSeconds();
+        foreach (var kv in _used) if (kv.Value < now) _used.TryRemove(kv.Key, out _);
+        return _used.TryAdd(token!.Split('.')[3], long.Parse(token.Split('.')[1], CultureInfo.InvariantCulture)) ? id : null;
     }
 
     public Guid? Validate(string? token)
     {
         var parts = token?.Split('.');
-        if (parts is not { Length: 3 } || !long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var exp) || !Guid.TryParseExact(parts[0], "N", out var id)) return null;
-        if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(Mac(parts[0] + "." + parts[1])), Encoding.ASCII.GetBytes(parts[2]))) return null;
+        if (parts is not { Length: 4 } || !long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var exp) || !Guid.TryParseExact(parts[0], "N", out var id)) return null;
+        if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(Mac(parts[0] + "." + parts[1] + "." + parts[2])), Encoding.ASCII.GetBytes(parts[3]))) return null;
         return time.GetUtcNow().ToUnixTimeSeconds() > exp ? null : id;
     }
 }

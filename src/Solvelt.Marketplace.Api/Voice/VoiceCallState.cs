@@ -3,6 +3,9 @@ using System.Text;
 
 namespace Solvelt.Marketplace.Api.Voice;
 
+public sealed record ProductRef(Guid ListingId, string Slug, string Title);
+public sealed record VariantRef(Guid VariantId, string Name, long PriceCents, bool Available);
+
 public enum CallerLevel { Anonymous, Guest, Verified }
 public enum ConfirmationStatus { None, ReadBack, Confirmed }
 
@@ -38,7 +41,39 @@ public sealed class VoiceCallState
     public int Version { get; private set; }
     public DateTimeOffset LastTouched { get; private set; }
 
+    /// <summary>The caller's number as SignalWire reported it (E.164). Memory only: never stored, logged or given to the model. Caller ID alone never authenticates anyone.</summary>
+    public string? CallerNumber { get; private set; }
+    public string? FirstName { get; private set; }
+    public string? GuestName { get; private set; }
+    public string? VerifiedPhone { get; private set; }
+    public PhoneChallenge? Challenge { get; private set; }
+    private int _sms;
+    /// <summary>The guest cart's token (the cart service creates it on the first add); an account cart needs none.</summary>
+    public string? CartToken { get; private set; }
+    /// <summary>The products last read out, so the caller can say "the second one". The model names a position; the server holds the ids.</summary>
+    public IReadOnlyList<ProductRef> LastResults { get; private set; } = [];
+
+    public void SetCaller(string? e164) { lock (_gate) CallerNumber ??= e164; }
+    public void SetFirstName(string? name) { lock (_gate) FirstName = name; }
+    public void SetGuestName(string? name) { lock (_gate) { GuestName = name; Version++; } }
+    public void SetVerifiedPhone(string? phone) { lock (_gate) { VerifiedPhone = phone; Version++; } }
+    /// <summary>The number and account of the last challenge, kept after it is consumed so the keypad handler can apply it.</summary>
+    public string? LastChallengePhone { get; private set; }
+    public Guid? LastChallengeAccount { get; private set; }
+    public void SetChallenge(PhoneChallenge? c) { lock (_gate) { if (c is not null) { LastChallengePhone = c.Phone; LastChallengeAccount = c.AccountId; } Challenge = c; } }
+    public bool TryCountSms(int max) { lock (_gate) { if (_sms >= max) return false; _sms++; return true; } }
+    public void SetCartToken(string? token) { lock (_gate) CartToken = token; }
+    public void SetResults(IReadOnlyList<ProductRef> results) { lock (_gate) LastResults = results; }
+    /// <summary>The product last described and its variants, so "the large one" means a variant the server knows.</summary>
+    public ProductRef? CurrentProduct { get; private set; }
+    public IReadOnlyList<VariantRef> CurrentVariants { get; private set; } = [];
+    public void SetCurrentProduct(ProductRef? product, IReadOnlyList<VariantRef> variants) { lock (_gate) { CurrentProduct = product; CurrentVariants = variants; } }
+    /// <summary>How the last keypad step ended (<c>verified</c>, <c>failed</c>), told to the model once when the stream resumes.</summary>
+    public string? LastKeypadOutcome { get; private set; }
+    public void SetKeypadOutcome(string? outcome) { lock (_gate) LastKeypadOutcome = outcome; }
+
     public void Connected(DateTimeOffset now) { lock (_gate) { Connections++; LastTouched = now; } }
+    public void Touch(DateTimeOffset now) { lock (_gate) LastTouched = now; }
 
     public void BeginKeypadStep(string step) { lock (_gate) { KeypadStep = step; Version++; } }
     public void EndKeypadStep() { lock (_gate) { KeypadStep = null; Version++; } }
@@ -75,8 +110,10 @@ public sealed class VoiceCallState
         lock (_gate)
         {
             var sb = new StringBuilder("Server state of this call (facts, not caller words). ");
-            sb.Append(Level switch { CallerLevel.Verified => VerifiedInThisCall ? "The caller is verified by SMS code in this call. " : "The caller is recognised but not verified in this call. ", CallerLevel.Guest => "The caller is a guest. ", _ => "The caller is not identified yet. " });
+            sb.Append(Level switch { CallerLevel.Verified => VerifiedInThisCall ? "The caller is verified by SMS code in this call. " : "The caller is recognised but not verified in this call. ", CallerLevel.Guest => "The caller is a guest" + (VerifiedPhone is not null ? " whose phone is verified. " : ". "), _ => "The caller is not identified yet. " });
+            if (FirstName is not null && Level == CallerLevel.Verified) sb.Append("Their first name is ").Append(FirstName).Append(". ");
             sb.Append("Current task: ").Append(Task).Append(". ");
+            if (LastKeypadOutcome == "failed") sb.Append("The caller typed a wrong code too often or it expired: they are NOT verified. ");
             sb.Append(CartItemCount == 0 ? "The cart is empty. " : $"The cart has {CartItemCount} item{(CartItemCount == 1 ? "" : "s")}. ");
             if (AddressLabel is not null) sb.Append("Delivery address chosen: ").Append(AddressLabel).Append(". ");
             if (DeliveryChoice is not null) sb.Append("Delivery option: ").Append(DeliveryChoice).Append(". ");
@@ -101,7 +138,9 @@ public sealed class VoiceStateStore(TimeProvider time)
     public VoiceCallState GetOrCreate(Guid callId)
     {
         Sweep();
-        return _states.GetOrAdd(callId, id => new VoiceCallState(id));
+        var s = _states.GetOrAdd(callId, id => new VoiceCallState(id));
+        s.Touch(time.GetUtcNow());
+        return s;
     }
 
     public VoiceCallState? Find(Guid callId) => _states.TryGetValue(callId, out var s) ? s : null;
