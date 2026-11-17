@@ -39,6 +39,7 @@ public static class ServicesModule
         services.AddScoped<BookingsAccountEraser>();
         services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, BookingsDataExporter>();
         services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, BookingsAccountEraser>();
+        services.AddSingleton<IHoldRaceProbe, NoHoldRaceProbe>();
         services.AddScoped<BookingService>();
         services.AddScoped<BookingMaintenance>();
         services.AddScoped<BookingActions>();

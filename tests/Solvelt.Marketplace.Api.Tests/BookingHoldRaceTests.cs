@@ -6,6 +6,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
 
@@ -122,44 +123,38 @@ public sealed class BookingHoldCapRaceTests : IDisposable
     private readonly Gate _gate = new();
     private string _jane = "";
 
-    private sealed class Gate
+    /// <summary>
+    /// The first request to reach the cap count passes. Every later one is parked there until the first insert is saved, and the first insert waits until some request is parked,
+    /// so at least one request always has a "no row" key lookup and a "cap reached" count.
+    /// </summary>
+    private sealed class Gate : Solvelt.Marketplace.Api.Services.IHoldRaceProbe
     {
         public volatile bool Armed;
-        public int Counts;
+        private int _counts;
         public readonly TaskCompletionSource Waiting = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource Inserted = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    }
-
-    private sealed class CountGate(Gate g) : DbCommandInterceptor
-    {
-        public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(System.Data.Common.DbCommand command, CommandEventData eventData, InterceptionResult<object> result, CancellationToken ct = default)
+        private static Task Timeout() => Task.Delay(TimeSpan.FromSeconds(10));
+        public async Task AtAsync(Solvelt.Marketplace.Api.Services.HoldProbePoint point, CancellationToken ct)
         {
-            if (g.Armed && command.CommandText.Contains("COUNT(*)", StringComparison.OrdinalIgnoreCase) && command.CommandText.Contains("bookings", StringComparison.OrdinalIgnoreCase) && Interlocked.Increment(ref g.Counts) > 1)
+            if (!Armed) return;
+            switch (point)
             {
-                g.Waiting.TrySetResult();
-                await Task.WhenAny(g.Inserted.Task, Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None));
+                case Solvelt.Marketplace.Api.Services.HoldProbePoint.BeforeCapCount:
+                    if (Interlocked.Increment(ref _counts) > 1) { Waiting.TrySetResult(); await Task.WhenAny(Inserted.Task, Timeout()); }
+                    break;
+                case Solvelt.Marketplace.Api.Services.HoldProbePoint.BeforeInsert:
+                    await Task.WhenAny(Waiting.Task, Timeout());
+                    break;
+                case Solvelt.Marketplace.Api.Services.HoldProbePoint.AfterInsert:
+                    Inserted.TrySetResult();
+                    break;
             }
-            return result;
-        }
-    }
-
-    private sealed class InsertGate(Gate g) : SaveChangesInterceptor
-    {
-        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
-        {
-            if (g.Armed && eventData.Context!.ChangeTracker.Entries<Booking>().Any(e => e.State == EntityState.Added)) await Task.WhenAny(g.Waiting.Task, Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None));
-            return result;
-        }
-        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result, CancellationToken ct = default)
-        {
-            if (g.Armed && g.Waiting.Task.IsCompleted) g.Inserted.TrySetResult();
-            return ValueTask.FromResult(result);
         }
     }
 
     public BookingHoldCapRaceTests()
     {
-        _k = new AuthKit(new Dictionary<string, string?> { ["Bookings:MaxActiveHolds"] = "3" }, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(new CountGate(_gate), new InsertGate(_gate))));
+        _k = new AuthKit(new Dictionary<string, string?> { ["Bookings:MaxActiveHolds"] = "3" }, s => { s.RemoveAll<Solvelt.Marketplace.Api.Services.IHoldRaceProbe>(); s.AddSingleton<Solvelt.Marketplace.Api.Services.IHoldRaceProbe>(_gate); });
         _portal = new FakeBookingPortal(_k.F.Clock);
     }
 

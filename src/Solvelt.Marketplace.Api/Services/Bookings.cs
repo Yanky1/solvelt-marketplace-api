@@ -27,6 +27,11 @@ public sealed record BookingView(Guid Id, string? Number, Guid ListingId, string
 public enum HoldStatus { Ok, NotFound, Invalid, IdempotencyConflict, TooManyHolds, SlotUnavailable, PortalRefused, Unavailable }
 public sealed record HoldResult(HoldStatus Status, BookingView? Booking = null, bool Created = false, string? Code = null, IReadOnlyDictionary<string, string>? Errors = null);
 
+/// <summary>Points in <see cref="BookingService.HoldAsync"/> where a test can park a request to force an interleaving of parallel same-key requests (FX1-01). Production does nothing there.</summary>
+public enum HoldProbePoint { BeforeCapCount, BeforeInsert, AfterInsert }
+public interface IHoldRaceProbe { Task AtAsync(HoldProbePoint point, CancellationToken ct); }
+public sealed class NoHoldRaceProbe : IHoldRaceProbe { public Task AtAsync(HoldProbePoint point, CancellationToken ct) => Task.CompletedTask; }
+
 public sealed class BookingOptions
 {
     public int MaxActiveHolds { get; set; } = 3;
@@ -44,7 +49,7 @@ public static class BookingStatuses
     public static bool RevealsMeetingLink(string status) => status is BookingStatus.Confirmed or BookingStatus.Rescheduled or BookingStatus.InProgress;
 }
 
-public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal, ServiceOptionsCache serviceOptions, Portal.Webhooks.PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingService> log)
+public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal, ServiceOptionsCache serviceOptions, Portal.Webhooks.PortalEventProcessor events, TimeProvider time, IOptions<BookingOptions> options, ILogger<BookingService> log, IHoldRaceProbe probe)
 {
     private static readonly string[] Locations = ["online", "customer", "seller"];
     private const string IdAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -129,6 +134,7 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
                 if (opts.Assignment != "buyerChoice") return new HoldResult(HoldStatus.Invalid, Errors: new Dictionary<string, string> { ["providerId"] = "This service assigns the provider; you cannot choose one." });
                 if (!opts.Providers.Any(p => p.ProviderId == wanted)) return new HoldResult(HoldStatus.Invalid, Errors: new Dictionary<string, string> { ["providerId"] = "That provider is not available for this service." });
             }
+            await probe.AtAsync(HoldProbePoint.BeforeCapCount, ct);
             var open = await db.Bookings.CountAsync(b => b.AccountId == buyer.AccountId && (b.Status == BookingStatus.HoldPending || (b.Status == BookingStatus.Hold && (b.HoldExpiresAt == null || b.HoldExpiresAt > now))), ct);
             if (open >= Math.Clamp(options.Value.MaxActiveHolds, 1, 20))
             {
@@ -151,6 +157,7 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
                     AddrCity = a is null ? null : Clean(a.City), AddrRegion = a is null || Clean(a.Region).Length == 0 ? null : Clean(a.Region), AddrPostalCode = a is null ? null : Clean(a.PostalCode),
                     AddrCountry = a is null ? null : Clean(a.Country).ToUpperInvariant(), AddrLat = a?.Lat, AddrLng = a?.Lng, Phone = Clean(r.Phone) is { Length: > 0 } p ? p : null,
                 };
+                await probe.AtAsync(HoldProbePoint.BeforeInsert, ct);
                 var fresh = row;
                 for (var attempt = 0; ; attempt++)
                 {
@@ -174,6 +181,7 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
                         await Task.Delay(Random.Shared.Next(2, 12) * (attempt + 1), ct);
                     }
                 }
+                if (created) await probe.AtAsync(HoldProbePoint.AfterInsert, ct);
             }
         }
 
