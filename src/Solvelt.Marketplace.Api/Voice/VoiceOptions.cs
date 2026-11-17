@@ -27,7 +27,9 @@ public sealed class VoiceOptions
     public int MiniPercent { get; set; } = 50;
     public string OpenAiVoice { get; set; } = "cedar";
     /// <summary><c>server_vad</c> or <c>semantic_vad</c>.</summary>
-    public string TurnDetection { get; set; } = "server_vad";
+    public string TurnDetection { get; set; } = "semantic_vad";
+    /// <summary>A tool slower than this many milliseconds makes the agent say a short natural filler first: never silence.</summary>
+    public int ToolFillerMs { get; set; } = 700;
     public string OpenAiRealtimeUrl { get; set; } = "wss://api.openai.com/v1/realtime";
     /// <summary>USD per million tokens, from OpenAI's model pages on 2026-11-17 (V-01). Cached input is priced lower; the estimate charges it at the full rate (it errs high).</summary>
     public VoicePrices PricePerMillionFull { get; set; } = new() { AudioIn = 32m, AudioOut = 64m, TextIn = 4m, TextOut = 24m };

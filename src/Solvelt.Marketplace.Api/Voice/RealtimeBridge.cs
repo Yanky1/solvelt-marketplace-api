@@ -30,14 +30,17 @@ public sealed class OpenAiRealtimeConnector(IOptions<VoiceOptions> options) : IR
 /// What crosses: caller audio up, agent audio down, the model's tool calls and our tool results. What never crosses: DTMF digits (dropped here, not even logged),
 /// anything a keypad step produces, payload text in logs. Nothing is stored but counters.
 /// </summary>
-public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCall call, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools,
+public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCall call, VoiceCallState state, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools,
     TimeProvider time, ILogger logger)
 {
     private const int BytesPerMs = 8;   // mu-law, 8000 samples per second, one byte each
     private readonly SemaphoreSlim _phoneSend = new(1, 1), _upSend = new(1, 1);
     private string? _streamSid, _itemId;
     private long _playedBytes, _speechStopped;
-    private bool _playing, _endAfterResponse, _dtmfTransfer;
+    private bool _playing, _endAfterResponse, _dtmfTransfer, _responseActive;
+    private TaskCompletionSource? _fillerDone;
+    private CancellationTokenSource _cts = new();
+    private Task _calls = Task.CompletedTask;
     private TaskCompletionSource _markEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly VoiceOptions _o = options.Value;
 
@@ -45,6 +48,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     public async Task<string> RunAsync(CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _cts = cts;
         cts.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, _o.MaxCallSeconds)));   // per-call limit: call length
         var token = cts.Token;
         string outcome = VoiceOutcome.Abandoned;
@@ -52,7 +56,14 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
         try
         {
             await SendUpAsync(SessionUpdate(), token);
-            await SendUpAsync(new JsonObject { ["type"] = "response.create", ["response"] = new JsonObject { ["instructions"] = VoiceScripts.Greeting } }, token);
+            if (state.Connections > 1)
+            {
+                // a keypad step ended the earlier stream: same voice, same prompt, plus the server's summary of where things stand
+                await SendUpAsync(new JsonObject { ["type"] = "conversation.item.create", ["item"] = new JsonObject { ["type"] = "message", ["role"] = "system", ["content"] = new JsonArray(new JsonObject { ["type"] = "input_text", ["text"] = state.Summary() }) } }, token);
+                await SendUpAsync(new JsonObject { ["type"] = "response.create", ["response"] = new JsonObject { ["instructions"] = VoiceScripts.Resume } }, token);
+            }
+            else await SendUpAsync(new JsonObject { ["type"] = "response.create", ["response"] = new JsonObject { ["instructions"] = VoiceScripts.Greeting } }, token);
+            _responseActive = true;
             phoneLoop = PumpAsync(phone, HandlePhoneAsync, token);
             upLoop = PumpAsync(upstream, HandleUpAsync, token);
             await Task.WhenAny(phoneLoop, upLoop);
@@ -63,10 +74,10 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
         finally
         {
             cts.Cancel();
-            try { await Task.WhenAll(phoneLoop, upLoop); } catch (Exception) { /* both loops end by cancellation or a closed socket */ }
+            try { await Task.WhenAll(phoneLoop, upLoop, _calls); } catch (Exception) { /* both loops end by cancellation or a closed socket */ }
             await CloseQuietly(upstream);
             await CloseQuietly(phone);
-            await store.EndAsync(call.Id, outcome, CancellationToken.None);
+            if (state.KeypadStep is null) await store.EndAsync(call.Id, outcome, CancellationToken.None);   // a keypad step pauses the call: the next stream resumes it
         }
         return outcome;
     }
@@ -129,6 +140,9 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     {
         switch (Str(m, "type"))
         {
+            case "response.created":
+                _responseActive = true;
+                break;
             case "response.output_audio.delta" or "response.audio.delta":
                 if (Str(m, "delta") is { Length: > 0 } delta && _streamSid is not null)
                 {
@@ -162,21 +176,56 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
 
     private async Task HandleResponseDoneAsync(JsonElement m, CancellationToken ct)
     {
-        _playing = false; _playedBytes = 0;
+        _playing = false; _playedBytes = 0; _responseActive = false;
+        _fillerDone?.TrySetResult();
         if (!m.TryGetProperty("response", out var r)) return;
         if (r.TryGetProperty("usage", out var u)) await store.AddUsageAsync(call.Id, call.Tier, ReadUsage(u), ct);
-        var anyCall = false;
+        var pending = new List<(string Name, string? Args, string? CallId)>();
         if (r.TryGetProperty("output", out var output) && output.ValueKind == JsonValueKind.Array)
             foreach (var item in output.EnumerateArray())
+                if (Str(item, "type") == "function_call") pending.Add((Str(item, "name") ?? "", Str(item, "arguments"), Str(item, "call_id")));
+        if (pending.Count > 0)
+        {
+            // off the read loop: a slow tool must not stop audio, barge-in or the filler's own events from being handled
+            var previous = _calls;
+            _calls = Task.Run(async () =>
             {
-                if (Str(item, "type") != "function_call") continue;
-                anyCall = true;
-                var result = await tools.RunAsync(new VoiceToolContext(call.Id, call.Tier), Str(item, "name") ?? "", Str(item, "arguments"), ct);
-                _endAfterResponse |= result.EndCall;
-                await SendUpAsync(new JsonObject { ["type"] = "conversation.item.create", ["item"] = new JsonObject { ["type"] = "function_call_output", ["call_id"] = Str(item, "call_id"), ["output"] = result.Output } }, ct);
-            }
-        if (anyCall) { await SendUpAsync(new JsonObject { ["type"] = "response.create" }, ct); return; }
+                try { await previous; await RunCallsAsync(pending, ct); }
+                catch (OperationCanceledException) { /* the call ended */ }
+                catch (WebSocketException) { /* a socket closed */ }
+            }, CancellationToken.None);
+            return;
+        }
         if (_endAfterResponse) await FinishAfterGoodbyeAsync(ct);
+    }
+
+    private async Task RunCallsAsync(List<(string Name, string? Args, string? CallId)> pending, CancellationToken ct)
+    {
+        foreach (var (name, args, callId) in pending)
+        {
+            var result = await RunToolWithFillerAsync(name, args, ct);
+            _endAfterResponse |= result.EndCall;
+            await SendUpAsync(new JsonObject { ["type"] = "conversation.item.create", ["item"] = new JsonObject { ["type"] = "function_call_output", ["call_id"] = callId, ["output"] = result.Output } }, ct);
+        }
+        _responseActive = true;
+        await SendUpAsync(new JsonObject { ["type"] = "response.create" }, ct);
+    }
+
+    /// <summary>A tool that takes longer than <c>Voice:ToolFillerMs</c> makes the agent say a short natural filler first, so the caller never hears silence; the answer waits for the filler to finish.</summary>
+    private async Task<VoiceToolResult> RunToolWithFillerAsync(string name, string? args, CancellationToken ct)
+    {
+        var run = tools.RunAsync(new VoiceToolContext(call.Id, call.Tier, state), name, args, ct);
+        var fast = await Task.WhenAny(run, Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, _o.ToolFillerMs)), time, ct));
+        if (fast != run && !_responseActive)
+        {
+            _fillerDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            _responseActive = true;
+            await SendUpAsync(new JsonObject { ["type"] = "response.create", ["response"] = new JsonObject { ["instructions"] = VoiceScripts.Filler, ["tool_choice"] = "none" } }, ct);
+            var result = await run;
+            await Task.WhenAny(_fillerDone.Task, Task.Delay(TimeSpan.FromSeconds(4), time, ct));   // its response.done is handled by the read loop, which keeps running
+            return result;
+        }
+        return await run;
     }
 
     /// <summary>The agent has said goodbye: wait (bounded) until the phone has played it, then end the stream so SignalWire continues with the next instruction (the transfer).</summary>
@@ -184,7 +233,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     {
         if (_streamSid is not null) await SendPhoneAsync(new JsonObject { ["event"] = "mark", ["streamSid"] = _streamSid, ["mark"] = new JsonObject { ["name"] = "end" } }, ct);
         await Task.WhenAny(_markEnd.Task, Task.Delay(TimeSpan.FromSeconds(6), time, ct));
-        throw new OperationCanceledException();
+        _cts.Cancel();
     }
 
     internal static VoiceUsage ReadUsage(JsonElement u)

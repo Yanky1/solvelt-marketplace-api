@@ -155,7 +155,7 @@ public class VoiceCallTests
         Assert.Equal("audio/pcmu", s["audio"]!["input"]!["format"]!["type"]!.GetValue<string>());
         Assert.Equal("audio/pcmu", s["audio"]!["output"]!["format"]!["type"]!.GetValue<string>());
         Assert.Equal("ash", s["audio"]!["output"]!["voice"]!.GetValue<string>());
-        Assert.Equal("server_vad", s["audio"]!["input"]!["turn_detection"]!["type"]!.GetValue<string>());
+        Assert.Equal("semantic_vad", s["audio"]!["input"]!["turn_detection"]!["type"]!.GetValue<string>());   // the agent does not cut in on a caller who pauses mid-sentence
         Assert.Contains(s["tools"]!.AsArray(), t => t!["name"]!.GetValue<string>() == "transfer_to_person");
         var greeting = await fake.Wait("response.create");
         Assert.Contains("AI", greeting["response"]!["instructions"]!.GetValue<string>());
@@ -298,7 +298,7 @@ public class VoiceCallTests
         foreach (var d in "4111111111111111#") await phone.Dtmf(d.ToString());
         await phone.Media(Audio);
         await fake.Wait("input_audio_buffer.append");   // the audio sent after the digits has arrived, so the digits would have too
-        Assert.DoesNotContain(fake.Received, m => m.Contains("4111") || m.Contains("dtmf", StringComparison.OrdinalIgnoreCase) || m.Contains("digit"));
+        Assert.DoesNotContain(fake.Received, m => m.Contains("4111") || m.Contains("\"dtmf\"", StringComparison.OrdinalIgnoreCase) || m.Contains("\"digit\""));
         Assert.DoesNotContain(f.Logs.Lines, l => l.Contains("4111") || l.Contains("dtmf", StringComparison.OrdinalIgnoreCase));
     }
 

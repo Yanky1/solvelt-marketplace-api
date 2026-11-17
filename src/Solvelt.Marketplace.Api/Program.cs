@@ -107,6 +107,7 @@ builder.Services.Configure<Solvelt.Marketplace.Api.Voice.SignalWireOptions>(buil
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.StreamTokens>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceCallStore>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceToolRunner>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceStateStore>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IRealtimeConnector, Solvelt.Marketplace.Api.Voice.OpenAiRealtimeConnector>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TransferToPersonTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.VoiceReportService>();

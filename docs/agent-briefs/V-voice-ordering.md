@@ -1,4 +1,4 @@
-# V. Voice ordering for buyers (Vapi-like, OpenAI Realtime, SignalWire)
+# V. Voice ordering for buyers (Vapi-quality conversation, OpenAI Realtime, SignalWire)
 
 Requested by Ronald, the repository owner, on 2026-11-17, and confirmed by him directly in the buyer orchestrator's chat ("yes, start it"). This brief is an approved assignment (see CLAUDE.md). The feature freeze is lifted for this project only; everything else stays frozen.
 
@@ -37,6 +37,56 @@ The first version covers products and order status only; service bookings come l
 - **The voice service:** a new module in the marketplace API, or a small sibling service (it needs long-lived WebSockets). Choose, and record the choice.
 - **Tools:** the model's function calls map to server-side handlers that call the EXISTING buyer API services (catalog, cart, addresses, quote, checkout, orders). Duplicate no business logic.
 - **Keypad steps** (SMS code, confirmation key, payment): pause or end the OpenAI stream, run cXML `<Gather input="dtmf">` or `<Pay>`, then reconnect a stream with a server-side summary of the state. No DTMF digits ever reach OpenAI.
+
+## Conversational quality: Vapi-level, human-sounding (clarified by Ronald directly in the orchestrator's chat, 2026-11-17)
+"Vapi-like" means the conversational STYLE and QUALITY, not Vapi's feature set; our features are the ones in this brief. The agent must sound like a friendly, natural person on the phone, and must never get confused across turns.
+- **Turn-taking:**
+  - Use semantic turn detection (OpenAI `semantic_vad` or the current equivalent; verify in the docs), so the agent doesn't cut in on a caller who pauses mid-sentence and doesn't wait awkwardly after they finish.
+  - Barge-in: when the caller starts speaking, stop playback at once (clear the SignalWire audio buffer), and truncate the agent's unheard audio in the model's context (`conversation.item.truncate` or the current equivalent), so the model knows what the caller actually heard.
+- **Latency:**
+  - Under about 800 ms from the caller stopping to the agent starting to speak, measured and recorded for every call.
+  - For tool calls that take longer than about 700 ms, the agent says a short natural filler first ("let me check that for you"), never silence.
+- **Speaking style (system prompt plus server-shaped tool results):**
+  - Short spoken sentences, one question at a time, and contractions.
+  - Natural acknowledgements ("sure", "got it") without overdoing them.
+  - Never read out long lists: at most 3 options, then offer more.
+  - Prices, dates, order numbers and addresses are spoken the way a person says them ("twelve ninety-nine", "Tuesday the fourth"), not as raw digits or ISO dates. Tool results give the model speech-ready text alongside the data.
+  - No markdown, URLs or symbols spoken.
+  - Don't repeat the same phrase turn after turn.
+  - Confirm important details without being tedious.
+- **Context:** never lose track across turns (see "Multi-turn conversations"). Corrections, interruptions, "wait, go back" and topic switches are handled gracefully, and the agent says where things stand when it resumes.
+- **Persona:** one consistent, friendly male voice and personality for the whole call, including after keypad steps and reconnects (the same voice and prompt, plus the state summary).
+- **Tests:**
+  - automated: response-length and list-length limits on tool results; the filler fires for slow tools; barge-in truncation; latency recorded; speech-ready formatting of money, dates and addresses; no markdown or URLs in spoken text.
+  - manual: a short listening checklist for Ronald (naturalness, interruptions, pauses, switching topics), run with the test keys. Nothing is recorded or stored.
+
+## Multi-turn conversations and switching tasks (added by Ronald directly in the orchestrator's chat, 2026-11-17)
+- **Any order, any time:** within one call, the caller can move freely between account setup, account editing, order status, cart, and placing an order, and come back, without the agent getting confused or losing anything.
+- **State lives on the server, not in the model's memory:**
+  - A per-call server state holds the caller's identity and verification level, the cart, the chosen address and delivery option, the current quote, the read-back/confirmation status, and any pending account change.
+  - The tools read and write that state.
+  - Whenever the stream reconnects (after keypad steps) or the context grows long, the model is given a short server-generated summary of the state. No transcripts are stored.
+- **Switching rules:**
+  - Leaving a task keeps its state; the cart and a half-entered address are intact on return.
+  - Any change that affects the order (cart, address, delivery, account details used for the order) invalidates the quote and the confirmation, so a fresh read-back is required.
+  - The agent says where the caller is when resuming ("we were at delivery; your cart still has 2 items").
+- **Account setup by phone:**
+  - Create a buyer account: name, phone verified by an SMS code typed on the keypad, and an optional email spelled out and read back.
+  - Reuse the existing account and auth services; duplicate no rules.
+  - A guest in the call can turn into an account, and the cart carries over.
+- **Account editing by phone:**
+  - Name, saved addresses (add, edit, remove, set default) and email, only after SMS verification on the keypad in THIS call.
+  - Changing the phone number requires verifying the NEW number by SMS code too.
+  - Every change is read back and confirmed before it is saved, and goes through the existing account services and audit.
+  - Password, payment methods and account deletion are not done by phone: the agent offers an SMS link to the website instead.
+- **Tests (scripted whole calls through the fake Realtime server):**
+  - switching mid-checkout to order status, then back, with the cart and address intact;
+  - an address edit after the read-back forces a new read-back;
+  - account creation as a guest-to-account conversion with the cart carried over;
+  - an unverified caller trying to edit the account is refused;
+  - a phone-number change without verifying the new number is refused;
+  - a long call (many turns and task switches) still places the right order;
+  - corrections ("no, 3 not 2", "go back", "cancel that") are handled.
 
 ## Payment (pluggable; the provider decision is pending)
 - Everything goes through an `IPhonePaymentProvider` interface, with a FAKE implementation for tests and dev.
@@ -107,7 +157,8 @@ The first version covers products and order status only; service bookings come l
 3. Address, delivery options, quote and read-back confirmation.
 4. The `IPhonePaymentProvider` interface with the fake, plus order placement. Wire in the real provider once it's decided.
 5. Order status and cancellation by phone; an SMS summary.
-6. Docs:
+6. Account setup and account editing by phone, plus the full task-switching test suite.
+7. Docs (the old slice 6):
    - a setup guide covering the SignalWire number and webhooks, OpenAI key and models, voice choice, limits, and the full env var list;
    - cost per minute (full vs mini);
    - known limits.

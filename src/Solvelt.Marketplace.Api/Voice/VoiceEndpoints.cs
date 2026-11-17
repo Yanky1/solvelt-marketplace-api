@@ -61,7 +61,7 @@ public static class VoiceEndpoints
         return Cxml(new XElement("Response", new XElement("Hangup")));
     }
 
-    private static async Task Stream(HttpContext ctx, IOptions<VoiceOptions> vo, StreamTokens tokens, VoiceCallStore store, IRealtimeConnector connector, VoiceToolRunner tools,
+    private static async Task Stream(HttpContext ctx, IOptions<VoiceOptions> vo, StreamTokens tokens, VoiceCallStore store, VoiceStateStore states, IRealtimeConnector connector, VoiceToolRunner tools,
         TimeProvider time, ILoggerFactory logs)
     {
         if (!vo.Value.Enabled) { ctx.Response.StatusCode = 404; return; }
@@ -83,7 +83,10 @@ public static class VoiceEndpoints
         }
         using var phone = await ctx.WebSockets.AcceptWebSocketAsync();
         log.LogInformation("Voice call {Call} started: caller {Caller}, model tier {Tier}.", call.Id, call.CallerMasked, call.Tier);
-        await new RealtimeBridge(phone, upstream, call, vo, store, tools, time, log).RunAsync(ctx.RequestAborted);
+        var state = states.GetOrCreate(call.Id);
+        state.Connected(time.GetUtcNow());
+        await new RealtimeBridge(phone, upstream, call, state, vo, store, tools, time, log).RunAsync(ctx.RequestAborted);
+        if (state.KeypadStep is null) states.Remove(call.Id);   // the call is over: nothing of it stays in memory
         upstream.Dispose();
     }
 }
