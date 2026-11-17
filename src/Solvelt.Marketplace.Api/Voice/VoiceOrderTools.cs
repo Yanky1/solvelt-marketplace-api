@@ -6,6 +6,8 @@ using Solvelt.Marketplace.Api.Carts;
 using Solvelt.Marketplace.Api.Catalog;
 using Solvelt.Marketplace.Api.Data;
 
+using Solvelt.Marketplace.Api.Infrastructure;
+
 namespace Solvelt.Marketplace.Api.Voice;
 
 /// <summary>

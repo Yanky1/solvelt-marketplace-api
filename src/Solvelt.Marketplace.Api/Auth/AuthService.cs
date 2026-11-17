@@ -318,6 +318,8 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
             .SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, a => a.SessionEpoch + 1)
             .SetProperty(a => a.DisplayName, a => a.EmailVerifiedAt == null || a.DemoVerifiedAt != null ? "Buyer" : a.DisplayName)   // a name typed by whoever registered an unverified address first is not kept
             .SetProperty(a => a.Phone, a => a.DemoVerifiedAt != null ? null : a.Phone)
+            .SetProperty(a => a.PhoneVerifiedE164, a => a.DemoVerifiedAt != null ? null : a.PhoneVerifiedE164)
+            .SetProperty(a => a.PhoneVerifiedAt, a => a.DemoVerifiedAt != null ? null : a.PhoneVerifiedAt)
             .SetProperty(a => a.EmailVerifiedAt, a => a.EmailVerifiedAt ?? now)
             .SetProperty(a => a.DemoVerifiedAt, (DateTimeOffset?)null), ct);   // the reset link proves the mailbox: a test-only verification is replaced by it (M9-07)
         if (changed == 0) return new ResetOutcome(false);

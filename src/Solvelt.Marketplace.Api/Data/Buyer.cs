@@ -20,6 +20,12 @@ public sealed class BuyerAccount
     public DateTimeOffset? DemoVerifiedAt { get; set; }
     /// <summary>Optional contact number (profile). Personal data: erased with the account.</summary>
     public string? Phone { get; set; }
+    /// <summary>
+    /// The number (E.164) that this account has PROVEN it holds, by an SMS code typed in a context already signed in as the account (decision V-05). The profile <see cref="Phone"/> is free text nobody checked,
+    /// so only this one lets the voice line recognise the caller as the account. At most one account holds a number (unique index); changing the profile phone, deleting the account or a demo verification clears it.
+    /// </summary>
+    public string? PhoneVerifiedE164 { get; set; }
+    public DateTimeOffset? PhoneVerifiedAt { get; set; }
     /// <summary><c>relay-&lt;random&gt;@&lt;relay domain&gt;</c>, generated once, unique, the only address the portal and sellers see.</summary>
     public string RelayEmail { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
@@ -176,6 +182,8 @@ internal sealed class BuyerAccountConfiguration : IEntityTypeConfiguration<Buyer
         b.Property(a => a.PasswordHash).HasMaxLength(400);
         b.Property(a => a.Phone).HasMaxLength(30);
         b.Property(a => a.RelayEmail).HasMaxLength(120).IsRequired();
+        b.Property(a => a.PhoneVerifiedE164).HasMaxLength(20);
+        b.HasIndex(a => a.PhoneVerifiedE164).IsUnique().HasDatabaseName("ux_buyer_accounts_phone_verified");   // several NULLs are allowed; a proven number belongs to one account
         b.HasIndex(a => a.Email).IsUnique();
         b.HasIndex(a => a.RelayEmail).IsUnique();
     }

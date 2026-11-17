@@ -2,6 +2,8 @@ using System.Net.WebSockets;
 using System.Xml.Linq;
 using Microsoft.Extensions.Options;
 
+using Solvelt.Marketplace.Api.Infrastructure;
+
 namespace Solvelt.Marketplace.Api.Voice;
 
 public static class VoiceEndpoints

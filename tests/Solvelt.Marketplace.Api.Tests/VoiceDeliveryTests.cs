@@ -255,7 +255,7 @@ public class VoiceDeliveryTests
         using var s = new VoiceScenario();
         await s.SyncCatalog(); s.PortalShipping();
         await s.K.VerifiedSession(Email);
-        await s.SetPhone(Email, "(555) 123-4567");
+        await s.SetPhone(Email, "(555) 123-4567", verified: true);
         var jane = await s.K.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Email == Email));
         await s.K.VerifiedSession("other@example.com", name: "Other Person");
         var other = await s.K.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Email == "other@example.com"));
@@ -286,7 +286,7 @@ public class VoiceDeliveryTests
         using var s = new VoiceScenario();
         await s.SyncCatalog(); s.PortalShipping();
         await s.K.VerifiedSession(Email);
-        await s.SetPhone(Email, "(555) 123-4567");
+        await s.SetPhone(Email, "(555) 123-4567", verified: true);
         var jane = await s.K.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Email == Email));
         using (var scope = s.F.Services.CreateScope())
             await scope.ServiceProvider.GetRequiredService<AccountService>().CreateAddressAsync(jane.Id, new AddressBody("Jane Brown", "10 Park Ave", null, "Brooklyn", "NY", "11201", "US", null, null, null, true), CancellationToken.None);

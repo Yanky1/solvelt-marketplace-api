@@ -137,6 +137,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     EmailVerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     DemoVerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     Phone = table.Column<string>(type: "character varying(30)", maxLength: 30, nullable: true),
+                    PhoneVerifiedE164 = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    PhoneVerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     RelayEmail = table.Column<string>(type: "character varying(120)", maxLength: 120, nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -1506,6 +1508,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 name: "IX_buyer_accounts_RelayEmail",
                 table: "buyer_accounts",
                 column: "RelayEmail",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "ux_buyer_accounts_phone_verified",
+                table: "buyer_accounts",
+                column: "PhoneVerifiedE164",
                 unique: true);
 
             migrationBuilder.CreateIndex(

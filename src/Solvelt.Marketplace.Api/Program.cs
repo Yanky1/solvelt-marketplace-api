@@ -111,6 +111,7 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceStateStore>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IRealtimeConnector, Solvelt.Marketplace.Api.Voice.OpenAiRealtimeConnector>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhoneCodeService>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhoneIdentity>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.AccountPhoneVerifier>();
 if (devLike) builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.InMemorySmsSender>();
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.SignalWireSmsSender>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessCatalog>(sp => new Solvelt.Marketplace.Api.Voice.InProcessCatalog(sp));

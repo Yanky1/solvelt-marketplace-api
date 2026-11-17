@@ -105,7 +105,13 @@ public sealed class VoiceScenario : IDisposable
     public string LastCode(string? to = null)
         => Regex.Match(Sms.Sent.Last(m => to is null || m.To == to).Body, @"\b(\d{6})\b").Groups[1].Value;
 
-    public async Task SetPhone(string email, string phone) => await K.Db(async db => await db.BuyerAccounts.Where(a => a.Email == email).ExecuteUpdateAsync(s => s.SetProperty(a => a.Phone, phone)));
+    /// <summary>The profile phone (free text, unproven). <paramref name="verified"/> stands for a proof by SMS code in a session signed in as the account.</summary>
+    public async Task SetPhone(string email, string phone, bool verified = false)
+    {
+        var e164 = verified ? Solvelt.Marketplace.Api.Infrastructure.PhoneNumbers.ToE164(phone) : null;
+        var at = verified ? F.Clock.GetUtcNow() : (DateTimeOffset?)null;
+        await K.Db(async db => await db.BuyerAccounts.Where(a => a.Email == email).ExecuteUpdateAsync(s => s.SetProperty(a => a.Phone, phone).SetProperty(a => a.PhoneVerifiedE164, e164).SetProperty(a => a.PhoneVerifiedAt, at)));
+    }
     public Task<VoiceCall> Row() => Task.Run(async () => { using var s = F.Services.CreateScope(); return await s.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.AsNoTracking().SingleAsync(c => c.CallSid == Sid); });
     public VoiceCallState State() => F.Services.GetRequiredService<VoiceStateStore>().Find(Row().Result.Id)!;
 

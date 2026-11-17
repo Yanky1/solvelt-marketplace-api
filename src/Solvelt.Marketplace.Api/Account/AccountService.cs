@@ -66,8 +66,12 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         var name = AuthValidation.NormaliseText(displayName);
         var number = string.IsNullOrWhiteSpace(phone) ? null : AuthValidation.NormaliseText(phone);
         var now = Now;
+        var e164 = Infrastructure.PhoneNumbers.ToE164(number);
+        // a number the buyer changed is a number nobody has proven: the proof stays only while the profile phone still means the same number (decision V-05)
         var rows = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DisplayName, name).SetProperty(a => a.Phone, number).SetProperty(a => a.UpdatedAt, now), ct);
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DisplayName, name).SetProperty(a => a.Phone, number).SetProperty(a => a.UpdatedAt, now)
+                .SetProperty(a => a.PhoneVerifiedE164, a => a.PhoneVerifiedE164 == e164 ? a.PhoneVerifiedE164 : null)
+                .SetProperty(a => a.PhoneVerifiedAt, a => a.PhoneVerifiedE164 == e164 ? a.PhoneVerifiedAt : null), ct);
         return rows == 1 ? await GetProfileAsync(accountId, ct) : null;
     }
 
@@ -299,7 +303,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         await db.BuyerPasskeys.Where(p => p.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.WebAuthnChallenges.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.RedactedAt == null).ExecuteUpdateAsync(s => s
-            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null)
+            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null).SetProperty(a => a.PhoneVerifiedE164, (string?)null).SetProperty(a => a.PhoneVerifiedAt, (DateTimeOffset?)null)
             .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.StaffLockedAt, (DateTimeOffset?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
         await tx.CommitAsync(ct);
         return true;

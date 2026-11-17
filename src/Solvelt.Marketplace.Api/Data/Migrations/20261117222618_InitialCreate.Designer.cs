@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261117191856_InitialCreate")]
+    [Migration("20261117222618_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -402,6 +402,13 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)");
 
+                    b.Property<DateTimeOffset?>("PhoneVerifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PhoneVerifiedE164")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
                     b.Property<DateTimeOffset?>("RedactedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -423,6 +430,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.HasIndex("Email")
                         .IsUnique();
+
+                    b.HasIndex("PhoneVerifiedE164")
+                        .IsUnique()
+                        .HasDatabaseName("ux_buyer_accounts_phone_verified");
 
                     b.HasIndex("RelayEmail")
                         .IsUnique();

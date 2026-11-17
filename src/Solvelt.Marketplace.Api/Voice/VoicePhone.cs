@@ -9,21 +9,6 @@ using Solvelt.Marketplace.Api.Infrastructure;
 
 namespace Solvelt.Marketplace.Api.Voice;
 
-public static class PhoneNumbers
-{
-    /// <summary>E.164 for a number as people write it. Ten digits, or eleven starting with 1, are US/Canada (our default market; the code takes no other assumption); anything with a leading + keeps its country. Null when it is not a phone number.</summary>
-    public static string? ToE164(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-        var plus = raw.TrimStart().StartsWith('+');
-        var d = new string(raw.Where(char.IsDigit).ToArray());
-        if (plus) return d.Length is >= 8 and <= 15 ? "+" + d : null;
-        if (d.Length == 10) return "+1" + d;
-        if (d.Length == 11 && d[0] == '1') return "+" + d;
-        return null;
-    }
-}
-
 /// <summary>Sends a text message. A seam: tests and development use <see cref="InMemorySmsSender"/>; production uses SignalWire's messaging API.</summary>
 public interface ISmsSender
 {
@@ -122,23 +107,41 @@ public sealed class PhoneCodeService(ISmsSender sms, IOptions<VoiceOptions> opti
     }
 }
 
-/// <summary>Which buyer account, if any, owns a phone number. Never guesses: more than one match is no match.</summary>
+/// <summary>
+/// Which buyer account, if any, has PROVEN that it holds a phone number (decision V-05). The profile phone is free text nobody checked: a typo, or a number that was reassigned, would let whoever
+/// holds it now pass the SMS code and become that account, so it is never used. Only <c>PhoneVerifiedE164</c>, set by a code typed in a session already signed in as the account, counts; at most one
+/// account holds a number. Deleted, staff-locked, demo-verified and unverified-email accounts are never recognised.
+/// </summary>
 public sealed class PhoneIdentity(IServiceScopeFactory scopes)
 {
     public sealed record Match(Guid AccountId, string FirstName);
 
     public async Task<Match?> FindAsync(string e164, CancellationToken ct)
     {
-        var last4 = e164[^4..];
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
-        // the profile phone is free text a buyer typed: narrow by its last four digits in SQL, then compare the normalised numbers
-        var candidates = await db.BuyerAccounts.AsNoTracking()
-            .Where(a => a.Phone != null && a.DeletedAt == null && a.StaffLockedAt == null && a.EmailVerifiedAt != null && a.Phone.Contains(last4)).Select(a => new { a.Id, a.DisplayName, a.Phone }).Take(50).ToListAsync(ct);
-        var hits = candidates.Where(a => PhoneNumbers.ToE164(a.Phone) == e164).ToList();
-        if (hits.Count != 1) return null;   // none, or several accounts claim this number: do not pick one
-        return new Match(hits[0].Id, FirstWord(hits[0].DisplayName));
+        var hit = await db.BuyerAccounts.AsNoTracking()
+            .Where(a => a.PhoneVerifiedE164 == e164 && a.DeletedAt == null && a.StaffLockedAt == null && a.EmailVerifiedAt != null && a.DemoVerifiedAt == null)
+            .Select(a => new { a.Id, a.DisplayName }).FirstOrDefaultAsync(ct);
+        return hit is null ? null : new Match(hit.Id, hit.DisplayName.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "");
     }
+}
 
-    private static string FirstWord(string name) => name.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+/// <summary>
+/// Records that an account has proven a number. Called ONLY after an SMS code was typed in a context already signed in as that account (slice 6's phone account setup; a web settings step is the
+/// follow-up): it takes the number over from any other account (the code proves who holds it now) in one transaction, and refuses a number the account's own profile does not carry.
+/// </summary>
+public sealed class AccountPhoneVerifier(MarketplaceDb db, TimeProvider time)
+{
+    public async Task<bool> MarkVerifiedAsync(Guid accountId, string e164, CancellationToken ct)
+    {
+        var profile = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == accountId && a.DeletedAt == null).Select(a => a.Phone).FirstOrDefaultAsync(ct);
+        if (PhoneNumbers.ToE164(profile) != e164) return false;   // the proof is for the number the profile carries
+        var now = time.GetUtcNow();
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.BuyerAccounts.Where(a => a.PhoneVerifiedE164 == e164 && a.Id != accountId).ExecuteUpdateAsync(s => s.SetProperty(a => a.PhoneVerifiedE164, (string?)null).SetProperty(a => a.PhoneVerifiedAt, (DateTimeOffset?)null), ct);
+        var rows = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.PhoneVerifiedE164, e164).SetProperty(a => a.PhoneVerifiedAt, now), ct);
+        await tx.CommitAsync(ct);
+        return rows == 1;
+    }
 }

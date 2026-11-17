@@ -27,7 +27,7 @@ public class VoiceIdentifyTests
         if (account)
         {
             await s.K.VerifiedSession(Email);
-            if (profilePhone is not null) await s.SetPhone(Email, profilePhone);
+            if (profilePhone is not null) await s.SetPhone(Email, profilePhone, verified: true);   // a number the account has proven (see VoicePhoneVerificationTests)
         }
         await s.Dial();
         return s;
@@ -226,16 +226,16 @@ public class VoiceIdentifyTests
     }
 
     [Fact]
-    public async Task Two_accounts_on_one_number_is_no_match_the_caller_is_a_guest()
+    public async Task A_second_account_that_merely_types_the_same_profile_phone_does_not_change_who_is_recognised()
     {
         using var s = await Scenario();
         await s.K.VerifiedSession("twin@example.com", name: "Twin Brown");
-        await s.SetPhone("twin@example.com", "555-123-4567");
+        await s.SetPhone("twin@example.com", "555-123-4567");                  // typed, never proven
         await AskForCode(s);
         var (_, token) = await s.Type(s.LastCode());
         await s.Attach(token);
-        var st = s.State();
-        Assert.Equal((CallerLevel.Guest, null), (st.Level, st.AccountId));
+        var jane = await s.K.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Email == Email));
+        Assert.Equal((CallerLevel.Verified, jane.Id), (s.State().Level, s.State().AccountId));   // the account that PROVED the number
     }
 
     [Fact]
