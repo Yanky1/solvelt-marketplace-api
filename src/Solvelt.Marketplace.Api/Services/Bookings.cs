@@ -94,6 +94,8 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
     }
 
+    private const int HoldWriteAttempts = 12;
+
     /// <summary>
     /// Reserves a slot for 10 minutes. Order of work (decision M4-02): validate; find the buyer's own row for this <c>Idempotency-Key</c>; cap the buyer's open holds;
     /// INSERT our row (<c>HoldPending</c>, unique on (account, key)) and only then call the portal with our <c>BK-…</c> id; store the portal's answer. A retry with the same key
@@ -140,15 +142,28 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
                 AddrCity = a is null ? null : Clean(a.City), AddrRegion = a is null || Clean(a.Region).Length == 0 ? null : Clean(a.Region), AddrPostalCode = a is null ? null : Clean(a.PostalCode),
                 AddrCountry = a is null ? null : Clean(a.Country).ToUpperInvariant(), AddrLat = a?.Lat, AddrLng = a?.Lng, Phone = Clean(r.Phone) is { Length: > 0 } p ? p : null,
             };
-            db.Bookings.Add(row);
-            try { await db.SaveChangesAsync(ct); created = true; }
-            catch (DbUpdateException)
+            var fresh = row;
+            for (var attempt = 0; ; attempt++)
             {
-                // A parallel request with the same key won the unique index: answer with ITS row.
-                db.ChangeTracker.Clear();
-                row = await db.Bookings.FirstOrDefaultAsync(b => b.AccountId == buyer.AccountId && b.IdempotencyKey == idempotencyKey, ct);
-                if (row is null) throw;
-                if (row.RequestHash != hash) return new HoldResult(HoldStatus.IdempotencyConflict);
+                db.Bookings.Add(fresh);
+                try { await db.SaveChangesAsync(ct); row = fresh; created = true; break; }
+                catch (DbUpdateException ex)
+                {
+                    // A parallel request with the same key won the unique index: answer with ITS row.
+                    db.ChangeTracker.Clear();
+                    var theirs = await db.Bookings.FirstOrDefaultAsync(b => b.AccountId == buyer.AccountId && b.IdempotencyKey == idempotencyKey, ct);
+                    if (theirs is not null)
+                    {
+                        row = theirs;
+                        if (row.RequestHash != hash) return new HoldResult(HoldStatus.IdempotencyConflict);
+                        break;
+                    }
+                    // No row under our key: the write itself failed. A lock that was not freed in time (SQLite busy/locked, PostgreSQL serialization failure) is retried like every other
+                    // write race (FX1-01); anything else is a real error; after the attempts the buyer gets a 503 with Retry-After, never a 500.
+                    if (!Solvelt.Marketplace.Api.Account.AccountService.IsRetryable(ex)) throw;
+                    if (attempt >= HoldWriteAttempts - 1) throw new TooBusyException("Bookings are too busy; try again.", ex);
+                    await Task.Delay(Random.Shared.Next(2, 12) * (attempt + 1), ct);
+                }
             }
         }
 
