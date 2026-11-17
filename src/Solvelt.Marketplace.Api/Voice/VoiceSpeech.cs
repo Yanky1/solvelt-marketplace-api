@@ -49,7 +49,8 @@ public static partial class VoiceSpeech
     {
         var parts = new List<string>();
         foreach (var chunk in code.Split('-', ' ', StringSplitOptions.RemoveEmptyEntries))
-            parts.Add(chunk.All(char.IsDigit) ? string.Join(", ", Chunks(chunk).Select(c => string.Join(" ", c.Select(ch => Ones[ch - '0'])))) : string.Join(" ", chunk.ToUpperInvariant().Select(ch => ch.ToString())));
+            parts.Add(chunk.All(char.IsDigit) ? string.Join(", ", Chunks(chunk).Select(c => string.Join(" ", c.Select(ch => Ones[ch - '0']))))
+                : string.Join(" ", chunk.ToUpperInvariant().Select(ch => char.IsDigit(ch) ? Ones[ch - '0'] : ch.ToString())));   // a code with letters and digits: letters spelled, digits as words
         return string.Join(", ", parts);
     }
 

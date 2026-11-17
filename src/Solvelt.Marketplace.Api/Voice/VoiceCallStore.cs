@@ -44,6 +44,26 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
         return await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.CountAsync(c => c.CallerKey == callerKey && c.Outcome == VoiceOutcome.OrderPlaced && c.StartedAt >= since, ct);
     }
 
+    /// <summary>The number that proved itself in this call (keyed hash). Set when the SMS code is typed right.</summary>
+    public async Task SetVerifiedKeyAsync(Guid id, string? key, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.Where(c => c.Id == id).ExecuteUpdateAsync(s => s.SetProperty(c => c.VerifiedKey, key), ct);
+    }
+
+    /// <summary>Orders paid by phone in calls whose VERIFIED number is this one, newest first (our own records, never a match on a phone string in the orders).</summary>
+    public async Task<IReadOnlyList<string>> PhoneOrdersAsync(string verifiedKey, int limit, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+        var rows = await (from a in db.VoicePaymentAttempts.AsNoTracking()
+                          join c in db.VoiceCalls.AsNoTracking() on a.CallId equals c.Id
+                          where c.VerifiedKey == verifiedKey && a.Status == "paid"
+                          orderby a.SettledAt descending
+                          select a.OrderNumber).Take(limit * 3).ToListAsync(ct);
+        return rows.Distinct().Take(limit).ToList();
+    }
+
     /// <summary>The call placed (and was paid for) an order: the outcome the cost report counts. Set once, stays through the call's end.</summary>
     public async Task MarkOrderPlacedAsync(Guid id, CancellationToken ct)
     {

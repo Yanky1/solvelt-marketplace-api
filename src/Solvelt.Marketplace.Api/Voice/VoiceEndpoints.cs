@@ -72,6 +72,7 @@ public static class VoiceEndpoints
             // the server speaks ITS OWN read-back (built from the fresh quote) and listens for yes / 1: the model is not on the line
             if (st.KeypadStep == "confirm" && st.ReadBackText is { } text) return Cxml(new XElement("Response", GatherConfirm(v, text)));
             // the payment provider's own instruction (the keypad step runs without the model; no card data touches this API or the model)
+            if (st.KeypadStep == "confirm_cancel" && st.Cancel is { } cancel) return Cxml(new XElement("Response", GatherConfirm(v, cancel.Text)));
             if (st.KeypadStep == "pay" && st.Payment?.Instruction is { } pay) return Cxml(new XElement("Response", new XElement(pay)));
         }
         return Cxml(new XElement("Response", new XElement("Hangup")));
@@ -123,7 +124,7 @@ public static class VoiceEndpoints
     }
 
     private static async Task<IResult> Keypad(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, PhoneCodeService codes,
-        StreamTokens tokens, IServiceScopeFactory scopes, PhonePayments phonePayments, PhoneOrderService orders, ISmsSender sms, CancellationToken ct)
+        StreamTokens tokens, IServiceScopeFactory scopes, PhonePayments phonePayments, PhoneOrderService orders, ISmsSender sms, TimeProvider time, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -131,8 +132,29 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "confirm_cancel" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
+        if (state.KeypadStep == "confirm_cancel")
+        {
+            form.TryGetValue("SpeechResult", out var said);
+            var answer = ReadBackAnswer.Parse(typed, said);
+            if (answer == ConfirmChoice.Unclear && state.CountConfirmFailure() < 2) return Cxml(new XElement("Response", GatherConfirm(v, VoiceScripts.CancelRetry)));
+            string outcome = "cancel_declined", say = VoiceScripts.CancelKept;
+            if (answer == ConfirmChoice.Yes && state.Cancel is { } pending && state.AccountId is { } accountId)
+            {
+                // the ONLY path that sends a cancellation: the caller heard the server's read-back and said yes (or pressed 1); the existing buyer action applies its own rules
+                var actions = ctx.RequestServices.GetRequiredService<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>();
+                var principal = new Solvelt.Marketplace.Api.Auth.BuyerPrincipal(accountId, Guid.Empty, "", "", state.VerifiedAt ?? time.GetUtcNow());
+                var cancelled = await actions.CancelAsync(principal, pending.OrderNumber, pending.SellerOrderNumber, pending.Reason, null, ct);
+                var sent = cancelled.Status == 202;
+                outcome = sent ? "cancel_sent" : "cancel_refused";
+                say = sent ? VoiceScripts.CancelSent : VoiceScripts.CancelRefused;
+            }
+            state.SetCancel(null);
+            state.SetKeypadOutcome(outcome);
+            state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", say), StreamParts(v, tokens, call.Id)));
+        }
         if (state.KeypadStep == "pay")
         {
             var attempt = state.Payment;
@@ -170,17 +192,19 @@ public static class VoiceEndpoints
         var result = codes.Verify(state, typed);
         if (result == CodeResult.Wrong) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.WrongCode)));
         var challenge = state.Challenge;
-        if (result == CodeResult.Ok) await ApplyVerifiedAsync(state, scopes, ct);
+        if (result == CodeResult.Ok) await ApplyVerifiedAsync(state, scopes, store, call.Id, time, ct);
         else { state.SetKeypadOutcome("failed"); state.SetChallenge(null); }
         state.EndKeypadStep();
         return Cxml(new XElement("Response", new XElement("Say", result == CodeResult.Ok ? VoiceScripts.CodeOk : VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
     }
 
     /// <summary>A right code proves the caller holds the number: the matching account (if exactly one) is now theirs for this call, otherwise they are a guest with a verified phone. A guest cart moves into the account.</summary>
-    private static async Task ApplyVerifiedAsync(VoiceCallState state, IServiceScopeFactory scopes, CancellationToken ct)
+    private static async Task ApplyVerifiedAsync(VoiceCallState state, IServiceScopeFactory scopes, VoiceCallStore store, Guid callId, TimeProvider time, CancellationToken ct)
     {
         var phone = state.LastChallengePhone;
         state.SetVerifiedPhone(phone);
+        state.SetVerifiedAt(time.GetUtcNow());
+        await store.SetVerifiedKeyAsync(callId, phone is null ? null : store.CallerKeyOf(phone), ct);
         state.SetKeypadOutcome("verified");
         if (state.LastChallengeAccount is { } accountId)
         {

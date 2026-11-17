@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261117231127_InitialCreate")]
+    [Migration("20261117234811_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -3240,6 +3240,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<DateTimeOffset?>("TransferRequestedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("VerifiedKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<int>("Version")
                         .IsConcurrencyToken()
                         .HasColumnType("integer");
@@ -3250,6 +3254,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .IsUnique();
 
                     b.HasIndex("StartedAt");
+
+                    b.HasIndex("VerifiedKey");
 
                     b.HasIndex("CallerKey", "StartedAt");
 

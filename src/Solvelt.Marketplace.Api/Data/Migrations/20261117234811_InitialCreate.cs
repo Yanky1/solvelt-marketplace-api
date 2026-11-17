@@ -1107,6 +1107,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     CallSid = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                     CallerMasked = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
                     CallerKey = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: true),
+                    VerifiedKey = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: true),
                     Model = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
                     Tier = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
                     StartedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -2090,6 +2091,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 name: "IX_voice_calls_StartedAt",
                 table: "voice_calls",
                 column: "StartedAt");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_calls_VerifiedKey",
+                table: "voice_calls",
+                column: "VerifiedKey");
 
             migrationBuilder.CreateIndex(
                 name: "IX_voice_payment_attempts_CreatedAt",

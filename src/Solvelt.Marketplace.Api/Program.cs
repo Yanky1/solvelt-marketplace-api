@@ -139,6 +139,11 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Mar
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ConfirmGuestEmailTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.PayForOrderTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CheckPaymentTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessOrders>(sp => new Solvelt.Marketplace.Api.Voice.InProcessOrders(sp));
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ListMyOrdersTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.OrderStatusTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TextOrderSummaryTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CancelOrderTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.VoiceReportService>();
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();

@@ -39,7 +39,7 @@ public static class OrderEndpoints
         return Problems.Json(r.Status, r.Code ?? "error", r.Message ?? "");
     }
 
-    private static async Task<IResult> List(HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, Guid? beforeId, CancellationToken ct)
+    internal static async Task<IResult> List(HttpContext ctx, MarketplaceDb db, int? limit, DateTimeOffset? before, Guid? beforeId, CancellationToken ct)
     {
         var buyer = ctx.Buyer();
         var take = Math.Clamp(limit ?? 20, 1, 50);
@@ -66,7 +66,7 @@ public static class OrderEndpoints
         }), ctx);
     }
 
-    private static async Task<IResult> Detail(string number, HttpContext ctx, MarketplaceDb db, TimeProvider time, CancellationToken ct)
+    internal static async Task<IResult> Detail(string number, HttpContext ctx, MarketplaceDb db, TimeProvider time, CancellationToken ct)
     {
         var buyer = ctx.Buyer();
         var o = await db.Orders.AsNoTracking().Include(x => x.Groups).Include(x => x.Lines).AsSplitQuery().FirstOrDefaultAsync(x => x.Number == number && x.AccountId == buyer.AccountId, ct);

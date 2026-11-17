@@ -20,7 +20,7 @@ public static class GuestOrderEndpoints
         return app;
     }
 
-    private static async Task<IResult> Get(string number, HttpContext ctx, MarketplaceDb db, GuestLinks links, CancellationToken ct)
+    internal static async Task<IResult> Get(string number, HttpContext ctx, MarketplaceDb db, GuestLinks links, CancellationToken ct)
     {
         ctx.Response.Headers.CacheControl = "private, no-store";
         if (links.Parse(ctx.Request.Headers[CheckoutEndpoints.GuestOrderHeader].ToString()) is not { } orderId) return Problems.Json(401, "unauthorized", "Open the link from your order email to continue.");

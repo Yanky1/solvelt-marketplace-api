@@ -9,6 +9,8 @@ public sealed record DeliveryChoice(Guid SellerId, Guid BrandId, string SellerNa
 public sealed record DeliveryOption(string Kind, string? Speed, Guid? WindowId, string? Date, long PriceCents, string Spoken);
 public sealed record VariantRef(Guid VariantId, string Name, long PriceCents, bool Available);
 
+public sealed record PendingCancel(string OrderNumber, string? SellerOrderNumber, string Reason, string Text);
+
 public sealed class PaymentAttempt
 {
     public required string AttemptId { get; init; }
@@ -61,6 +63,19 @@ public sealed class VoiceCallState
     public string? FirstName { get; private set; }
     public string? GuestName { get; private set; }
     public string? VerifiedPhone { get; private set; }
+    /// <summary>When the caller typed the right SMS code in THIS call (the time a cancellation counts as authenticated).</summary>
+    public DateTimeOffset? VerifiedAt { get; private set; }
+    public void SetVerifiedAt(DateTimeOffset at) { lock (_gate) VerifiedAt = at; }
+    /// <summary>A cancellation waiting for the caller's yes, read back by the server (slice 5, decision V-08).</summary>
+    public PendingCancel? Cancel { get; private set; }
+    public int CancelStarts { get; private set; }
+    public void SetCancel(PendingCancel? c) { lock (_gate) Cancel = c; }
+    public int CountCancelStart() { lock (_gate) return ++CancelStarts; }
+    /// <summary>The orders last read out (numbers by position), so "the first one" means an order the server knows.</summary>
+    public IReadOnlyList<string> ListedOrders { get; private set; } = [];
+    public void SetListedOrders(IReadOnlyList<string> numbers) { lock (_gate) ListedOrders = numbers; }
+    public int OrderTexts { get; private set; }
+    public int CountOrderText() { lock (_gate) return ++OrderTexts; }
     public PhoneChallenge? Challenge { get; private set; }
     private int _sms;
     /// <summary>The guest cart's token (the cart service creates it on the first add); an account cart needs none.</summary>
@@ -195,6 +210,9 @@ public sealed class VoiceCallState
             sb.Append(Level switch { CallerLevel.Verified => VerifiedInThisCall ? "The caller is verified by SMS code in this call. " : "The caller is recognised but not verified in this call. ", CallerLevel.Guest => "The caller is a guest" + (VerifiedPhone is not null ? " whose phone is verified. " : ". "), _ => "The caller is not identified yet. " });
             if (FirstName is not null && Level == CallerLevel.Verified) sb.Append("Their first name is ").Append(FirstName).Append(". ");
             sb.Append("Current task: ").Append(Task).Append(". ");
+            if (LastKeypadOutcome == "cancel_sent") sb.Append("The caller just confirmed a cancellation request and it was sent to the seller; they are told by email what the seller decides. ");
+            if (LastKeypadOutcome == "cancel_refused") sb.Append("The cancellation could not be requested (the order can no longer be cancelled, or something went wrong). ");
+            if (LastKeypadOutcome == "cancel_declined") sb.Append("The caller decided to keep the order: nothing was cancelled. ");
             if (OrderNumber is not null) sb.Append("An order has been placed and paid for in this call: its number is ").Append(VoiceSpeech.Spelled(OrderNumber)).Append(". Do not discuss card details. ");
             else if (Payment is { Status: "pending" }) sb.Append("A payment is in progress for the order. ");
             if (LastKeypadOutcome == "pay_failed") sb.Append("The payment did not go through (declined or not completed): offer to try again or another way. ");

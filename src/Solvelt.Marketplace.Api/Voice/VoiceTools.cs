@@ -91,6 +91,10 @@ public static class VoiceScripts
     public const string FakePayPrompt = "Test payment. Press 1 to pay, or 2 to decline.";
     public const string PayThanks = "Thank you. Your payment went through.";
     public const string PayFailed = "Sorry, the payment did not go through.";
+    public const string CancelRetry = "Sorry, I did not catch that. To send the cancellation request, say yes or press 1. To keep the order, say no or press 2.";
+    public const string CancelSent = "Done. The cancellation request has been sent to the seller.";
+    public const string CancelKept = "Okay, I will leave the order as it is.";
+    public const string CancelRefused = "Sorry, that order can not be cancelled any more.";
     public const string Connecting = "Please hold while I connect you to a person.";
     public const string NoPerson = "Our team is not available right now. You can also order on our web site. Goodbye.";
     public const string Trouble = "Sorry, we are having trouble right now. Please try again later. Goodbye.";
