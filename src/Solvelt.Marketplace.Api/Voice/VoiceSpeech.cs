@@ -104,6 +104,17 @@ public static partial class VoiceSpeech
         => DateOnly.TryParse(earliest, CultureInfo.InvariantCulture, out var a) && DateOnly.TryParse(latest, CultureInfo.InvariantCulture, out var b)
             ? (a == b ? Date(a, today) : Date(a, today) + " to " + Date(b, today)) : "";
 
+    /// <summary>An email address for reading back: the part before the @ spelled letter by letter ("d a n a dot l e v i"), then "at", then the domain by its labels, a common ending as a word.</summary>
+    public static string Email(string email)
+    {
+        var at = email.LastIndexOf('@');
+        if (at < 1) return "";
+        string Spell(string t) => string.Join(" ", t.Select(c => c switch { '.' => "dot", '_' => "underscore", '-' => "dash", '+' => "plus", _ when char.IsDigit(c) => Ones[c - '0'], _ => c.ToString().ToUpperInvariant() == c.ToString() ? c.ToString() : c.ToString() }));
+        var labels = email[(at + 1)..].Split('.');
+        var domain = string.Join(" dot ", labels.Select((l, i) => i == labels.Length - 1 && l is "com" or "net" or "org" or "edu" or "gov" ? l : Spell(l)));
+        return Spell(email[..at]) + " at " + domain;
+    }
+
     /// <summary>At most three options, then an offer of more: "A, B and C, and 4 more if you like".</summary>
     public static string List(IReadOnlyList<string> items, int max = 3)
     {

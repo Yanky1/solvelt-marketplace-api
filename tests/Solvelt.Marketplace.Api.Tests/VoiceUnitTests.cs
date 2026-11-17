@@ -158,7 +158,7 @@ public class VoiceUnitTests
         Assert.Contains(p, x => x.Contains("Voice:StreamTokenKey")); Assert.Contains(p, x => x.Contains("Voice:PublicBaseUrl"));
         var good = new Dictionary<string, string?>
         {
-            ["Voice:Enabled"] = "true", ["Voice:OpenAiApiKey"] = "x", ["SignalWire:SigningKey"] = "sw-signing-key", ["Voice:StreamTokenKey"] = new string('k', 40), ["Voice:PhoneCodeKey"] = new string('c', 40),
+            ["Voice:Enabled"] = "true", ["Voice:OpenAiApiKey"] = "x", ["SignalWire:SigningKey"] = "sw-signing-key", ["Voice:StreamTokenKey"] = new string('k', 40), ["Voice:PhoneCodeKey"] = new string('c', 40), ["Voice:CallerHashKey"] = new string('h', 40),
             ["Voice:PublicBaseUrl"] = "https://api.example.com", ["SignalWire:ProjectId"] = "p", ["SignalWire:ApiToken"] = "t", ["SignalWire:Space"] = "s", ["SignalWire:FromNumber"] = "+15550002222",
         };
         Assert.Empty(Problems(good));
@@ -166,6 +166,11 @@ public class VoiceUnitTests
         Assert.Contains(Problems(new(good) { ["Voice:PublicBaseUrl"] = "http://api.example.com" }), x => x.Contains("PublicBaseUrl"));
         Assert.Contains(Problems(new(good) { ["Voice:PhoneCodeKey"] = new string('k', 40) }), x => x.Contains("PhoneCodeKey must differ"));          // not the stream token key
         Assert.Contains(Problems(new(good) { ["Voice:PhoneCodeKey"] = "short" }), x => x.Contains("PhoneCodeKey"));
+        Assert.Contains(Problems(new(good) { ["Voice:CallerHashKey"] = new string('c', 40) }), x => x.Contains("CallerHashKey must differ"));              // one key per purpose
+        Assert.Contains(Problems(new(good) { ["Voice:CallerHashKey"] = null }), x => x.Contains("CallerHashKey"));
+        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "fake" }), x => x.Contains("development and tests only"));             // no fake money in production
+        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }), x => x.Contains("none or fake"));                           // nothing real is connected
+        Assert.DoesNotContain(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "fake" }, "Development"), x => x.Contains("PhonePaymentProvider"));
         Assert.Contains(Problems(new(good) { ["SignalWire:ApiToken"] = null }), x => x.Contains("login codes are sent by SMS"));                   // production needs the messaging settings
         Assert.Contains(Problems(new(good) { ["Voice:ModelMode"] = "turbo" }), x => x.Contains("ModelMode"));
         Assert.Contains(Problems(new(good) { ["Voice:MiniPercent"] = "101" }), x => x.Contains("MiniPercent"));

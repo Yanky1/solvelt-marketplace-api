@@ -16,7 +16,7 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
         if (existing is not null) return existing;
         var id = Guid.NewGuid();
         var (model, tier) = VoiceModelSelector.Pick(options.Value, id);
-        var call = new VoiceCall { Id = id, CallSid = callSid, CallerMasked = PhoneMask.Mask(from), Model = model, Tier = tier, StartedAt = time.GetUtcNow() };
+        var call = new VoiceCall { Id = id, CallSid = callSid, CallerMasked = PhoneMask.Mask(from), CallerKey = CallerKeyOf(Infrastructure.PhoneNumbers.ToE164(from)), Model = model, Tier = tier, StartedAt = time.GetUtcNow() };
         db.VoiceCalls.Add(call);
         try { await db.SaveChangesAsync(ct); }
         catch (DbUpdateException)   // a parallel retry of the same webhook won the unique index
@@ -25,6 +25,30 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
             return await db.VoiceCalls.AsNoTracking().FirstAsync(c => c.CallSid == callSid, ct);
         }
         return call;
+    }
+
+    /// <summary>A keyed hash of the caller's number (null without a number or a key). The number itself is never stored.</summary>
+    public string? CallerKeyOf(string? e164)
+    {
+        var key = options.Value.CallerHashKey;
+        if (e164 is null || string.IsNullOrWhiteSpace(key)) return null;
+        using var h = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(key));
+        return Convert.ToHexStringLower(h.ComputeHash(System.Text.Encoding.UTF8.GetBytes("voice-caller-v1|" + e164)));
+    }
+
+    /// <summary>How many phone orders this number placed in the last 24 hours (calls that ended as <c>order_placed</c>).</summary>
+    public async Task<int> OrdersTodayAsync(string callerKey, CancellationToken ct)
+    {
+        var since = time.GetUtcNow().AddHours(-24);
+        using var scope = scopes.CreateScope();
+        return await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.CountAsync(c => c.CallerKey == callerKey && c.Outcome == VoiceOutcome.OrderPlaced && c.StartedAt >= since, ct);
+    }
+
+    /// <summary>The call placed (and was paid for) an order: the outcome the cost report counts. Set once, stays through the call's end.</summary>
+    public async Task MarkOrderPlacedAsync(Guid id, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.Where(c => c.Id == id && c.EndedAt == null).ExecuteUpdateAsync(s => s.SetProperty(c => c.Outcome, VoiceOutcome.OrderPlaced), ct);
     }
 
     public async Task<VoiceCall?> FindAsync(Guid id, CancellationToken ct)

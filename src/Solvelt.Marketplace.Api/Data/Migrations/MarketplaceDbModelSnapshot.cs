@@ -3186,6 +3186,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
+                    b.Property<string>("CallerKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("CallerMasked")
                         .IsRequired()
                         .HasMaxLength(16)
@@ -3243,6 +3247,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .IsUnique();
 
                     b.HasIndex("StartedAt");
+
+                    b.HasIndex("CallerKey", "StartedAt");
 
                     b.ToTable("voice_calls", (string)null);
                 });

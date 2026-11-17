@@ -84,6 +84,8 @@ internal static class CheckoutAccess
         if (s.CartItemCount == 0) return new JsonObject { ["error"] = "cart_empty", ["instruction"] = "The cart is empty: help them find something first." };
         if (s.DeliveryAddress is null) return new JsonObject { ["error"] = "need_address", ["instruction"] = "Ask where to deliver: a saved address, or a new one." };
         if (!s.AddressConfirmed) return new JsonObject { ["error"] = "address_not_confirmed", ["instruction"] = "The caller has not confirmed the address you read back: ask, then call confirm_address." };
+        // a guest's order is mailed its access link and texted to the verified phone: both must be known BEFORE the read-back, so the yes covers a complete order
+        if (s.Level != CallerLevel.Verified && s.GuestEmail is null) return new JsonObject { ["error"] = "need_email", ["instruction"] = "A guest order needs an email address for the order link: ask for it with set_guest_email, read it back, then confirm_guest_email." };
         return null;
     }
 

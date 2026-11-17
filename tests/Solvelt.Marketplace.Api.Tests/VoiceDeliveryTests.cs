@@ -29,6 +29,8 @@ public class VoiceDeliveryTests
         await s.Tool("add_to_cart", new { position = 1, option_position = 1, quantity = qty });
         await Verify(s);
         await s.Tool("set_guest_name", new { name = "Dana Levi" });
+        await s.Tool("set_guest_email", new { email = "dana.levi@example.com" });
+        await s.Tool("confirm_guest_email");
         return s;
     }
 

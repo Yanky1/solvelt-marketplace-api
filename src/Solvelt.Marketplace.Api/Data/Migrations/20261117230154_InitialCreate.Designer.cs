@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261117222618_InitialCreate")]
+    [Migration("20261117230154_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -3189,6 +3189,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
+                    b.Property<string>("CallerKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("CallerMasked")
                         .IsRequired()
                         .HasMaxLength(16)
@@ -3246,6 +3250,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .IsUnique();
 
                     b.HasIndex("StartedAt");
+
+                    b.HasIndex("CallerKey", "StartedAt");
 
                     b.ToTable("voice_calls", (string)null);
                 });

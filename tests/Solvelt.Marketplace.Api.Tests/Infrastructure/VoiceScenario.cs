@@ -18,7 +18,7 @@ public sealed class VoiceScenario : IDisposable
     public HttpClient C { get; }
     public InMemorySmsSender Sms => (InMemorySmsSender)F.Services.GetRequiredService<ISmsSender>();
     public FakePhone? Phone { get; private set; }
-    public string Sid { get; }
+    public string Sid { get; set; }
     public string From { get; }
     private int _calls;
 

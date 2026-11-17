@@ -17,6 +17,8 @@ public sealed class VoiceCall
     public Guid Id { get; set; }
     public string CallSid { get; set; } = "";
     public string CallerMasked { get; set; } = "";
+    /// <summary>A keyed hash (HMAC-SHA256, <c>Voice:CallerHashKey</c>) of the caller's number: it lets us count phone orders per number per day without keeping the number. Null when the number was unknown.</summary>
+    public string? CallerKey { get; set; }
     /// <summary>The model id used for this call, chosen at its start.</summary>
     public string Model { get; set; } = "";
     /// <summary><c>full</c> or <c>mini</c>.</summary>
@@ -52,6 +54,8 @@ internal sealed class VoiceCallConfiguration : IEntityTypeConfiguration<VoiceCal
         b.Property(c => c.Outcome).HasMaxLength(20).IsRequired();
         b.Property(c => c.Version).IsConcurrencyToken();
         b.HasIndex(c => c.CallSid).IsUnique();        // SignalWire retries its webhook: one row per call
+        b.Property(c => c.CallerKey).HasMaxLength(64);
         b.HasIndex(c => c.StartedAt);
+        b.HasIndex(c => new { c.CallerKey, c.StartedAt });
     }
 }
