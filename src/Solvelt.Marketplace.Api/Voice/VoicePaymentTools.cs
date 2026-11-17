@@ -36,7 +36,7 @@ public sealed class ConfirmGuestEmailTool : IVoiceTool
 /// Pays for the order the caller confirmed. The model chooses nothing but the method: the server places the order through the existing checkout at the amount it priced and read back, and the card
 /// is entered by the caller on the keypad into the payment provider's own path while the model is off the line (or on the provider's page, from a text link). The model never sees a card.
 /// </summary>
-public sealed class PayForOrderTool(PhoneOrderService orders, PhonePayments payments, VoiceCallStore calls, IOptions<VoiceOptions> options) : IVoiceTool
+public sealed class PayForOrderTool(PhoneOrderService orders, PhonePayments payments, VoiceCallStore calls, ISmsSender sms, IOptions<VoiceOptions> options) : IVoiceTool
 {
     public string Name => "pay_for_order";
     public JsonObject Definition => ToolKit.Def(Name, "After the caller confirmed the read-back: place the order and start the payment. Say one short sentence that the payment step is starting, then stop talking.",
@@ -63,26 +63,36 @@ public sealed class PayForOrderTool(PhoneOrderService orders, PhonePayments paym
             case PlaceStatus.NotReady: return ToolKit.Error("not_ready", "Something is missing for the order (name, email, address or verification): check each and ask.");
             case PlaceStatus.Unavailable: return ToolKit.Error("order_unavailable", "The order could not be started right now: offer to try again in a moment.");
         }
-        var attemptId = Guid.NewGuid().ToString("N");
+        if (method == PhonePaymentMethod.TextLink && s.VerifiedPhone is null) return ToolKit.Error("need_verification", "A payment link goes to a verified phone: verify the caller first.");
+        var row = await orders.OpenAttemptAsync(ctx.CallId, number!, total, method, ct);
+        var attemptId = row.Id.ToString("N");
         var actionUrl = options.Value.PublicBaseUrl!.TrimEnd('/') + VoiceEndpoints.KeypadPath;
         PhonePaymentStart start;
         try { start = await provider.StartAsync(new PhonePaymentRequest(attemptId, number!, total, "USD", method, s.VerifiedPhone ?? s.CallerNumber), actionUrl, ct); }
         catch (Exception ex) when (ex is not OperationCanceledException) { return ToolKit.Error("payments_unavailable", "The payment step could not start: offer to try again in a moment."); }
-        s.SetPayment(new PaymentAttempt { AttemptId = attemptId, OrderNumber = number!, IntentId = intent!, AmountCents = total, Method = method, Instruction = start.Instruction });
+        var attempt = new PaymentAttempt { AttemptId = attemptId, OrderNumber = number!, IntentId = intent!, AmountCents = total, Method = method, Instruction = start.Instruction };
+        s.SetPayment(attempt);
         s.SetTask("payment");
+        if (method == PhonePaymentMethod.TextLink)
+        {
+            // the link goes by text to the verified phone: the caller pays on Sola's own page, and the call can go on while they do
+            if (start.LinkUrl is null || !await sms.SendAsync(s.VerifiedPhone!, "Solvelt: pay for your order here: " + start.LinkUrl, ct)) return ToolKit.Error("sms_failed", "The text could not be sent: offer to try again.");
+            return ToolKit.Json(new JsonObject { ["status"] = "link_sent", ["instruction"] = "Tell the caller a text with a payment link is on its way and they can pay on their phone while you stay on the line. Never ask for card details. When they say they are done, call check_payment." });
+        }
         s.BeginKeypadStep("pay");
         return new(new JsonObject { ["status"] = "payment_starting", ["instruction"] = "Tell the caller in one short sentence that the payment step is starting and they will type their card on the keypad. Do not say any card detail or the total. Then stop talking." }.ToJsonString(), EndCall: true);
     }
 }
 
-public sealed class CheckPaymentTool : IVoiceTool
+public sealed class CheckPaymentTool(PhoneOrderService orders) : IVoiceTool
 {
     public string Name => "check_payment";
     public JsonObject Definition => ToolKit.Def(Name, "Say whether the order has been placed and paid.");
 
-    public Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
+    public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
     {
         var s = ctx.State;
+        await orders.RefreshAsync(s, ct);   // a text-link payment is settled by the provider's notification, not by the call
         var o = new JsonObject
         {
             ["order_placed"] = s.OrderNumber is not null,
@@ -90,6 +100,6 @@ public sealed class CheckPaymentTool : IVoiceTool
             ["payment"] = s.Payment?.Status ?? "none",
             ["instruction"] = s.OrderNumber is not null ? "Tell them the order is placed, give the order number slowly, and say a text confirmation is on its way." : "The order is not paid yet: do not say it is placed.",
         };
-        return Task.FromResult(ToolKit.Json(o));
+        return ToolKit.Json(o);
     }
 }

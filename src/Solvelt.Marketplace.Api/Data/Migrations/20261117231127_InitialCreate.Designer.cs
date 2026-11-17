@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261117230154_InitialCreate")]
+    [Migration("20261117231127_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -3254,6 +3254,59 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasIndex("CallerKey", "StartedAt");
 
                     b.ToTable("voice_calls", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.VoicePaymentAttempt", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AmountCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("CallId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("Method")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("OrderNumber")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<string>("ProviderRef")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTimeOffset?>("SettledAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("OrderNumber");
+
+                    b.HasIndex("ProviderRef")
+                        .IsUnique();
+
+                    b.ToTable("voice_payment_attempts", (string)null);
                 });
 
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.WebAuthnChallenge", b =>

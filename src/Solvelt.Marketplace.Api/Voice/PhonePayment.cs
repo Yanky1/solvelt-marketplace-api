@@ -76,7 +76,7 @@ public sealed class FakePhonePaymentProvider : IPhonePaymentProvider
 }
 
 /// <summary>The provider chosen by configuration. <c>none</c> means there is none: the tools tell the model that phone payment is not available.</summary>
-public sealed class PhonePayments(IOptions<VoiceOptions> options, FakePhonePaymentProvider fake)
+public sealed class PhonePayments(IOptions<VoiceOptions> options, FakePhonePaymentProvider fake, SolaPhonePaymentProvider sola)
 {
-    public IPhonePaymentProvider? Provider => options.Value.PhonePaymentProvider == "fake" ? fake : null;
+    public IPhonePaymentProvider? Provider => options.Value.PhonePaymentProvider switch { "fake" => fake, "sola" => sola, _ => null };
 }

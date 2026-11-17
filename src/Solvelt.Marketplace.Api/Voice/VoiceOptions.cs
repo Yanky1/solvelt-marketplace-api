@@ -83,7 +83,7 @@ public static class VoiceConfig
     }
 
     /// <summary>Start-up problems; only checked when the module is enabled.</summary>
-    public static IReadOnlyList<string> Problems(VoiceOptions v, SignalWireOptions s, bool devLike)
+    public static IReadOnlyList<string> Problems(VoiceOptions v, SignalWireOptions s, bool devLike, SolaOptions? sola = null)
     {
         var p = new List<string>();
         if (!v.Enabled) return p;
@@ -95,8 +95,10 @@ public static class VoiceConfig
         else if (v.PhoneCodeKey == v.StreamTokenKey || v.PhoneCodeKey == s.SigningKey || v.PhoneCodeKey == s.ApiToken) p.Add("Voice:PhoneCodeKey must differ from the stream token key and every SignalWire secret (one key per purpose).");
         if (string.IsNullOrWhiteSpace(v.CallerHashKey) || v.CallerHashKey.Length < 32) p.Add("Voice:CallerHashKey (env Voice__CallerHashKey) must be at least 32 characters when Voice:Enabled.");
         else if (v.CallerHashKey == v.PhoneCodeKey || v.CallerHashKey == v.StreamTokenKey || v.CallerHashKey == s.SigningKey || v.CallerHashKey == s.ApiToken) p.Add("Voice:CallerHashKey must differ from every other key (one key per purpose).");
-        if (!new[] { "none", "fake" }.Contains(v.PhonePaymentProvider)) p.Add("Voice:PhonePaymentProvider must be none or fake (no real provider is connected yet).");
-        if (!devLike && v.PhonePaymentProvider == "fake") p.Add("Voice:PhonePaymentProvider=fake is for development and tests only: no phone payment provider is connected for production.");
+        if (!new[] { "none", "fake", "sola" }.Contains(v.PhonePaymentProvider)) p.Add("Voice:PhonePaymentProvider must be none, fake or sola.");
+        // nothing real moves money by phone yet: the fake and the Sola SANDBOX are for development and tests only (the order is marked paid with the in-process fake money), until the owner decides about real money
+        if (!devLike && v.PhonePaymentProvider is "fake" or "sola") p.Add($"Voice:PhonePaymentProvider={v.PhonePaymentProvider} is for development and tests only: real-money phone orders are not enabled.");
+        if (v.PhonePaymentProvider == "sola") p.AddRange(SolaOptions.Problems(sola ?? new SolaOptions()));
         if (!devLike && (string.IsNullOrWhiteSpace(s.ProjectId) || string.IsNullOrWhiteSpace(s.ApiToken) || string.IsNullOrWhiteSpace(s.Space) || string.IsNullOrWhiteSpace(s.FromNumber)))
             p.Add("SignalWire:ProjectId, ApiToken, Space and FromNumber (env SignalWire__...) are required in production when Voice:Enabled: login codes are sent by SMS.");
         if (!Uri.TryCreate(v.PublicBaseUrl, UriKind.Absolute, out var u) || (u.Scheme != "https" && !(devLike && u.Scheme == "http")) || u.AbsolutePath != "/")

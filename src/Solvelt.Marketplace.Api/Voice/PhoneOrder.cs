@@ -10,6 +10,7 @@ using Solvelt.Marketplace.Api.Payments;
 namespace Solvelt.Marketplace.Api.Voice;
 
 public enum PlaceStatus { Placed, PriceChanged, LimitReached, NotReady, Unavailable }
+public enum SettleStatus { Paid, AlreadyPaid, Declined, Failed, Mismatch, NotApplied, Unknown }
 
 /// <summary>
 /// Turns a confirmed read-back into an order and, once a provider reports a payment, into a PAID order (decision V-06). The order goes through the EXISTING checkout (<see cref="CheckoutService"/>:
@@ -48,29 +49,65 @@ public sealed class PhoneOrderService(CheckoutService checkout, MarketplaceDb db
         }
     }
 
-    /// <summary>
-    /// A provider says an attempt was paid. Accepted only if the amount equals the order total and the invoice is the order number; then the order is marked paid through the SAME path a Stripe
-    /// payment takes (the signed success event), so portal ingest, mail and refunds behave as for any order. Nothing real is connected: this runs only with the in-process fake money (no Stripe key,
-    /// development or test environment); anywhere else it refuses, and real-money phone orders stay off until the owner's Stripe-or-Sola decision.
-    /// </summary>
-    public async Task<bool> RecordPaidAsync(PaymentAttempt attempt, PhonePaymentOutcome outcome, CancellationToken ct)
+    /// <summary>Opens the persisted attempt for an order: exactly the amount the server priced. It outlives the call (a text-link payment can finish after it).</summary>
+    public async Task<VoicePaymentAttempt> OpenAttemptAsync(Guid callId, string orderNumber, long amountCents, string method, CancellationToken ct)
     {
-        if (outcome.Status != PhonePaymentStatus.Paid || outcome.PaidCents != attempt.AmountCents || !string.Equals(outcome.InvoiceRef, attempt.OrderNumber, StringComparison.Ordinal))
+        var a = new VoicePaymentAttempt { Id = Guid.NewGuid(), CallId = callId, OrderNumber = orderNumber, Method = method, AmountCents = amountCents, Currency = "USD", CreatedAt = time.GetUtcNow() };
+        db.VoicePaymentAttempts.Add(a);
+        await db.SaveChangesAsync(ct);
+        return a;
+    }
+
+    /// <summary>
+    /// A provider reports an outcome for an attempt. A payment is believed only when the amount EQUALS the attempt's amount (our order total) and the invoice IS our order number; a different amount
+    /// (a customer who edited a payment link) or invoice is recorded as <c>mismatch</c> and logged for a person, never applied. A paid attempt marks the order paid through the SAME path a Stripe
+    /// payment takes, allowed ONLY with the in-process fake money (no Stripe key, development or test environment): anywhere else it refuses (<see cref="SettleStatus.NotApplied"/>), so no real money
+    /// can be taken for an order that this API would not then fulfil. Repeats (the provider's transaction reference is unique) change nothing.
+    /// </summary>
+    public async Task<SettleStatus> SettleAsync(Guid attemptId, PhonePaymentOutcome outcome, CancellationToken ct)
+    {
+        var attempt = await db.VoicePaymentAttempts.FirstOrDefaultAsync(a => a.Id == attemptId, ct);
+        if (attempt is null) return SettleStatus.Unknown;
+        if (attempt.Status == "paid") return SettleStatus.AlreadyPaid;
+        if (attempt.Status != "pending") return attempt.Status == "mismatch" ? SettleStatus.Mismatch : SettleStatus.Failed;
+        var now = time.GetUtcNow();
+        async Task<SettleStatus> Close(string status, SettleStatus result)
         {
-            log.LogError("A phone payment for order {Number} was refused: the provider's amount or invoice does not match the order.", attempt.OrderNumber);
-            return false;
+            attempt.Status = status; attempt.SettledAt = now; attempt.ProviderRef ??= outcome.TransactionId;
+            try { await db.SaveChangesAsync(ct); } catch (DbUpdateException) { db.ChangeTracker.Clear(); return SettleStatus.AlreadyPaid; }   // the same provider reference was already settled
+            return result;
         }
-        var order = await db.Orders.AsNoTracking().Where(x => x.Number == attempt.OrderNumber).Select(x => new { x.TotalCents, x.PaymentIntentId, x.Status, x.Number, x.Currency }).FirstOrDefaultAsync(ct);
-        if (order is null || order.TotalCents != attempt.AmountCents || order.PaymentIntentId != attempt.IntentId) return false;
-        if (order.Status == OrderStatus.Paid) return true;   // a repeated callback of the same attempt
-        if (!StartupValidator.IsDevLike(env) || !string.IsNullOrWhiteSpace(stripe.Value.SecretKey)) { log.LogError("A phone payment cannot be recorded: no phone payment provider is connected to real money."); return false; }
-        fakeStripe.TryCapture(attempt.IntentId);
-        var evt = StripeEnvelope.Parse(System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        if (outcome.Status == PhonePaymentStatus.Declined) return await Close("declined", SettleStatus.Declined);
+        if (outcome.Status != PhonePaymentStatus.Paid) return await Close("failed", SettleStatus.Failed);
+        if (outcome.PaidCents != attempt.AmountCents || !string.Equals(outcome.InvoiceRef, attempt.OrderNumber, StringComparison.Ordinal))
         {
-            id = "evt_phone_" + attempt.AttemptId, type = "payment_intent.succeeded", created = time.GetUtcNow().ToUnixTimeSeconds(),
-            data = new { @object = new { id = attempt.IntentId, amount = attempt.AmountCents, amount_received = attempt.AmountCents, currency = order.Currency.ToLowerInvariant(), metadata = new Dictionary<string, string> { ["marketplace_order_id"] = attempt.OrderNumber } } },
-        })));
-        await stripeEvents.ProcessAsync(evt, ct);
-        return await db.Orders.AsNoTracking().AnyAsync(x => x.Number == attempt.OrderNumber && x.Status == OrderStatus.Paid, ct);   // only PAID counts: an event the pipeline turned into a failure (amount, currency) is not a placed order
+            log.LogError("A phone payment for order {Number} (attempt {Attempt}) does not match the order: the provider took {Paid} cents where {Expected} were asked. It is NOT applied and needs a person.", attempt.OrderNumber, attempt.Id, outcome.PaidCents, attempt.AmountCents);
+            return await Close("mismatch", SettleStatus.Mismatch);
+        }
+        var order = await db.Orders.AsNoTracking().Where(x => x.Number == attempt.OrderNumber).Select(x => new { x.TotalCents, x.PaymentIntentId, x.Status, x.Currency }).FirstOrDefaultAsync(ct);
+        if (order is null || order.TotalCents != attempt.AmountCents || order.PaymentIntentId is null) return await Close("failed", SettleStatus.Failed);
+        if (order.Status != OrderStatus.Paid)
+        {
+            if (!StartupValidator.IsDevLike(env) || !string.IsNullOrWhiteSpace(stripe.Value.SecretKey)) { log.LogError("A phone payment for order {Number} cannot be recorded: no phone payment provider is connected to real money.", attempt.OrderNumber); return await Close("failed", SettleStatus.NotApplied); }
+            fakeStripe.TryCapture(order.PaymentIntentId);
+            var evt = StripeEnvelope.Parse(System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+            {
+                id = "evt_phone_" + attempt.Id.ToString("N"), type = "payment_intent.succeeded", created = now.ToUnixTimeSeconds(),
+                data = new { @object = new { id = order.PaymentIntentId, amount = attempt.AmountCents, amount_received = attempt.AmountCents, currency = order.Currency.ToLowerInvariant(), metadata = new Dictionary<string, string> { ["marketplace_order_id"] = attempt.OrderNumber } } },
+            })));
+            await stripeEvents.ProcessAsync(evt, ct);
+            if (!await db.Orders.AsNoTracking().AnyAsync(x => x.Number == attempt.OrderNumber && x.Status == OrderStatus.Paid, ct)) return await Close("failed", SettleStatus.Failed);   // only PAID counts
+        }
+        return await Close("paid", SettleStatus.Paid);
+    }
+
+    /// <summary>Brings the call's state up to date with the persisted attempt (a text-link payment can be settled by a webhook while the call goes on, or after it).</summary>
+    public async Task<bool> RefreshAsync(VoiceCallState state, CancellationToken ct)
+    {
+        if (state.Payment is not { } p || !Guid.TryParseExact(p.AttemptId, "N", out var id)) return state.OrderNumber is not null;
+        var row = await db.VoicePaymentAttempts.AsNoTracking().Where(a => a.Id == id).Select(a => a.Status).FirstOrDefaultAsync(ct);
+        if (row is not null) p.Status = row;
+        if (row == "paid" && state.OrderNumber is null) { state.SetOrderPlaced(p.OrderNumber); await calls.MarkOrderPlacedAsync(state.CallId, ct); }
+        return state.OrderNumber is not null;
     }
 }

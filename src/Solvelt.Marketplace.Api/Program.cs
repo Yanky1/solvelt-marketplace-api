@@ -130,7 +130,9 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Mar
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.GetDeliveryOptionsTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ChooseDeliveryTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ReadBackOrderTool>();
+builder.Services.Configure<Solvelt.Marketplace.Api.Voice.SolaOptions>(builder.Configuration.GetSection("Sola"));
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.FakePhonePaymentProvider>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.SolaPhonePaymentProvider>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhonePayments>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.PhoneOrderService>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SetGuestEmailTool>();
