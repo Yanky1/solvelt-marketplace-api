@@ -8,13 +8,14 @@ namespace Solvelt.Marketplace.Api.Voice;
 
 public static class VoiceEndpoints
 {
-    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", KeypadPath = "/api/v1/voice/signalwire/keypad", StreamPath = "/api/v1/voice/stream";
+    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", KeypadPath = "/api/v1/voice/signalwire/keypad", SolaWebhookPath = "/api/v1/voice/sola/webhook", StreamPath = "/api/v1/voice/stream";
 
     public static IEndpointRouteBuilder MapVoice(this IEndpointRouteBuilder app)
     {
         app.MapPost(InboundPath, Inbound);
         app.MapPost(AfterStreamPath, AfterStream);
         app.MapPost(KeypadPath, Keypad);
+        app.MapPost(SolaWebhookPath, SolaWebhook);
         app.Map(StreamPath, Stream);
         return app;
     }
@@ -86,6 +87,41 @@ public static class VoiceEndpoints
             new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", say));
 
     /// <summary>The digits typed for an SMS code. Checked against the hash held for THIS call; never stored, logged or given to the model.</summary>
+    /// <summary>
+    /// Sola's account webhook for a payment made on the PaymentSITE page the caller was texted (method B). Signed with the webhook PIN over EVERY received parameter (<c>ck-signature</c>); an unsigned
+    /// or wrongly signed notification is a 401 and nothing else happens. The body is never logged (it can hold a masked card number and a name). The invoice names our order; the amount, invoice and
+    /// result are compared with the attempt the SERVER opened, so a customer who edited the amount in the link pays nothing we accept (V-07). Duplicates (<c>xRefNum</c>) and notifications for
+    /// invoices we never asked about are acknowledged and ignored: Sola sends each one once and waits for any 2xx.
+    /// </summary>
+    private static async Task<IResult> SolaWebhook(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SolaOptions> sola, VoiceStateStore states, VoiceCallStore store, PhoneOrderService orders,
+        Data.MarketplaceDb db, ISmsSender sms, CancellationToken ct)
+    {
+        if (!vo.Value.Enabled || vo.Value.PhonePaymentProvider != "sola") return Results.NotFound();
+        if (!ctx.Request.HasFormContentType || ctx.Request.ContentLength is > 64 * 1024) return Results.StatusCode(400);
+        var form = await ctx.Request.ReadFormAsync(ct);
+        var pairs = form.SelectMany(kv => kv.Value.Select(v => new KeyValuePair<string, string>(kv.Key, v ?? ""))).ToList();
+        if (!SolaSignature.Verify(sola.Value.WebhookPin, pairs, ctx.Request.Headers["ck-signature"].ToString())) return Results.StatusCode(401);
+        var parsed = SolaNotification.Parse(pairs.GroupBy(p => p.Key, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().Value, StringComparer.OrdinalIgnoreCase));
+        if (parsed is null) return Results.Ok();
+        var attempt = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(
+            db.VoicePaymentAttempts.Where(a => a.OrderNumber == parsed.Invoice && a.Method == PhonePaymentMethod.TextLink && a.Status == "pending").OrderByDescending(a => a.CreatedAt), ct);
+        if (attempt is null) return Results.Ok();
+        var settled = await orders.SettleAsync(attempt.Id, parsed.Outcome, ct);
+        if (settled == SettleStatus.Paid)
+        {
+            await store.MarkOrderPlacedAsync(attempt.CallId, ct);
+            if (states.Find(attempt.CallId) is { } st)
+            {
+                st.SetOrderPlaced(attempt.OrderNumber);
+                if (st.Payment is { } p) p.Status = "paid";
+                st.SetKeypadOutcome("paid");
+            }
+            var to = states.Find(attempt.CallId)?.VerifiedPhone;
+            if (to is not null) await sms.SendAsync(to, $"Solvelt: your order {attempt.OrderNumber} is placed and paid ({SolaNotification.Dollars(attempt.AmountCents)} USD). We will email you updates.", ct);
+        }
+        return Results.Ok();
+    }
+
     private static async Task<IResult> Keypad(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, PhoneCodeService codes,
         StreamTokens tokens, IServiceScopeFactory scopes, PhonePayments phonePayments, PhoneOrderService orders, ISmsSender sms, CancellationToken ct)
     {
@@ -105,9 +141,10 @@ public static class VoiceEndpoints
             if (attempt is { Status: "pending" } && provider is not null)
             {
                 var outcome = await provider.CompleteKeypadAsync(attempt.AttemptId, form, ct);
-                // believed only after the server compares the provider's amount and invoice with its own order
-                paid = outcome.Status == PhonePaymentStatus.Paid && await orders.RecordPaidAsync(attempt, outcome, ct);
-                attempt.Status = paid ? "paid" : outcome.Status == PhonePaymentStatus.Declined ? "declined" : "failed";
+                // believed only after the server compares the provider's amount and invoice with its own order (and it is recorded once, whatever repeats)
+                var settled = await orders.SettleAsync(Guid.ParseExact(attempt.AttemptId, "N"), outcome, ct);
+                paid = settled is SettleStatus.Paid or SettleStatus.AlreadyPaid;
+                attempt.Status = paid ? "paid" : settled == SettleStatus.Declined ? "declined" : "failed";
             }
             if (paid)
             {

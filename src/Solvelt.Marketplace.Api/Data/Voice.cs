@@ -59,3 +59,41 @@ internal sealed class VoiceCallConfiguration : IEntityTypeConfiguration<VoiceCal
         b.HasIndex(c => new { c.CallerKey, c.StartedAt });
     }
 }
+
+/// <summary>
+/// One attempt to pay an order by phone (decision V-07): the amount and invoice the SERVER asked for, and what the provider later said. It outlives the call (a text-link payment can finish after
+/// the call ended) and holds no card data, no number and no name: only an order number, an amount and the provider's transaction reference.
+/// </summary>
+public sealed class VoicePaymentAttempt
+{
+    public Guid Id { get; set; }
+    public Guid CallId { get; set; }
+    public string OrderNumber { get; set; } = "";
+    public string Method { get; set; } = "";
+    public long AmountCents { get; set; }
+    public string Currency { get; set; } = "USD";
+    /// <summary><c>pending</c>, <c>paid</c>, <c>declined</c>, <c>failed</c>, <c>mismatch</c> (the provider took another amount or invoice: needs a person).</summary>
+    public string Status { get; set; } = "pending";
+    /// <summary>The provider's transaction id (Sola <c>xRefNum</c>): unique, so a repeated notification is the same payment.</summary>
+    public string? ProviderRef { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? SettledAt { get; set; }
+}
+
+internal sealed class VoicePaymentAttemptConfiguration : IEntityTypeConfiguration<VoicePaymentAttempt>
+{
+    public void Configure(EntityTypeBuilder<VoicePaymentAttempt> b)
+    {
+        b.ToTable("voice_payment_attempts");
+        b.HasKey(a => a.Id);
+        b.Property(a => a.Id).ValueGeneratedNever();
+        b.Property(a => a.OrderNumber).HasMaxLength(40).IsRequired();
+        b.Property(a => a.Method).HasMaxLength(20).IsRequired();
+        b.Property(a => a.Currency).HasMaxLength(3).IsRequired();
+        b.Property(a => a.Status).HasMaxLength(20).IsRequired();
+        b.Property(a => a.ProviderRef).HasMaxLength(100);
+        b.HasIndex(a => a.ProviderRef).IsUnique();
+        b.HasIndex(a => a.OrderNumber);
+        b.HasIndex(a => a.CreatedAt);
+    }
+}

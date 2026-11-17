@@ -109,7 +109,9 @@ public static class StartupValidator
         Solvelt.Marketplace.Api.Voice.VoiceConfig.Bind(v, config, IsDevLike(env));
         var s = new Solvelt.Marketplace.Api.Voice.SignalWireOptions();
         config.GetSection("SignalWire").Bind(s);
-        return Solvelt.Marketplace.Api.Voice.VoiceConfig.Problems(v, s, IsDevLike(env));
+        var sola = new Solvelt.Marketplace.Api.Voice.SolaOptions();
+        config.GetSection("Sola").Bind(sola);
+        return Solvelt.Marketplace.Api.Voice.VoiceConfig.Problems(v, s, IsDevLike(env), sola);
     }
 
     /// <summary>Returns every configuration problem; empty means the configuration is acceptable.</summary>

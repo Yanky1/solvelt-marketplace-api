@@ -48,7 +48,7 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
     public async Task MarkOrderPlacedAsync(Guid id, CancellationToken ct)
     {
         using var scope = scopes.CreateScope();
-        await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.Where(c => c.Id == id && c.EndedAt == null).ExecuteUpdateAsync(s => s.SetProperty(c => c.Outcome, VoiceOutcome.OrderPlaced), ct);
+        await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.Where(c => c.Id == id && (c.Outcome == VoiceOutcome.InProgress || c.Outcome == VoiceOutcome.Abandoned)).ExecuteUpdateAsync(s => s.SetProperty(c => c.Outcome, VoiceOutcome.OrderPlaced), ct);   // also after the caller hung up: a payment link can be paid later
     }
 
     public async Task<VoiceCall?> FindAsync(Guid id, CancellationToken ct)
@@ -108,6 +108,8 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
     {
         var cutoff = time.GetUtcNow().AddDays(-Math.Max(1, options.Value.CallRetentionDays));
         using var scope = scopes.CreateScope();
-        return await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.Where(c => c.StartedAt < cutoff).ExecuteDeleteAsync(ct);
+        var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+        await db.VoicePaymentAttempts.Where(a => a.CreatedAt < cutoff).ExecuteDeleteAsync(ct);   // payment attempts follow the call rows
+        return await db.VoiceCalls.Where(c => c.StartedAt < cutoff).ExecuteDeleteAsync(ct);
     }
 }

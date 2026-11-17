@@ -169,7 +169,9 @@ public class VoiceUnitTests
         Assert.Contains(Problems(new(good) { ["Voice:CallerHashKey"] = new string('c', 40) }), x => x.Contains("CallerHashKey must differ"));              // one key per purpose
         Assert.Contains(Problems(new(good) { ["Voice:CallerHashKey"] = null }), x => x.Contains("CallerHashKey"));
         Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "fake" }), x => x.Contains("development and tests only"));             // no fake money in production
-        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }), x => x.Contains("none or fake"));                           // nothing real is connected
+        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "stripe-link" }), x => x.Contains("none, fake or sola"));
+        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }), x => x.Contains("development and tests only"));             // nothing real moves money: the Sola sandbox is for development too
+        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }, "Development"), x => x.Contains("Sola:WebhookPin"));         // and it needs its own settings
         Assert.DoesNotContain(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "fake" }, "Development"), x => x.Contains("PhonePaymentProvider"));
         Assert.Contains(Problems(new(good) { ["SignalWire:ApiToken"] = null }), x => x.Contains("login codes are sent by SMS"));                   // production needs the messaging settings
         Assert.Contains(Problems(new(good) { ["Voice:ModelMode"] = "turbo" }), x => x.Contains("ModelMode"));

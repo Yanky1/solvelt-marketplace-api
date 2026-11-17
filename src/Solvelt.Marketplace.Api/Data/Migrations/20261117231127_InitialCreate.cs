@@ -1129,6 +1129,26 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "voice_payment_attempts",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    CallId = table.Column<Guid>(type: "uuid", nullable: false),
+                    OrderNumber = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
+                    Method = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    AmountCents = table.Column<long>(type: "bigint", nullable: false),
+                    Currency = table.Column<string>(type: "character varying(3)", maxLength: 3, nullable: false),
+                    Status = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    ProviderRef = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    SettledAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_voice_payment_attempts", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "webauthn_challenges",
                 columns: table => new
                 {
@@ -2072,6 +2092,22 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 column: "StartedAt");
 
             migrationBuilder.CreateIndex(
+                name: "IX_voice_payment_attempts_CreatedAt",
+                table: "voice_payment_attempts",
+                column: "CreatedAt");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_payment_attempts_OrderNumber",
+                table: "voice_payment_attempts",
+                column: "OrderNumber");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_payment_attempts_ProviderRef",
+                table: "voice_payment_attempts",
+                column: "ProviderRef",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
                 name: "IX_webauthn_challenges_AccountId",
                 table: "webauthn_challenges",
                 column: "AccountId");
@@ -2274,6 +2310,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "voice_calls");
+
+            migrationBuilder.DropTable(
+                name: "voice_payment_attempts");
 
             migrationBuilder.DropTable(
                 name: "webauthn_challenges");

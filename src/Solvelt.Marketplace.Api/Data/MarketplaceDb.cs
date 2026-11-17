@@ -69,6 +69,7 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<ReviewPhoto> ReviewPhotos => Set<ReviewPhoto>();
     public DbSet<ReviewPhotoData> ReviewPhotoData => Set<ReviewPhotoData>();
     public DbSet<VoiceCall> VoiceCalls => Set<VoiceCall>();   // V
+    public DbSet<VoicePaymentAttempt> VoicePaymentAttempts => Set<VoicePaymentAttempt>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
