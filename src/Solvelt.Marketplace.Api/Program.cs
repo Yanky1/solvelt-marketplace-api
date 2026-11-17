@@ -130,6 +130,13 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Mar
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.GetDeliveryOptionsTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ChooseDeliveryTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ReadBackOrderTool>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.FakePhonePaymentProvider>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhonePayments>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.PhoneOrderService>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SetGuestEmailTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ConfirmGuestEmailTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.PayForOrderTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CheckPaymentTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.VoiceReportService>();
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();

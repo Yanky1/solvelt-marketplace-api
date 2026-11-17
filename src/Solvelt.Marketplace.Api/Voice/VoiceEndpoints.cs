@@ -70,6 +70,8 @@ public static class VoiceEndpoints
             if (st.KeypadStep == "sms_code") return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.AskCode)));
             // the server speaks ITS OWN read-back (built from the fresh quote) and listens for yes / 1: the model is not on the line
             if (st.KeypadStep == "confirm" && st.ReadBackText is { } text) return Cxml(new XElement("Response", GatherConfirm(v, text)));
+            // the payment provider's own instruction (the keypad step runs without the model; no card data touches this API or the model)
+            if (st.KeypadStep == "pay" && st.Payment?.Instruction is { } pay) return Cxml(new XElement("Response", new XElement(pay)));
         }
         return Cxml(new XElement("Response", new XElement("Hangup")));
     }
@@ -85,7 +87,7 @@ public static class VoiceEndpoints
 
     /// <summary>The digits typed for an SMS code. Checked against the hash held for THIS call; never stored, logged or given to the model.</summary>
     private static async Task<IResult> Keypad(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, PhoneCodeService codes,
-        StreamTokens tokens, IServiceScopeFactory scopes, CancellationToken ct)
+        StreamTokens tokens, IServiceScopeFactory scopes, PhonePayments phonePayments, PhoneOrderService orders, ISmsSender sms, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -93,8 +95,30 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
+        if (state.KeypadStep == "pay")
+        {
+            var attempt = state.Payment;
+            var provider = phonePayments.Provider;
+            var paid = false;
+            if (attempt is { Status: "pending" } && provider is not null)
+            {
+                var outcome = await provider.CompleteKeypadAsync(attempt.AttemptId, form, ct);
+                // believed only after the server compares the provider's amount and invoice with its own order
+                paid = outcome.Status == PhonePaymentStatus.Paid && await orders.RecordPaidAsync(attempt, outcome, ct);
+                attempt.Status = paid ? "paid" : outcome.Status == PhonePaymentStatus.Declined ? "declined" : "failed";
+            }
+            if (paid)
+            {
+                state.SetOrderPlaced(attempt!.OrderNumber);
+                await store.MarkOrderPlacedAsync(call.Id, ct);
+                if ((state.VerifiedPhone ?? state.CallerNumber) is { } to) await sms.SendAsync(to, $"Solvelt: your order {attempt.OrderNumber} is placed and paid ({attempt.AmountCents / 100}.{attempt.AmountCents % 100:D2} USD). We will email you updates.", ct);
+            }
+            state.SetKeypadOutcome(paid ? "paid" : "pay_failed");
+            state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", paid ? VoiceScripts.PayThanks : VoiceScripts.PayFailed), StreamParts(v, tokens, call.Id)));
+        }
         if (state.KeypadStep == "confirm")
         {
             form.TryGetValue("SpeechResult", out var spoken);

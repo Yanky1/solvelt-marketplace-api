@@ -88,6 +88,9 @@ public static class VoiceScripts
     public const string ConfirmRetry = "Sorry, I did not catch that. To place this order, say yes or press 1. To change something, say no or press 2.";
     public const string ConfirmChange = "Okay, let us change it.";
     public const string ConfirmThanks = "Thank you. Your order is confirmed.";
+    public const string FakePayPrompt = "Test payment. Press 1 to pay, or 2 to decline.";
+    public const string PayThanks = "Thank you. Your payment went through.";
+    public const string PayFailed = "Sorry, the payment did not go through.";
     public const string Connecting = "Please hold while I connect you to a person.";
     public const string NoPerson = "Our team is not available right now. You can also order on our web site. Goodbye.";
     public const string Trouble = "Sorry, we are having trouble right now. Please try again later. Goodbye.";

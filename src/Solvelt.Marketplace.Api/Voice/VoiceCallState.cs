@@ -9,6 +9,18 @@ public sealed record DeliveryChoice(Guid SellerId, Guid BrandId, string SellerNa
 public sealed record DeliveryOption(string Kind, string? Speed, Guid? WindowId, string? Date, long PriceCents, string Spoken);
 public sealed record VariantRef(Guid VariantId, string Name, long PriceCents, bool Available);
 
+public sealed class PaymentAttempt
+{
+    public required string AttemptId { get; init; }
+    public required string OrderNumber { get; init; }
+    public required string IntentId { get; init; }
+    public required long AmountCents { get; init; }
+    public required string Method { get; init; }
+    public string Status { get; set; } = "pending";   // pending, paid, declined, failed
+    /// <summary>The provider's cXML for the keypad step (never holds card data).</summary>
+    public System.Xml.Linq.XElement? Instruction { get; init; }
+}
+
 public enum CallerLevel { Anonymous, Guest, Verified }
 public enum ConfirmationStatus { None, ReadBack, Confirmed }
 
@@ -127,6 +139,20 @@ public sealed class VoiceCallState
 
     public int CountConfirmFailure() { lock (_gate) return ++ConfirmFailures; }
 
+    // ---- guest email, payment and the placed order (slice 4, decision V-06) ----
+    /// <summary>A guest's order is mailed its access link: the address the caller spelled and confirmed. Memory only; never given back to the model after the read-back.</summary>
+    public string? GuestEmail { get; private set; }
+    public string? GuestEmailDraft { get; private set; }
+    public PaymentAttempt? Payment { get; private set; }
+    public int PaymentStarts { get; private set; }
+    public string? OrderNumber { get; private set; }
+
+    public void SetGuestEmailDraft(string? email) { lock (_gate) GuestEmailDraft = email; }
+    public bool ConfirmGuestEmail() { lock (_gate) { if (GuestEmailDraft is null) return false; GuestEmail = GuestEmailDraft; GuestEmailDraft = null; Version++; OrderChangedLocked(); return true; } }
+    public int CountPaymentStart() { lock (_gate) return ++PaymentStarts; }
+    public void SetPayment(PaymentAttempt? attempt) { lock (_gate) Payment = attempt; }
+    public void SetOrderPlaced(string number) { lock (_gate) { OrderNumber = number; Task = "placed"; } }
+
     public void Connected(DateTimeOffset now) { lock (_gate) { Connections++; LastTouched = now; } }
     public void Touch(DateTimeOffset now) { lock (_gate) LastTouched = now; }
 
@@ -169,6 +195,9 @@ public sealed class VoiceCallState
             sb.Append(Level switch { CallerLevel.Verified => VerifiedInThisCall ? "The caller is verified by SMS code in this call. " : "The caller is recognised but not verified in this call. ", CallerLevel.Guest => "The caller is a guest" + (VerifiedPhone is not null ? " whose phone is verified. " : ". "), _ => "The caller is not identified yet. " });
             if (FirstName is not null && Level == CallerLevel.Verified) sb.Append("Their first name is ").Append(FirstName).Append(". ");
             sb.Append("Current task: ").Append(Task).Append(". ");
+            if (OrderNumber is not null) sb.Append("An order has been placed and paid for in this call: its number is ").Append(VoiceSpeech.Spelled(OrderNumber)).Append(". Do not discuss card details. ");
+            else if (Payment is { Status: "pending" }) sb.Append("A payment is in progress for the order. ");
+            if (LastKeypadOutcome == "pay_failed") sb.Append("The payment did not go through (declined or not completed): offer to try again or another way. ");
             if (LastKeypadOutcome == "confirmed") sb.Append("The caller just confirmed the order read-back by keypad or voice. ");
             if (LastKeypadOutcome == "change_requested") sb.Append("The caller wants to change something in the order after the read-back: ask what. ");
             if (LastKeypadOutcome == "unclear") sb.Append("The read-back was not confirmed (no clear yes or no): ask what they want to do. ");

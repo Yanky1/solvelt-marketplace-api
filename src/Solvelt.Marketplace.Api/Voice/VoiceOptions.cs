@@ -51,6 +51,11 @@ public sealed class VoiceOptions
     public int StreamTokenSeconds { get; set; } = 120;
     /// <summary>Key of the SMS code hashes (a purpose of its own: never the stream token key or the SignalWire signing key).</summary>
     public string? PhoneCodeKey { get; set; }
+    /// <summary>Key of the caller-number hash used to count phone orders per number (a purpose of its own).</summary>
+    public string? CallerHashKey { get; set; }
+    /// <summary><c>none</c> (default: nobody can pay by phone) or <c>fake</c> (development and tests only). A real provider (Sola) is chosen here once it exists; real-money phone orders stay off until then.</summary>
+    public string PhonePaymentProvider { get; set; } = "none";
+    public int MaxPaymentAttempts { get; set; } = 3;
     public int MaxSmsPerNumberPerHour { get; set; } = 3;
     public int MaxSmsPerHour { get; set; } = 300;
     /// <summary>Days a call's metrics row is kept (no audio, no transcript, only a masked number).</summary>
@@ -74,6 +79,7 @@ public static class VoiceConfig
         c.GetSection("Voice").Bind(o);
         if (string.IsNullOrWhiteSpace(o.StreamTokenKey) && devLike) o.StreamTokenKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         if (string.IsNullOrWhiteSpace(o.PhoneCodeKey) && devLike) o.PhoneCodeKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        if (string.IsNullOrWhiteSpace(o.CallerHashKey) && devLike) o.CallerHashKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     }
 
     /// <summary>Start-up problems; only checked when the module is enabled.</summary>
@@ -87,6 +93,10 @@ public static class VoiceConfig
         else if (!string.IsNullOrEmpty(s.SigningKey) && v.StreamTokenKey == s.SigningKey) p.Add("Voice:StreamTokenKey must differ from SignalWire:SigningKey (one key per purpose).");
         if (string.IsNullOrWhiteSpace(v.PhoneCodeKey) || v.PhoneCodeKey.Length < 32) p.Add("Voice:PhoneCodeKey (env Voice__PhoneCodeKey) must be at least 32 characters when Voice:Enabled.");
         else if (v.PhoneCodeKey == v.StreamTokenKey || v.PhoneCodeKey == s.SigningKey || v.PhoneCodeKey == s.ApiToken) p.Add("Voice:PhoneCodeKey must differ from the stream token key and every SignalWire secret (one key per purpose).");
+        if (string.IsNullOrWhiteSpace(v.CallerHashKey) || v.CallerHashKey.Length < 32) p.Add("Voice:CallerHashKey (env Voice__CallerHashKey) must be at least 32 characters when Voice:Enabled.");
+        else if (v.CallerHashKey == v.PhoneCodeKey || v.CallerHashKey == v.StreamTokenKey || v.CallerHashKey == s.SigningKey || v.CallerHashKey == s.ApiToken) p.Add("Voice:CallerHashKey must differ from every other key (one key per purpose).");
+        if (!new[] { "none", "fake" }.Contains(v.PhonePaymentProvider)) p.Add("Voice:PhonePaymentProvider must be none or fake (no real provider is connected yet).");
+        if (!devLike && v.PhonePaymentProvider == "fake") p.Add("Voice:PhonePaymentProvider=fake is for development and tests only: no phone payment provider is connected for production.");
         if (!devLike && (string.IsNullOrWhiteSpace(s.ProjectId) || string.IsNullOrWhiteSpace(s.ApiToken) || string.IsNullOrWhiteSpace(s.Space) || string.IsNullOrWhiteSpace(s.FromNumber)))
             p.Add("SignalWire:ProjectId, ApiToken, Space and FromNumber (env SignalWire__...) are required in production when Voice:Enabled: login codes are sent by SMS.");
         if (!Uri.TryCreate(v.PublicBaseUrl, UriKind.Absolute, out var u) || (u.Scheme != "https" && !(devLike && u.Scheme == "http")) || u.AbsolutePath != "/")

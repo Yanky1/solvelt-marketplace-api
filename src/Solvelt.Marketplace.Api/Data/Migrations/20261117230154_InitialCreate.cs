@@ -1106,6 +1106,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     CallSid = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                     CallerMasked = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),
+                    CallerKey = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: true),
                     Model = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
                     Tier = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false),
                     StartedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -2059,6 +2060,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 table: "voice_calls",
                 column: "CallSid",
                 unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_calls_CallerKey_StartedAt",
+                table: "voice_calls",
+                columns: new[] { "CallerKey", "StartedAt" });
 
             migrationBuilder.CreateIndex(
                 name: "IX_voice_calls_StartedAt",
