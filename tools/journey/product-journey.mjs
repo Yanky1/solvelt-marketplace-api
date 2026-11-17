@@ -59,7 +59,7 @@ async function main() {
 
     step("a guest adds it to the cart (the cart token header must match web and API)");
     await hydrated(page);
-    await page.getByRole("button", { name: new RegExp(`^Add ${MUG}, .*, to cart$`) }).click();
+    await page.getByRole("button", { name: new RegExp(`^Add to cart, ${MUG}, `) }).click();
     await page.waitForURL(/\/cart\?notice=added$/);
     await go(page, "/cart");
     await page.getByText(MUG).first().waitFor({ timeout: 10_000 });
