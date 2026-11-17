@@ -130,39 +130,49 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
                 if (!opts.Providers.Any(p => p.ProviderId == wanted)) return new HoldResult(HoldStatus.Invalid, Errors: new Dictionary<string, string> { ["providerId"] = "That provider is not available for this service." });
             }
             var open = await db.Bookings.CountAsync(b => b.AccountId == buyer.AccountId && (b.Status == BookingStatus.HoldPending || (b.Status == BookingStatus.Hold && (b.HoldExpiresAt == null || b.HoldExpiresAt > now))), ct);
-            if (open >= Math.Clamp(options.Value.MaxActiveHolds, 1, 20)) return new HoldResult(HoldStatus.TooManyHolds);
-            var loc = Clean(r.Location).ToLowerInvariant();
-            var a = loc == "customer" ? r.Address : null;
-            row = new Booking
+            if (open >= Math.Clamp(options.Value.MaxActiveHolds, 1, 20))
             {
-                Id = Guid.NewGuid(), MarketplaceBookingId = NewMarketplaceBookingId(), AccountId = buyer.AccountId, IdempotencyKey = idempotencyKey, RequestHash = hash, ListingId = listing.Id,
-                ProviderId = r.ProviderId, Status = BookingStatus.HoldPending, Location = loc, StartAt = r.Start!.Value.ToUniversalTime(), DurationMinutes = r.DurationMinutes ?? 0, Currency = listing.Currency,
-                AddOnIds = string.Join(",", (r.AddOnIds ?? []).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)), CreatedAt = now, UpdatedAt = now,
-                AddrName = a is null ? null : Clean(a.Name), AddrLine1 = a is null ? null : Clean(a.Line1), AddrLine2 = a is null || Clean(a.Line2).Length == 0 ? null : Clean(a.Line2),
-                AddrCity = a is null ? null : Clean(a.City), AddrRegion = a is null || Clean(a.Region).Length == 0 ? null : Clean(a.Region), AddrPostalCode = a is null ? null : Clean(a.PostalCode),
-                AddrCountry = a is null ? null : Clean(a.Country).ToUpperInvariant(), AddrLat = a?.Lat, AddrLng = a?.Lng, Phone = Clean(r.Phone) is { Length: > 0 } p ? p : null,
-            };
-            var fresh = row;
-            for (var attempt = 0; ; attempt++)
+                // A parallel request with the same key may have inserted its hold after our first look and is now counted: answer with ITS row, never a false too_many_holds for a double-click on the last allowed hold (FX1-01).
+                var theirs = await db.Bookings.FirstOrDefaultAsync(b => b.AccountId == buyer.AccountId && b.IdempotencyKey == idempotencyKey, ct);
+                if (theirs is null) return new HoldResult(HoldStatus.TooManyHolds);
+                if (theirs.RequestHash != hash) return new HoldResult(HoldStatus.IdempotencyConflict);
+                row = theirs;
+            }
+            if (row is null)
             {
-                db.Bookings.Add(fresh);
-                try { await db.SaveChangesAsync(ct); row = fresh; created = true; break; }
-                catch (DbUpdateException ex)
+                var loc = Clean(r.Location).ToLowerInvariant();
+                var a = loc == "customer" ? r.Address : null;
+                row = new Booking
                 {
-                    // A parallel request with the same key won the unique index: answer with ITS row.
-                    db.ChangeTracker.Clear();
-                    var theirs = await db.Bookings.FirstOrDefaultAsync(b => b.AccountId == buyer.AccountId && b.IdempotencyKey == idempotencyKey, ct);
-                    if (theirs is not null)
+                    Id = Guid.NewGuid(), MarketplaceBookingId = NewMarketplaceBookingId(), AccountId = buyer.AccountId, IdempotencyKey = idempotencyKey, RequestHash = hash, ListingId = listing.Id,
+                    ProviderId = r.ProviderId, Status = BookingStatus.HoldPending, Location = loc, StartAt = r.Start!.Value.ToUniversalTime(), DurationMinutes = r.DurationMinutes ?? 0, Currency = listing.Currency,
+                    AddOnIds = string.Join(",", (r.AddOnIds ?? []).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)), CreatedAt = now, UpdatedAt = now,
+                    AddrName = a is null ? null : Clean(a.Name), AddrLine1 = a is null ? null : Clean(a.Line1), AddrLine2 = a is null || Clean(a.Line2).Length == 0 ? null : Clean(a.Line2),
+                    AddrCity = a is null ? null : Clean(a.City), AddrRegion = a is null || Clean(a.Region).Length == 0 ? null : Clean(a.Region), AddrPostalCode = a is null ? null : Clean(a.PostalCode),
+                    AddrCountry = a is null ? null : Clean(a.Country).ToUpperInvariant(), AddrLat = a?.Lat, AddrLng = a?.Lng, Phone = Clean(r.Phone) is { Length: > 0 } p ? p : null,
+                };
+                var fresh = row;
+                for (var attempt = 0; ; attempt++)
+                {
+                    db.Bookings.Add(fresh);
+                    try { await db.SaveChangesAsync(ct); row = fresh; created = true; break; }
+                    catch (DbUpdateException ex)
                     {
-                        row = theirs;
-                        if (row.RequestHash != hash) return new HoldResult(HoldStatus.IdempotencyConflict);
-                        break;
+                        // A parallel request with the same key won the unique index: answer with ITS row.
+                        db.ChangeTracker.Clear();
+                        var theirs = await db.Bookings.FirstOrDefaultAsync(b => b.AccountId == buyer.AccountId && b.IdempotencyKey == idempotencyKey, ct);
+                        if (theirs is not null)
+                        {
+                            row = theirs;
+                            if (row.RequestHash != hash) return new HoldResult(HoldStatus.IdempotencyConflict);
+                            break;
+                        }
+                        // No row under our key: the write itself failed. A lock that was not freed in time (SQLite busy/locked, PostgreSQL serialization failure) is retried like every other
+                        // write race (FX1-01); anything else is a real error; after the attempts the buyer gets a 503 with Retry-After, never a 500.
+                        if (!Solvelt.Marketplace.Api.Account.AccountService.IsRetryable(ex)) throw;
+                        if (attempt >= HoldWriteAttempts - 1) throw new TooBusyException("Bookings are too busy; try again.", ex);
+                        await Task.Delay(Random.Shared.Next(2, 12) * (attempt + 1), ct);
                     }
-                    // No row under our key: the write itself failed. A lock that was not freed in time (SQLite busy/locked, PostgreSQL serialization failure) is retried like every other
-                    // write race (FX1-01); anything else is a real error; after the attempts the buyer gets a 503 with Retry-After, never a 500.
-                    if (!Solvelt.Marketplace.Api.Account.AccountService.IsRetryable(ex)) throw;
-                    if (attempt >= HoldWriteAttempts - 1) throw new TooBusyException("Bookings are too busy; try again.", ex);
-                    await Task.Delay(Random.Shared.Next(2, 12) * (attempt + 1), ct);
                 }
             }
         }

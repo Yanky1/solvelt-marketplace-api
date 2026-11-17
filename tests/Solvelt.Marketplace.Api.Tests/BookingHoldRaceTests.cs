@@ -108,3 +108,96 @@ public sealed class BookingHoldRaceTests : IDisposable
         Assert.Equal(20, await _k.Db(db => db.Bookings.AsNoTracking().CountAsync()));
     }
 }
+
+/// <summary>
+/// FX1-01, the cap boundary: a buyer with one hold left sends the same key in parallel. A request that looked its key up BEFORE the winner's insert and counts the open holds AFTER it
+/// used to see the cap and answer 422 too_many_holds instead of replaying the winner's hold. The interleaving is forced: the first cap count passes, every later one is parked until the
+/// first insert has been saved, and the first insert waits until another request is parked, so at least one request always has a "no row" lookup and a "cap reached" count.
+/// </summary>
+public sealed class BookingHoldCapRaceTests : IDisposable
+{
+    private static readonly Guid Service = CatalogKit.ListingId("deep-house-cleaning");
+    private readonly AuthKit _k;
+    private readonly FakeBookingPortal _portal;
+    private readonly Gate _gate = new();
+    private string _jane = "";
+
+    private sealed class Gate
+    {
+        public volatile bool Armed;
+        public int Counts;
+        public readonly TaskCompletionSource Waiting = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource Inserted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class CountGate(Gate g) : DbCommandInterceptor
+    {
+        public override async ValueTask<InterceptionResult<object>> ScalarExecutingAsync(System.Data.Common.DbCommand command, CommandEventData eventData, InterceptionResult<object> result, CancellationToken ct = default)
+        {
+            if (g.Armed && command.CommandText.Contains("COUNT(*)", StringComparison.OrdinalIgnoreCase) && command.CommandText.Contains("bookings", StringComparison.OrdinalIgnoreCase) && Interlocked.Increment(ref g.Counts) > 1)
+            {
+                g.Waiting.TrySetResult();
+                await Task.WhenAny(g.Inserted.Task, Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None));
+            }
+            return result;
+        }
+    }
+
+    private sealed class InsertGate(Gate g) : SaveChangesInterceptor
+    {
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
+        {
+            if (g.Armed && eventData.Context!.ChangeTracker.Entries<Booking>().Any(e => e.State == EntityState.Added)) await Task.WhenAny(g.Waiting.Task, Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None));
+            return result;
+        }
+        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result, CancellationToken ct = default)
+        {
+            if (g.Armed && g.Waiting.Task.IsCompleted) g.Inserted.TrySetResult();
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    public BookingHoldCapRaceTests()
+    {
+        _k = new AuthKit(new Dictionary<string, string?> { ["Bookings:MaxActiveHolds"] = "3" }, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(new CountGate(_gate), new InsertGate(_gate))));
+        _portal = new FakeBookingPortal(_k.F.Clock);
+    }
+
+    public void Dispose() => _k.Dispose();
+
+    private object Body(int day) => new
+    {
+        listingId = Service, start = new DateTimeOffset(_k.F.Clock.GetUtcNow().Date.AddDays(7 + day).AddHours(14), TimeSpan.Zero), location = "online", durationMinutes = 240, addOnIds = new[] { "deep" },
+    };
+
+    private async Task<HttpResponseMessage> Hold(object body, string key)
+    {
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/bookings/holds") { Content = JsonContent.Create(body) };
+        r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _jane);
+        r.Headers.Add("Idempotency-Key", key);
+        return await _k.Http.SendAsync(r);
+    }
+
+    [Fact]
+    public async Task The_same_key_sent_in_parallel_for_the_last_allowed_hold_is_one_hold_and_never_too_many_holds()
+    {
+        await CatalogKit.Sync(_k.F);
+        _k.F.Portal.RespondAlways(c => _portal.Handle(c) ?? FakePortal.Json(HttpStatusCode.NotFound, "{\"code\":\"not_found\"}"));
+        _jane = await _k.VerifiedSession("jane@example.com", name: "Jane Brown");
+        Assert.Equal(HttpStatusCode.Created, (await Hold(Body(0), "key-fx1-cap-0")).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await Hold(Body(1), "key-fx1-cap-1")).StatusCode);   // two of three allowed holds are open
+
+        _gate.Armed = true;
+        var all = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Hold(Body(2), "key-fx1-cap-2")));
+        Assert.True(_gate.Waiting.Task.IsCompleted, "no request reached the cap count after the first: the interleaving was not forced");
+        Assert.All(all, r => Assert.True(r.IsSuccessStatusCode, string.Join(",", all.Select(x => (int)x.StatusCode))));
+        Assert.Equal(1, all.Count(r => r.StatusCode == HttpStatusCode.Created));
+        Assert.Equal(3, await _k.Db(db => db.Bookings.AsNoTracking().CountAsync()));
+        Assert.Equal(3, _portal.Holds.Count);
+
+        _gate.Armed = false;
+        // A genuinely new request over the cap is still refused.
+        var over = await Hold(Body(3), "key-fx1-cap-3");
+        Assert.Equal((HttpStatusCode)422, over.StatusCode);
+    }
+}
