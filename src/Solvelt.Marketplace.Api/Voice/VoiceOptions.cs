@@ -3,7 +3,7 @@ using Microsoft.Extensions.Configuration;
 
 namespace Solvelt.Marketplace.Api.Voice;
 
-/// <summary>Per-million-token prices in USD for one model (config only: copy them from OpenAI's pricing page; 0 means "not set", the estimate is then 0).</summary>
+/// <summary>Per-million-token prices in USD for one model (defaults: OpenAI's published prices, V-01; override in configuration when they change).</summary>
 public sealed class VoicePrices
 {
     public decimal AudioIn { get; set; }
@@ -18,19 +18,20 @@ public sealed class VoiceOptions
     public bool Enabled { get; set; }
     /// <summary>OpenAI key. Secret: environment only. Never logged, never sent anywhere but api.openai.com.</summary>
     public string? OpenAiApiKey { get; set; }
-    /// <summary>Full real-time model id. The id is configuration on purpose (it could not be verified against OpenAI's docs from the build sandbox, V-01).</summary>
-    public string OpenAiModel { get; set; } = "gpt-realtime";
-    public string OpenAiModelMini { get; set; } = "gpt-realtime-mini";
+    /// <summary>Full real-time model id (V-01: gpt-realtime-2.1; <c>gpt-realtime</c> and <c>gpt-realtime-mini</c> are marked deprecated by OpenAI). Configuration, so a new id needs no release.</summary>
+    public string OpenAiModel { get; set; } = "gpt-realtime-2.1";
+    public string OpenAiModelMini { get; set; } = "gpt-realtime-2.1-mini";
     /// <summary><c>full</c>, <c>mini</c> or <c>split</c>.</summary>
     public string ModelMode { get; set; } = "full";
     /// <summary>Share of calls (0-100) that go to mini in <c>split</c> mode.</summary>
     public int MiniPercent { get; set; } = 50;
-    public string OpenAiVoice { get; set; } = "ash";
+    public string OpenAiVoice { get; set; } = "cedar";
     /// <summary><c>server_vad</c> or <c>semantic_vad</c>.</summary>
     public string TurnDetection { get; set; } = "server_vad";
     public string OpenAiRealtimeUrl { get; set; } = "wss://api.openai.com/v1/realtime";
-    public VoicePrices PricePerMillionFull { get; set; } = new();
-    public VoicePrices PricePerMillionMini { get; set; } = new();
+    /// <summary>USD per million tokens, from OpenAI's model pages on 2026-11-17 (V-01). Cached input is priced lower; the estimate charges it at the full rate (it errs high).</summary>
+    public VoicePrices PricePerMillionFull { get; set; } = new() { AudioIn = 32m, AudioOut = 64m, TextIn = 4m, TextOut = 24m };
+    public VoicePrices PricePerMillionMini { get; set; } = new() { AudioIn = 10m, AudioOut = 20m, TextIn = 0.6m, TextOut = 2.4m };
     /// <summary>Human support line (E.164). Empty: transfer is never offered, the caller is told to use the web site.</summary>
     public string? SupportNumber { get; set; }
     /// <summary>Support hours, <c>HH:mm-HH:mm</c> in <see cref="SupportTimeZone"/>, optionally prefixed by days (<c>Mon-Fri 09:00-17:00</c>). Empty: always.</summary>

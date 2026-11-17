@@ -101,10 +101,12 @@ public sealed class FakePhone(WebSocket ws) : IDisposable
     public WebSocket Socket => ws;
     public IReadOnlyList<JsonNode> Got => _got.ToArray();
 
-    public static async Task<FakePhone> Connect(TestFactory f, string token)
+    /// <summary>Connects like SignalWire: the token in the URL, or (<paramref name="bearerOnly"/>) only in the Authorization header that <c>authBearerToken</c> makes it send.</summary>
+    public static async Task<FakePhone> Connect(TestFactory f, string token, bool bearerOnly = false)
     {
         var c = f.Server.CreateWebSocketClient();
-        var p = new FakePhone(await c.ConnectAsync(new Uri("ws://localhost/api/v1/voice/stream?token=" + Uri.EscapeDataString(token)), CancellationToken.None));
+        if (bearerOnly) c.ConfigureRequest = r => r.Headers["Authorization"] = "Bearer " + token;
+        var p = new FakePhone(await c.ConnectAsync(new Uri("ws://localhost/api/v1/voice/stream" + (bearerOnly ? "" : "?token=" + Uri.EscapeDataString(token))), CancellationToken.None));
         p.StartReading();
         return p;
     }

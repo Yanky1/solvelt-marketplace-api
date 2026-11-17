@@ -45,6 +45,39 @@ public class VoiceCallTests
     }
 
     [Fact]
+    public async Task The_cxml_hands_the_call_on_after_the_stream_and_sends_the_token_as_a_bearer_too()
+    {
+        using var f = VoiceFactory.Create(new FakeRealtime());
+        var xml = XDocument.Parse(await (await VoiceFactory.Hook(f.CreateClient(), VoiceEndpoints.InboundPath, "CA-r")).Content.ReadAsStringAsync()).Root!;
+        var after = VoiceFactory.BaseUrl + VoiceEndpoints.AfterStreamPath;
+        Assert.Equal(after, xml.Element("Redirect")!.Value);                       // the Connect page documents no "action", so the Redirect is what continues the call
+        var stream = xml.Element("Connect")!.Element("Stream")!;
+        var inUrl = System.Web.HttpUtility.ParseQueryString(new Uri(stream.Attribute("url")!.Value).Query)["token"];
+        Assert.Equal(inUrl, stream.Attribute("authBearerToken")!.Value);
+    }
+
+    [Fact]
+    public async Task The_stream_accepts_the_token_as_a_bearer_header_alone_and_a_bad_bearer_is_refused()
+    {
+        var fake = new FakeRealtime();
+        using var f = VoiceFactory.Create(fake);
+        var token = await VoiceFactory.Answer(f.CreateClient());
+        await Assert.ThrowsAnyAsync<Exception>(() => FakePhone.Connect(f, token + "0", bearerOnly: true));
+        using var phone = await FakePhone.Connect(f, token, bearerOnly: true);
+        await phone.Start();
+        await fake.Wait("session.update");
+    }
+
+    [Fact]
+    public void The_shipped_defaults_are_the_verified_models_voice_and_prices()
+    {
+        var o = new VoiceOptions();
+        Assert.Equal(("gpt-realtime-2.1", "gpt-realtime-2.1-mini", "cedar"), (o.OpenAiModel, o.OpenAiModelMini, o.OpenAiVoice));
+        Assert.Equal(32_000_000 + 64_000_000 + 4_000_000 + 24_000_000, new VoiceUsage(1_000_000, 1_000_000, 1_000_000, 1_000_000).EstimateMicros(o.PricePerMillionFull));
+        Assert.Equal(10_000_000 + 20_000_000 + 600_000 + 2_400_000, new VoiceUsage(1_000_000, 1_000_000, 1_000_000, 1_000_000).EstimateMicros(o.PricePerMillionMini));
+    }
+
+    [Fact]
     public async Task A_retried_webhook_is_one_call_even_in_parallel()
     {
         using var f = VoiceFactory.Create(new FakeRealtime());

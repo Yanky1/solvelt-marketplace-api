@@ -37,10 +37,15 @@ public static class VoiceEndpoints
         if (!form.TryGetValue("CallSid", out var sid) || string.IsNullOrWhiteSpace(sid) || sid.Length > 64) return Results.BadRequest();
         form.TryGetValue("From", out var from);
         var call = await store.StartAsync(sid, from, ct);
-        var wss = new UriBuilder(v.PublicBaseUrl!) { Scheme = new Uri(v.PublicBaseUrl!).Scheme == "https" ? "wss" : "ws", Path = StreamPath, Query = "token=" + Uri.EscapeDataString(tokens.Issue(call.Id)) };
+        var token = tokens.Issue(call.Id);
+        var afterUrl = v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath;
+        var wss = new UriBuilder(v.PublicBaseUrl!) { Scheme = new Uri(v.PublicBaseUrl!).Scheme == "https" ? "wss" : "ws", Path = StreamPath, Query = "token=" + Uri.EscapeDataString(token) };
         return Cxml(new XElement("Response",
             new XElement("Say", VoiceScripts.Disclosure),
-            new XElement("Connect", new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath), new XElement("Stream", new XAttribute("url", wss.Uri.ToString())))));
+            // authBearerToken: SignalWire sends it as "Authorization: Bearer" on the upgrade (documented); the same token is also in the URL. The Connect page does not document an
+            // "action" attribute, so the Redirect after the stream ends is what moves the call on; both point to the same idempotent endpoint.
+            new XElement("Connect", new XAttribute("action", afterUrl), new XElement("Stream", new XAttribute("url", wss.Uri.ToString()), new XAttribute("authBearerToken", token))),
+            new XElement("Redirect", afterUrl)));
     }
 
     /// <summary>SignalWire calls this when the stream ends: a person was asked for and is reachable, so dial; otherwise hang up.</summary>
@@ -61,7 +66,9 @@ public static class VoiceEndpoints
     {
         if (!vo.Value.Enabled) { ctx.Response.StatusCode = 404; return; }
         if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
-        var id = tokens.Validate(ctx.Request.Query["token"].ToString());
+        var auth = ctx.Request.Headers.Authorization.ToString();
+        var bearer = auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? auth[7..].Trim() : null;
+        var id = tokens.Validate(!string.IsNullOrEmpty(bearer) ? bearer : ctx.Request.Query["token"].ToString());
         var call = id is { } g ? await store.FindAsync(g, ctx.RequestAborted) : null;
         if (call is null || call.EndedAt is not null) { ctx.Response.StatusCode = 401; return; }
         var log = logs.CreateLogger("Solvelt.Marketplace.Api.Voice");
