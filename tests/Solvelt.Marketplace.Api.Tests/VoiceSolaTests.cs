@@ -260,6 +260,23 @@ public class VoiceSolaTests
     }
 
     [Fact]
+    public async Task Paying_the_same_link_twice_settles_once_and_the_second_charge_is_recorded_and_logged_for_a_person()
+    {
+        using var s = await Confirmed();
+        var (number, total) = await StartLink(s);
+        Assert.Equal(HttpStatusCode.OK, (await Hook(s, Approved(number, total, "R-1"))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Hook(s, Approved(number, total, "R-2"))).StatusCode);     // a second, different sale for the same invoice
+        Assert.Equal(HttpStatusCode.OK, (await Hook(s, Approved(number, total, "R-2"))).StatusCode);     // and its repeat
+
+        var paid = Assert.Single(await Orders(s));
+        Assert.Equal((OrderStatus.Paid, total), (paid.Status, paid.PaidCents));                         // the order is paid once
+        var attempts = (await Attempts(s)).OrderBy(a => a.ProviderRef).ToList();
+        Assert.Equal(new[] { ("paid", "R-1"), ("duplicate", "R-2") }, attempts.Select(a => (a.Status, a.ProviderRef!)).ToArray());   // the second charge is kept, once
+        Assert.Equal(total, attempts[1].AmountCents);
+        Assert.Single(s.F.Logs.Lines, l => l.Contains("paid twice") && l.Contains(number) && l.Contains("R-2"));   // a person is told
+    }
+
+    [Fact]
     public async Task A_declined_payment_leaves_the_order_for_another_try()
     {
         using var s = await Confirmed();

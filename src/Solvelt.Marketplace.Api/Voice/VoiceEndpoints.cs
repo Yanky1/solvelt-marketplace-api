@@ -105,7 +105,7 @@ public static class VoiceEndpoints
         var parsed = SolaNotification.Parse(pairs.GroupBy(p => p.Key, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First().Value, StringComparer.OrdinalIgnoreCase));
         if (parsed is null) return Results.Ok();
         var attempt = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(
-            db.VoicePaymentAttempts.Where(a => a.OrderNumber == parsed.Invoice && a.Method == PhonePaymentMethod.TextLink && a.Status == "pending").OrderByDescending(a => a.CreatedAt), ct);
+            db.VoicePaymentAttempts.Where(a => a.OrderNumber == parsed.Invoice && a.Method == PhonePaymentMethod.TextLink && (a.Status == "pending" || a.Status == "paid")).OrderBy(a => a.Status == "pending" ? 0 : 1).ThenByDescending(a => a.CreatedAt), ct);   // a paid one too: a second sale for it is a duplicate charge that must be recorded
         if (attempt is null) return Results.Ok();
         var settled = await orders.SettleAsync(attempt.Id, parsed.Outcome, ct);
         if (settled == SettleStatus.Paid)

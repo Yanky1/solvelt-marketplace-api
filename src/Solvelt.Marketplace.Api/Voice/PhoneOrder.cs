@@ -68,7 +68,12 @@ public sealed class PhoneOrderService(CheckoutService checkout, MarketplaceDb db
     {
         var attempt = await db.VoicePaymentAttempts.FirstOrDefaultAsync(a => a.Id == attemptId, ct);
         if (attempt is null) return SettleStatus.Unknown;
-        if (attempt.Status == "paid") return SettleStatus.AlreadyPaid;
+        if (attempt.Status == "paid")
+        {
+            if (outcome.Status == PhonePaymentStatus.Paid && !string.IsNullOrEmpty(outcome.TransactionId) && !string.Equals(outcome.TransactionId, attempt.ProviderRef, StringComparison.Ordinal))
+                await RecordDuplicateAsync(attempt, outcome, ct);   // the same link was paid twice: the customer was charged twice
+            return SettleStatus.AlreadyPaid;
+        }
         if (attempt.Status != "pending") return attempt.Status == "mismatch" ? SettleStatus.Mismatch : SettleStatus.Failed;
         var now = time.GetUtcNow();
         async Task<SettleStatus> Close(string status, SettleStatus result)
@@ -99,6 +104,24 @@ public sealed class PhoneOrderService(CheckoutService checkout, MarketplaceDb db
             if (!await db.Orders.AsNoTracking().AnyAsync(x => x.Number == attempt.OrderNumber && x.Status == OrderStatus.Paid, ct)) return await Close("failed", SettleStatus.Failed);   // only PAID counts
         }
         return await Close("paid", SettleStatus.Paid);
+    }
+
+    /// <summary>
+    /// A second approved sale for an invoice that is already paid (the customer paid the same link twice). Only the first settles the order; the second is kept as its own row
+    /// (status <c>duplicate</c>, keyed by the provider's transaction id so a repeated notification adds nothing) and logged as an error, so a person refunds or voids it in the provider's dashboard.
+    /// Nothing is refunded automatically: that needs the provider's transaction API.
+    /// </summary>
+    private async Task RecordDuplicateAsync(VoicePaymentAttempt paid, PhonePaymentOutcome outcome, CancellationToken ct)
+    {
+        if (await db.VoicePaymentAttempts.AnyAsync(a => a.ProviderRef == outcome.TransactionId, ct)) return;
+        var now = time.GetUtcNow();
+        db.VoicePaymentAttempts.Add(new VoicePaymentAttempt
+        {
+            Id = Guid.NewGuid(), CallId = paid.CallId, OrderNumber = paid.OrderNumber, Method = paid.Method, AmountCents = outcome.PaidCents, Currency = paid.Currency,
+            Status = "duplicate", ProviderRef = outcome.TransactionId, CreatedAt = now, SettledAt = now,
+        });
+        try { await db.SaveChangesAsync(ct); } catch (DbUpdateException) { db.ChangeTracker.Clear(); return; }   // recorded by a parallel notification
+        log.LogError("Order {Number} was paid twice: attempt {Attempt} settled it, and a second approved sale ({Paid} cents, transaction {Ref}) was taken for the same invoice. It needs a refund or void by a person.", paid.OrderNumber, paid.Id, outcome.PaidCents, outcome.TransactionId);
     }
 
     /// <summary>Brings the call's state up to date with the persisted attempt (a text-link payment can be settled by a webhook while the call goes on, or after it).</summary>

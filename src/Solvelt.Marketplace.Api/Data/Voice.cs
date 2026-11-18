@@ -76,7 +76,7 @@ public sealed class VoicePaymentAttempt
     public string Method { get; set; } = "";
     public long AmountCents { get; set; }
     public string Currency { get; set; } = "USD";
-    /// <summary><c>pending</c>, <c>paid</c>, <c>declined</c>, <c>failed</c>, <c>mismatch</c> (the provider took another amount or invoice: needs a person).</summary>
+    /// <summary><c>pending</c>, <c>paid</c>, <c>declined</c>, <c>failed</c>, <c>mismatch</c> (the provider took another amount or invoice: needs a person), <c>duplicate</c> (a second approved sale for an order already paid: needs a refund or void by a person).</summary>
     public string Status { get; set; } = "pending";
     /// <summary>The provider's transaction id (Sola <c>xRefNum</c>): unique, so a repeated notification is the same payment.</summary>
     public string? ProviderRef { get; set; }
