@@ -41,7 +41,7 @@ Test with the number, not with curl: the signature makes hand-made requests usel
 - **Key**: `Voice__OpenAiApiKey` (environment only; never logged or sent anywhere but `api.openai.com`).
 - **Models** (`V-01`, checked against OpenAI's pages on 2026-11-17): `Voice:OpenAiModel=gpt-realtime-2.1` and `Voice:OpenAiModelMini=gpt-realtime-2.1-mini`. The older `gpt-realtime` and `gpt-realtime-mini` ids are marked deprecated by OpenAI. They are configuration, so a new model id needs no release.
 - **Mode**: `Voice:ModelMode` = `full`, `mini`, or `split` (`Voice:MiniPercent` of calls go to mini, chosen per call; the staff report compares them). Start with `full` while you listen to calls; try `mini` or `split` once the checklist in section 9 passes on it.
-- **Voice**: `Voice:OpenAiVoice`, default `cedar`. Available: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar (OpenAI recommends marin or cedar). Pick by listening: OpenAI's own voice previews are on its Realtime guide; or set the value, restart, and call. There is no per-caller choice.
+- **Voice**: `Voice:OpenAiVoice`, default `cedar`. Available: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar (OpenAI recommends marin or cedar). Pick by listening: render samples with `tools/voice-samples` (section 11), or set the value, restart, and call. There is no per-caller choice.
 - **Turn taking**: `Voice:TurnDetection` = `semantic_vad` (default; waits for the caller to finish a thought) or `server_vad` (simple silence). Callers can interrupt the assistant at any time (barge-in); the unheard part of its sentence is cut from its memory.
 - **Slow tools**: a tool slower than `Voice:ToolFillerMs` (700) makes the assistant say a short natural filler first; the caller never gets silence.
 - **Data**: nothing is recorded or stored: no audio, no transcript. A call row keeps counts, tokens, cost, latency and a masked number for `Voice:CallRetentionDays` (400). OpenAI states that `/v1/realtime` data is not used for training and is kept for 30 days for abuse monitoring; **Zero Data Retention** is available for eligible organisations and has to be **requested by the account owner from OpenAI**; do it before real customers call.
@@ -121,7 +121,7 @@ MARKETPLACE_DB="<connection string>" dotnet run --project tools/SchemaTool -- sq
 - **Identity:** caller ID alone never authenticates anyone. A caller is an account only after typing an SMS code sent to a number that account has **proven** (V-05); order status, cancellation and every account edit need that code **in this call**.
 - **Account by phone (V-09):** a verified guest can become an account (name + proven number, no email, no password, the cart carries over); name, saved addresses and the phone number can be changed (the NEW number must be proven by code first). Email, password, payment methods and deleting the account are not done by phone: the caller is texted a link to `{Marketplace:PublicBaseUrl}/account`. **The web page behind that link, and the web steps to add a verified email and a password to an email-less account and "verify my phone" for web accounts, do not exist yet.**
 - **Cancellation** is a request to the seller (who decides), after a server read-back and a yes.
-- Not built: Sola auto-refund, the raw-card keypad connector, an automated end-to-end journey through the real seller portal with the fake model (the scripted whole-call tests in `VoiceAccountTests`, `VoiceOrderStatusTests`, `VoicePaymentTests` and others cover each flow through the fake Realtime server and fake phone; the browser journey does not drive a phone call), and call recordings (on purpose).
+- Not built: Sola auto-refund, the raw-card keypad connector, call recordings (on purpose). The end-to-end voice journey (section 10) covers one guest order through the real seller portal; the other flows (account, status, cancellation, corrections, task switching) are covered by the scripted whole-call tests (`VoiceAccountTests`, `VoiceOrderStatusTests`, `VoicePaymentTests` and others, fake Realtime server and fake phone, no portal).
 
 ## 8. Operating it
 
@@ -147,3 +147,29 @@ Call the number from a phone. For each, note pass/fail and what you heard:
 12. **Cost**: after ten calls open the staff report and compare `costPerMinute` with section 3.
 
 Record your voice choice and mode in `DECISIONS.md` (one line) so the next person knows what was chosen and why.
+
+## 10. The end-to-end voice journey (CI and local)
+
+`tools/journey/voice-journey.mjs` runs in the **Journey** workflow with the other journeys (`tools/journey/run.sh`, default list `product booking refund staff voice`), on the same stack: the real seller portal, this API on PostgreSQL. A guest phones in and orders one mug by voice; the order must appear in the seller portal (the same check the product journey uses). Scripted, on localhost only:
+
+- **SignalWire**: the script signs the webhooks exactly like SignalWire (`X-SignalWire-Signature`) and acts as the audio stream (a WebSocket client: `start`, `mark`, `stop`); a forged signature must get 403.
+- **OpenAI Realtime**: a small WebSocket server on `Voice__OpenAiRealtimeUrl` plays the model and asks for the tool calls a real call would (search, cart, identify, name, email, address, delivery, read-back, pay).
+- **SMS**: a sink on `SignalWire__ApiBaseUrl` catches the texts (the code, the confirmation).
+- **Keypad**: signed keypad posts carry a wrong code, the right code, the read-back yes (`1`) and the fake payment's `1`.
+- It also asserts: the AI disclosure is the platform's own `<Say>`; the model key reaches only the configured upstream; the read-back text never reaches the model; the model session never contained the postal code, the email, the SMS code or a keypad digit event; the confirmation text holds the order number and no address.
+
+Both knobs exist for development and this journey only, and **start-up refuses them in production**: `Voice:OpenAiRealtimeUrl` must be `wss://api.openai.com/...` and `SignalWire:ApiBaseUrl` must be empty (tests in `VoiceUnitTests`). The fake payment provider is accepted only because the journey stack is Development with no real Stripe key. The opt-in real-Stripe journey does not run the voice journey.
+
+To run it locally: `tools/journey/run.sh voice` (needs the portal and web checkouts and PostgreSQL, like the other journeys; see the header of `tools/journey/stack.sh`). The mechanics (signature, both WebSockets, the mark/close hand-off, the SMS sink, the keypad hand-off) were also exercised against the API alone with SQLite, up to the delivery step, which needs the portal's shipping settings.
+
+## 11. Voice samples (choosing the voice by listening)
+
+OpenAI's documentation does not say which voices sound male or female, so this tool renders **all ten** (or the ones you name); you pick by ear. It is a script you run with your own key; it is not part of the API, and the files it writes are never committed (`tools/voice-samples/.gitignore`).
+
+```
+cd tools/voice-samples && npm install                       # one dependency: ws
+OPENAI_API_KEY=sk-...  node voice-samples.mjs               # all ten voices -> ./out/<voice>-hd.wav and <voice>-phone.wav
+OPENAI_API_KEY=sk-...  VOICES=cedar,marin,echo SAMPLE_TEXT="Your own sentence." node voice-samples.mjs
+```
+
+`-hd.wav` (24 kHz) is how the voice sounds; `-phone.wav` (8 kHz, telephone-style compression) is closer to what a caller hears, so **judge by the phone file**. The key is read from `OPENAI_API_KEY` only (never an argument or a file) and is never printed. One short Realtime session per voice: a few cents for all ten. Set the winner in `Voice:OpenAiVoice` and note it in `DECISIONS.md`. `npm run selftest` checks the tool offline against a local script. **It has not been run against OpenAI itself** (no key in the build environment): its event names follow OpenAI's Realtime documentation as checked in V-01, and if OpenAI answers with an error the tool prints the error code and message.

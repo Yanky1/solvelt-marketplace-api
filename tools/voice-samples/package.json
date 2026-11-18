@@ -1,0 +1,8 @@
+{
+  "name": "solvelt-voice-samples",
+  "private": true,
+  "type": "module",
+  "description": "Renders one short sentence in each OpenAI Realtime voice to local .wav files, so the voice can be chosen by listening. Run by hand with your own key; nothing here is part of the API.",
+  "scripts": { "samples": "node voice-samples.mjs", "selftest": "node selftest.mjs" },
+  "dependencies": { "ws": "8.18.3" }
+}
