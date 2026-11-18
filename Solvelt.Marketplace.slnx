@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Solvelt.Marketplace.Api/Solvelt.Marketplace.Api.csproj" />
+    <Project Path="src/Solvelt.PayConnector/Solvelt.PayConnector.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/SchemaTool/SchemaTool.csproj" />
@@ -9,5 +10,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Solvelt.Marketplace.Api.Tests/Solvelt.Marketplace.Api.Tests.csproj" />
+    <Project Path="tests/Solvelt.PayConnector.Tests/Solvelt.PayConnector.Tests.csproj" />
   </Folder>
 </Solution>

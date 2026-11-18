@@ -237,6 +237,7 @@ public sealed class VoiceCallState
             if (LastKeypadOutcome == "cancel_declined") sb.Append("The caller decided to keep the order: nothing was cancelled. ");
             if (OrderNumber is not null) sb.Append("An order has been placed and paid for in this call: its number is ").Append(VoiceSpeech.Spelled(OrderNumber)).Append(". Do not discuss card details. ");
             else if (Payment is { Status: "pending" }) sb.Append("A payment is in progress for the order. ");
+            if (LastKeypadOutcome == "pay_pending") sb.Append("The caller's card payment went through at the payment step but the confirmation has not arrived yet: say it is being confirmed, that they will get a text when the order is placed, and use check_payment if they ask. ");
             if (LastKeypadOutcome == "pay_failed") sb.Append("The payment did not go through (declined or not completed): offer to try again or another way. ");
             if (LastKeypadOutcome == "confirmed") sb.Append("The caller just confirmed the order read-back by keypad or voice. ");
             if (LastKeypadOutcome == "change_requested") sb.Append("The caller wants to change something in the order after the read-back: ask what. ");

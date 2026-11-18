@@ -97,7 +97,7 @@ public class VoiceSolaTests
     [Fact]
     public async Task The_link_carries_the_amount_and_the_invoice_and_there_is_no_keypad_method()
     {
-        var p = new SolaPhonePaymentProvider(Options.Create(new SolaOptions { PaymentSiteUrl = Site, WebhookPin = Pin }));
+        var p = new SolaPhonePaymentProvider(Options.Create(new SolaOptions { PaymentSiteUrl = Site, WebhookPin = Pin }), null!);
         var start = await p.StartAsync(new PhonePaymentRequest("a1", "MP-20261117-ABC", 1805, "USD", PhonePaymentMethod.TextLink, "+15551234567"), "https://x/keypad", CancellationToken.None);
         Assert.Equal(Site + "?xamount=18.05&xinvoice=MP-20261117-ABC", start.LinkUrl);
         Assert.Null(start.Instruction);

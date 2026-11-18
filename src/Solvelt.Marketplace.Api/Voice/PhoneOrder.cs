@@ -10,7 +10,7 @@ using Solvelt.Marketplace.Api.Payments;
 namespace Solvelt.Marketplace.Api.Voice;
 
 public enum PlaceStatus { Placed, PriceChanged, LimitReached, NotReady, Unavailable }
-public enum SettleStatus { Paid, AlreadyPaid, Declined, Failed, Mismatch, NotApplied, Unknown }
+public enum SettleStatus { Paid, AlreadyPaid, Declined, Failed, Mismatch, NotApplied, Unknown, Pending }
 
 /// <summary>
 /// Turns a confirmed read-back into an order and, once a provider reports a payment, into a PAID order (decision V-06). The order goes through the EXISTING checkout (<see cref="CheckoutService"/>:
@@ -75,6 +75,7 @@ public sealed class PhoneOrderService(CheckoutService checkout, MarketplaceDb db
             return SettleStatus.AlreadyPaid;
         }
         if (attempt.Status != "pending") return attempt.Status == "mismatch" ? SettleStatus.Mismatch : SettleStatus.Failed;
+        if (outcome.Status == PhonePaymentStatus.Pending) return SettleStatus.Pending;   // the provider's report has not arrived yet: the attempt stays open, nothing is closed or applied
         var now = time.GetUtcNow();
         async Task<SettleStatus> Close(string status, SettleStatus result)
         {

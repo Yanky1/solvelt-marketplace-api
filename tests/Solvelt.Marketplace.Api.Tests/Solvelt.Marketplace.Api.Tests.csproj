@@ -17,5 +17,6 @@
   <ItemGroup>
     <Using Include="Xunit" />
     <ProjectReference Include="..\..\src\Solvelt.Marketplace.Api\Solvelt.Marketplace.Api.csproj" />
+    <ProjectReference Include="..\..\src\Solvelt.PayConnector\Solvelt.PayConnector.csproj" />
   </ItemGroup>
 </Project>

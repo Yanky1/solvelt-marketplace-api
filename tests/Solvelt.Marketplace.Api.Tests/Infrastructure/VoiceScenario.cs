@@ -101,6 +101,14 @@ public sealed class VoiceScenario : IDisposable
         return (xml, token);
     }
 
+    /// <summary>SignalWire's <c>action</c> after a <c>&lt;Pay&gt;</c> step: the result of the card step (never any card data).</summary>
+    public async Task<(XElement Xml, string Token)> PayAction(string result)
+    {
+        var r = await VoiceFactory.Hook(C, VoiceEndpoints.KeypadPath, Sid, From, extra: new Dictionary<string, string> { ["PayResult"] = result, ["PaymentCardType"] = "visa", ["PaymentCardLast4"] = "1111" });
+        var (token, xml) = await StreamFrom(r);
+        return (xml, token);
+    }
+
     /// <summary>The six-digit code of the latest text message sent to <paramref name="to"/> (what the caller would read on their phone).</summary>
     public string LastCode(string? to = null)
         => Regex.Match(Sms.Sent.Last(m => to is null || m.To == to).Body, @"\b(\d{6})\b").Groups[1].Value;

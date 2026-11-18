@@ -17,6 +17,7 @@ public static class VoiceEndpoints
         app.MapPost(KeypadPath, Keypad);
         app.MapPost(SolaWebhookPath, SolaWebhook);
         app.MapPhoneEmail();
+        app.MapPayConnector();
         app.Map(StreamPath, Stream);
         return app;
     }
@@ -115,18 +116,7 @@ public static class VoiceEndpoints
             db.VoicePaymentAttempts.Where(a => a.OrderNumber == parsed.Invoice && a.Method == PhonePaymentMethod.TextLink && (a.Status == "pending" || a.Status == "paid")).OrderBy(a => a.Status == "pending" ? 0 : 1).ThenByDescending(a => a.CreatedAt), ct);   // a paid one too: a second sale for it is a duplicate charge that must be recorded
         if (attempt is null) return Results.Ok();
         var settled = await orders.SettleAsync(attempt.Id, parsed.Outcome, ct);
-        if (settled == SettleStatus.Paid)
-        {
-            await store.MarkOrderPlacedAsync(attempt.CallId, ct);
-            if (states.Find(attempt.CallId) is { } st)
-            {
-                st.SetOrderPlaced(attempt.OrderNumber);
-                if (st.Payment is { } p) p.Status = "paid";
-                st.SetKeypadOutcome("paid");
-            }
-            var to = states.Find(attempt.CallId)?.VerifiedPhone;
-            if (to is not null) await sms.SendAsync(to, $"Solvelt: your order {attempt.OrderNumber} is placed and paid ({SolaNotification.Dollars(attempt.AmountCents)} USD). We will email you updates.", ct);
-        }
+        if (settled == SettleStatus.Paid) await PhonePaymentCompletion.AfterPaidAsync(attempt, store, states, sms, ct);
         return Results.Ok();
     }
 
@@ -191,24 +181,27 @@ public static class VoiceEndpoints
         {
             var attempt = state.Payment;
             var provider = phonePayments.Provider;
-            var paid = false;
-            if (attempt is { Status: "pending" } && provider is not null)
+            var paid = false; var pending = false;
+            var settledAlready = attempt is { Status: "paid" };   // the connector's signed report came first and PhonePaymentCompletion did everything (order placed, text sent)
+            if (settledAlready) paid = true;
+            else if (attempt is { Status: "pending" } && provider is not null)
             {
                 var outcome = await provider.CompleteKeypadAsync(attempt.AttemptId, form, ct);
                 // believed only after the server compares the provider's amount and invoice with its own order (and it is recorded once, whatever repeats)
                 var settled = await orders.SettleAsync(Guid.ParseExact(attempt.AttemptId, "N"), outcome, ct);
                 paid = settled is SettleStatus.Paid or SettleStatus.AlreadyPaid;
-                attempt.Status = paid ? "paid" : settled == SettleStatus.Declined ? "declined" : "failed";
+                pending = settled == SettleStatus.Pending;   // the connector's signed report is not in yet: the attempt stays open and a late report still places the order
+                attempt.Status = paid ? "paid" : pending ? "pending" : settled == SettleStatus.Declined ? "declined" : "failed";
             }
-            if (paid)
+            if (paid && !settledAlready)
             {
                 state.SetOrderPlaced(attempt!.OrderNumber);
                 await store.MarkOrderPlacedAsync(call.Id, ct);
                 if ((state.VerifiedPhone ?? state.CallerNumber) is { } to) await sms.SendAsync(to, $"Solvelt: your order {attempt.OrderNumber} is placed and paid ({attempt.AmountCents / 100}.{attempt.AmountCents % 100:D2} USD). We will email you updates.", ct);
             }
-            state.SetKeypadOutcome(paid ? "paid" : "pay_failed");
+            state.SetKeypadOutcome(paid ? "paid" : pending ? "pay_pending" : "pay_failed");
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", paid ? VoiceScripts.PayThanks : VoiceScripts.PayFailed), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", paid ? VoiceScripts.PayThanks : pending ? VoiceScripts.PayPending : VoiceScripts.PayFailed), StreamParts(v, tokens, call.Id)));
         }
         if (state.KeypadStep == "confirm")
         {
