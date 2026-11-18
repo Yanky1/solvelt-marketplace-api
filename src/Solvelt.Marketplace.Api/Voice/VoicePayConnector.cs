@@ -116,8 +116,8 @@ public static class PayConnectorEndpoints
             var count = await db.SavedCards.CountAsync(c => c.AccountId == accountId, ct);
             if (!valid) { status = "failed"; log.LogError("The pay connector reported a saved card in an unusable shape (attempt {Attempt}).", attempt.Id); }
             else if (count >= SavedCardLimits.MaxPerAccount) { status = "failed"; log.LogError("A card was tokenised for an account that already has {Max} saved cards (attempt {Attempt}); it was not kept.", SavedCardLimits.MaxPerAccount, attempt.Id); }
-            else if (!(await db.SavedCards.Where(c => c.AccountId == accountId).Select(c => c.Token).ToListAsync(ct)).Any(t => vault.Unprotect(t, accountId) == r.Token!.Trim()))
-                db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = accountId, Token = vault.Protect(r.Token!.Trim(), accountId), Brand = r.Brand!.Trim(), Last4 = r.Last4!, ExpMonth = r.Exp![..2], ExpYear = r.Exp[2..], CreatedAt = now });
+            else if (!await db.SavedCards.AnyAsync(c => c.AccountId == accountId && c.TokenHash == vault.Fingerprint(r.Token!.Trim()), ct))
+                db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = accountId, Token = vault.Protect(r.Token!.Trim(), accountId), TokenHash = vault.Fingerprint(r.Token!.Trim()), Brand = r.Brand!.Trim(), Last4 = r.Last4!, ExpMonth = r.Exp![..2], ExpYear = r.Exp[2..], CreatedAt = now });
         }
         attempt.Status = status; attempt.SettledAt = now;
         try { await db.SaveChangesAsync(ct); }

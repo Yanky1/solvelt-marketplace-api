@@ -917,6 +917,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     AccountId = table.Column<Guid>(type: "uuid", nullable: false),
                     Token = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: false),
+                    TokenHash = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                     Brand = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
                     Last4 = table.Column<string>(type: "character varying(4)", maxLength: 4, nullable: false),
                     ExpMonth = table.Column<string>(type: "character varying(2)", maxLength: 2, nullable: false),
@@ -2005,9 +2006,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "ListingId", "Status", "CreatedAt" });
 
             migrationBuilder.CreateIndex(
-                name: "IX_saved_cards_AccountId_Token",
+                name: "IX_saved_cards_AccountId_TokenHash",
                 table: "saved_cards",
-                columns: new[] { "AccountId", "Token" },
+                columns: new[] { "AccountId", "TokenHash" },
                 unique: true);
 
             migrationBuilder.CreateIndex(

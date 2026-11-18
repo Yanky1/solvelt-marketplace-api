@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261118235529_InitialCreate")]
+    [Migration("20261118235641_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2784,9 +2784,14 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(400)
                         .HasColumnType("character varying(400)");
 
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("AccountId", "Token")
+                    b.HasIndex("AccountId", "TokenHash")
                         .IsUnique();
 
                     b.ToTable("saved_cards", (string)null);

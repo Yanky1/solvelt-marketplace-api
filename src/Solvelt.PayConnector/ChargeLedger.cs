@@ -94,13 +94,13 @@ public class ChargeLedger : IDisposable
     /// <summary>The API has the token: it is erased from the ledger (the row stays as proof that the save happened).</summary>
     public void ClearToken(string transactionId) { lock (_gate) Exec2("UPDATE charges SET token = NULL WHERE transaction_id = $t", ("$t", transactionId)); }
 
-    /// <summary>A token the API has not acknowledged after <paramref name="cutoff"/> is WIPED (a token must not pile up in this file): the row becomes <c>unknown</c> (<c>token_not_delivered</c>), which is reported to the API as an unclear save, and the rows are returned for the log.</summary>
+    /// <summary>A token the API has not acknowledged after <paramref name="cutoff"/> is WIPED (a token must not pile up in this file): the row becomes <c>abandoned</c> (<c>token_not_delivered</c>), which is reported to the API as an unclear save, and the rows are returned for the log.</summary>
     public IReadOnlyList<LedgerRow> WipeStaleTokens(DateTimeOffset cutoff)
     {
         lock (_gate)
         {
             var rows = Read(null, "SELECT transaction_id, attempt_id, invoice, cents, state, charge_id, error_code, reported, kind, token, brand, last4, exp FROM charges WHERE kind = 'save' AND token IS NOT NULL AND created_at <= $c", ("$c", cutoff.ToUnixTimeSeconds()));
-            foreach (var r in rows) Exec2("UPDATE charges SET token = NULL, state = 'unknown', error_code = 'token_not_delivered', reported = 0 WHERE transaction_id = $t", ("$t", r.TransactionId));
+            foreach (var r in rows) Exec2("UPDATE charges SET token = NULL, state = 'abandoned', error_code = 'token_not_delivered', reported = 0 WHERE transaction_id = $t", ("$t", r.TransactionId));
             return rows;
         }
     }

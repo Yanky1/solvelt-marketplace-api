@@ -2781,9 +2781,14 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(400)
                         .HasColumnType("character varying(400)");
 
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("AccountId", "Token")
+                    b.HasIndex("AccountId", "TokenHash")
                         .IsUnique();
 
                     b.ToTable("saved_cards", (string)null);

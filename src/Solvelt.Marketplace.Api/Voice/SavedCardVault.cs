@@ -18,6 +18,14 @@ public sealed class SavedCardVault(IOptions<SolaOptions> options)
         return string.IsNullOrWhiteSpace(k) || k.Length < 32 ? null : HKDF.DeriveKey(HashAlgorithmName.SHA256, Encoding.UTF8.GetBytes(k), 32, salt: null, info: Encoding.ASCII.GetBytes("Solvelt.SavedCardToken.v1"));
     }
 
+    /// <summary>HMAC-SHA256 (hex) of the token under a key derived for this one purpose: stable, so a duplicate can be found, and useless for getting the token back.</summary>
+    public string Fingerprint(string token)
+    {
+        var k = options.Value.SavedCardKey ?? throw new InvalidOperationException("Sola:SavedCardKey is not configured.");
+        var key = HKDF.DeriveKey(HashAlgorithmName.SHA256, Encoding.UTF8.GetBytes(k), 32, salt: null, info: Encoding.ASCII.GetBytes("Solvelt.SavedCardToken.fingerprint.v1"));
+        try { return Convert.ToHexString(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(token))); } finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
     public string Protect(string token, Guid accountId)
     {
         var key = Key() ?? throw new InvalidOperationException("Sola:SavedCardKey is not configured.");

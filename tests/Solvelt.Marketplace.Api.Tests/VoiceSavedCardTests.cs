@@ -95,6 +95,7 @@ public class VoiceSavedCardTests
             Assert.Equal((jane, "Visa", "1111", "01", "38"), (card.AccountId, card.Brand, card.Last4, card.ExpMonth, card.ExpYear));
             Assert.DoesNotContain(Token, card.Token);                                                                   // ENCRYPTED at rest: the database never holds the token itself
             var vault = s.F.Services.GetRequiredService<SavedCardVault>();
+            Assert.Equal(vault.Fingerprint(Token), card.TokenHash);                                                     // the duplicate guard is a keyed fingerprint, not the token
             Assert.Equal(Token, vault.Unprotect(card.Token, jane));                                                     // the owner's key opens it
             Assert.Null(vault.Unprotect(card.Token, Guid.NewGuid()));                                                   // bound to the account: another account's id does not
             Assert.Equal("saved", (await s.K.Db(db => db.VoicePaymentAttempts.AsNoTracking().SingleAsync())).Status);
@@ -158,7 +159,7 @@ public class VoiceSavedCardTests
             var (resume, token) = await s.PayAction("success");                                                         // the action arrived before the connector's report
             Assert.Equal(VoiceScripts.CardPending, resume.Element("Say")!.Value);
             await s.Attach(token);
-            for (var i = 0; i < SavedCardLimits.MaxPerAccount; i++) await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = jane, Token = "t" + i, Brand = "Visa", Last4 = "1111", ExpMonth = "01", ExpYear = "38", CreatedAt = s.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
+            for (var i = 0; i < SavedCardLimits.MaxPerAccount; i++) await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { TokenHash = Guid.NewGuid().ToString("N"), Id = Guid.NewGuid(), AccountId = jane, Token = "t" + i, Brand = "Visa", Last4 = "1111", ExpMonth = "01", ExpYear = "38", CreatedAt = s.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
             Assert.Equal("too_many_cards", (await s.Tool("add_saved_card"))["error"]!.GetValue<string>());                // the sixth is refused before the card step starts
             await Send(s, PayConnectorEndpoints.CardPath, Report(attempt));                                              // and a late report over the cap is not kept
             Assert.Equal(SavedCardLimits.MaxPerAccount, (await Cards(s)).Count);
@@ -204,7 +205,28 @@ public class VoiceSavedCardTests
             var vault = s.F.Services.GetRequiredService<SavedCardVault>();
             Assert.Null(vault.Unprotect(stored[..^4] + (stored[^4..] == "AAAA" ? "BBBB" : "AAAA"), jane));                 // an edited value does not decrypt
             Assert.Null(vault.Unprotect("v1.AAAA", jane)); Assert.Null(vault.Unprotect("plain-token", jane));
+            // a wrong key fails closed: a vault with another key cannot open it
+            var wrongKey = new SavedCardVault(Microsoft.Extensions.Options.Options.Create(new SolaOptions { SavedCardKey = "another-saved-card-key-0123456789abcdef" }));
+            Assert.Null(wrongKey.Unprotect(stored, jane));
+            Assert.Equal(vault.Fingerprint(Token), vault.Fingerprint(Token)); Assert.NotEqual(vault.Fingerprint(Token), wrongKey.Fingerprint(Token));   // stable per key, different under another
             Assert.NotEqual(vault.Protect(Token, jane), vault.Protect(Token, jane));                                     // a fresh nonce every time
+        }
+    }
+
+    [Fact]
+    public async Task The_same_card_saved_twice_is_one_saved_card()
+    {
+        var (s, _, _) = await AccountCall();
+        using (s)
+        {
+            var (first, _) = await StartSave(s);
+            await Send(s, PayConnectorEndpoints.CardPath, Report(first));
+            var (_, tFirst) = await s.PayAction("success"); await s.Attach(tFirst);
+            await s.Tool("add_saved_card"); await s.EndStreamAfterGoodbye(); await s.AfterStream();
+            var second = (await s.K.Db(db => db.VoicePaymentAttempts.AsNoTracking().Where(a => a.Method == "save_card" && a.Status == "pending").ToListAsync())).Single().Id.ToString("N");
+            await Send(s, PayConnectorEndpoints.CardPath, Report(second));                                              // Sola returns the same token for the same card
+            Assert.Single(await Cards(s));                                                                              // the keyed fingerprint stops the duplicate; the attempt is closed
+            Assert.Equal("saved", (await s.K.Db(db => db.VoicePaymentAttempts.AsNoTracking().SingleAsync(a => a.Id == Guid.ParseExact(second, "N")))).Status);
         }
     }
 
@@ -213,7 +235,7 @@ public class VoiceSavedCardTests
     private static async Task Seed(VoiceScenario s, Guid account, params (string Token, string Brand, string Last4)[] cards)
     {
         foreach (var c in cards)
-            await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = account, Token = c.Token, Brand = c.Brand, Last4 = c.Last4, ExpMonth = "07", ExpYear = "31", CreatedAt = s.F.Clock.GetUtcNow().AddSeconds(c.Last4[3])  }); await db.SaveChangesAsync(); return 0; });
+            await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { TokenHash = Guid.NewGuid().ToString("N"), Id = Guid.NewGuid(), AccountId = account, Token = c.Token, Brand = c.Brand, Last4 = c.Last4, ExpMonth = "07", ExpYear = "31", CreatedAt = s.F.Clock.GetUtcNow().AddSeconds(c.Last4[3])  }); await db.SaveChangesAsync(); return 0; });
     }
 
     [Fact]
@@ -239,7 +261,7 @@ public class VoiceSavedCardTests
         {
             await Seed(s, jane, ("tok-one", "Visa", "1111"), ("tok-two", "Mastercard", "4444"));
             var other = Guid.NewGuid();
-            await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = other, Token = "tok-other", Brand = "Visa", Last4 = "9999", ExpMonth = "01", ExpYear = "38", CreatedAt = s.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
+            await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { TokenHash = Guid.NewGuid().ToString("N"), Id = Guid.NewGuid(), AccountId = other, Token = "tok-other", Brand = "Visa", Last4 = "9999", ExpMonth = "01", ExpYear = "38", CreatedAt = s.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
             Assert.Equal("no_such_position", (await s.Tool("remove_saved_card", new { position = 1 }))["error"]!.GetValue<string>());   // the list was not read out yet
             await s.Tool("list_saved_cards");
             var r = await s.Tool("remove_saved_card", new { position = 2 });
@@ -265,7 +287,7 @@ public class VoiceSavedCardTests
         using (s)
         {
             var theirs = Guid.NewGuid();
-            await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { Id = theirs, AccountId = Guid.NewGuid(), Token = "tok-theirs", Brand = "Visa", Last4 = "9999", ExpMonth = "01", ExpYear = "38", CreatedAt = s.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
+            await s.K.Db(async db => { db.SavedCards.Add(new SavedCard { TokenHash = Guid.NewGuid().ToString("N"), Id = theirs, AccountId = Guid.NewGuid(), Token = "tok-theirs", Brand = "Visa", Last4 = "9999", ExpMonth = "01", ExpYear = "38", CreatedAt = s.F.Clock.GetUtcNow() }); await db.SaveChangesAsync(); return 0; });
             using var scope = s.F.Services.CreateScope();
             var applied = await scope.ServiceProvider.GetRequiredService<PhoneAccountService>().ApplyAsync(s.State(), new AccountChangeRequest("card_remove", "x", CardId: theirs), default);
             Assert.Equal(AccountApply.Refused, applied);                                                                // the tools only ever offer the account's own ids; this is the second lock

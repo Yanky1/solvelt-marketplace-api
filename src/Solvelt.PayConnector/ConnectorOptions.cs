@@ -30,8 +30,8 @@ public sealed class ConnectorOptions
     public long MaxChargeCents { get; set; } = 50_000;
     /// <summary>Connector requests allowed per payment attempt (a caller may retype a wrong card number a couple of times); a PAID attempt takes no further request at all.</summary>
     public int MaxRequestsPerAttempt { get; set; } = 3;
-    /// <summary>Minutes a saved-card token may wait in the ledger for the marketplace API to take it; after that it is wiped and logged for a person (V-16).</summary>
-    public int SavedTokenMinutes { get; set; } = 15;
+    /// <summary>Minutes (default 30) a saved-card token may wait in the ledger for the marketplace API to take it; after that it is wiped and logged for a person (V-16).</summary>
+    public int SavedTokenMinutes { get; set; } = 30;
     /// <summary>Refuse plain http (true everywhere but a development box behind nothing).</summary>
     public bool RequireHttps { get; set; } = true;
     /// <summary>True when a platform in front terminates TLS and says so with <c>X-Forwarded-Proto: https</c> (for example Azure App Service). Off by default: then only a request that arrived over https itself is accepted.</summary>

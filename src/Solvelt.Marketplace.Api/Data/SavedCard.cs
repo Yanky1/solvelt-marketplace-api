@@ -13,6 +13,8 @@ public sealed class SavedCard
     public Guid AccountId { get; set; }
     /// <summary>The processor's token, ENCRYPTED at rest (AES-GCM, bound to the account; see <c>SavedCardVault</c>). Never returned, logged, exported or shown to the model.</summary>
     public string Token { get; set; } = "";
+    /// <summary>A keyed fingerprint of the token (HMAC-SHA256 hex, see <c>SavedCardVault.Fingerprint</c>): the same card is not saved twice for an account, without the token being readable from the row.</summary>
+    public string TokenHash { get; set; } = "";
     public string Brand { get; set; } = "";
     public string Last4 { get; set; } = "";
     /// <summary>Two digits each, as Sola returns the expiry (MMYY).</summary>
@@ -33,6 +35,7 @@ internal sealed class SavedCardConfiguration : IEntityTypeConfiguration<SavedCar
         b.Property(c => c.Last4).HasMaxLength(4).IsRequired();
         b.Property(c => c.ExpMonth).HasMaxLength(2).IsRequired();
         b.Property(c => c.ExpYear).HasMaxLength(2).IsRequired();
-        b.HasIndex(c => new { c.AccountId, c.Token }).IsUnique();
+        b.Property(c => c.TokenHash).HasMaxLength(64).IsRequired();
+        b.HasIndex(c => new { c.AccountId, c.TokenHash }).IsUnique();
     }
 }
