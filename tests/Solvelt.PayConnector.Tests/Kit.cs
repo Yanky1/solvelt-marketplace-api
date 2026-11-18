@@ -42,11 +42,12 @@ internal sealed class FakeApi : IMarketplaceApi
 {
     public Expectation? Expect { get; set; } = new(3500, Kit.Invoice, "USD");
     public bool ReportWorks { get; set; } = true;
+    public Exception? ThrowOnReport { get; set; }
     public Exception? ThrowOnExpect { get; set; }
     public List<ChargeReport> Reports { get; } = [];
     public int ExpectCalls { get; private set; }
     public Task<Expectation?> ExpectAsync(string attemptId, CancellationToken ct) { ExpectCalls++; if (ThrowOnExpect is not null) throw ThrowOnExpect; return Task.FromResult(Expect); }
-    public Task<bool> ReportAsync(ChargeReport report, CancellationToken ct) { if (!ReportWorks) return Task.FromResult(false); Reports.Add(report); return Task.FromResult(true); }
+    public Task<bool> ReportAsync(ChargeReport report, CancellationToken ct) { if (ThrowOnReport is not null) throw ThrowOnReport; if (!ReportWorks) return Task.FromResult(false); Reports.Add(report); return Task.FromResult(true); }
 }
 
 internal sealed class FakeSola : ISolaGateway

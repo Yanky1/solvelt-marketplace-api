@@ -281,6 +281,82 @@ public class ConnectorTests
         Assert.Empty(rig.Ledger.Unreported());
     }
 
+    // ---------- nothing stays "processing" for good ----------
+
+    [Fact]
+    public async Task Something_that_fails_after_the_sale_leaves_an_unknown_row_not_a_processing_one()
+    {
+        using var rig = new Rig();
+        rig.Api.ThrowOnReport = new InvalidOperationException("boom 4111111111111111 cvv 123");
+        var reply = await rig.Post(Kit.Body(tx: "after-1"));
+        Assert.Equal(("gateway_unknown", null), (reply.ErrorCode, reply.ChargeId));
+        var row = rig.Ledger.Find("after-1")!;
+        Assert.Equal(("unknown", "601518451"), (row.State, row.ChargeId));                                             // kept with the reference: a person can find the sale
+        Assert.Contains(rig.Logs.Lines, l => l.StartsWith("Error") && l.Contains("needs a person") && l.Contains("after-1") && l.Contains("601518451") && l.Contains(Kit.Attempt));
+        Assert.DoesNotContain(rig.Logs.Lines, l => l.Contains("boom") || l.Contains(Kit.Pan));                           // the exception type only
+        Assert.Equal("already_paid", (await rig.Post(Kit.Body(tx: "after-2"))).ErrorCode);                              // and no new charge for the attempt
+        Assert.Single(rig.Sola.Calls);
+        Assert.Contains(rig.Ledger.Unreported(), r => r.TransactionId == "after-1");                                    // it is reported (for a person) by the retry service
+    }
+
+    [Fact]
+    public async Task A_sale_call_that_throws_is_unknown_never_retried_and_logs_only_the_type()
+    {
+        using var rig = new Rig();
+        rig.Sola.Throw = new InvalidOperationException("gateway blew up for 4111111111111111");
+        var reply = await rig.Post(Kit.Body(tx: "throw-1"));
+        Assert.Equal("gateway_unknown", reply.ErrorCode);
+        Assert.Equal("unknown", rig.Ledger.Find("throw-1")!.State);
+        Assert.Single(rig.Sola.Calls);
+        Assert.Contains(rig.Logs.Lines, l => l.StartsWith("Error") && l.Contains("needs a person") && l.Contains("InvalidOperationException"));
+        Assert.DoesNotContain(rig.Logs.Lines, l => l.Contains("blew up") || l.Contains(Kit.Pan));
+        Assert.Equal("unknown", Assert.Single(rig.Api.Reports).Status);
+    }
+
+    [Fact]
+    public async Task A_row_stuck_in_processing_is_swept_to_unknown_and_reported_for_a_person()
+    {
+        using var rig = new Rig();
+        Assert.Equal(BeginKind.Started, rig.Ledger.Begin("stuck-1", Kit.Attempt, Kit.Invoice, 3500, 3, rig.Time.GetUtcNow()).Kind);   // the request that owned it died
+        var sweeper = new ReportRetryService(rig.Ledger, rig.Api, Microsoft.Extensions.Options.Options.Create(rig.Opts), rig.Time, Microsoft.Extensions.Logging.Abstractions.NullLogger<ReportRetryService>.Instance);
+        rig.Time.Advance(TimeSpan.FromSeconds(rig.Opts.SolaTimeoutSeconds + 30));
+        await sweeper.RunOnceAsync(default);
+        Assert.Equal("processing", rig.Ledger.Find("stuck-1")!.State);                                                  // still within the gateway timeout plus a minute: untouched
+        rig.Time.Advance(TimeSpan.FromSeconds(31));
+        await sweeper.RunOnceAsync(default);
+        var row = rig.Ledger.Find("stuck-1")!;
+        Assert.Equal(("unknown", "stuck_processing", true), (row.State, row.ErrorCode, row.Reported));
+        Assert.Equal("unknown", Assert.Single(rig.Api.Reports).Status);                                                  // the API is told, so a person is
+        Assert.Equal("already_paid", (await rig.Post(Kit.Body(tx: "next"))).ErrorCode);                                  // the attempt is not charged again behind a possible sale
+    }
+
+    // ---------- the API's answers must be signed too ----------
+
+    [Fact]
+    public async Task An_answer_from_the_API_with_a_bad_or_stale_signature_is_not_believed()
+    {
+        var o = Kit.Options();
+        var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider(new DateTimeOffset(2026, 11, 18, 12, 0, 0, TimeSpan.Zero));
+        async Task<Expectation?> Ask(Func<string, (string Ts, string Sig)> sign)
+        {
+            const string json = """{"open":true,"amountCents":3500,"invoice":"MP-20261118-ABCD1234","currency":"USD"}""";
+            var http = new HttpClient(new Handler((req, _) =>
+            {
+                var (ts, sig) = sign(json);
+                var res = new HttpResponseMessage { Content = new StringContent(json) };
+                res.Headers.Add(ConnectorSigning.TimestampHeader, ts); res.Headers.Add(ConnectorSigning.SignatureHeader, sig);
+                return Task.FromResult(res);
+            }));
+            return await new MarketplaceApi(http, Microsoft.Extensions.Options.Options.Create(o), time, Microsoft.Extensions.Logging.Abstractions.NullLogger<MarketplaceApi>.Instance).ExpectAsync(Kit.Attempt, default);
+        }
+        string Now() => time.GetUtcNow().ToUnixTimeSeconds().ToString();
+        Assert.NotNull(await Ask(j => (Now(), ConnectorSigning.Sign(Kit.SharedKey, Now(), j))));                                          // control: a good answer is believed
+        Assert.Null(await Ask(j => (Now(), ConnectorSigning.Sign("another-shared-key-0123456789abcdef0123", Now(), j))));               // signed with another key
+        Assert.Null(await Ask(j => (Now(), "AAAA")));                                                                                    // garbage
+        var stale = time.GetUtcNow().AddMinutes(-6).ToUnixTimeSeconds().ToString();
+        Assert.Null(await Ask(j => (stale, ConnectorSigning.Sign(Kit.SharedKey, stale, j))));                                            // validly signed but old: a replayed answer
+    }
+
     // ---------- Sola's wire format ----------
 
     [Fact]
@@ -345,9 +421,9 @@ public class ConnectorTests
             await rig.Post(Kit.Body(pan: pan, cvv: "987"), sign: false);
             await rig.Post(Kit.Body(pan: pan, cvv: "987", amount: "1.00"));
             rig.Sola.Throw = new InvalidOperationException($"gateway failed for {pan} cvv 987");
-            try { await rig.Post(Kit.Body(tx: "x-" + pan, pan: pan, cvv: "987")); } catch (InvalidOperationException) { }
+            try { await rig.Post(Kit.Body(tx: "x-tx", pan: pan, cvv: "987")); } catch (InvalidOperationException) { }
             rig.Api.ThrowOnExpect = new InvalidOperationException($"api failed for {pan}");
-            try { await rig.Post(Kit.Body(tx: "y-" + pan, pan: pan, cvv: "987")); } catch (InvalidOperationException) { }
+            try { await rig.Post(Kit.Body(tx: "y-tx", pan: pan, cvv: "987")); } catch (InvalidOperationException) { }
             var all = string.Join("\n", rig.Logs.Lines);
             Assert.DoesNotMatch(new Regex(@"\d{9,}"), all.Replace("601518451", "").Replace(Kit.Attempt, ""));                                    // no long digit run: no card number in any form (the one reference id of the fake is allowed)
             Assert.DoesNotContain("987", all); Assert.DoesNotContain(pan, all);

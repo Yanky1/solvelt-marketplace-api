@@ -55,7 +55,14 @@ public sealed class ConnectorHandler(Microsoft.Extensions.Options.IOptions<Conne
             case BeginKind.TooManyRequests: return ConnectorReply.Refused("too_many_attempts", "Too many tries for this payment.");
         }
 
-        var result = await sola.SaleAsync(new SolaSale(expect.Invoice, expect.AmountCents, card.PostalCode), card, ct);
+        SolaResult result;
+        try { result = await sola.SaleAsync(new SolaSale(expect.Invoice, expect.AmountCents, card.PostalCode), card, ct); }
+        catch (Exception ex)
+        {
+            // the gateway call itself blew up (not a decline: a bug, a disposal, an abort): the card may have been charged, so it is "unknown", never retried, for a person. Type only: the message could hold anything.
+            log.LogError("Attempt {Attempt}: the sale call failed ({Type}); the card may have been charged. It needs a person (transaction {Tx}).", card.AttemptId, ex.GetType().Name, card.TransactionId);
+            result = new SolaResult(SolaOutcome.Unknown, null, null, "sale_call_failed");
+        }
         string state; ConnectorReply reply; string status;
         switch (result.Outcome)
         {
@@ -73,9 +80,19 @@ public sealed class ConnectorHandler(Microsoft.Extensions.Options.IOptions<Conne
                 log.LogError("Attempt {Attempt}: the answer to the sale is unknown ({Code}); the card may have been charged. It needs a person (transaction {Tx}).", card.AttemptId, result.ErrorCode, card.TransactionId);
                 state = "unknown"; status = "unknown"; reply = ConnectorReply.Refused("gateway_unknown", "The payment could not be confirmed."); break;
         }
-        ledger.Finish(card.TransactionId, state, result.RefNum, result.ErrorCode, state is "approved" or "unknown" && result.AuthorisedCents is { } a ? a : null);
-        var report = new ChargeReport(card.AttemptId, expect.Invoice, status, result.AuthorisedCents ?? 0, result.RefNum, result.ErrorCode);
-        if (await ReportWithRetriesAsync(report, ct)) ledger.MarkReported(card.TransactionId);   // otherwise the background service keeps trying: the result is not lost
+        try
+        {
+            ledger.Finish(card.TransactionId, state, result.RefNum, result.ErrorCode, state is "approved" or "unknown" && result.AuthorisedCents is { } a ? a : null);
+            var report = new ChargeReport(card.AttemptId, expect.Invoice, status, result.AuthorisedCents ?? 0, result.RefNum, result.ErrorCode);
+            if (await ReportWithRetriesAsync(report, ct)) ledger.MarkReported(card.TransactionId);   // otherwise the background service keeps trying: the result is not lost
+        }
+        catch (Exception ex)
+        {
+            // something failed AFTER the sale (the ledger, a disposal, a bug): the row must not stay "processing" for good. Attempt, transaction and reference only; the caller is told the outcome is unknown.
+            log.LogError("Attempt {Attempt}: recording the sale failed ({Type}); the card may have been charged (transaction {Tx}, reference {Ref}). It needs a person.", card.AttemptId, ex.GetType().Name, card.TransactionId, result.RefNum);
+            try { ledger.Finish(card.TransactionId, "unknown", result.RefNum, "recording_failed", result.AuthorisedCents); } catch (Exception) { /* the sweeper turns a row that is still "processing" into "unknown" */ }
+            return ConnectorReply.Refused("gateway_unknown", "The payment could not be confirmed.");
+        }
         return reply;
     }
 
@@ -104,19 +121,27 @@ public sealed class ConnectorHandler(Microsoft.Extensions.Options.IOptions<Conne
 }
 
 /// <summary>Keeps trying to tell the marketplace API about results it has not received (it was down at the time): a charge is never left unrecorded.</summary>
-public sealed class ReportRetryService(ChargeLedger ledger, IMarketplaceApi api, ILogger<ReportRetryService> log) : BackgroundService
+public sealed class ReportRetryService(ChargeLedger ledger, IMarketplaceApi api, Microsoft.Extensions.Options.IOptions<ConnectorOptions> options, TimeProvider time, ILogger<ReportRetryService> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stop)
     {
         while (!stop.IsCancellationRequested)
         {
-            try
-            {
-                foreach (var row in ledger.Unreported())
-                    if (await api.ReportAsync(ConnectorHandler.ReportOf(row), stop)) ledger.MarkReported(row.TransactionId);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException) { log.LogWarning("Reporting results to the marketplace API failed ({Type}).", ex.GetType().Name); }
+            await RunOnceAsync(stop);
             try { await Task.Delay(TimeSpan.FromSeconds(10), stop); } catch (OperationCanceledException) { }
         }
+    }
+
+    /// <summary>One pass: a row stuck in "processing" longer than the gateway timeout plus a minute (the request died after the sale started) becomes "unknown" and is logged for a person; then every finished result the API has not been told about is reported.</summary>
+    public async Task RunOnceAsync(CancellationToken stop)
+    {
+        try
+        {
+            foreach (var stuck in ledger.SweepStuck(time.GetUtcNow() - TimeSpan.FromSeconds(options.Value.SolaTimeoutSeconds + 60)))
+                log.LogError("Attempt {Attempt}: transaction {Tx} never finished (the sale may have happened); marked unknown. It needs a person.", stuck.AttemptId, stuck.TransactionId);
+            foreach (var row in ledger.Unreported())
+                if (await api.ReportAsync(ConnectorHandler.ReportOf(row), stop)) ledger.MarkReported(row.TransactionId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { log.LogWarning("Reporting results to the marketplace API failed ({Type}).", ex.GetType().Name); }
     }
 }
