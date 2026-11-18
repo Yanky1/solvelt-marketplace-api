@@ -105,3 +105,7 @@ No secrets are stored in the repository.
 
 ## Tools
 - `tools/unicode/generate_normalization.py` regenerates the Unicode tables of the managed normaliser (decision M1-81); `dotnet run -c Release --project tools/NormalizationCheck` compares the normaliser with the runtime's ICU-backed one (needs ICU installed).
+
+## Voice ordering by phone
+
+Off unless `Voice:Enabled`. Setup (SignalWire number and webhooks, OpenAI key and models, every setting, database step for existing databases, payments guard, known limits, manual listening checklist): [docs/VOICE.md](docs/VOICE.md). Decisions: `V-00` to `V-09` in [docs/DECISIONS.md](docs/DECISIONS.md); endpoints: [docs/API.md](docs/API.md).

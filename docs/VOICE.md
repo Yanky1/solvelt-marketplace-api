@@ -1,0 +1,149 @@
+# Voice ordering by phone: setup, limits and checklist
+
+Buyers call a number, talk to an AI assistant, and can search, fill a cart, set a delivery address, hear the order read back, pay and get a text confirmation. It lives inside this API (`src/Solvelt.Marketplace.Api/Voice/`) and is **off unless `Voice:Enabled=true`**. Design decisions are `V-00` to `V-09` in `DECISIONS.md`; the endpoints are in `API.md` ("Voice ordering"); the standing rules are in `agent-briefs/V-voice-ordering.md`.
+
+```
+caller ─ SignalWire number ─ POST /api/v1/voice/signalwire/inbound (signed) ─ cXML: <Say> AI disclosure, <Connect><Stream>
+                                         │
+                       wss://<you>/api/v1/voice/stream?token=…   (single-use token, bearer header also accepted)
+                                         │
+                      RealtimeBridge ── audio (G.711 mu-law, no transcoding) ── OpenAI Realtime (wss://api.openai.com/v1/realtime)
+                                         │ tools run IN-PROCESS on the same catalog, cart, quote, checkout, account and order services as the web
+ keypad steps (SMS code, read-back yes, payment, cancel yes, account-change yes): the stream ends, SignalWire collects the digits and
+ posts them to /api/v1/voice/signalwire/keypad; the model never hears them. A fresh stream then resumes the call with a server summary.
+```
+
+What the model can NOT do (by design): confirm an order, change an account, cancel an order or take a payment by itself. The **server** speaks every read-back (built from fresh server state) and only a keypad or spoken yes/1 from the caller applies it. The model never receives an SMS code, a card number, an email address or a full delivery address it did not hear from the caller.
+
+## 1. What you need before you start
+
+| Thing | Used for | Notes |
+|---|---|---|
+| A SignalWire project and a phone number with **voice and SMS** | the number callers dial; the SMS codes, links and summaries | the "from" number for texts can be the same number |
+| An OpenAI API key with access to the Realtime models | the conversation | see section 3 for models, cost and data retention |
+| A public **https** origin that reaches this API, with **WebSockets** allowed | SignalWire calls the webhooks and opens the stream there | `Voice:PublicBaseUrl` (no path) |
+| ONE running instance of the API (see section 7) | per-call state is in memory | session affinity if you ever scale out |
+
+## 2. SignalWire
+
+1. In the SignalWire dashboard create (or reuse) a project; note **Project ID**, **Space** (the part before `.signalwire.com`), an **API token**, and the project's **Signing Key** (used to verify webhooks). Menu names change over time; these four values are what matter.
+2. Buy a number that supports voice and SMS. Put it in `SignalWire:FromNumber` (E.164, for example `+15551234567`).
+3. Set the number's **incoming-call handler** to a cXML (LaML) webhook, method **POST**: `https://<your-api-origin>/api/v1/voice/signalwire/inbound`.
+   No other webhook has to be configured by hand: the API tells SignalWire the follow-up URLs (`after-stream`, `keypad`) inside its own cXML answers, built from `Voice:PublicBaseUrl`.
+4. Every webhook is verified with `X-SignalWire-Signature` (base64 HMAC-SHA1 of the URL plus the sorted form fields, keyed with the Signing Key) against **`Voice:PublicBaseUrl`**, never against request headers. If you change the public URL (a proxy, a new domain), change `Voice:PublicBaseUrl` too, or every webhook is refused with 403.
+5. SMS goes out through `POST https://<Space>.signalwire.com/api/messaging/messages` (basic auth Project ID : API token).
+6. The caller hears an AI disclosure spoken by the phone platform itself (not the model) before the assistant connects, and can press **0** at any time for a person (`Voice:SupportNumber`, inside `Voice:SupportHours`; empty means "no transfer is offered, use the web site").
+
+Test with the number, not with curl: the signature makes hand-made requests useless on purpose.
+
+## 3. OpenAI: keys, models, voice, cost, data
+
+- **Key**: `Voice__OpenAiApiKey` (environment only; never logged or sent anywhere but `api.openai.com`).
+- **Models** (`V-01`, checked against OpenAI's pages on 2026-11-17): `Voice:OpenAiModel=gpt-realtime-2.1` and `Voice:OpenAiModelMini=gpt-realtime-2.1-mini`. The older `gpt-realtime` and `gpt-realtime-mini` ids are marked deprecated by OpenAI. They are configuration, so a new model id needs no release.
+- **Mode**: `Voice:ModelMode` = `full`, `mini`, or `split` (`Voice:MiniPercent` of calls go to mini, chosen per call; the staff report compares them). Start with `full` while you listen to calls; try `mini` or `split` once the checklist in section 9 passes on it.
+- **Voice**: `Voice:OpenAiVoice`, default `cedar`. Available: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar (OpenAI recommends marin or cedar). Pick by listening: OpenAI's own voice previews are on its Realtime guide; or set the value, restart, and call. There is no per-caller choice.
+- **Turn taking**: `Voice:TurnDetection` = `semantic_vad` (default; waits for the caller to finish a thought) or `server_vad` (simple silence). Callers can interrupt the assistant at any time (barge-in); the unheard part of its sentence is cut from its memory.
+- **Slow tools**: a tool slower than `Voice:ToolFillerMs` (700) makes the assistant say a short natural filler first; the caller never gets silence.
+- **Data**: nothing is recorded or stored: no audio, no transcript. A call row keeps counts, tokens, cost, latency and a masked number for `Voice:CallRetentionDays` (400). OpenAI states that `/v1/realtime` data is not used for training and is kept for 30 days for abuse monitoring; **Zero Data Retention** is available for eligible organisations and has to be **requested by the account owner from OpenAI**; do it before real customers call.
+
+### Cost per minute (an estimate you should replace with the measured number)
+
+The staff report (`GET /api/v1/staff/voice/report`, permission `voice.view`) shows the **measured** `costPerMinute` per tier (`full`, `mini`), computed from the token counts OpenAI reports on every response and the configured prices. **Use that number; the figures below are only a planning estimate until ten or so real calls exist.**
+
+Prices configured (USD per million tokens, from OpenAI's model pages on 2026-11-17): full: audio in 32, audio out 64, text in 4, text out 24; mini: 10, 20, 0.6, 2.4. The estimate assumes, **without having measured it**, about 600 to 1,200 audio tokens per minute of the caller's speech (streamed all call long), about 300 to 600 per minute of assistant speech (it talks roughly half the time), and a modest amount of text context:
+
+| | planning estimate per minute (unverified assumptions) |
+|---|---|
+| full | roughly **$0.04 to $0.11** |
+| mini | roughly **$0.015 to $0.04** |
+
+Add SignalWire's per-minute voice and per-message SMS prices (see your SignalWire rate card; not included here). A call is cut off at `Voice:MaxCallSeconds` (900 = 15 minutes), so one call costs at most 15 times the per-minute figure. Cached input is priced lower by OpenAI; the estimate charges it at the full rate, so it errs high. If prices change, override `Voice:PricePerMillionFull` and `Voice:PricePerMillionMini`.
+
+## 4. Configuration (names only; values live in the host's secret store, never in the repository or chat)
+
+Environment variables use `__` for `:` (for example `Voice__OpenAiApiKey`).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `Voice:Enabled` | `false` | the switch; when true, start-up **refuses** a half-configured module (`VoiceConfig.Problems`) |
+| `Voice:PublicBaseUrl` | none | public https origin of this API, no path (signature base and stream URL) |
+| `Voice:OpenAiApiKey` | none | **secret** |
+| `Voice:OpenAiModel` / `OpenAiModelMini` | `gpt-realtime-2.1` / `-mini` | model ids |
+| `Voice:ModelMode`, `Voice:MiniPercent` | `full`, 50 | `full`, `mini`, `split` |
+| `Voice:OpenAiVoice` | `cedar` | voice |
+| `Voice:TurnDetection` | `semantic_vad` | or `server_vad` |
+| `Voice:ToolFillerMs` | 700 | filler threshold |
+| `Voice:PricePerMillionFull` / `Mini` | published prices | cost estimate inputs |
+| `Voice:SupportNumber`, `Voice:SupportHours`, `Voice:SupportTimeZone` | empty, empty, `America/New_York` | human transfer (E.164; `HH:mm-HH:mm` optionally with days `Mon-Fri 09:00-17:00`) |
+| `Voice:MaxOrderAmount` | 500 | most a phone order may cost, in whole dollars |
+| `Voice:MaxItems` | 20 | most items in a phone order |
+| `Voice:MaxOrdersPerDay` | 3 | per verified caller number |
+| `Voice:MaxCallSeconds` | 900 | per-call cap |
+| `Voice:MaxPaymentAttempts` | 3 | payment tries per call |
+| `Voice:MaxSmsPerNumberPerHour` / `MaxSmsPerHour` | 3 / 300 | SMS caps (codes, links, summaries); one call also sends at most 3 codes |
+| `Voice:CallRetentionDays` | 400 | metrics row retention |
+| `Voice:StreamTokenKey` | none | **secret**, >= 32 characters, signs the single-use stream tokens |
+| `Voice:PhoneCodeKey` | none | **secret**, >= 32 characters, keys the SMS-code hashes |
+| `Voice:CallerHashKey` | none | **secret**, >= 32 characters, keys the hashes of caller numbers (per-number limits) |
+| `Voice:PhonePaymentProvider` | `none` | `none`, `fake` (development/tests only), `sola` (Sola SANDBOX only; see section 6) |
+| `SignalWire:ProjectId`, `ApiToken`, `Space`, `FromNumber` | none | **secrets** (token) and identifiers; required in production |
+| `Marketplace:PublicBaseUrl` | dev default | the WEB site's public origin; the account link texted to callers is `<it>/account` |
+| `SignalWire:SigningKey` | none | **secret**, verifies webhooks |
+| `Sola:PaymentSiteUrl`, `Sola:WebhookPin`, `Sola:ApiKey` | none | only with provider `sola`; PIN is >= 15 letters/digits; the API key is reserved for refunds/reconciliation (not used yet) |
+
+The four keys `Voice:StreamTokenKey`, `Voice:PhoneCodeKey`, `Voice:CallerHashKey` and `SignalWire:SigningKey` must **all differ** (one key per purpose; start-up enforces it). Generate each with a secure random generator (32 random bytes as hex is fine). In development the three `Voice:` keys are generated per process if left empty.
+
+## 5. Existing databases (the DB step)
+
+The model gained `voice_calls`, `voice_payment_attempts`, `buyer_accounts.PhoneVerifiedE164`, `buyer_accounts.PhoneVerifiedAt` and the unique index `ux_buyer_accounts_phone_verified` (`InitialCreate` was regenerated; a fresh database needs nothing). For a database that already exists (the Azure test site runs SQLite with manual schema updates):
+
+```
+MARKETPLACE_DB="<connection string>" dotnet run --project tools/SchemaTool -- sqlite     # or: postgres
+```
+
+`SchemaTool` is read-only: it lists the differences between the database and the model and **prints the SQL that adds what is missing** (SQLite is opened read-only; PostgreSQL with `default_transaction_read_only`). Review it, take a backup, apply it, run the tool again: it must say "The database matches the model." The connection string comes from the environment variable or standard input, never the command line.
+
+## 6. Payments and real money (read this before enabling anything)
+
+- `Voice:PhonePaymentProvider=none` (default): nobody can pay by phone; the assistant says so and offers the web site.
+- `fake` and `sola` are **refused at start-up in production** ("for development and tests only: real-money phone orders are not enabled"). The order is marked paid with the in-process fake money, nothing real moves.
+- **Why real money stays off:** seller payouts for web orders run on **Stripe Connect**. A phone payment taken through Sola would not be in Stripe, so the existing payout, refund and dispute machinery would not apply to it. Real-money phone orders and Sola seller payouts wait for the owner's Stripe-versus-Sola decision (parked, listed in `AGENTS.md`).
+- **Sola text link (method B)**, sandbox only: the caller is texted a link to the PaymentSITE page with the exact amount and the order number as invoice (the amount is not lockable on that page, so the server verifies it). Sola posts the result to `POST /api/v1/voice/sola/webhook` (signed with the webhook PIN: `ck-signature`). Only an approved sale for **exactly** our order total and **our** order number counts; anything else is recorded as `mismatch`, logged for a person, and never applied. Setup in Sola: PaymentSITE URL → `Sola:PaymentSiteUrl`, webhook URL = the endpoint above, PIN → `Sola:WebhookPin`.
+- **Money that needs a person (nothing refunds automatically):** a `mismatch` (the customer edited the amount) and a `duplicate` (the same link paid twice; recorded as its own `voice_payment_attempts` row, logged at error level) must be refunded or voided in Sola's dashboard. Automatic void/refund needs Sola's Transaction API and `Sola:ApiKey`; not built.
+- **Raw-card keypad connector (method A): NOT built, parked** until Ronald confirms it directly. When it is built the hardening requirements are: a separate service and deployment with its own secret store; no card data in logs, exceptions, metrics or crash dumps (with a test that fuzzes log output with PAN-like input); TLS only; per-call amount and attempt limits; card buffers cleared after use (avoid strings for the PAN where practical); an SAQ D / ASV scan checklist. An IP allowlist for SignalWire's connector requests is **not** possible (SignalWire's Pay documentation says they come from no published IP range), so the protection is the request signature plus Basic auth.
+
+## 7. Hosting requirements and known limits
+
+- **One instance, or session affinity.** A call's state (cart reference, chosen address, quote, pending read-back, identity level) lives in memory in the API process for the length of the call (decision V-02). The stream, the keypad webhook and the resume of one call must all reach the **same instance**. Run one instance, or pin a call to an instance. A restart of the instance ends the calls in progress; an order is only created at the payment step, so an interrupted call before that leaves no order.
+- **WebSockets must be enabled** on the host (for Azure App Service: Web sockets on) and the reverse proxy must pass `Authorization` and upgrade headers.
+- Phone orders are limited: `MaxOrderAmount`, `MaxItems`, `MaxOrdersPerDay`, and the SMS caps. Over a limit the assistant says so and offers the web site or a person.
+- **Languages and addresses:** the assistant starts in English and follows the caller's language, but money, dates and street numbers are spoken English-style and address validation is US-shaped (two-letter state codes). Other languages are untested.
+- **Identity:** caller ID alone never authenticates anyone. A caller is an account only after typing an SMS code sent to a number that account has **proven** (V-05); order status, cancellation and every account edit need that code **in this call**.
+- **Account by phone (V-09):** a verified guest can become an account (name + proven number, no email, no password, the cart carries over); name, saved addresses and the phone number can be changed (the NEW number must be proven by code first). Email, password, payment methods and deleting the account are not done by phone: the caller is texted a link to `{Marketplace:PublicBaseUrl}/account`. **The web page behind that link, and the web steps to add a verified email and a password to an email-less account and "verify my phone" for web accounts, do not exist yet.**
+- **Cancellation** is a request to the seller (who decides), after a server read-back and a yes.
+- Not built: Sola auto-refund, the raw-card keypad connector, an automated end-to-end journey through the real seller portal with the fake model (the scripted whole-call tests in `VoiceAccountTests`, `VoiceOrderStatusTests`, `VoicePaymentTests` and others cover each flow through the fake Realtime server and fake phone; the browser journey does not drive a phone call), and call recordings (on purpose).
+
+## 8. Operating it
+
+- **Staff report:** `GET /api/v1/staff/voice/report?days=30` (permission `voice.view`: finance, admin): per tier: calls, finished calls, total seconds, estimated cost and cost per minute, average latency (speech end to first audio), and the share of finished calls that placed an order, were transferred, or were abandoned.
+- **Logs to watch** (error level, no card or caller data in them): "does not match the order" (a payment `mismatch`), "was paid twice" (a `duplicate` charge), "cannot be recorded" (a payment that could not be applied). Each names the order number and attempt id; a person acts in Sola's dashboard.
+- **Cutting it off:** set `Voice:Enabled=false` and restart; the number then gets a 404 from the webhook (SignalWire plays its failure handling), or point the number's handler away.
+
+## 9. Manual listening checklist (for Ronald; run with test keys, nothing is recorded or stored)
+
+Call the number from a phone. For each, note pass/fail and what you heard:
+
+1. **Disclosure and greeting**: the AI disclosure plays before anything else; the greeting is short and natural; pressing 0 offers a person (or says no one is available).
+2. **Naturalness**: sentences are short, no lists of more than three things, no markdown or "link" talk, money and dates sound right ("eighteen dollars and five cents", "Tuesday, November twenty-fourth").
+3. **Interruptions**: talk over the assistant mid-sentence; it stops at once and answers what you said. Say "no, three not two" and "go back" while building the cart.
+4. **Pauses**: ask something slow (search); you hear a short filler, never dead air for more than a second or two.
+5. **Switching topics**: start an order, ask "where is my other order?", come back ("so, my cart?"), edit a saved address, come back; the cart and address are intact and the assistant says where you were.
+6. **Verification**: you receive a text code; typing it on the keypad works; a wrong code is refused; the assistant never asks you to say the code.
+7. **Read-back**: the whole order (items, address, delivery, total) is read by a **different-sounding system voice** (the phone platform, not the AI); yes/1 confirms, no/2 changes; a change after the read-back forces a new read-back.
+8. **Payment (test mode only)**: with the fake provider "Press 1 to pay"; the order appears paid; you get a confirmation text with the number and no address.
+9. **Account**: as a new caller create an account; call again and be recognised after the code; change your name; add and remove an address; change the number (the code goes to the NEW number); ask for your password and get a text link.
+10. **Cancellation**: cancel a test order; the request goes to the seller; you hear it is a request.
+11. **Hang up at every step** (mid-code, mid-read-back, mid-payment): no half-finished order, no charge, no error text.
+12. **Cost**: after ten calls open the staff report and compare `costPerMinute` with section 3.
+
+Record your voice choice and mode in `DECISIONS.md` (one line) so the next person knows what was chosen and why.
