@@ -34,8 +34,8 @@ public class VoiceTopicTests
     {
         var before = s.Fake.Of("response.create").Count();
         await s.Fake.Send(new { type = "response.done", response = new { output = new object[] { new { type = "function_call", name = "off_topic", call_id = "call_limit", arguments = "{}" } } } });
-        var mark = await s.Phone!.Wait("mark");
-        await s.Phone.Send(new { @event = "mark", streamSid = "MZ1", mark = new { name = mark["mark"]!["name"]!.GetValue<string>() } });
+        var mark = await s.Phone!.Wait(n => n["event"]?.GetValue<string>() == "mark" && n["mark"]?["name"]?.GetValue<string>() == "end");   // the hand-off mark (audio marks of V-12 are not it)
+        await s.Phone.Send(new { @event = "mark", streamSid = "MZ1", mark = new { name = "end" } });
         Assert.True(await s.Phone.WaitClosed());                                                           // the stream is closed by the server
         Assert.Equal(before, s.Fake.Of("response.create").Count());                                        // the model was not asked to say or do anything
         Assert.DoesNotContain(s.Fake.Received, m => m.Contains("call_limit"));                             // and was not even given an answer to the last call
@@ -112,6 +112,27 @@ public class VoiceTopicTests
         using var scope = s.F.Services.CreateScope();
         var report = await scope.ServiceProvider.GetRequiredService<VoiceReportService>().BuildAsync(30, default);
         Assert.Equal(100.0, Assert.Single(report.Tiers).EndedOffTopicPercent);
+    }
+
+    [Fact]
+    public async Task The_limit_lets_the_phone_finish_playing_what_is_queued_and_then_the_platform_says_its_goodbye()
+    {
+        using var s = new VoiceScenario();
+        await s.Dial();
+        await Strike(s); await Strike(s);
+        await s.Fake.Send(new { type = "response.output_audio.delta", item_id = "item_9", delta = Convert.ToBase64String(new byte[4000]) });   // the redirect is still playing on the phone (500 ms queued)
+        await FakeRealtime.Poll(() => s.Phone!.Got.Count(g => g["event"]!.GetValue<string>() == "media") >= 1 ? "x" : null, 5);
+        var audioMark = (await FakeRealtime.Poll(() => s.Phone!.Got.FirstOrDefault(g => g["event"]!.GetValue<string>() == "mark" && g["mark"]!["name"]!.GetValue<string>() != "end"), 5))["mark"]!["name"]!.GetValue<string>();
+        await s.Fake.Send(new { type = "response.done", response = new { output = new object[] { new { type = "function_call", name = "off_topic", call_id = "call_limit", arguments = "{}" } } } });
+        var end = await s.Phone!.Wait(n => n["event"]?.GetValue<string>() == "mark" && n["mark"]?["name"]?.GetValue<string>() == "end");
+        Assert.Equal(System.Net.WebSockets.WebSocketState.Open, s.Phone.Socket.State);                      // the stream stays open until the phone has played what is queued: the line is not cut off
+        Assert.Equal(0, s.Phone.Got.Count(g => g["event"]!.GetValue<string>() == "clear"));                  // and nothing was cleared: this is the server ending the call, not a barge-in
+        await s.Phone.Send(new { @event = "mark", streamSid = "MZ1", mark = new { name = audioMark } });    // the phone has played the audio...
+        await s.Phone.Send(new { @event = "mark", streamSid = "MZ1", mark = new { name = end["mark"]!["name"]!.GetValue<string>() } });   // ...and the hand-off mark
+        Assert.True(await s.Phone.WaitClosed());                                                            // only then does the stream close
+        var after = await s.AfterStream();
+        Assert.Equal(VoiceScripts.OffTopicGoodbye, after.Element("Say")!.Value); Assert.NotNull(after.Element("Hangup"));   // and the platform speaks its goodbye
+        Assert.Equal(VoiceOutcome.EndedOffTopic, (await FakeRealtime.Poll(() => s.Row().Result is { EndedAt: not null } r ? r : null, 5)).Outcome);
     }
 
     [Fact]
