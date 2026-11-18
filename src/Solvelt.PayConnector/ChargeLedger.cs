@@ -75,6 +75,19 @@ public sealed class ChargeLedger : IDisposable
         }
     }
 
+    /// <summary>Rows still "processing" that were created before <paramref name="cutoff"/> become "unknown" (the request that owned them died after the sale may have started). Returns them, for the log.</summary>
+    public IReadOnlyList<LedgerRow> SweepStuck(DateTimeOffset cutoff)
+    {
+        lock (_gate)
+        {
+            var rows = Read(null, "SELECT transaction_id, attempt_id, invoice, cents, state, charge_id, error_code, reported FROM charges WHERE state = 'processing' AND created_at <= $c", ("$c", cutoff.ToUnixTimeSeconds()));
+            foreach (var r in rows) Exec2("UPDATE charges SET state = 'unknown', error_code = 'stuck_processing' WHERE transaction_id = $t AND state = 'processing'", ("$t", r.TransactionId));
+            return rows;
+        }
+    }
+
+    private void Exec2(string sql, params (string, object)[] ps) { using var c = _db.CreateCommand(); c.CommandText = sql; foreach (var (n, v) in ps) c.Parameters.AddWithValue(n, v); c.ExecuteNonQuery(); }
+
     public void MarkReported(string transactionId)
     {
         lock (_gate) { using var c = _db.CreateCommand(); c.CommandText = "UPDATE charges SET reported = 1 WHERE transaction_id = $t"; c.Parameters.AddWithValue("$t", transactionId); c.ExecuteNonQuery(); }
