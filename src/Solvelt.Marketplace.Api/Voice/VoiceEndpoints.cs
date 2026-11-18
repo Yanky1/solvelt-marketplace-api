@@ -73,6 +73,7 @@ public static class VoiceEndpoints
             if (st.KeypadStep == "confirm" && st.ReadBackText is { } text) return Cxml(new XElement("Response", GatherConfirm(v, text)));
             // the payment provider's own instruction (the keypad step runs without the model; no card data touches this API or the model)
             if (st.KeypadStep == "confirm_cancel" && st.Cancel is { } cancel) return Cxml(new XElement("Response", GatherConfirm(v, cancel.Text)));
+            if (st.KeypadStep == "confirm_account" && st.AccountChange is { } change) return Cxml(new XElement("Response", GatherConfirm(v, change.Text)));
             if (st.KeypadStep == "pay" && st.Payment?.Instruction is { } pay) return Cxml(new XElement("Response", new XElement(pay)));
         }
         return Cxml(new XElement("Response", new XElement("Hangup")));
@@ -132,7 +133,7 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "confirm_cancel" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
         if (state.KeypadStep == "confirm_cancel")
         {
@@ -154,6 +155,29 @@ public static class VoiceEndpoints
             state.SetKeypadOutcome(outcome);
             state.EndKeypadStep();
             return Cxml(new XElement("Response", new XElement("Say", say), StreamParts(v, tokens, call.Id)));
+        }
+        if (state.KeypadStep == "confirm_account")
+        {
+            form.TryGetValue("SpeechResult", out var heard);
+            var reply = ReadBackAnswer.Parse(typed, heard);
+            if (reply == ConfirmChoice.Unclear && state.CountConfirmFailure() < 2) return Cxml(new XElement("Response", GatherConfirm(v, VoiceScripts.AccountRetry)));
+            string accountResult = "account_declined", line = VoiceScripts.AccountKept;
+            if (reply == ConfirmChoice.Yes && state.AccountChange is { } pendingChange)
+            {
+                // the ONLY path that changes an account: the caller heard the server's read-back and said yes (or pressed 1); the existing account services apply their own rules
+                using var scope = ctx.RequestServices.CreateScope();
+                var applied = await scope.ServiceProvider.GetRequiredService<PhoneAccountService>().ApplyAsync(state, pendingChange, ct);
+                if (applied != AccountApply.Refused)
+                {
+                    accountResult = applied == AccountApply.Created ? "account_created" : "account_changed"; line = applied == AccountApply.Created ? VoiceScripts.AccountCreated : VoiceScripts.AccountSaved;
+                    if (pendingChange.Kind is "phone" or "create" && state.VerifiedPhone is { } nowVerified) await store.SetVerifiedKeyAsync(call.Id, store.CallerKeyOf(nowVerified), ct);
+                }
+                else { accountResult = "account_refused"; line = VoiceScripts.AccountRefused; }
+            }
+            state.SetAccountChange(null);
+            state.SetKeypadOutcome(accountResult);
+            state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", line), StreamParts(v, tokens, call.Id)));
         }
         if (state.KeypadStep == "pay")
         {
@@ -192,6 +216,21 @@ public static class VoiceEndpoints
         var result = codes.Verify(state, typed);
         if (result == CodeResult.Wrong) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.WrongCode)));
         var challenge = state.Challenge;
+        if (state.LastChallengePurpose == "phone_change")
+        {
+            // a code for a NEW number the signed-in account wants: it proves the number, it never changes who the caller is. Then the server reads the change back and waits for the yes.
+            if (result == CodeResult.Ok && state.AccountChange is { Kind: "phone" } phoneChange && state.LastChallengePhone == phoneChange.Phone)
+            {
+                state.SetAccountChange(phoneChange with { PhoneProved = true });
+                state.BeginKeypadStep("confirm_account");
+                return Cxml(new XElement("Response", GatherConfirm(v, phoneChange.Text)));
+            }
+            state.SetAccountChange(null);
+            state.SetKeypadOutcome("account_refused");
+            state.SetChallenge(null);
+            state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
+        }
         if (result == CodeResult.Ok) await ApplyVerifiedAsync(state, scopes, store, call.Id, time, ct);
         else { state.SetKeypadOutcome("failed"); state.SetChallenge(null); }
         state.EndKeypadStep();

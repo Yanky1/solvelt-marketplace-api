@@ -110,7 +110,7 @@ public sealed class PhoneCodeService(ISmsSender sms, IOptions<VoiceOptions> opti
 /// <summary>
 /// Which buyer account, if any, has PROVEN that it holds a phone number (decision V-05). The profile phone is free text nobody checked: a typo, or a number that was reassigned, would let whoever
 /// holds it now pass the SMS code and become that account, so it is never used. Only <c>PhoneVerifiedE164</c>, set by a code typed in a session already signed in as the account, counts; at most one
-/// account holds a number. Deleted, staff-locked, demo-verified and unverified-email accounts are never recognised.
+/// account holds a number. Deleted, staff-locked, demo-verified and unverified-email accounts are never recognised. The one account that has no verified email and IS recognised is the phone-only account (no email, no password: slice 6, V-09): there is no mailbox for anyone to claim, so the number is its only credential.
 /// </summary>
 public sealed class PhoneIdentity(IServiceScopeFactory scopes)
 {
@@ -121,7 +121,7 @@ public sealed class PhoneIdentity(IServiceScopeFactory scopes)
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
         var hit = await db.BuyerAccounts.AsNoTracking()
-            .Where(a => a.PhoneVerifiedE164 == e164 && a.DeletedAt == null && a.StaffLockedAt == null && a.EmailVerifiedAt != null && a.DemoVerifiedAt == null)
+            .Where(a => a.PhoneVerifiedE164 == e164 && a.DeletedAt == null && a.StaffLockedAt == null && (a.EmailVerifiedAt != null || (a.Email == null && a.PasswordHash == null)) && a.DemoVerifiedAt == null)
             .Select(a => new { a.Id, a.DisplayName }).FirstOrDefaultAsync(ct);
         return hit is null ? null : new Match(hit.Id, hit.DisplayName.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "");
     }

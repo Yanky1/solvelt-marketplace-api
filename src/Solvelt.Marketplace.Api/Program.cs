@@ -144,6 +144,12 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Mar
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.OrderStatusTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TextOrderSummaryTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CancelOrderTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.PhoneAccountService>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CreateAccountTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ChangeNameTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ManageSavedAddressTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ChangePhoneTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TextAccountLinkTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.VoiceReportService>();
 builder.Services.AddPortalClient();
 builder.Services.AddSingleton<ClientIpResolver>();

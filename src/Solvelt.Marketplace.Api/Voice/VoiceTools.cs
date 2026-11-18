@@ -95,6 +95,11 @@ public static class VoiceScripts
     public const string CancelSent = "Done. The cancellation request has been sent to the seller.";
     public const string CancelKept = "Okay, I will leave the order as it is.";
     public const string CancelRefused = "Sorry, that order can not be cancelled any more.";
+    public const string AccountRetry = "Sorry, I did not catch that. To save the change, say yes or press 1. To leave it as it is, say no or press 2.";
+    public const string AccountSaved = "Done. That is saved.";
+    public const string AccountCreated = "Done. Your account is created, and you are signed in.";
+    public const string AccountKept = "Okay, I will leave it as it is.";
+    public const string AccountRefused = "Sorry, I could not save that.";
     public const string Connecting = "Please hold while I connect you to a person.";
     public const string NoPerson = "Our team is not available right now. You can also order on our web site. Goodbye.";
     public const string Trouble = "Sorry, we are having trouble right now. Please try again later. Goodbye.";
