@@ -515,8 +515,9 @@ public class SignedPortalClientTests
                   .Respond(HttpStatusCode.ServiceUnavailable, "{}", r => r.Headers.RetryAfter = new(TimeSpan.FromSeconds(10)))
                   .Respond(HttpStatusCode.OK, "{\"created\":false,\"orders\":[]}");
         var task = rig.Client.CreateOrderAsync(Order());
-        while (!task.IsCompleted) { rig.Clock.Advance(TimeSpan.FromSeconds(1)); await Task.Delay(5); }
-        var res = await task;
+        await WaitForCalls(rig.Portal, 1);
+        await Advance(rig, 10);             // exactly the first Retry-After wait; the clock is NOT run on while attempt 2 reads its answer (a ticking clock made that attempt's own 5 s budget expire on a slow runner)
+        var res = await Within(task);
         Assert.Equal(503, res.Status);
         Assert.Equal(2, res.Attempts);      // 0 s + 10 s wait fits in 15 s; a second 10 s wait (20 s) would not
         Assert.True(res.Retryable);
