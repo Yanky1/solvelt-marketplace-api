@@ -144,6 +144,23 @@ public class VoiceAccountTests
     }
 
     [Fact]
+    public async Task A_number_claimed_between_the_read_back_and_the_yes_is_refused_cleanly_with_no_takeover_and_no_error()
+    {
+        using var s = new VoiceScenario();
+        await s.Dial(); await Verify(s);
+        await ReadBack(s, "create_account", new { name = "Dana Levi" });                                   // nothing holds the number yet: the read-back is offered
+        await s.K.SignUp("rival@example.com");                                                              // ...then another account proves the same number before the yes
+        await s.K.Db(async db => await db.BuyerAccounts.Where(a => a.Email == "rival@example.com").ExecuteUpdateAsync(x => x.SetProperty(a => a.PhoneVerifiedE164, Number).SetProperty(a => a.Phone, Number)));
+        Assert.Equal(VoiceScripts.AccountRefused, await Answer(s, "1"));                                   // refused, spoken, no 500
+        var accounts = await s.K.Db(db => db.BuyerAccounts.AsNoTracking().ToListAsync());
+        var rival = Assert.Single(accounts);                                                                // no second account
+        Assert.Equal((Number, "rival@example.com"), (rival.PhoneVerifiedE164, rival.Email));               // and the rival keeps the number
+        Assert.Equal(CallerLevel.Guest, s.State().Level);
+        using var scope = s.F.Services.CreateScope();
+        Assert.Null(await scope.ServiceProvider.GetRequiredService<PhoneAccountService>().CreateAsync("Dana Levi", Number, default));   // the service itself says no, it does not throw
+    }
+
+    [Fact]
     public async Task A_phone_only_account_is_not_a_door_for_an_email_address_it_has_none()
     {
         // an email-less account is recognised by its number; an account with an UNVERIFIED email still is not (V-05)
