@@ -91,6 +91,7 @@ public static class VoiceScripts
     public const string ConfirmThanks = "Thank you. Your order is confirmed.";
     public const string FakePayPrompt = "Test payment. Press 1 to pay, or 2 to decline.";
     public const string PayThanks = "Thank you. Your payment went through.";
+    public const string PayPending = "We received your payment and are confirming it. You will get a text message when your order is placed.";
     public const string PayFailed = "Sorry, the payment did not go through.";
     public const string CancelRetry = "Sorry, I did not catch that. To send the cancellation request, say yes or press 1. To keep the order, say no or press 2.";
     public const string CancelSent = "Done. The cancellation request has been sent to the seller.";
