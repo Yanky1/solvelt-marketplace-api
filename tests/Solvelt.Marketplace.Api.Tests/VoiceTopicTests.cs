@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Solvelt.Marketplace.Api.Data;
 using Solvelt.Marketplace.Api.Tests.Infrastructure;
@@ -151,6 +152,18 @@ public class VoiceTopicTests
     }
 
     [Fact]
+    public async Task A_call_that_already_placed_an_order_keeps_that_outcome_but_still_hears_the_platforms_goodbye()
+    {
+        using var s = new VoiceScenario();
+        await s.Dial();
+        await s.K.Db(async db => await db.VoiceCalls.ExecuteUpdateAsync(x => x.SetProperty(c => c.Outcome, VoiceOutcome.OrderPlaced)));   // an order was placed earlier in the call
+        await Strike(s); await Strike(s);
+        var after = await LimitStrike(s);
+        Assert.Equal(VoiceScripts.OffTopicGoodbye, after.Element("Say")!.Value); Assert.NotNull(after.Element("Hangup"));
+        Assert.Equal(VoiceOutcome.OrderPlaced, (await FakeRealtime.Poll(() => s.Row().Result is { EndedAt: not null } r ? r : null, 5)).Outcome);   // the placed order is the more important fact in the report
+    }
+
+    [Fact]
     public async Task A_configured_limit_is_honoured()
     {
         using var s = new VoiceScenario(config: new() { ["Voice:MaxOffTopicTurns"] = "1" });
@@ -193,6 +206,6 @@ public class VoiceTopicTests
                 Assert.DoesNotMatch("strike|limit|max_off|reset", p.Key);
         // the only code that reads the setting is the tool itself; the state has no setter for the count
         Assert.Null(typeof(VoiceCallState).GetProperty(nameof(VoiceCallState.OffTopicCount))!.SetMethod?.IsPublic == true ? "public setter" : null);
-        Assert.DoesNotContain(typeof(VoiceCallState).GetMethods(), m => m.Name.Contains("OffTopic") && m.Name != nameof(VoiceCallState.CountOffTopic) && !m.Name.StartsWith("get_"));
+        Assert.DoesNotContain(typeof(VoiceCallState).GetMethods(), m => m.Name.Contains("OffTopic") && m.Name != nameof(VoiceCallState.CountOffTopic) && m.Name != nameof(VoiceCallState.MarkOffTopicEnded) && !m.Name.StartsWith("get_"));   // the count only goes up; the one other method sets the "ended" flag
     }
 }

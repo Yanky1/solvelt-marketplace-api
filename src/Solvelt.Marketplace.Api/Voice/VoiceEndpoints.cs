@@ -65,7 +65,7 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         // the off-topic limit ended the AI part: the PLATFORM says the line (the model never does), then a person if one is reachable, otherwise goodbye (V2, V-11)
-        if (call?.Outcome == Data.VoiceOutcome.EndedOffTopic)
+        if (call is not null && (call.Outcome == Data.VoiceOutcome.EndedOffTopic || states.Find(call.Id)?.OffTopicEnded == true))
             return Cxml(call.TransferRequestedAt is not null && !string.IsNullOrWhiteSpace(v.SupportNumber)
                 ? new XElement("Response", new XElement("Say", VoiceScripts.OffTopicTransfer), new XElement("Dial", v.SupportNumber))
                 : new XElement("Response", new XElement("Say", VoiceScripts.OffTopicGoodbye), new XElement("Hangup")));
@@ -292,7 +292,7 @@ public static class VoiceEndpoints
         state.Connected(time.GetUtcNow());
         var bridge = new RealtimeBridge(phone, upstream, call, state, vo, store, tools, time, log);
         await bridge.RunAsync(ctx.RequestAborted);
-        if (!bridge.KeypadPause) states.Remove(call.Id);   // the call is over: nothing of it stays in memory
+        if (!bridge.KeypadPause && !state.OffTopicEnded) states.Remove(call.Id);   // the call is over: nothing of it stays in memory (the flag of an off-topic end stays until the grace period, for the after-stream webhook)
         upstream.Dispose();
     }
 }

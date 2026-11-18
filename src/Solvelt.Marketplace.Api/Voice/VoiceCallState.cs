@@ -86,6 +86,9 @@ public sealed class VoiceCallState
     /// <summary>Off-topic requests in THIS call (V2, V-11). Only ever counted up: it survives keypad hand-offs and resumes, and there is no way to reset it.</summary>
     public int OffTopicCount { get; private set; }
     public int CountOffTopic() { lock (_gate) return ++OffTopicCount; }
+    /// <summary>The server ended the AI part of the call at the off-topic limit; the after-stream webhook reads it (the call row keeps <c>order_placed</c> if an order was already placed).</summary>
+    public bool OffTopicEnded { get; private set; }
+    public void MarkOffTopicEnded() { lock (_gate) OffTopicEnded = true; }
     /// <summary>The orders last read out (numbers by position), so "the first one" means an order the server knows.</summary>
     public IReadOnlyList<string> ListedOrders { get; private set; } = [];
     public void SetListedOrders(IReadOnlyList<string> numbers) { lock (_gate) ListedOrders = numbers; }

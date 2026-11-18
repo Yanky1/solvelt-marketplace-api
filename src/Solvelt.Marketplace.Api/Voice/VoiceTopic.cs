@@ -31,6 +31,7 @@ public sealed class OffTopicTool(VoiceCallStore store, IOptions<VoiceOptions> op
 
         // the limit: the SERVER ends the AI part of the call. A person is asked for only when one is reachable (support number within support hours); the platform then says the line and either dials or hangs up.
         await VoiceTransfer.RequestAsync(store, options, time, ctx.CallId, ct);
+        ctx.State.MarkOffTopicEnded();
         await store.MarkOffTopicEndAsync(ctx.CallId, ct);
         string masked;
         using (var scope = scopes.CreateScope())
