@@ -284,19 +284,43 @@ public class ConnectorTests
     // ---------- nothing stays "processing" for good ----------
 
     [Fact]
-    public async Task Something_that_fails_after_the_sale_leaves_an_unknown_row_not_a_processing_one()
+    public async Task A_sale_that_cannot_be_recorded_leaves_an_unknown_row_not_a_processing_one()
     {
-        using var rig = new Rig();
-        rig.Api.ThrowOnReport = new InvalidOperationException("boom 4111111111111111 cvv 123");
+        using var rig = new Rig(ledger: new FailingFinishLedger());
         var reply = await rig.Post(Kit.Body(tx: "after-1"));
         Assert.Equal(("gateway_unknown", null), (reply.ErrorCode, reply.ChargeId));
         var row = rig.Ledger.Find("after-1")!;
         Assert.Equal(("unknown", "601518451"), (row.State, row.ChargeId));                                             // kept with the reference: a person can find the sale
         Assert.Contains(rig.Logs.Lines, l => l.StartsWith("Error") && l.Contains("needs a person") && l.Contains("after-1") && l.Contains("601518451") && l.Contains(Kit.Attempt));
-        Assert.DoesNotContain(rig.Logs.Lines, l => l.Contains("boom") || l.Contains(Kit.Pan));                           // the exception type only
+        Assert.DoesNotContain(rig.Logs.Lines, l => l.Contains("ledger boom") || l.Contains(Kit.Pan));                   // the exception type only
         Assert.Equal("already_paid", (await rig.Post(Kit.Body(tx: "after-2"))).ErrorCode);                              // and no new charge for the attempt
         Assert.Single(rig.Sola.Calls);
-        Assert.Contains(rig.Ledger.Unreported(), r => r.TransactionId == "after-1");                                    // it is reported (for a person) by the retry service
+    }
+
+    [Fact]
+    public async Task A_report_that_fails_after_the_result_was_recorded_keeps_the_real_answer_and_is_delivered_later()
+    {
+        using var rig = new Rig();
+        rig.Api.ThrowOnReport = new InvalidOperationException("api boom 4111111111111111");
+        var reply = await rig.Post(Kit.Body(tx: "rep-1"));
+        Assert.Equal(("601518451", null), (reply.ChargeId, reply.ErrorCode));                                           // the caller hears that it was paid
+        Assert.Equal(("approved", false), (rig.Ledger.Find("rep-1")!.State, rig.Ledger.Find("rep-1")!.Reported));        // NOT downgraded to unknown; unreported
+        Assert.DoesNotContain(rig.Logs.Lines, l => l.Contains("boom") || l.Contains(Kit.Pan));
+        rig.Api.ThrowOnReport = null;
+        var sweeper = new ReportRetryService(rig.Ledger, rig.Api, Microsoft.Extensions.Options.Options.Create(rig.Opts), rig.Time, Microsoft.Extensions.Logging.Abstractions.NullLogger<ReportRetryService>.Instance);
+        await sweeper.RunOnceAsync(default);
+        Assert.Equal(new ChargeReport(Kit.Attempt, Kit.Invoice, "paid", 3500, "601518451", null), Assert.Single(rig.Api.Reports));
+        Assert.True(rig.Ledger.Find("rep-1")!.Reported);
+    }
+
+    private sealed class FailingFinishLedger() : ChargeLedger(":memory:")
+    {
+        private bool _failed;
+        public override void Finish(string transactionId, string state, string? chargeId, string? errorCode, long? cents = null)
+        {
+            if (!_failed && state != "unknown") { _failed = true; throw new InvalidOperationException("ledger boom"); }
+            base.Finish(transactionId, state, chargeId, errorCode, cents);
+        }
     }
 
     [Fact]

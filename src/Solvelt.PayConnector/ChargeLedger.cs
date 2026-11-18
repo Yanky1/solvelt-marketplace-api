@@ -14,7 +14,7 @@ public sealed record BeginResult(BeginKind Kind, LedgerRow? Row);
 /// that has been paid takes no further request, an attempt takes at most <c>MaxRequestsPerAttempt</c>, and a result that could not yet be reported to the marketplace API is kept until it can.
 /// States: <c>processing</c>, <c>approved</c>, <c>declined</c>, <c>error</c>, <c>unknown</c> (the card may have been charged: for a person).
 /// </summary>
-public sealed class ChargeLedger : IDisposable
+public class ChargeLedger : IDisposable
 {
     private readonly SqliteConnection _db;
     private readonly object _gate = new();
@@ -63,7 +63,7 @@ public sealed class ChargeLedger : IDisposable
     }
 
     /// <summary><paramref name="cents"/>: what the gateway actually authorised, when that is known (it replaces the amount asked for, so a report says what was really charged).</summary>
-    public void Finish(string transactionId, string state, string? chargeId, string? errorCode, long? cents = null)
+    public virtual void Finish(string transactionId, string state, string? chargeId, string? errorCode, long? cents = null)
     {
         lock (_gate)
         {

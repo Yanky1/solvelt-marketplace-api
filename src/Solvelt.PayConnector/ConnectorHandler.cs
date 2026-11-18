@@ -80,15 +80,22 @@ public sealed class ConnectorHandler(Microsoft.Extensions.Options.IOptions<Conne
                 log.LogError("Attempt {Attempt}: the answer to the sale is unknown ({Code}); the card may have been charged. It needs a person (transaction {Tx}).", card.AttemptId, result.ErrorCode, card.TransactionId);
                 state = "unknown"; status = "unknown"; reply = ConnectorReply.Refused("gateway_unknown", "The payment could not be confirmed."); break;
         }
+        var finished = false;
         try
         {
             ledger.Finish(card.TransactionId, state, result.RefNum, result.ErrorCode, state is "approved" or "unknown" && result.AuthorisedCents is { } a ? a : null);
+            finished = true;
             var report = new ChargeReport(card.AttemptId, expect.Invoice, status, result.AuthorisedCents ?? 0, result.RefNum, result.ErrorCode);
             if (await ReportWithRetriesAsync(report, ct)) ledger.MarkReported(card.TransactionId);   // otherwise the background service keeps trying: the result is not lost
         }
+        catch (Exception ex) when (finished)
+        {
+            // the result IS recorded; only telling the marketplace API failed (a dropped request, an API that threw): the row stays as it is, unreported, and the retry service delivers it. The caller gets the real answer.
+            log.LogWarning("Attempt {Attempt}: reporting transaction {Tx} failed ({Type}); it stays unreported and is retried.", card.AttemptId, card.TransactionId, ex.GetType().Name);
+        }
         catch (Exception ex)
         {
-            // something failed AFTER the sale (the ledger, a disposal, a bug): the row must not stay "processing" for good. Attempt, transaction and reference only; the caller is told the outcome is unknown.
+            // the sale could not be RECORDED (the ledger, a disposal, a bug): the row must not stay "processing" for good. Attempt, transaction and reference only; the caller is told the outcome is unknown.
             log.LogError("Attempt {Attempt}: recording the sale failed ({Type}); the card may have been charged (transaction {Tx}, reference {Ref}). It needs a person.", card.AttemptId, ex.GetType().Name, card.TransactionId, result.RefNum);
             try { ledger.Finish(card.TransactionId, "unknown", result.RefNum, "recording_failed", result.AuthorisedCents); } catch (Exception) { /* the sweeper turns a row that is still "processing" into "unknown" */ }
             return ConnectorReply.Refused("gateway_unknown", "The payment could not be confirmed.");

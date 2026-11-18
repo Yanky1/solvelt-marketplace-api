@@ -83,14 +83,15 @@ internal sealed class Rig : IDisposable
 {
     public FakeApi Api { get; } = new();
     public FakeSola Sola { get; } = new();
-    public ChargeLedger Ledger { get; } = new(":memory:");
+    public ChargeLedger Ledger { get; }
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 11, 18, 12, 0, 0, TimeSpan.Zero));
     public LogCollector Logs { get; } = new();
     public ConnectorOptions Opts { get; }
     public ConnectorHandler Handler { get; }
 
-    public Rig(Action<ConnectorOptions>? tweak = null)
+    public Rig(Action<ConnectorOptions>? tweak = null, ChargeLedger? ledger = null)
     {
+        Ledger = ledger ?? new ChargeLedger(":memory:");
         Opts = Kit.Options(tweak);
         var factory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(Logs));
         Handler = new ConnectorHandler(Microsoft.Extensions.Options.Options.Create(Opts), Api, Sola, Ledger, Time, factory.CreateLogger<ConnectorHandler>());
