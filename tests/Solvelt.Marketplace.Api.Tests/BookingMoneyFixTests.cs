@@ -51,6 +51,25 @@ public sealed class BookingMoneyFixTests : BookingFlowBase
     }
 
     [Fact]
+    public async Task V09_a_phone_only_account_without_an_email_still_gets_the_refund_for_a_closed_booking_and_the_handler_does_not_fail()
+    {
+        // an account created by phone (V-09) has no email: the refund must still happen, only the mail is skipped (this path used to dereference the address)
+        await Ready();
+        var (b, _) = await PaidNotConfirmed();
+        _portal.ConfirmDown = true;
+        await Drain();
+        await PortalEvent("booking.hold_expired", Now.AddMinutes(11), b);
+        await _k.Db(async db => await db.BuyerAccounts.ExecuteUpdateAsync(x => x.SetProperty(a => a.Email, (string?)null).SetProperty(a => a.PasswordHash, (string?)null)));
+        _portal.ConfirmDown = false;
+        _k.F.Clock.Advance(TimeSpan.FromHours(2));
+        await Drain();
+        Assert.Equal(BookingPaymentStatus.Void, (await Pay(b.Id)).Status);
+        Assert.Equal(24000, Assert.Single(Stripe.Refunds).AmountCents);
+        Assert.Empty(await _k.Db(db => db.OutboxMessages.AsNoTracking().Where(m => m.DedupeKey != null && m.DedupeKey.StartsWith("mail:void:")).ToListAsync()));   // no address, no mail
+        Assert.Empty(await _k.Db(db => db.OutboxMessages.AsNoTracking().Where(m => m.Type == BookingConfirmHandler.Type && m.Status == OutboxStatus.Dead).ToListAsync()));
+    }
+
+    [Fact]
     public async Task H1_a_portal_that_confirms_while_we_close_the_booking_is_cancelled_there_and_the_payment_is_refunded_unreported()
     {
         await Ready();

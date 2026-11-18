@@ -234,14 +234,15 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         _ => false,
     };
 
-    private async Task VoidClosedAsync(Booking b, BookingPayment pay, string email, string code, bool cancelAtPortal, CancellationToken ct)
+    private async Task VoidClosedAsync(Booking b, BookingPayment pay, string? email, string code, bool cancelAtPortal, CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = time.GetUtcNow().ToUniversalTime();
         if (await BookingMoney.VoidCapturedAsync(db, refunds, log, pay, code, now, ct))
         {
-            outbox.EnqueueEmail(new EmailMessage(email, "We couldn't confirm your booking",
-                "The time you chose could not be confirmed, so your payment is being refunded in full to your card (it can take a few days to show). Please choose another time.\n"), "mail:void:" + pay.Key);
+            if (email is not null)   // a phone-only account (V-09) has no email: the refund still happens, only the mail is skipped
+                outbox.EnqueueEmail(new EmailMessage(email, "We couldn't confirm your booking",
+                    "The time you chose could not be confirmed, so your payment is being refunded in full to your card (it can take a few days to show). Please choose another time.\n"), "mail:void:" + pay.Key);
             if (cancelAtPortal) outbox.Enqueue(BookingLateCancelHandler.Type, new BookingLateCancelHandler.Payload(b.MarketplaceBookingId), "late-cancel:" + b.MarketplaceBookingId);
             await db.SaveChangesAsync(ct);
         }
@@ -258,7 +259,7 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
         var pay = await db.BookingPayments.AsNoTracking().FirstOrDefaultAsync(x => x.Id == p.PaymentId, ct);
         if (b is null || pay is null) return OutboxResult.Dead("booking_missing");
         if (pay.Status != BookingPaymentStatus.Captured || pay.ReportedToPortal) return OutboxResult.Delivered();   // done before, or voided
-        var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == b.AccountId).Select(a => new { a.DisplayName, a.RelayEmail, Email = a.Email! }).FirstOrDefaultAsync(ct);
+        var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == b.AccountId).Select(a => new { a.DisplayName, a.RelayEmail, Email = a.Email }).FirstOrDefaultAsync(ct);
         if (account is null) return OutboxResult.Dead("account_missing");
 
         // A booking we already show as over (the hold lapsed while this message waited, the buyer cancelled) is never confirmed: confirming it could charge the buyer for a booking that
@@ -378,7 +379,7 @@ public sealed class BookingConfirmHandler(MarketplaceDb db, ISignedPortalClient 
                 // What can go back now goes back; what an open dispute holds is deferred until it is decided (never dropped, never claimed as refunded: M4-22).
                 var left = await db.BookingPayments.AsNoTracking().Where(x => x.Id == pay.Id).Select(x => x.CapturedCents - x.RefundedCents).FirstAsync(ct);
                 var held = await refunds.ReserveOrDeferAsync(pay.Id, left, $"void:{pay.Key}", "confirm_" + code, false, log, ct);
-                outbox.EnqueueEmail(new EmailMessage(account.Email, "We couldn't confirm your booking",
+                if (account.Email is not null) outbox.EnqueueEmail(new EmailMessage(account.Email, "We couldn't confirm your booking",
                     held == 0
                         ? "The time you chose could not be confirmed, so your payment is being refunded in full to your card (it can take a few days to show). Please choose another time.\n"
                         : "The time you chose could not be confirmed, so your payment is being refunded to your card (it can take a few days to show). Part of it is on hold while a dispute with your card issuer is decided; it is returned to your card only if the money is left with us afterwards. Please choose another time.\n"), "mail:void:" + pay.Key);
