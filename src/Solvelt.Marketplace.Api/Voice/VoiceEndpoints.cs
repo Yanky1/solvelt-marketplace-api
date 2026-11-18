@@ -64,6 +64,11 @@ public static class VoiceEndpoints
         var (ok, form) = await VerifyAsync(ctx, v, so.Value);
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
+        // the off-topic limit ended the AI part: the PLATFORM says the line (the model never does), then a person if one is reachable, otherwise goodbye (V2, V-11)
+        if (call?.Outcome == Data.VoiceOutcome.EndedOffTopic)
+            return Cxml(call.TransferRequestedAt is not null && !string.IsNullOrWhiteSpace(v.SupportNumber)
+                ? new XElement("Response", new XElement("Say", VoiceScripts.OffTopicTransfer), new XElement("Dial", v.SupportNumber))
+                : new XElement("Response", new XElement("Say", VoiceScripts.OffTopicGoodbye), new XElement("Hangup")));
         if (call?.TransferRequestedAt is not null && !string.IsNullOrWhiteSpace(v.SupportNumber))
             return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Connecting), new XElement("Dial", v.SupportNumber)));
         if (call is not null && states.Find(call.Id) is { } st)

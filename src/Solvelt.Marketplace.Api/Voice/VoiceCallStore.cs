@@ -109,6 +109,17 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
             .ExecuteUpdateAsync(s => s.SetProperty(c => c.TransferRequestedAt, now), ct);
     }
 
+    /// <summary>
+    /// The call reached the off-topic limit and the SERVER ends its AI part (V2, V-11): the outcome becomes <c>ended_off_topic</c>, which also tells the after-stream webhook what the platform says next.
+    /// An order already placed keeps its outcome (it is the more important fact).
+    /// </summary>
+    public async Task MarkOffTopicEndAsync(Guid id, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.Where(c => c.Id == id && (c.Outcome == VoiceOutcome.InProgress || c.Outcome == VoiceOutcome.Abandoned))
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.Outcome, VoiceOutcome.EndedOffTopic), ct);
+    }
+
     /// <summary>Closes the call once: the outcome is <c>transferred</c> if a transfer was marked, otherwise what the bridge says (an order already placed stays placed).</summary>
     public async Task EndAsync(Guid id, string fallbackOutcome, CancellationToken ct)
     {

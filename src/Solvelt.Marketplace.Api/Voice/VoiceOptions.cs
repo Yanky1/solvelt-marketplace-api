@@ -56,6 +56,8 @@ public sealed class VoiceOptions
     /// <summary><c>none</c> (default: nobody can pay by phone) or <c>fake</c> (development and tests only). A real provider (Sola) is chosen here once it exists; real-money phone orders stay off until then.</summary>
     public string PhonePaymentProvider { get; set; } = "none";
     public int MaxPaymentAttempts { get; set; } = 3;
+    /// <summary>Off-topic requests (the <c>off_topic</c> tool) a call may have before the SERVER ends the AI part of it (V2, decision V-11). 1 to 10; per call; nothing resets it.</summary>
+    public int MaxOffTopicTurns { get; set; } = 3;
     public int MaxSmsPerNumberPerHour { get; set; } = 3;
     public int MaxSmsPerHour { get; set; } = 300;
     /// <summary>Days a call's metrics row is kept (no audio, no transcript, only a masked number).</summary>
@@ -112,6 +114,7 @@ public static class VoiceConfig
             if (!devLike) p.Add("SignalWire:ApiBaseUrl is for development and the journey only (an SMS sink): it must be empty in production.");
             else if (!Uri.TryCreate(s.ApiBaseUrl, UriKind.Absolute, out var sink) || sink.Scheme is not ("http" or "https")) p.Add("SignalWire:ApiBaseUrl must be an absolute http(s) URL.");
         }
+        if (v.MaxOffTopicTurns is < 1 or > 10) p.Add("Voice:MaxOffTopicTurns must be between 1 and 10.");
         if (!new[] { "full", "mini", "split" }.Contains(v.ModelMode)) p.Add("Voice:ModelMode must be full, mini or split.");
         if (v.MiniPercent is < 0 or > 100) p.Add("Voice:MiniPercent must be between 0 and 100.");
         if (!new[] { "server_vad", "semantic_vad" }.Contains(v.TurnDetection)) p.Add("Voice:TurnDetection must be server_vad or semantic_vad.");

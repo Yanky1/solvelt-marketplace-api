@@ -83,6 +83,9 @@ public sealed class VoiceCallState
     public void AccountDetailsChanged(string? firstName) { lock (_gate) { if (firstName is not null) FirstName = firstName; Version++; OrderChangedLocked(); Quote = null; } }
     public string? LastChallengePurpose { get; private set; }
     public int CountCancelStart() { lock (_gate) return ++CancelStarts; }
+    /// <summary>Off-topic requests in THIS call (V2, V-11). Only ever counted up: it survives keypad hand-offs and resumes, and there is no way to reset it.</summary>
+    public int OffTopicCount { get; private set; }
+    public int CountOffTopic() { lock (_gate) return ++OffTopicCount; }
     /// <summary>The orders last read out (numbers by position), so "the first one" means an order the server knows.</summary>
     public IReadOnlyList<string> ListedOrders { get; private set; } = [];
     public void SetListedOrders(IReadOnlyList<string> numbers) { lock (_gate) ListedOrders = numbers; }

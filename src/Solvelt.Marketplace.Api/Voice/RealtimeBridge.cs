@@ -214,6 +214,8 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
         {
             var result = await RunToolWithFillerAsync(name, args, ct);
             _endAfterResponse |= result.EndCall;
+            // the server ends the AI part of the call (the off-topic limit): the model is not asked for another answer; the phone plays what is already queued, then the stream ends and the platform speaks
+            if (result.EndNow) { await FinishAfterGoodbyeAsync(ct); return; }
             await SendUpAsync(new JsonObject { ["type"] = "conversation.item.create", ["item"] = new JsonObject { ["type"] = "function_call_output", ["call_id"] = callId, ["output"] = result.Output } }, ct);
         }
         _responseActive = true;

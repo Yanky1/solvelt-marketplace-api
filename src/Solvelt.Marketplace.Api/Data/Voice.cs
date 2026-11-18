@@ -5,7 +5,9 @@ namespace Solvelt.Marketplace.Api.Data;
 
 public static class VoiceOutcome
 {
-    public const string InProgress = "in_progress", Abandoned = "abandoned", Transferred = "transferred", OrderPlaced = "order_placed";
+    public const string InProgress = "in_progress", Abandoned = "abandoned", Transferred = "transferred", OrderPlaced = "order_placed",
+        /// <summary>The server ended the AI part of the call after too many off-topic requests (V2, V-11).</summary>
+        EndedOffTopic = "ended_off_topic";
 }
 
 /// <summary>

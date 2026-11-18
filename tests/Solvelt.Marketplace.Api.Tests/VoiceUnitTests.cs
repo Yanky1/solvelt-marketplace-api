@@ -182,6 +182,10 @@ public class VoiceUnitTests
         Assert.Contains(Problems(new(good) { ["SignalWire:ApiBaseUrl"] = "http://127.0.0.1:5092" }), x => x.Contains("SignalWire:ApiBaseUrl is for development"));
         Assert.DoesNotContain(Problems(new(good) { ["SignalWire:ApiBaseUrl"] = "http://127.0.0.1:5092" }, "Development"), x => x.Contains("ApiBaseUrl"));
         Assert.Contains(Problems(new(good) { ["SignalWire:ApiBaseUrl"] = "not a url" }, "Development"), x => x.Contains("absolute http(s) URL"));
+        // the off-topic strike limit (V2): 1 to 10, anything else is refused at start-up
+        foreach (var bad in new[] { "0", "11", "-1", "100" }) Assert.Contains(Problems(new(good) { ["Voice:MaxOffTopicTurns"] = bad }), x => x.Contains("Voice:MaxOffTopicTurns must be between 1 and 10"));
+        foreach (var fine in new[] { "1", "3", "10" }) Assert.DoesNotContain(Problems(new(good) { ["Voice:MaxOffTopicTurns"] = fine }), x => x.Contains("MaxOffTopicTurns"));
+        Assert.DoesNotContain(Problems(good), x => x.Contains("MaxOffTopicTurns"));                                                                  // the default (3) is fine
         Assert.Contains(Problems(new(good) { ["Voice:ModelMode"] = "turbo" }), x => x.Contains("ModelMode"));
         Assert.Contains(Problems(new(good) { ["Voice:MiniPercent"] = "101" }), x => x.Contains("MiniPercent"));
     }
