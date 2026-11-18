@@ -36,8 +36,10 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     private const int BytesPerMs = 8;   // mu-law, 8000 samples per second, one byte each
     private readonly SemaphoreSlim _phoneSend = new(1, 1), _upSend = new(1, 1);
     private string? _streamSid, _itemId;
-    private long _playedBytes, _speechStopped;
-    private bool _playing, _endAfterResponse, _dtmfTransfer, _responseActive;
+    private long _speechStopped;
+    private bool _endAfterResponse, _dtmfTransfer, _responseActive;
+    /// <summary>What the PHONE is playing (marks SignalWire echoes), not what the model has generated: the model is "done" seconds before the phone is (V-12).</summary>
+    private readonly PhonePlayback _playback = new(time);
     /// <summary>True when the stream ended for a keypad step: the call goes on and the next stream resumes it. Decided BEFORE either socket is closed, because SignalWire's next instruction can arrive the moment the phone socket closes and clear the step.</summary>
     public bool KeypadPause { get; private set; }
     private TaskCompletionSource? _fillerDone;
@@ -125,7 +127,11 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
                     await SendUpAsync(new JsonObject { ["type"] = "input_audio_buffer.append", ["audio"] = audio }, ct);
                 break;
             case "mark":
-                if (m.TryGetProperty("mark", out var mk) && Str(mk, "name") == "end") _markEnd.TrySetResult();
+                if (m.TryGetProperty("mark", out var mk) && Str(mk, "name") is { } markName)
+                {
+                    if (markName == "end") _markEnd.TrySetResult();   // the keypad / goodbye hand-off
+                    else _playback.Echoed(markName);                  // an audio mark: that part of the audio has played (or was cleared)
+                }
                 break;
             case "dtmf":
                 // Keypad digits never go upstream and are never logged. Zero asks for a person; every other digit is ignored here (keypad steps run outside the stream).
@@ -157,18 +163,24 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
                 {
                     if (_speechStopped != 0) { await store.AddLatencyAsync(call.Id, (long)time.GetElapsedTime(_speechStopped).TotalMilliseconds, ct); _speechStopped = 0; }
                     _itemId = Str(m, "item_id") ?? _itemId;
-                    _playing = true;
-                    _playedBytes += delta.Length * 3L / 4 - (delta.EndsWith("==") ? 2 : delta.EndsWith('=') ? 1 : 0);
+                    var bytes = delta.Length * 3L / 4 - (delta.EndsWith("==") ? 2 : delta.EndsWith('=') ? 1 : 0);
+                    var markName = _playback.NoteSent(bytes, _itemId);
                     await SendPhoneAsync(new JsonObject { ["event"] = "media", ["streamSid"] = _streamSid, ["media"] = new JsonObject { ["payload"] = delta } }, ct);
+                    // SignalWire echoes this mark when the audio before it has played, or when it was cleared: that is how we know the phone is still playing after the model is done
+                    await SendPhoneAsync(new JsonObject { ["event"] = "mark", ["streamSid"] = _streamSid, ["mark"] = new JsonObject { ["name"] = markName } }, ct);
                 }
                 break;
             case "input_audio_buffer.speech_started":
-                if (_playing && _streamSid is not null)   // barge-in: stop what the phone has queued, and tell the model how much was heard
+                // Barge-in: the caller talks while the PHONE still has audio queued, whether or not the model is done generating it (it usually is: it generates much faster than real time).
+                // Stop what the phone has queued, tell the model how much of the item was actually heard, and stop the response if it is still going.
+                if (_streamSid is not null && _playback.TryBargeIn() is { } cut)
                 {
                     await SendPhoneAsync(new JsonObject { ["event"] = "clear", ["streamSid"] = _streamSid }, ct);
-                    if (_itemId is not null)
-                        await SendUpAsync(new JsonObject { ["type"] = "conversation.item.truncate", ["item_id"] = _itemId, ["content_index"] = 0, ["audio_end_ms"] = (int)(_playedBytes / BytesPerMs) }, ct);
-                    _playing = false; _playedBytes = 0; _itemId = null;
+                    if (cut.ItemId is not null)
+                        await SendUpAsync(new JsonObject { ["type"] = "conversation.item.truncate", ["item_id"] = cut.ItemId, ["content_index"] = 0, ["audio_end_ms"] = (int)cut.PlayedMs }, ct);
+                    if (_responseActive) await SendUpAsync(new JsonObject { ["type"] = "response.cancel" }, ct);
+                    logger.LogInformation("Voice call {Call}: the caller talked over the agent; {Queued} ms of audio were still queued on the phone, {Played} ms of the item had played.", call.Id, cut.QueuedMs, cut.PlayedMs);
+                    _itemId = null;
                 }
                 break;
             case "input_audio_buffer.speech_stopped":
@@ -185,7 +197,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
 
     private async Task HandleResponseDoneAsync(JsonElement m, CancellationToken ct)
     {
-        _playing = false; _playedBytes = 0; _responseActive = false;
+        _responseActive = false;   // the model is done; the PHONE may still be playing (see _playback)
         _fillerDone?.TrySetResult();
         if (!m.TryGetProperty("response", out var r)) return;
         if (r.TryGetProperty("usage", out var u)) await store.AddUsageAsync(call.Id, call.Tier, ReadUsage(u), ct);
