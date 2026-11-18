@@ -19,6 +19,7 @@ RUN_DIR="${JOURNEY_RUN_DIR:-$API_DIR/.journey}"
 PG_HOST="${JOURNEY_PG_HOST:-localhost}"; PG_PORT="${JOURNEY_PG_PORT:-5432}"; PG_USER="${JOURNEY_PG_USER:-postgres}"; PG_PASSWORD="${JOURNEY_PG_PASSWORD:-postgres}"
 DB_NAME="journey_marketplace"
 PORTAL_PORT="${PORTAL_PORT:-5001}"; API_PORT="${API_PORT:-5080}"; WEB_PORT="${WEB_PORT:-3000}"; SMTP_PORT="${SMTP_PORT:-2525}"; MAIL_HTTP_PORT="${MAIL_HTTP_PORT:-8025}"
+VOICE_UPSTREAM_PORT="${VOICE_UPSTREAM_PORT:-5091}"; VOICE_SMS_PORT="${VOICE_SMS_PORT:-5092}"   # the voice journey's scripted model and SMS sink (started by voice-journey.mjs)
 
 # Shared dev secrets: obviously test values, different per purpose (the API refuses equal keys; none of them is a real secret).
 INBOUND="journey-portal-inbound-secret-0123456789abcdef"      # marketplace -> portal  (Portal__InboundSecret = Orders__InboundSecret)
@@ -26,6 +27,11 @@ OUTBOUND="journey-portal-outbound-secret-fedcba9876543210"    # portal -> market
 FWD_KEY="journey-web-forwarding-key-aaaaaaaaaaaaaaaaaaaa"
 SESSION_SECRET="Journey#Session9Secret!kdj39fK2mZq7Xw2Rt8YbN4"
 STRIPE_WEBHOOK="whsec_journey_test_only_00000000000000000000"
+# the voice module (V): four DIFFERENT test keys (the API refuses equal ones), a made-up model key that only ever reaches the scripted upstream on localhost, dummy SMS credentials for the local sink
+VOICE_SIGNING="journey-signalwire-signing-key-0123456789abcdef"
+VOICE_STREAM_KEY="journey-voice-stream-token-key-1111111111111111"
+VOICE_CODE_KEY="journey-voice-phone-code-key-2222222222222222"
+VOICE_CALLER_KEY="journey-voice-caller-hash-key-3333333333333333"
 # the staff area (M7): the first admin is created at start-up from this one-time secret (a made-up test value, only for this local stack; it must differ from every other key)
 STAFF_BOOT="journey-staff-bootstrap-secret-0123456789abcdef"; STAFF_EMAIL="staff-journey@journey.test"
 ADMIN_EMAIL="admin@example.com"; ADMIN_PASSWORD="Qu1et-Marble-Fox-Test!"
@@ -116,6 +122,10 @@ cmd_up() {
     # many sign-ins and requests from one address in a few minutes: the limits are not under test here
     export RateLimits__AuthPerMinute=100000 RateLimits__PublicPerMinute=100000
     export Outbox__BackoffSeconds=2 Catalog__SyncIntervalSeconds=5
+    # voice ordering by phone, against a scripted model and an SMS sink on localhost (voice-journey.mjs); the fake payment is accepted because this is Development with no real Stripe key
+    export Voice__Enabled=true Voice__PublicBaseUrl="http://127.0.0.1:$API_PORT" Voice__OpenAiApiKey="journey-not-a-real-openai-key" Voice__OpenAiRealtimeUrl="ws://127.0.0.1:$VOICE_UPSTREAM_PORT/v1/realtime"
+    export Voice__StreamTokenKey="$VOICE_STREAM_KEY" Voice__PhoneCodeKey="$VOICE_CODE_KEY" Voice__CallerHashKey="$VOICE_CALLER_KEY" Voice__PhonePaymentProvider=fake
+    export SignalWire__SigningKey="$VOICE_SIGNING" SignalWire__ProjectId=journey SignalWire__ApiToken=journey-sms-token SignalWire__Space=journey SignalWire__FromNumber="+15550001111" SignalWire__ApiBaseUrl="http://127.0.0.1:$VOICE_SMS_PORT"
     start api dotnet "$RUN_DIR/api/Solvelt.Marketplace.Api.dll"
   )
   wait_http api "http://127.0.0.1:$API_PORT/health" 90
@@ -133,7 +143,7 @@ cmd_up() {
 
   cat >"$RUN_DIR/env.json" <<JSON
 { "portal": "http://127.0.0.1:$PORTAL_PORT", "api": "http://127.0.0.1:$API_PORT", "web": "http://localhost:$WEB_PORT", "mail": "http://127.0.0.1:$MAIL_HTTP_PORT",
-  "webDir": "$WEB_DIR", "pg": { "host": "$PG_HOST", "port": $PG_PORT, "user": "$PG_USER", "password": "$PG_PASSWORD", "db": "$DB_NAME" }, "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "stripeWebhookSecret": "$STRIPE_WEBHOOK", "staffBootstrapSecret": "$STAFF_BOOT", "staffEmail": "$STAFF_EMAIL", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
+  "webDir": "$WEB_DIR", "pg": { "host": "$PG_HOST", "port": $PG_PORT, "user": "$PG_USER", "password": "$PG_PASSWORD", "db": "$DB_NAME" }, "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "voice": { "publicBase": "http://127.0.0.1:$API_PORT", "signingKey": "$VOICE_SIGNING", "upstreamPort": $VOICE_UPSTREAM_PORT, "smsPort": $VOICE_SMS_PORT }, "stripeWebhookSecret": "$STRIPE_WEBHOOK", "staffBootstrapSecret": "$STAFF_BOOT", "staffEmail": "$STAFF_EMAIL", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
 JSON
   echo "stack is up: $RUN_DIR/env.json"
 }
