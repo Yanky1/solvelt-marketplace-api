@@ -25,6 +25,8 @@ public sealed class SolaOptions
     public string? PayConnectorPassword { get; set; }
     /// <summary>The key shared with the connector: signs what the connector and this API tell each other (HMAC-SHA256, both directions). At least 32 characters, a key of its own. Secret.</summary>
     public string? PayConnectorKey { get; set; }
+    /// <summary>The key that encrypts saved-card tokens at rest (V-16): AES-256-GCM, its own purpose, bound to the account. A <b>secret</b>; required with the connector, at least 32 characters. Losing it makes saved cards unreadable (they are saved again).</summary>
+    public string? SavedCardKey { get; set; }
     public bool KeypadEnabled => !string.IsNullOrWhiteSpace(PayConnectorUrl);
 
     public static IReadOnlyList<string> Problems(SolaOptions o)
@@ -37,6 +39,8 @@ public sealed class SolaOptions
             if (string.IsNullOrWhiteSpace(o.PayConnectorUser) || o.PayConnectorPassword is not { Length: >= 24 }) p.Add("Sola:PayConnectorUser and Sola:PayConnectorPassword (at least 24 characters) are required with the pay connector.");
             if (o.PayConnectorKey is not { Length: >= 32 }) p.Add("Sola:PayConnectorKey (env Sola__PayConnectorKey) must be at least 32 characters.");
             else if (o.PayConnectorKey == o.PayConnectorPassword || o.PayConnectorKey == o.WebhookPin || o.PayConnectorKey == o.ApiKey) p.Add("Sola:PayConnectorKey must differ from every other secret (one key per purpose).");
+            if (o.SavedCardKey is not { Length: >= 32 }) p.Add("Sola:SavedCardKey (env Sola__SavedCardKey) must be at least 32 characters: it encrypts saved-card tokens.");
+            else if (o.SavedCardKey == o.PayConnectorKey || o.SavedCardKey == o.PayConnectorPassword || o.SavedCardKey == o.WebhookPin || o.SavedCardKey == o.ApiKey) p.Add("Sola:SavedCardKey must differ from every other secret (one key per purpose).");
         }
         if (!Uri.TryCreate(o.PaymentSiteUrl, UriKind.Absolute, out var u) || u.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(u.Query) || !string.IsNullOrEmpty(u.Fragment))
             p.Add("Sola:PaymentSiteUrl (env Sola__PaymentSiteUrl) must be the https URL of the PaymentSITE page, without a query string.");

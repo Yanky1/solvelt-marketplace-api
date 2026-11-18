@@ -248,6 +248,8 @@ public sealed class ReportRetryService(ChargeLedger ledger, IMarketplaceApi api,
         {
             foreach (var stuck in ledger.SweepStuck(time.GetUtcNow() - TimeSpan.FromSeconds(options.Value.SolaTimeoutSeconds + 60)))
                 log.LogError("Attempt {Attempt}: transaction {Tx} never finished (the sale may have happened); marked unknown. It needs a person.", stuck.AttemptId, stuck.TransactionId);
+            foreach (var wiped in ledger.WipeStaleTokens(time.GetUtcNow() - TimeSpan.FromMinutes(options.Value.SavedTokenMinutes)))
+                log.LogError("Attempt {Attempt}: the saved-card token of transaction {Tx} was not taken by the marketplace API in time and was wiped; the card was tokenised at the processor. It needs a person.", wiped.AttemptId, wiped.TransactionId);
             foreach (var row in ledger.Unreported())
             {
                 if (row.Kind == "save") { if (await api.ReportCardAsync(ConnectorHandler.ReportOfSave(row), stop)) { ledger.MarkReported(row.TransactionId); ledger.ClearToken(row.TransactionId); } }

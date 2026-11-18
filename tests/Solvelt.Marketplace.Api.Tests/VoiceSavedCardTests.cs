@@ -13,12 +13,12 @@ namespace Solvelt.Marketplace.Api.Tests;
 /// <summary>Saved cards by phone (decision V-16): the card goes to the pay connector, this API keeps only the processor's token, the brand, the last four digits and the expiry, and nothing is charged.</summary>
 public class VoiceSavedCardTests
 {
-    private const string Email = "jane@example.com", Key = "connector-shared-key-for-tests-0123456789abcdef", Token = "tok-9f8e7d6c5b4a39281706";
+    private const string SavedKey = "saved-card-key-for-tests-0123456789abcdef", Email = "jane@example.com", Key = "connector-shared-key-for-tests-0123456789abcdef", Token = "tok-9f8e7d6c5b4a39281706";
 
     private static Dictionary<string, string?> Config() => new()
     {
         ["Voice:PhonePaymentProvider"] = "sola", ["Sola:PaymentSiteUrl"] = "https://pay.sola.test/site", ["Sola:WebhookPin"] = "abcdefghij0123456789",
-        ["Sola:PayConnectorUrl"] = "https://pay.example.com/connector", ["Sola:PayConnectorUser"] = "payuser", ["Sola:PayConnectorPassword"] = "basic-password-for-tests-0123456789abcdef", ["Sola:PayConnectorKey"] = Key,
+        ["Sola:PayConnectorUrl"] = "https://pay.example.com/connector", ["Sola:PayConnectorUser"] = "payuser", ["Sola:PayConnectorPassword"] = "basic-password-for-tests-0123456789abcdef", ["Sola:PayConnectorKey"] = Key, ["Sola:SavedCardKey"] = SavedKey,
     };
 
     private static async Task Verify(VoiceScenario s)
@@ -92,7 +92,11 @@ public class VoiceSavedCardTests
             Assert.Equal(HttpStatusCode.OK, (await Send(s, PayConnectorEndpoints.CardPath, Report(attempt))).StatusCode);
             Assert.Equal(HttpStatusCode.OK, (await Send(s, PayConnectorEndpoints.CardPath, Report(attempt))).StatusCode);   // a repeat: the first word stands
             var card = Assert.Single(await Cards(s));
-            Assert.Equal((jane, Token, "Visa", "1111", "01", "38"), (card.AccountId, card.Token, card.Brand, card.Last4, card.ExpMonth, card.ExpYear));
+            Assert.Equal((jane, "Visa", "1111", "01", "38"), (card.AccountId, card.Brand, card.Last4, card.ExpMonth, card.ExpYear));
+            Assert.DoesNotContain(Token, card.Token);                                                                   // ENCRYPTED at rest: the database never holds the token itself
+            var vault = s.F.Services.GetRequiredService<SavedCardVault>();
+            Assert.Equal(Token, vault.Unprotect(card.Token, jane));                                                     // the owner's key opens it
+            Assert.Null(vault.Unprotect(card.Token, Guid.NewGuid()));                                                   // bound to the account: another account's id does not
             Assert.Equal("saved", (await s.K.Db(db => db.VoicePaymentAttempts.AsNoTracking().SingleAsync())).Status);
             // after the report the attempt is closed: the connector is told it is not open any more
             using var closed = JsonDocument.Parse(await (await Send(s, PayConnectorEndpoints.ExpectPath, JsonSerializer.Serialize(new { attemptId = attempt }))).Content.ReadAsStringAsync());
@@ -178,6 +182,29 @@ public class VoiceSavedCardTests
         using (t)
         {
             Assert.Equal("card_step_starting", (await t.Tool("add_saved_card"))["status"]!.GetValue<string>());
+        }
+    }
+
+    [Fact]
+    public async Task A_report_cannot_attach_a_card_to_another_account_than_the_calls_and_the_vault_refuses_tampering()
+    {
+        var (s, jane, _) = await AccountCall();
+        using (s)
+        {
+            var (attempt, _) = await StartSave(s);
+            // the attempt names an account that is not the one signed in on the live call: refused, nothing stored, the attempt stays pending for the real report
+            var other = Guid.NewGuid();
+            await s.K.Db(async db => { await db.VoicePaymentAttempts.ExecuteUpdateAsync(x => x.SetProperty(a => a.OrderNumber, "cs-" + other.ToString("N"))); return 0; });
+            Assert.Contains("wrong_account", await (await Send(s, PayConnectorEndpoints.CardPath, Report(attempt))).Content.ReadAsStringAsync());
+            Assert.Empty(await Cards(s));
+            Assert.Equal("pending", (await s.K.Db(db => db.VoicePaymentAttempts.AsNoTracking().SingleAsync())).Status);
+            await s.K.Db(async db => { await db.VoicePaymentAttempts.ExecuteUpdateAsync(x => x.SetProperty(a => a.OrderNumber, "cs-" + jane.ToString("N"))); return 0; });
+            await Send(s, PayConnectorEndpoints.CardPath, Report(attempt));
+            var stored = Assert.Single(await Cards(s)).Token;
+            var vault = s.F.Services.GetRequiredService<SavedCardVault>();
+            Assert.Null(vault.Unprotect(stored[..^4] + (stored[^4..] == "AAAA" ? "BBBB" : "AAAA"), jane));                 // an edited value does not decrypt
+            Assert.Null(vault.Unprotect("v1.AAAA", jane)); Assert.Null(vault.Unprotect("plain-token", jane));
+            Assert.NotEqual(vault.Protect(Token, jane), vault.Protect(Token, jane));                                     // a fresh nonce every time
         }
     }
 

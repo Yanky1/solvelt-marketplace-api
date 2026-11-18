@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261118234442_InitialCreate")]
+    [Migration("20261118235529_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2781,8 +2781,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<string>("Token")
                         .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
 
                     b.HasKey("Id");
 

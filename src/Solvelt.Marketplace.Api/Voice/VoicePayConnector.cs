@@ -92,7 +92,7 @@ public static class PayConnectorEndpoints
     /// The connector's report of a card it saved (V-16): the processor's token, brand, last four digits and expiry. Believed only for a PENDING card-saving attempt this server opened (it names the account); the token is
     /// stored for that account and nothing else (never a card number: this API never has one). A repeat of the same report changes nothing. Over the cap of saved cards the card is not kept.
     /// </summary>
-    private static async Task<IResult> Card(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SolaOptions> so, MarketplaceDb db, VoiceStateStore states, TimeProvider time, ILoggerFactory logs, CancellationToken ct)
+    private static async Task<IResult> Card(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SolaOptions> so, MarketplaceDb db, VoiceStateStore states, SavedCardVault vault, TimeProvider time, ILoggerFactory logs, CancellationToken ct)
     {
         if (!Enabled(vo.Value, so.Value)) return Results.NotFound();
         var (ok, body) = await ReadSignedAsync(ctx, so.Value, time, ct);
@@ -104,6 +104,8 @@ public static class PayConnectorEndpoints
         var attempt = await db.VoicePaymentAttempts.FirstOrDefaultAsync(x => x.Id == id && x.Method == SaveCardMethod, ct);
         if (attempt is null || !attempt.OrderNumber.StartsWith("cs-", StringComparison.Ordinal) || !Guid.TryParseExact(attempt.OrderNumber[3..], "N", out var accountId)) return Signed(ctx, so.Value, time, new { ok = false, settle = "unknown_attempt" });
         if (attempt.Status != "pending") return Signed(ctx, so.Value, time, new { ok = true, settle = attempt.Status });   // a repeat: the first word stands
+        // bound to THIS call and THIS account: while the call is live its signed-in account must be the one the attempt was opened for (a report can never attach a card to another account)
+        if (states.Find(attempt.CallId) is { } live && live.AccountId != accountId) { log.LogError("A card report for attempt {Attempt} named another account than the call's; it was refused.", attempt.Id); return Signed(ctx, so.Value, time, new { ok = false, settle = "wrong_account" }); }
         var now = time.GetUtcNow();
         var status = r.Status switch { "saved" => "saved", "declined" => "declined", "failed" => "failed", _ => "unknown" };
         if (status == "unknown") log.LogError("The pay connector could not confirm a card save (attempt {Attempt}): the card may have been tokenised at the processor. It needs a person.", attempt.Id);
@@ -114,8 +116,8 @@ public static class PayConnectorEndpoints
             var count = await db.SavedCards.CountAsync(c => c.AccountId == accountId, ct);
             if (!valid) { status = "failed"; log.LogError("The pay connector reported a saved card in an unusable shape (attempt {Attempt}).", attempt.Id); }
             else if (count >= SavedCardLimits.MaxPerAccount) { status = "failed"; log.LogError("A card was tokenised for an account that already has {Max} saved cards (attempt {Attempt}); it was not kept.", SavedCardLimits.MaxPerAccount, attempt.Id); }
-            else if (!await db.SavedCards.AnyAsync(c => c.AccountId == accountId && c.Token == r.Token, ct))
-                db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = accountId, Token = r.Token!.Trim(), Brand = r.Brand!.Trim(), Last4 = r.Last4!, ExpMonth = r.Exp![..2], ExpYear = r.Exp[2..], CreatedAt = now });
+            else if (!(await db.SavedCards.Where(c => c.AccountId == accountId).Select(c => c.Token).ToListAsync(ct)).Any(t => vault.Unprotect(t, accountId) == r.Token!.Trim()))
+                db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = accountId, Token = vault.Protect(r.Token!.Trim(), accountId), Brand = r.Brand!.Trim(), Last4 = r.Last4!, ExpMonth = r.Exp![..2], ExpYear = r.Exp[2..], CreatedAt = now });
         }
         attempt.Status = status; attempt.SettledAt = now;
         try { await db.SaveChangesAsync(ct); }

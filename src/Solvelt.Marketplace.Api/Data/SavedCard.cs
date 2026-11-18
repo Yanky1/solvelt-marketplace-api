@@ -11,6 +11,7 @@ public sealed class SavedCard
 {
     public Guid Id { get; set; }
     public Guid AccountId { get; set; }
+    /// <summary>The processor's token, ENCRYPTED at rest (AES-GCM, bound to the account; see <c>SavedCardVault</c>). Never returned, logged, exported or shown to the model.</summary>
     public string Token { get; set; } = "";
     public string Brand { get; set; } = "";
     public string Last4 { get; set; } = "";
@@ -27,7 +28,7 @@ internal sealed class SavedCardConfiguration : IEntityTypeConfiguration<SavedCar
         b.ToTable("saved_cards");
         b.HasKey(c => c.Id);
         b.Property(c => c.Id).ValueGeneratedNever();
-        b.Property(c => c.Token).HasMaxLength(100).IsRequired();
+        b.Property(c => c.Token).HasMaxLength(400).IsRequired();   // the ENCRYPTED token (SavedCardVault)
         b.Property(c => c.Brand).HasMaxLength(20).IsRequired();
         b.Property(c => c.Last4).HasMaxLength(4).IsRequired();
         b.Property(c => c.ExpMonth).HasMaxLength(2).IsRequired();

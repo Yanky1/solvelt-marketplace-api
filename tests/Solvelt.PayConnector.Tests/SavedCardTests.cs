@@ -96,6 +96,29 @@ public class SavedCardTests
     }
 
     [Fact]
+    public async Task A_token_the_API_does_not_take_in_time_is_wiped_logged_for_a_person_and_reported_as_unclear()
+    {
+        using var rig = SaveRig(o => o.SavedTokenMinutes = 10);
+        rig.Api.CardReportWorks = false;
+        var posting = rig.Post(Kit.Body(tx: "stale", amount: "0"));
+        while (!posting.IsCompleted) { rig.Time.Advance(TimeSpan.FromSeconds(1)); await Task.Delay(5); }
+        await posting;
+        var sweeper = new ReportRetryService(rig.Ledger, rig.Api, Microsoft.Extensions.Options.Options.Create(rig.Opts), rig.Time, Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<ReportRetryService>(new Microsoft.Extensions.Logging.LoggerFactory([rig.Logs])));
+        rig.Time.Advance(TimeSpan.FromMinutes(9));
+        await sweeper.RunOnceAsync(default);
+        Assert.Equal(Token, rig.Ledger.Find("stale")!.Token);                                                           // still within the window: kept for the retry
+        rig.Api.CardReportWorks = true;
+        rig.Time.Advance(TimeSpan.FromMinutes(2));
+        await sweeper.RunOnceAsync(default);
+        var row = rig.Ledger.Find("stale")!;
+        Assert.Equal((null, "unknown", "token_not_delivered"), (row.Token, row.State, row.ErrorCode));                  // wiped
+        Assert.Contains(rig.Logs.Lines, l => l.StartsWith("Error") && l.Contains("wiped") && l.Contains("needs a person"));
+        Assert.DoesNotContain(rig.Logs.Lines, l => l.Contains(Token));
+        var report = Assert.Single(rig.Api.Cards);
+        Assert.Equal(("unknown", null), (report.Status, report.Token));                                                 // the API is told it was unclear, never given the old token
+    }
+
+    [Fact]
     public void Sola_saves_are_read_strictly()
     {
         SolaSaveResult P(string json) => SolaGateway.ParseSave(Encoding.UTF8.GetBytes(json));

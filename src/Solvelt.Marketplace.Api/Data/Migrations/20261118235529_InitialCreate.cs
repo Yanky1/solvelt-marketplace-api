@@ -916,7 +916,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     AccountId = table.Column<Guid>(type: "uuid", nullable: false),
-                    Token = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Token = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: false),
                     Brand = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
                     Last4 = table.Column<string>(type: "character varying(4)", maxLength: 4, nullable: false),
                     ExpMonth = table.Column<string>(type: "character varying(2)", maxLength: 2, nullable: false),

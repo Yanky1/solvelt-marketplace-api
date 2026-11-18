@@ -19,7 +19,7 @@ public class VoicePayConnectorTests
     private static Dictionary<string, string?> Config() => new()
     {
         ["Voice:PhonePaymentProvider"] = "sola", ["Sola:PaymentSiteUrl"] = "https://pay.sola.test/site", ["Sola:WebhookPin"] = "abcdefghij0123456789",
-        ["Sola:PayConnectorUrl"] = Url, ["Sola:PayConnectorUser"] = User, ["Sola:PayConnectorPassword"] = Password, ["Sola:PayConnectorKey"] = Key,
+        ["Sola:PayConnectorUrl"] = Url, ["Sola:PayConnectorUser"] = User, ["Sola:PayConnectorPassword"] = Password, ["Sola:PayConnectorKey"] = Key, ["Sola:SavedCardKey"] = "saved-card-key-for-tests-0123456789abcdef",
     };
 
     private static async Task<VoiceScenario> Confirmed(Dictionary<string, string?>? config = null)
@@ -101,12 +101,14 @@ public class VoicePayConnectorTests
     [InlineData("Sola:PayConnectorKey", "short", "PayConnectorKey")]
     [InlineData("Sola:PayConnectorPassword", Key, "must differ")]
     [InlineData("Sola:PayConnectorUser", "", "PayConnectorUser")]
+    [InlineData("Sola:SavedCardKey", "short", "SavedCardKey")]
+    [InlineData("Sola:SavedCardKey", Key, "must differ")]
     public void The_connector_settings_are_checked_at_start_up(string key, string value, string problem)
     {
         var c = Config();
-        var o = new SolaOptions { PaymentSiteUrl = c["Sola:PaymentSiteUrl"], WebhookPin = c["Sola:WebhookPin"], PayConnectorUrl = c["Sola:PayConnectorUrl"], PayConnectorUser = User, PayConnectorPassword = Password, PayConnectorKey = Key };
+        var o = new SolaOptions { PaymentSiteUrl = c["Sola:PaymentSiteUrl"], WebhookPin = c["Sola:WebhookPin"], PayConnectorUrl = c["Sola:PayConnectorUrl"], PayConnectorUser = User, PayConnectorPassword = Password, PayConnectorKey = Key, SavedCardKey = "saved-card-key-for-tests-0123456789abcdef" };
         Assert.Empty(SolaOptions.Problems(o));
-        switch (key) { case "Sola:PayConnectorUrl": o.PayConnectorUrl = value; break; case "Sola:PayConnectorPassword": o.PayConnectorPassword = value; break; case "Sola:PayConnectorKey": o.PayConnectorKey = value; break; default: o.PayConnectorUser = value; break; }
+        switch (key) { case "Sola:PayConnectorUrl": o.PayConnectorUrl = value; break; case "Sola:PayConnectorPassword": o.PayConnectorPassword = value; break; case "Sola:PayConnectorKey": o.PayConnectorKey = value; break; case "Sola:SavedCardKey": o.SavedCardKey = value; break; default: o.PayConnectorUser = value; break; }
         Assert.Contains(SolaOptions.Problems(o), x => x.Contains(problem));
     }
 

@@ -30,6 +30,8 @@ public sealed class ConnectorOptions
     public long MaxChargeCents { get; set; } = 50_000;
     /// <summary>Connector requests allowed per payment attempt (a caller may retype a wrong card number a couple of times); a PAID attempt takes no further request at all.</summary>
     public int MaxRequestsPerAttempt { get; set; } = 3;
+    /// <summary>Minutes a saved-card token may wait in the ledger for the marketplace API to take it; after that it is wiped and logged for a person (V-16).</summary>
+    public int SavedTokenMinutes { get; set; } = 15;
     /// <summary>Refuse plain http (true everywhere but a development box behind nothing).</summary>
     public bool RequireHttps { get; set; } = true;
     /// <summary>True when a platform in front terminates TLS and says so with <c>X-Forwarded-Proto: https</c> (for example Azure App Service). Off by default: then only a request that arrived over https itself is accepted.</summary>
@@ -52,6 +54,7 @@ public sealed class ConnectorOptions
         if (string.IsNullOrWhiteSpace(o.SolaKey)) p.Add("Connector:SolaKey (env Connector__SolaKey) is required.");
         if (!Uri.TryCreate(o.SolaUrl, UriKind.Absolute, out var sola) || sola.Scheme != "https") p.Add("Connector:SolaUrl must be an https URL.");
         if (o.MaxChargeCents is < 1 or > 1_000_000) p.Add("Connector:MaxChargeCents must be between 1 and 1000000.");
+        if (o.SavedTokenMinutes is < 1 or > 60) p.Add("Connector:SavedTokenMinutes must be between 1 and 60.");
         if (o.MaxRequestsPerAttempt is < 1 or > 5) p.Add("Connector:MaxRequestsPerAttempt must be between 1 and 5.");
         if (o.SolaTimeoutSeconds is < 5 or > 60) p.Add("Connector:SolaTimeoutSeconds must be between 5 and 60.");
         return p;
