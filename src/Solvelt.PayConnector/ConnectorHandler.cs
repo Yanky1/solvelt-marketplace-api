@@ -5,7 +5,10 @@ namespace Solvelt.PayConnector;
 /// <summary>The answer to SignalWire: an HTTP status and, for a business result, the body SignalWire documents (<c>charge_id</c>, <c>error_code</c>, <c>error_message</c>). Messages are fixed words of ours, never Sola's text.</summary>
 public sealed record ConnectorReply(int Status, string? ChargeId, string? ErrorCode, string? ErrorMessage)
 {
+    /// <summary>True for a successful tokenisation: SignalWire is answered with <c>token_id</c> instead of <c>charge_id</c>.</summary>
+    public bool IsToken { get; init; }
     public static ConnectorReply Paid(string chargeId) => new(200, chargeId, null, null);
+    public static ConnectorReply Token(string tokenId) => new(200, tokenId, null, null) { IsToken = true };
     public static ConnectorReply Refused(string code, string message) => new(200, null, code, message);
     public static ConnectorReply Http(int status) => new(status, null, null, null);
 }
@@ -36,6 +39,8 @@ public sealed class ConnectorHandler(Microsoft.Extensions.Options.IOptions<Conne
         // what to charge comes from the marketplace API's server state; SignalWire's chargeAmount (OUR <Pay> attribute) must equal it
         var expect = await api.ExpectAsync(card.AttemptId, ct);
         if (expect is null) return ConnectorReply.Refused("attempt_not_open", "This payment cannot be taken.");
+        if (expect.Purpose == "save_card") return await SaveCardAsync(card, expect, ct);   // a tokenisation: chargeAmount 0, nothing is charged
+        if (expect.Purpose != "sale") return ConnectorReply.Refused("attempt_not_open", "This payment cannot be taken.");
         if (card.ChargeAmount != SolaGateway.Dollars(expect.AmountCents) || !string.Equals(expect.Currency, "USD", StringComparison.OrdinalIgnoreCase))
         {
             log.LogError("Connector request for attempt {Attempt} asked for another amount than the order's ({Asked} vs {Expected}); nothing was charged.", card.AttemptId, card.ChargeAmount, SolaGateway.Dollars(expect.AmountCents));
@@ -63,6 +68,12 @@ public sealed class ConnectorHandler(Microsoft.Extensions.Options.IOptions<Conne
             log.LogError("Attempt {Attempt}: the sale call failed ({Type}); the card may have been charged. It needs a person (transaction {Tx}).", card.AttemptId, ex.GetType().Name, card.TransactionId);
             result = new SolaResult(SolaOutcome.Unknown, null, null, "sale_call_failed");
         }
+        return await FinishSaleAsync(card.TransactionId, card.AttemptId, expect, result, ct);
+    }
+
+    /// <summary>The part every sale shares (card or token): classify what Sola said, record it, report it, answer. See the notes inside.</summary>
+    private async Task<ConnectorReply> FinishSaleAsync(string txId, string attemptId, Expectation expect, SolaResult result, CancellationToken ct)
+    {
         string state; ConnectorReply reply; string status;
         switch (result.Outcome)
         {
@@ -70,37 +81,128 @@ public sealed class ConnectorHandler(Microsoft.Extensions.Options.IOptions<Conne
                 state = "approved"; status = "paid"; reply = ConnectorReply.Paid(result.RefNum!); break;
             case SolaOutcome.Approved:
                 // the gateway authorised another amount than asked for: money moved that does not match the order. Reported as it was (the API records a mismatch for a person); SignalWire is not told "paid".
-                log.LogError("Attempt {Attempt}: Sola authorised {Authorised} cents where {Expected} were asked (reference {Ref}). It needs a person.", card.AttemptId, result.AuthorisedCents, expect.AmountCents, result.RefNum);
+                log.LogError("Attempt {Attempt}: Sola authorised {Authorised} cents where {Expected} were asked (reference {Ref}). It needs a person.", attemptId, result.AuthorisedCents, expect.AmountCents, result.RefNum);
                 state = "unknown"; status = "paid"; reply = ConnectorReply.Refused("amount_mismatch", "This payment could not be completed."); break;
             case SolaOutcome.Declined:
                 state = "declined"; status = "declined"; reply = ConnectorReply.Refused("declined", "The card was declined."); break;
             case SolaOutcome.Error:
                 state = "error"; status = "failed"; reply = ConnectorReply.Refused("gateway_error", "The payment could not be processed."); break;
             default:
-                log.LogError("Attempt {Attempt}: the answer to the sale is unknown ({Code}); the card may have been charged. It needs a person (transaction {Tx}).", card.AttemptId, result.ErrorCode, card.TransactionId);
+                log.LogError("Attempt {Attempt}: the answer to the sale is unknown ({Code}); the card may have been charged. It needs a person (transaction {Tx}).", attemptId, result.ErrorCode, txId);
                 state = "unknown"; status = "unknown"; reply = ConnectorReply.Refused("gateway_unknown", "The payment could not be confirmed."); break;
         }
         var finished = false;
         try
         {
-            ledger.Finish(card.TransactionId, state, result.RefNum, result.ErrorCode, state is "approved" or "unknown" && result.AuthorisedCents is { } a ? a : null);
+            ledger.Finish(txId, state, result.RefNum, result.ErrorCode, state is "approved" or "unknown" && result.AuthorisedCents is { } a ? a : null);
             finished = true;
-            var report = new ChargeReport(card.AttemptId, expect.Invoice, status, result.AuthorisedCents ?? 0, result.RefNum, result.ErrorCode);
-            if (await ReportWithRetriesAsync(report, ct)) ledger.MarkReported(card.TransactionId);   // otherwise the background service keeps trying: the result is not lost
+            var report = new ChargeReport(attemptId, expect.Invoice, status, result.AuthorisedCents ?? 0, result.RefNum, result.ErrorCode);
+            if (await ReportWithRetriesAsync(report, ct)) ledger.MarkReported(txId);   // otherwise the background service keeps trying: the result is not lost
         }
         catch (Exception ex) when (finished)
         {
             // the result IS recorded; only telling the marketplace API failed (a dropped request, an API that threw): the row stays as it is, unreported, and the retry service delivers it. The caller gets the real answer.
-            log.LogWarning("Attempt {Attempt}: reporting transaction {Tx} failed ({Type}); it stays unreported and is retried.", card.AttemptId, card.TransactionId, ex.GetType().Name);
+            log.LogWarning("Attempt {Attempt}: reporting transaction {Tx} failed ({Type}); it stays unreported and is retried.", attemptId, txId, ex.GetType().Name);
         }
         catch (Exception ex)
         {
             // the sale could not be RECORDED (the ledger, a disposal, a bug): the row must not stay "processing" for good. Attempt, transaction and reference only; the caller is told the outcome is unknown.
-            log.LogError("Attempt {Attempt}: recording the sale failed ({Type}); the card may have been charged (transaction {Tx}, reference {Ref}). It needs a person.", card.AttemptId, ex.GetType().Name, card.TransactionId, result.RefNum);
-            try { ledger.Finish(card.TransactionId, "unknown", result.RefNum, "recording_failed", result.AuthorisedCents); } catch (Exception) { /* the sweeper turns a row that is still "processing" into "unknown" */ }
+            log.LogError("Attempt {Attempt}: recording the sale failed ({Type}); the card may have been charged (transaction {Tx}, reference {Ref}). It needs a person.", attemptId, ex.GetType().Name, txId, result.RefNum);
+            try { ledger.Finish(txId, "unknown", result.RefNum, "recording_failed", result.AuthorisedCents); } catch (Exception) { /* the sweeper turns a row that is still "processing" into "unknown" */ }
             return ConnectorReply.Refused("gateway_unknown", "The payment could not be confirmed.");
         }
         return reply;
+    }
+
+    /// <summary>
+    /// <c>&lt;Pay chargeAmount="0" tokenType="reusable"&gt;</c> (V-16): the card goes to Sola's <c>cc:save</c> and ONLY the token, brand, last four and expiry come back; they are reported to the marketplace API over the signed channel
+    /// (the API never trusts SignalWire's action for a credential). Same rules as a sale: the attempt must be a save-card attempt the SERVER opened, the request must say amount 0, idempotent on <c>transaction_id</c>, never retried.
+    /// </summary>
+    private async Task<ConnectorReply> SaveCardAsync(ConnectorRequest card, Expectation expect, CancellationToken ct)
+    {
+        var o = options.Value;
+        if (expect.AmountCents != 0 || (card.ChargeAmount != "0" && card.ChargeAmount != "0.00")) { log.LogError("Connector save-card request for attempt {Attempt} did not say amount 0; nothing was saved.", card.AttemptId); return ConnectorReply.Refused("amount_mismatch", "This card cannot be saved."); }
+        var begin = ledger.Begin(card.TransactionId, card.AttemptId, expect.Invoice, 0, o.MaxRequestsPerAttempt, time.GetUtcNow(), "save");
+        switch (begin.Kind)
+        {
+            case BeginKind.Replay: return begin.Row!.State == "approved" ? ConnectorReply.Token(begin.Row.ChargeId ?? "saved") : Replay(begin.Row!);
+            case BeginKind.AttemptAlreadyPaid: return ConnectorReply.Refused("already_saved", "This card was already saved.");
+            case BeginKind.TooManyRequests: return ConnectorReply.Refused("too_many_attempts", "Too many tries.");
+        }
+        SolaSaveResult result;
+        try { result = await sola.SaveAsync(card, ct); }
+        catch (Exception ex)
+        {
+            log.LogError("Attempt {Attempt}: the save call failed ({Type}); it needs a person (transaction {Tx}).", card.AttemptId, ex.GetType().Name, card.TransactionId);
+            result = new SolaSaveResult(SolaOutcome.Unknown, null, null, null, null, "save_call_failed");
+        }
+        var state = result.Outcome switch { SolaOutcome.Approved => "approved", SolaOutcome.Declined => "declined", SolaOutcome.Error => "error", _ => "unknown" };
+        var finished = false;
+        try
+        {
+            ledger.FinishSave(card.TransactionId, state, result.Token, result.Brand, result.Last4, result.Exp, result.ErrorCode);
+            finished = true;
+            if (await ReportCardWithRetriesAsync(ReportOfSave(card.AttemptId, state, result), ct)) { ledger.MarkReported(card.TransactionId); ledger.ClearToken(card.TransactionId); }
+        }
+        catch (Exception ex) when (finished) { log.LogWarning("Attempt {Attempt}: reporting the saved card failed ({Type}); it stays unreported and is retried.", card.AttemptId, ex.GetType().Name); }
+        catch (Exception ex)
+        {
+            log.LogError("Attempt {Attempt}: recording the saved card failed ({Type}); it needs a person (transaction {Tx}).", card.AttemptId, ex.GetType().Name, card.TransactionId);
+            try { ledger.FinishSave(card.TransactionId, "unknown", null, null, null, null, "recording_failed"); } catch (Exception) { }
+            return ConnectorReply.Refused("gateway_unknown", "The card could not be saved.");
+        }
+        return result.Outcome switch
+        {
+            SolaOutcome.Approved => ConnectorReply.Token("saved"),
+            SolaOutcome.Declined => ConnectorReply.Refused("declined", "The card was declined."),
+            SolaOutcome.Error => ConnectorReply.Refused("gateway_error", "The card could not be saved."),
+            _ => ConnectorReply.Refused("gateway_unknown", "The card could not be saved."),
+        };
+    }
+
+    private static CardReport ReportOfSave(string attemptId, string state, SolaSaveResult r)
+        => new(attemptId, state switch { "approved" => "saved", "declined" => "declined", "error" => "failed", _ => "unknown" }, r.Token, r.Brand, r.Last4, r.Exp, r.ErrorCode);
+
+    public static CardReport ReportOfSave(LedgerRow r)
+        => new(r.AttemptId, r.State switch { "approved" => "saved", "declined" => "declined", "error" => "failed", _ => "unknown" }, r.Token, r.Brand, r.Last4, r.Exp, r.ErrorCode);
+
+    private async Task<bool> ReportCardWithRetriesAsync(CardReport report, CancellationToken ct)
+    {
+        for (var i = 0; i < 3; i++)
+        {
+            if (await api.ReportCardAsync(report, ct)) return true;
+            await Task.Delay(TimeSpan.FromMilliseconds(250 * (i + 1)), time, ct);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// A sale with a SAVED card (V-16), asked for by the marketplace API itself over the signed channel (never by SignalWire): the API names the attempt and the token; the amount and invoice are still checked against the
+    /// API's own expectation for that attempt, so a token can only be charged for the order the server priced. No card data is involved. Idempotent on the attempt, never retried, an unknown outcome is for a person.
+    /// </summary>
+    public async Task<ConnectorReply> ChargeTokenAsync(string attemptId, string token, CancellationToken ct)
+    {
+        var o = options.Value;
+        if (string.IsNullOrWhiteSpace(token) || token.Length > 100) return ConnectorReply.Refused("bad_request", "This payment cannot be taken.");
+        var expect = await api.ExpectAsync(attemptId, ct);
+        if (expect is null || expect.Purpose != "sale") return ConnectorReply.Refused("attempt_not_open", "This payment cannot be taken.");
+        if (expect.AmountCents < 1 || expect.AmountCents > o.MaxChargeCents || !string.Equals(expect.Currency, "USD", StringComparison.OrdinalIgnoreCase)) return ConnectorReply.Refused("over_limit", "This payment cannot be taken.");
+        var txId = "tok-" + attemptId;   // one token sale per attempt: a repeat is a replay, never a second charge
+        var begin = ledger.Begin(txId, attemptId, expect.Invoice, expect.AmountCents, o.MaxRequestsPerAttempt, time.GetUtcNow(), "token_sale");
+        switch (begin.Kind)
+        {
+            case BeginKind.Replay: return Replay(begin.Row!);
+            case BeginKind.AttemptAlreadyPaid: return ConnectorReply.Refused("already_paid", "This payment was already taken.");
+            case BeginKind.TooManyRequests: return ConnectorReply.Refused("too_many_attempts", "Too many tries for this payment.");
+        }
+        SolaResult result;
+        try { result = await sola.TokenSaleAsync(new SolaSale(expect.Invoice, expect.AmountCents, null), token, ct); }
+        catch (Exception ex)
+        {
+            log.LogError("Attempt {Attempt}: the token sale call failed ({Type}); the card may have been charged. It needs a person (transaction {Tx}).", attemptId, ex.GetType().Name, txId);
+            result = new SolaResult(SolaOutcome.Unknown, null, null, "sale_call_failed");
+        }
+        return await FinishSaleAsync(txId, attemptId, expect, result, ct);
     }
 
     private async Task<bool> ReportWithRetriesAsync(ChargeReport report, CancellationToken ct)
@@ -147,7 +249,10 @@ public sealed class ReportRetryService(ChargeLedger ledger, IMarketplaceApi api,
             foreach (var stuck in ledger.SweepStuck(time.GetUtcNow() - TimeSpan.FromSeconds(options.Value.SolaTimeoutSeconds + 60)))
                 log.LogError("Attempt {Attempt}: transaction {Tx} never finished (the sale may have happened); marked unknown. It needs a person.", stuck.AttemptId, stuck.TransactionId);
             foreach (var row in ledger.Unreported())
-                if (await api.ReportAsync(ConnectorHandler.ReportOf(row), stop)) ledger.MarkReported(row.TransactionId);
+            {
+                if (row.Kind == "save") { if (await api.ReportCardAsync(ConnectorHandler.ReportOfSave(row), stop)) { ledger.MarkReported(row.TransactionId); ledger.ClearToken(row.TransactionId); } }
+                else if (await api.ReportAsync(ConnectorHandler.ReportOf(row), stop)) ledger.MarkReported(row.TransactionId);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { log.LogWarning("Reporting results to the marketplace API failed ({Type}).", ex.GetType().Name); }
     }

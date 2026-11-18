@@ -463,7 +463,8 @@ public class ConnectorTests
         var row = rig.Ledger.Find("l-1")!;
         var text = string.Join("|", row.TransactionId, row.AttemptId, row.Invoice, row.Cents, row.State, row.ChargeId, row.ErrorCode);
         Assert.DoesNotContain(Kit.Pan, text); Assert.DoesNotContain(Kit.Cvv + "|", text);
-        Assert.Equal(new[] { "TransactionId", "AttemptId", "Invoice", "Cents", "State", "ChargeId", "ErrorCode", "Reported" }, typeof(LedgerRow).GetProperties().Select(p => p.Name).ToArray());   // the row has no card fields at all
+        Assert.Equal(new[] { "TransactionId", "AttemptId", "Invoice", "Cents", "State", "ChargeId", "ErrorCode", "Reported", "Kind", "Token", "Brand", "Last4", "Exp" }, typeof(LedgerRow).GetProperties().Where(p => p.Name != "EqualityContract").Select(p => p.Name).ToArray());   // no card number, no security code: only (for a SAVE row, V-16) the processor's token, brand, last four and expiry
+        Assert.Null(row.Token);                                                                                          // a sale row never holds one
     }
 
     // ---------- start-up ----------

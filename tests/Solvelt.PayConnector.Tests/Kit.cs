@@ -45,7 +45,10 @@ internal sealed class FakeApi : IMarketplaceApi
     public Exception? ThrowOnReport { get; set; }
     public Exception? ThrowOnExpect { get; set; }
     public List<ChargeReport> Reports { get; } = [];
+    public List<CardReport> Cards { get; } = [];
+    public bool CardReportWorks { get; set; } = true;
     public int ExpectCalls { get; private set; }
+    public Task<bool> ReportCardAsync(CardReport report, CancellationToken ct) { if (!CardReportWorks) return Task.FromResult(false); Cards.Add(report); return Task.FromResult(true); }
     public Task<Expectation?> ExpectAsync(string attemptId, CancellationToken ct) { ExpectCalls++; if (ThrowOnExpect is not null) throw ThrowOnExpect; return Task.FromResult(Expect); }
     public Task<bool> ReportAsync(ChargeReport report, CancellationToken ct) { if (ThrowOnReport is not null) throw ThrowOnReport; if (!ReportWorks) return Task.FromResult(false); Reports.Add(report); return Task.FromResult(true); }
 }
@@ -54,6 +57,21 @@ internal sealed class FakeSola : ISolaGateway
 {
     public SolaResult Result { get; set; } = new(SolaOutcome.Approved, "601518451", 3500, null);
     public Exception? Throw { get; set; }
+    public SolaSaveResult SaveResult { get; set; } = new(SolaOutcome.Approved, "tok-abcdef0123456789", "Visa", "1111", "0138", null);
+    public List<(string Pan, string Cvv)> SaveCalls { get; } = [];
+    public List<(SolaSale Sale, string Token)> TokenCalls { get; } = [];
+    public Task<SolaSaveResult> SaveAsync(ConnectorRequest card, CancellationToken ct)
+    {
+        SaveCalls.Add((Encoding.ASCII.GetString(card.Pan), Encoding.ASCII.GetString(card.Cvv)));
+        if (Throw is not null) throw Throw;
+        return Task.FromResult(SaveResult);
+    }
+    public Task<SolaResult> TokenSaleAsync(SolaSale sale, string token, CancellationToken ct)
+    {
+        TokenCalls.Add((sale, token));
+        if (Throw is not null) throw Throw;
+        return Task.FromResult(Result);
+    }
     public List<(SolaSale Sale, string Pan, string Cvv)> Calls { get; } = [];
     public Task<SolaResult> SaleAsync(SolaSale sale, ConnectorRequest card, CancellationToken ct)
     {

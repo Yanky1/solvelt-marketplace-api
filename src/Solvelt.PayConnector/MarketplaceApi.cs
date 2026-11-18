@@ -6,7 +6,10 @@ using Microsoft.Extensions.Options;
 namespace Solvelt.PayConnector;
 
 /// <summary>What the marketplace API says is to be charged for an attempt: from ITS server state (the order total and the order number), never from the call.</summary>
-public sealed record Expectation(long AmountCents, string Invoice, string Currency);
+public sealed record Expectation(long AmountCents, string Invoice, string Currency, string Purpose = "sale");
+
+/// <summary>The connector's word about a card it saved (V-16): the processor's token and the facts the caller hears (brand, last four, expiry). Never the card number.</summary>
+public sealed record CardReport(string AttemptId, string Status, string? Token, string? Brand, string? Last4, string? Exp, string? Code);
 
 /// <summary>The connector's word to the marketplace API about one attempt. The API checks the amount and the invoice against its own order before it believes a <c>paid</c> (decision V-07).</summary>
 public sealed record ChargeReport(string AttemptId, string Invoice, string Status, long PaidCents, string? TransactionId, string? Code);
@@ -16,6 +19,7 @@ public interface IMarketplaceApi
     /// <summary>Null when the attempt is unknown, no longer open, or the API cannot be reached: the connector then charges nothing.</summary>
     Task<Expectation?> ExpectAsync(string attemptId, CancellationToken ct);
     Task<bool> ReportAsync(ChargeReport report, CancellationToken ct);
+    Task<bool> ReportCardAsync(CardReport report, CancellationToken ct);
 }
 
 /// <summary>
@@ -40,7 +44,7 @@ public static class ConnectorSigning
 public sealed class MarketplaceApi(HttpClient http, IOptions<ConnectorOptions> options, TimeProvider time, ILogger<MarketplaceApi> log) : IMarketplaceApi
 {
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(5);
-    private const string ExpectPath = "/api/v1/voice/pay-connector/expect", ResultPath = "/api/v1/voice/pay-connector/result";
+    private const string ExpectPath = "/api/v1/voice/pay-connector/expect", ResultPath = "/api/v1/voice/pay-connector/result", CardPath = "/api/v1/voice/pay-connector/card";
 
     public async Task<Expectation?> ExpectAsync(string attemptId, CancellationToken ct)
     {
@@ -51,7 +55,7 @@ public sealed class MarketplaceApi(HttpClient http, IOptions<ConnectorOptions> o
             using var d = JsonDocument.Parse(text);
             var r = d.RootElement;
             if (!r.TryGetProperty("open", out var open) || open.ValueKind != JsonValueKind.True) return null;
-            return new Expectation(r.GetProperty("amountCents").GetInt64(), r.GetProperty("invoice").GetString()!, r.GetProperty("currency").GetString()!);
+            return new Expectation(r.GetProperty("amountCents").GetInt64(), r.GetProperty("invoice").GetString()!, r.GetProperty("currency").GetString()!, r.TryGetProperty("purpose", out var pu) && pu.ValueKind == JsonValueKind.String ? pu.GetString()! : "sale");
         }
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return null; }
     }
@@ -59,6 +63,12 @@ public sealed class MarketplaceApi(HttpClient http, IOptions<ConnectorOptions> o
     public async Task<bool> ReportAsync(ChargeReport report, CancellationToken ct)
     {
         var (status, _, ok) = await PostAsync(ResultPath, JsonSerializer.Serialize(report), ct);
+        return ok && status is >= 200 and < 300;
+    }
+
+    public async Task<bool> ReportCardAsync(CardReport report, CancellationToken ct)
+    {
+        var (status, _, ok) = await PostAsync(CardPath, JsonSerializer.Serialize(report), ct);
         return ok && status is >= 200 and < 300;
     }
 
