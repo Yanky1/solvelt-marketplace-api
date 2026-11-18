@@ -174,6 +174,14 @@ public class VoiceUnitTests
         Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }, "Development"), x => x.Contains("Sola:WebhookPin"));         // and it needs its own settings
         Assert.DoesNotContain(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "fake" }, "Development"), x => x.Contains("PhonePaymentProvider"));
         Assert.Contains(Problems(new(good) { ["SignalWire:ApiToken"] = null }), x => x.Contains("login codes are sent by SMS"));                   // production needs the messaging settings
+        // a scripted upstream and an SMS sink exist for development and the journey only: production refuses both
+        Assert.Contains(Problems(new(good) { ["Voice:OpenAiRealtimeUrl"] = "ws://127.0.0.1:5091/v1/realtime" }), x => x.Contains("OpenAiRealtimeUrl must be OpenAI's"));
+        Assert.Contains(Problems(new(good) { ["Voice:OpenAiRealtimeUrl"] = "wss://api.openai.com.evil.example/v1/realtime" }), x => x.Contains("OpenAiRealtimeUrl must be OpenAI's"));
+        Assert.DoesNotContain(Problems(new(good) { ["Voice:OpenAiRealtimeUrl"] = "wss://api.openai.com/v1/realtime" }), x => x.Contains("OpenAiRealtimeUrl"));
+        Assert.DoesNotContain(Problems(new(good) { ["Voice:OpenAiRealtimeUrl"] = "ws://127.0.0.1:5091/v1/realtime" }, "Development"), x => x.Contains("OpenAiRealtimeUrl"));
+        Assert.Contains(Problems(new(good) { ["SignalWire:ApiBaseUrl"] = "http://127.0.0.1:5092" }), x => x.Contains("SignalWire:ApiBaseUrl is for development"));
+        Assert.DoesNotContain(Problems(new(good) { ["SignalWire:ApiBaseUrl"] = "http://127.0.0.1:5092" }, "Development"), x => x.Contains("ApiBaseUrl"));
+        Assert.Contains(Problems(new(good) { ["SignalWire:ApiBaseUrl"] = "not a url" }, "Development"), x => x.Contains("absolute http(s) URL"));
         Assert.Contains(Problems(new(good) { ["Voice:ModelMode"] = "turbo" }), x => x.Contains("ModelMode"));
         Assert.Contains(Problems(new(good) { ["Voice:MiniPercent"] = "101" }), x => x.Contains("MiniPercent"));
     }

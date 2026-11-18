@@ -70,6 +70,8 @@ public sealed class SignalWireOptions
     /// <summary>Verifies <c>X-SignalWire-Signature</c> (the project's signing key). Secret.</summary>
     public string? SigningKey { get; set; }
     public string? FromNumber { get; set; }
+    /// <summary>Development and the journey only: where SMS goes instead of <c>https://{Space}.signalwire.com</c> (a sink that lets a scripted call read its code). Refused in production.</summary>
+    public string? ApiBaseUrl { get; set; }
 }
 
 public static class VoiceConfig
@@ -103,6 +105,13 @@ public static class VoiceConfig
             p.Add("SignalWire:ProjectId, ApiToken, Space and FromNumber (env SignalWire__...) are required in production when Voice:Enabled: login codes are sent by SMS.");
         if (!Uri.TryCreate(v.PublicBaseUrl, UriKind.Absolute, out var u) || (u.Scheme != "https" && !(devLike && u.Scheme == "http")) || u.AbsolutePath != "/")
             p.Add("Voice:PublicBaseUrl must be the public https origin of this API (no path) when Voice:Enabled.");
+        // the key and the audio only ever go to OpenAI and the texts only to SignalWire in production; a scripted upstream or an SMS sink is for development and the journey
+        if (!devLike && !v.OpenAiRealtimeUrl.StartsWith("wss://api.openai.com/", StringComparison.OrdinalIgnoreCase)) p.Add("Voice:OpenAiRealtimeUrl must be OpenAI's (wss://api.openai.com/...) in production: a scripted upstream is for development and the journey only.");
+        if (!string.IsNullOrWhiteSpace(s.ApiBaseUrl))
+        {
+            if (!devLike) p.Add("SignalWire:ApiBaseUrl is for development and the journey only (an SMS sink): it must be empty in production.");
+            else if (!Uri.TryCreate(s.ApiBaseUrl, UriKind.Absolute, out var sink) || sink.Scheme is not ("http" or "https")) p.Add("SignalWire:ApiBaseUrl must be an absolute http(s) URL.");
+        }
         if (!new[] { "full", "mini", "split" }.Contains(v.ModelMode)) p.Add("Voice:ModelMode must be full, mini or split.");
         if (v.MiniPercent is < 0 or > 100) p.Add("Voice:MiniPercent must be between 0 and 100.");
         if (!new[] { "server_vad", "semantic_vad" }.Contains(v.TurnDetection)) p.Add("Voice:TurnDetection must be server_vad or semantic_vad.");

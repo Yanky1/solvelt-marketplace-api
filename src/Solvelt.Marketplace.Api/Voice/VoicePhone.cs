@@ -35,7 +35,7 @@ public sealed class SignalWireSmsSender(HttpClient http, IOptions<SignalWireOpti
     {
         var o = options.Value;
         if (string.IsNullOrWhiteSpace(o.Space) || string.IsNullOrWhiteSpace(o.ProjectId) || string.IsNullOrWhiteSpace(o.ApiToken) || string.IsNullOrWhiteSpace(o.FromNumber)) return false;
-        using var req = new HttpRequestMessage(HttpMethod.Post, $"https://{o.Space}.signalwire.com/api/messaging/messages") { Content = JsonContent.Create(new { to = toE164, from = o.FromNumber, body }) };
+        using var req = new HttpRequestMessage(HttpMethod.Post, (string.IsNullOrWhiteSpace(o.ApiBaseUrl) ? $"https://{o.Space}.signalwire.com" : o.ApiBaseUrl.TrimEnd('/')) + "/api/messaging/messages") { Content = JsonContent.Create(new { to = toE164, from = o.FromNumber, body }) };
         req.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(o.ProjectId + ":" + o.ApiToken)));
         try
         {

@@ -112,7 +112,7 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IRealtimeConnector, 
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhoneCodeService>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhoneIdentity>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.AccountPhoneVerifier>();
-if (devLike) builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.InMemorySmsSender>();
+if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBaseUrl"])) builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.InMemorySmsSender>();   // an SMS sink (the journey) makes development send over HTTP instead
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.SignalWireSmsSender>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessCatalog>(sp => new Solvelt.Marketplace.Api.Voice.InProcessCatalog(sp));
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TransferToPersonTool>();
