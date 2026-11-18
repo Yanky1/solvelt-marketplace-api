@@ -11,14 +11,14 @@ using Solvelt.Marketplace.Api.Infrastructure;
 
 namespace Solvelt.Marketplace.Api.Voice;
 
-public enum AccountApply { Saved, Created, Refused }
+public enum AccountApply { Saved, Created, Refused, EmailSent, CreatedWithEmail, CreatedEmailNotSaved }
 
 /// <summary>
 /// Account setup and editing by phone (slice 6, decision V-09). It owns no rules of its own: names, addresses and the phone proof go through <see cref="AccountService"/> and
 /// <see cref="AccountPhoneVerifier"/>. The one thing that is new is creating an account WITHOUT an email or a password: the number the caller proved by SMS code in this call is its only
 /// credential, so there is no mailbox for anyone to claim and no password to guess.
 /// </summary>
-public sealed class PhoneAccountService(MarketplaceDb db, AccountService accounts, AccountPhoneVerifier verifier, CartService carts, IOptions<MarketplaceOptions> marketplace, TimeProvider time)
+public sealed class PhoneAccountService(MarketplaceDb db, AccountService accounts, AccountPhoneVerifier verifier, AuthService auth, CartService carts, IOptions<MarketplaceOptions> marketplace, TimeProvider time)
 {
     public static string? NameProblem(string? raw)
     {
@@ -55,7 +55,9 @@ public sealed class PhoneAccountService(MarketplaceDb db, AccountService account
             s.SetFirstName(c.Name.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault());
             s.SetCart("cart", (await carts.GetAsync(new CartOwner(id, null), ct)).ItemCount);
             s.SetTask("shopping");
-            return AccountApply.Created;
+            if (c.Email is null) return AccountApply.Created;
+            // the spoken address is saved as PENDING and a link is mailed to it (V-13b); the account itself is already created either way
+            return await auth.RequestPhoneEmailAsync(id, c.Email, ct) == PhoneEmailResult.Sent ? AccountApply.CreatedWithEmail : AccountApply.CreatedEmailNotSaved;
         }
         if (!OrderAccess.IsAccount(s) || s.AccountId is not { } account) return AccountApply.Refused;
         var profile = await accounts.GetProfileAsync(account, ct);
@@ -73,6 +75,8 @@ public sealed class PhoneAccountService(MarketplaceDb db, AccountService account
                 s.SetVerifiedPhone(c.Phone);
                 s.AccountDetailsChanged(null);
                 return AccountApply.Saved;
+            case "email":
+                return c.Email is not null && await auth.RequestPhoneEmailAsync(account, c.Email, ct) == PhoneEmailResult.Sent ? AccountApply.EmailSent : AccountApply.Refused;
             case "address_add":
                 return c.Body is not null && (await accounts.CreateAddressAsync(account, c.Body, ct)).Outcome == AccountOutcome.Ok ? AccountApply.Saved : AccountApply.Refused;
             case "address_edit":
@@ -113,7 +117,7 @@ public sealed class CreateAccountTool(MarketplaceDb db) : IVoiceTool
 {
     public string Name => "create_account";
     public JsonObject Definition => ToolKit.Def(Name, "Create an account for a caller who ordered as a guest. Needs the caller's name and a phone number verified by text message in this call. The server reads the account back and asks for a yes on the keypad; say one short sentence that you will read it back, then stop talking. The cart carries over.",
-        new JsonObject { ["name"] = ToolKit.Prop("string", "The caller's full name as they said it.") }, "name");
+        new JsonObject { ["name"] = ToolKit.Prop("string", "The caller's full name as they said it."), ["email"] = ToolKit.Prop("string", "The caller's email address as they spelled it, if they want it saved (optional; ask once). The server reads it back.") }, "name");
 
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
     {
@@ -126,8 +130,11 @@ public sealed class CreateAccountTool(MarketplaceDb db) : IVoiceTool
         if (await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.PhoneVerifiedE164 == s.VerifiedPhone, ct))
             return ToolKit.Error("number_in_use", "Say that this number already belongs to an account that cannot be opened by phone yet; offer the web site or a person. Do not create another.");
         var last4 = VoiceSpeech.Digits(new string(s.VerifiedPhone!.Where(char.IsDigit).TakeLast(4).ToArray()));
-        var text = $"I will create a Solvelt account for {VoiceSpeech.Plain(name, 60)}, signed in with the phone number ending {last4}. It has no password and no email for now: you can add those on our web site. Your cart stays with you." + AccountTalk.Ask;
-        return AccountTalk.ReadingBack(s, new AccountChangeRequest("create", text, Name: name));
+        var email = ToolKit.Str(args, "email") is { Length: > 0 } raw ? AuthValidation.NormaliseEmail(raw) : null;
+        if (email is not null && AuthValidation.EmailProblem(email) is not null) return ToolKit.Error("bad_email", "That does not sound like an email address: ask them to spell it again, slowly, or to leave the email for now.");
+        var emailPart = email is null ? " It has no password and no email for now: you can add those on our web site." : $" I will also save the email address {VoiceSpeech.Email(email)}. It only starts to count after you open the link I email to that address; until then it is not used for anything. It has no password for now: you can add one on our web site.";
+        var text = $"I will create a Solvelt account for {VoiceSpeech.Plain(name, 60)}, signed in with the phone number ending {last4}.{emailPart} Your cart stays with you." + AccountTalk.Ask;
+        return AccountTalk.ReadingBack(s, new AccountChangeRequest("create", text, Name: name, Email: email));
     }
 }
 
@@ -193,6 +200,24 @@ public sealed class ManageSavedAddressTool(AccountService accounts) : IVoiceTool
     }
 }
 
+/// <summary>Saving or changing the account's email by phone (decision V-13b). The address the caller spelled is read back by the SERVER and applied only on yes. It is saved as PENDING: a link is mailed to it, and it only becomes the account's email, verified, when that link is confirmed. Until then it cannot sign in or reset a password, and an address another account already holds is never attached (the caller hears the same thing either way).</summary>
+public sealed class ChangeEmailTool : IVoiceTool
+{
+    public string Name => "change_my_email";
+    public JsonObject Definition => ToolKit.Def(Name, "Save or change the email address on the caller's account. Only for a caller verified by text message in this call. Ask the caller to spell it slowly. The server reads it back and asks for a yes on the keypad; say one short sentence that you will read it back, then stop. The address only counts after the caller opens the link that is emailed to it.",
+        new JsonObject { ["email"] = ToolKit.Prop("string", "The email address as the caller spelled it.") }, "email");
+
+    public Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        var s = ctx.State;
+        if (AccountTalk.Gate(s) is { } refused) return Task.FromResult(refused);
+        var email = ToolKit.Str(args, "email") is { } raw ? AuthValidation.NormaliseEmail(raw) : null;
+        if (AuthValidation.EmailProblem(email) is not null) return Task.FromResult(ToolKit.Error("bad_email", "That does not sound like an email address: ask them to spell it again, slowly."));
+        var text = $"I will save the email address {VoiceSpeech.Email(email!)} on your account, and send a link to it. It only starts to count after you open that link; until then nothing else changes." + AccountTalk.Ask;
+        return Task.FromResult(AccountTalk.ReadingBack(s, new AccountChangeRequest("email", text, Email: email)));
+    }
+}
+
 /// <summary>Changing the account's number: the NEW number must be proven by a code typed in this call before it is even read back, and only then does the caller's yes save it.</summary>
 public sealed class ChangePhoneTool(PhoneCodeService codes) : IVoiceTool
 {
@@ -222,12 +247,12 @@ public sealed class ChangePhoneTool(PhoneCodeService codes) : IVoiceTool
     }
 }
 
-/// <summary>Password, payment methods, email and deleting the account are not done by phone: the caller is texted a link to the web site (to their verified number only).</summary>
+/// <summary>Password, payment methods and deleting the account are not done by phone: the caller is texted a link to the web site (to their verified number only).</summary>
 public sealed class TextAccountLinkTool(ISmsSender sms, IOptions<MarketplaceOptions> marketplace) : IVoiceTool
 {
-    public static readonly string[] Topics = ["password", "email", "payment_methods", "delete_account"];
+    public static readonly string[] Topics = ["password", "payment_methods", "delete_account"];
     public string Name => "text_me_account_link";
-    public JsonObject Definition => ToolKit.Def(Name, "Text the caller a link to the web site for something that is not done by phone: their password, their email address, payment methods or deleting the account. Say it is done on the web site for their safety.",
+    public JsonObject Definition => ToolKit.Def(Name, "Text the caller a link to the web site for something that is not done by phone: their password, payment methods or deleting the account. Say it is done on the web site for their safety.",
         new JsonObject { ["topic"] = ToolKit.Prop("string", "One of: " + string.Join(", ", Topics) + ".") }, "topic");
 
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
@@ -238,7 +263,7 @@ public sealed class TextAccountLinkTool(ISmsSender sms, IOptions<MarketplaceOpti
         if (topic is null || !Topics.Contains(topic)) return ToolKit.Error("bad_topic", "Ask which: " + string.Join(", ", Topics) + ".");
         if (s.CountAccountLink() > 5) return ToolKit.Error("too_many_texts", "Enough texts in this call: say so.");
         var url = (marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/') + "/account";
-        var what = topic switch { "password" => "set a password", "email" => "add or change your email", "payment_methods" => "manage payment methods", _ => "delete your account" };
+        var what = topic switch { "password" => "set a password", "payment_methods" => "manage payment methods", _ => "delete your account" };
         if (!await sms.SendAsync(s.VerifiedPhone!, $"Solvelt: to {what}, sign in on our web site: {url}", ct)) return ToolKit.Error("sms_failed", "The text could not be sent: say so.");
         return ToolKit.Json(new JsonObject { ["status"] = "sent", ["instruction"] = "Say the link is on its way by text, and that this is done on the web site for their safety." });
     }

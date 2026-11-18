@@ -15,6 +15,8 @@ public sealed record SignInResult(SignInStatus Status, string? Token = null, Buy
 /// Buyer authentication. Every answer that could reveal whether an address has an account is the same either way (sign-up, resend, forgot): the
 /// difference is only in what we email. Unknown and known accounts share rate limits and the same time cost.
 /// </summary>
+public enum PhoneEmailResult { Sent, Invalid, RateLimited }
+
 public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<AuthOptions> authOptions, IOptions<MarketplaceOptions> marketplace,
     OutboxWriter outbox, AttemptLimiter limiter, PasswordService passwords, LinkTokens links, SignInGate gate, GateKeys gateKeys, GuestClaims guestClaims, Demo.DemoService demo)
 {
@@ -337,6 +339,55 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         await tx.CommitAsync(ct);
         await guestClaims.ClaimAsync(peek.Id, peek.Email!, ct);   // a reset proves the mailbox too
         return new ResetOutcome(true);
+    }
+
+    // ---------- an email address given by phone (decision V-13b) ----------
+
+    /// <summary>
+    /// Saves an address a caller gave BY PHONE for an account: stored as <see cref="BuyerAccount.PendingEmail"/> (NOT the account's email), and a link is mailed to it. The address becomes the
+    /// account's verified email only when that link is confirmed (<see cref="ConfirmPhoneEmailAsync"/>); until then it cannot sign in, cannot reset a password and does not merge with anything.
+    /// An address that already belongs to another account is NOT attached; that account's owner gets the usual "you already have an account" mail and the caller is told the same thing as for any
+    /// other address (nothing here reveals whether an address has an account).
+    /// </summary>
+    public async Task<PhoneEmailResult> RequestPhoneEmailAsync(Guid accountId, string rawEmail, CancellationToken ct)
+    {
+        var normal = AuthValidation.NormaliseEmail(rawEmail);
+        if (AuthValidation.EmailProblem(normal) is not null) return PhoneEmailResult.Invalid;
+        if (!limiter.TryAcquire("phone-email", normal, 3, Hour) || !limiter.TryAcquire("phone-email-account", accountId.ToString("N"), 5, Hour)) return PhoneEmailResult.RateLimited;
+        var now = Now;
+        var mine = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).FirstOrDefaultAsync(ct);
+        if (mine is null) return PhoneEmailResult.Invalid;
+        if (mine.Email == normal && mine.EmailVerifiedAt is not null) return PhoneEmailResult.Sent;     // already its verified address: nothing to do, nothing to tell
+        var owner = await db.BuyerAccounts.AsNoTracking().Where(a => a.Email == normal && a.DeletedAt == null).Select(a => new { a.Id }).FirstOrDefaultAsync(ct);
+        if (owner is not null)
+        {
+            outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.Exists, owner.Id), $"phone-email-exists:{owner.Id:N}:{now.ToUnixTimeSeconds() / 3600}");
+            try { await db.SaveChangesAsync(ct); } catch (DbUpdateException) { db.ChangeTracker.Clear(); }   // the same notice within the hour: already queued
+            return PhoneEmailResult.Sent;
+        }
+        await InvalidateTokensAsync(accountId, EmailTokenPurpose.PhoneEmail, ct);
+        mine.PendingEmail = normal; mine.UpdatedAt = now;
+        var id = Guid.NewGuid();
+        db.EmailTokens.Add(new EmailToken { Id = id, AccountId = accountId, Purpose = EmailTokenPurpose.PhoneEmail, CreatedAt = now, ExpiresAt = now.AddHours(Math.Max(1, O.VerificationTokenHours)) });
+        outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PhoneEmail, accountId, id));
+        await db.SaveChangesAsync(ct);
+        return PhoneEmailResult.Sent;
+    }
+
+    /// <summary>The link was confirmed: the pending address becomes the account's verified email (once). False for a used, expired, replaced or unknown link, or an address another account holds by now.</summary>
+    public async Task<bool> ConfirmPhoneEmailAsync(string token, CancellationToken ct)
+    {
+        var now = Now;
+        if (await ConsumeTokenAsync(EmailTokenPurpose.PhoneEmail, token, ct) is not { } accountId) return false;
+        var account = await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null && a.PendingEmail != null).FirstOrDefaultAsync(ct);
+        if (account is null) return false;
+        var address = account.PendingEmail!;
+        if (await db.BuyerAccounts.AnyAsync(a => a.Email == address && a.Id != accountId, ct)) { account.PendingEmail = null; await db.SaveChangesAsync(ct); return false; }   // someone else holds it meanwhile: never merged
+        account.Email = address; account.EmailVerifiedAt = now; account.PendingEmail = null; account.UpdatedAt = now;
+        try { await db.SaveChangesAsync(ct); }
+        catch (DbUpdateException ex) when (Solvelt.Marketplace.Api.Account.AccountService.IsUniqueViolation(ex)) { db.ChangeTracker.Clear(); return false; }
+        await guestClaims.ClaimAsync(accountId, address, ct);   // as for every verified address: guest orders placed with it become this account's
+        return true;
     }
 
     // ---------- internals ----------

@@ -268,7 +268,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         // The address is about to be freed, so it is read now and handed to the modules that hold it somewhere else than on the account (a guest order placed with it, M3-35): nothing keeps it afterwards.
         var address = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null).Select(a => a.Email).FirstOrDefaultAsync(ct);
         var rows = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == checkedHash && a.SessionEpoch == checkedEpoch)
-            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now).SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.Email, (string?)null).SetProperty(a => a.UpdatedAt, now), ct);
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)now).SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.Email, (string?)null).SetProperty(a => a.PendingEmail, (string?)null).SetProperty(a => a.UpdatedAt, now), ct);
         if (rows != 1) return new AccountResult(AccountOutcome.Conflict);
         if (!string.IsNullOrEmpty(address))
         {
@@ -303,7 +303,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         await db.BuyerPasskeys.Where(p => p.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.WebAuthnChallenges.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.RedactedAt == null).ExecuteUpdateAsync(s => s
-            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null).SetProperty(a => a.PhoneVerifiedE164, (string?)null).SetProperty(a => a.PhoneVerifiedAt, (DateTimeOffset?)null)
+            .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.PendingEmail, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null).SetProperty(a => a.PhoneVerifiedE164, (string?)null).SetProperty(a => a.PhoneVerifiedAt, (DateTimeOffset?)null)
             .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.StaffLockedAt, (DateTimeOffset?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);
         await tx.CommitAsync(ct);
         return true;

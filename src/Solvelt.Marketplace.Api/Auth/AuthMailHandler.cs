@@ -10,7 +10,7 @@ namespace Solvelt.Marketplace.Api.Auth;
 
 public static class AuthMailKinds
 {
-    public const string Verify = "verify", Reset = "reset", Exists = "exists", PasswordChanged = "password-changed", PasskeyAdded = "passkey-added", PasskeyRemoved = "passkey-removed";
+    public const string Verify = "verify", Reset = "reset", Exists = "exists", PasswordChanged = "password-changed", PasskeyAdded = "passkey-added", PasskeyRemoved = "passkey-removed", PhoneEmail = "phone-email";
 }
 
 /// <summary>What the outbox holds for an account mail: ids only. No address, name or link: those are read and computed when the mail is sent.</summary>
@@ -21,7 +21,7 @@ public sealed record AuthMailPayload(string Kind, Guid AccountId, Guid? TokenId 
 /// working link; the link is computed here from <c>Auth:EmailLinkKey</c> when the mail goes out. A link that is already used, replaced or expired, or an account
 /// that is gone, is not mailed at all (the message counts as delivered).
 /// </summary>
-public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSender sender, TimeProvider time, IOptions<MarketplaceOptions> marketplace, IOptions<EmailOptions> email) : IOutboxHandler
+public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSender sender, TimeProvider time, IOptions<MarketplaceOptions> marketplace, IOptions<EmailOptions> email, IOptions<Solvelt.Marketplace.Api.Voice.VoiceOptions> voice) : IOutboxHandler
 {
     public const string Type = "auth.mail";
     /// <summary>Placeholder rows only (decision M1-65): written already delivered, never dispatched, purged within the hour.</summary>
@@ -33,7 +33,9 @@ public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSe
         AuthMailPayload? p;
         try { p = message.Payload is null ? null : JsonSerializer.Deserialize<AuthMailPayload>(message.Payload, PortalJson.Options); }
         catch (JsonException) { return OutboxResult.Dead("invalid_payload"); }
-        if (p is null || p.Kind is not (AuthMailKinds.Verify or AuthMailKinds.Reset or AuthMailKinds.Exists or AuthMailKinds.PasswordChanged or AuthMailKinds.PasskeyAdded or AuthMailKinds.PasskeyRemoved)) return OutboxResult.Dead("invalid_payload");
+        if (p is null || p.Kind is not (AuthMailKinds.Verify or AuthMailKinds.Reset or AuthMailKinds.Exists or AuthMailKinds.PasswordChanged or AuthMailKinds.PasskeyAdded or AuthMailKinds.PasskeyRemoved or AuthMailKinds.PhoneEmail)) return OutboxResult.Dead("invalid_payload");
+
+        if (p.Kind == AuthMailKinds.PhoneEmail) return await SendPhoneEmailAsync(p, ct);
 
         var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == p.AccountId && a.DeletedAt == null && a.Email != null).Select(a => new { a.Email, a.DisplayName }).FirstOrDefaultAsync(ct);
         if (account is null) return OutboxResult.Delivered();   // deleted since: nothing to send
@@ -57,6 +59,21 @@ public sealed class AuthMailHandler(MarketplaceDb db, LinkTokens links, IEmailSe
                 : AuthEmails.PasswordReset(account.Email!, baseUrl, token, (int)Math.Round((t.ExpiresAt - t.CreatedAt).TotalMinutes));
         }
         await EmailSending.SendAsync(sender, mail, email.Value, ct);
+        return OutboxResult.Delivered();
+    }
+
+    /// <summary>The link for an address given by phone goes to the PENDING address (the account has no usable email yet) and opens the API's own confirm page.</summary>
+    private async Task<OutboxResult> SendPhoneEmailAsync(AuthMailPayload p, CancellationToken ct)
+    {
+        if (p.TokenId is not { } tokenId) return OutboxResult.Dead("invalid_payload");
+        var now = time.GetUtcNow();
+        var pending = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == p.AccountId && a.DeletedAt == null && a.PendingEmail != null).Select(a => a.PendingEmail).FirstOrDefaultAsync(ct);
+        var t = await db.EmailTokens.AsNoTracking().Where(x => x.Id == tokenId && x.AccountId == p.AccountId && x.Purpose == EmailTokenPurpose.PhoneEmail && x.UsedAt == null && x.ExpiresAt > now)
+            .Select(x => new { x.CreatedAt, x.ExpiresAt }).FirstOrDefaultAsync(ct);
+        if (pending is null || t is null) return OutboxResult.Delivered();   // replaced, confirmed, expired or deleted while it waited: do not mail a dead link
+        var origin = (voice.Value.PublicBaseUrl ?? marketplace.Value.PublicBaseUrl ?? DevDefaults.PublicBaseUrl).TrimEnd('/');
+        var url = origin + Solvelt.Marketplace.Api.Voice.PhoneEmailEndpoints.Path + "?token=" + links.Make(EmailTokenPurpose.PhoneEmail, tokenId);
+        await EmailSending.SendAsync(sender, AuthEmails.PhoneEmail(pending, url, (int)Math.Round((t.ExpiresAt - t.CreatedAt).TotalHours)), email.Value, ct);
         return OutboxResult.Delivered();
     }
 }

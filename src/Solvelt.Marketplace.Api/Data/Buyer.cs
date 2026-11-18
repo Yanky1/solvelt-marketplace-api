@@ -12,6 +12,8 @@ public sealed class BuyerAccount
     public string DisplayName { get; set; } = "";
     public string? PasswordHash { get; set; }
     public DateTimeOffset? EmailVerifiedAt { get; set; }
+    /// <summary>An address given BY PHONE (decision V-13b): saved but NOT an email of the account yet. It becomes <see cref="Email"/> (verified) only when the link mailed to it is clicked; until then it is not usable for sign-in or password reset and is never linked to any account that already has it. Cleared when it is confirmed, replaced or the account is deleted.</summary>
+    public string? PendingEmail { get; set; }
     /// <summary>
     /// Set when the test-only "Verify this account" (M9) marked the address verified WITHOUT a mailbox proof. While it is set no guest order is ever attached to the account (the
     /// address was never proven, so an order placed later by whoever owns that mailbox must not move to this account); a real proof (the verification link) or a password reset
@@ -110,6 +112,8 @@ public sealed class BuyerSession
 public static class EmailTokenPurpose
 {
     public const string Verify = "verify", Reset = "reset";
+    /// <summary>The link mailed to an address given by phone (V-13b): consumed by the API's own confirm page, no password involved (the account has none).</summary>
+    public const string PhoneEmail = "phone-email";
     /// <summary>A placeholder row written for an address that has no account, so that "forgot password" does the same writes for every address (decision M1-65). Always already used and expired; purged after an hour.</summary>
     public const string Decoy = "decoy";
 }
@@ -178,6 +182,7 @@ internal sealed class BuyerAccountConfiguration : IEntityTypeConfiguration<Buyer
         b.HasKey(a => a.Id);
         b.Property(a => a.Id).ValueGeneratedNever();
         b.Property(a => a.Email).HasMaxLength(254);
+        b.Property(a => a.PendingEmail).HasMaxLength(254);
         b.Property(a => a.DisplayName).HasMaxLength(60).IsRequired();
         b.Property(a => a.PasswordHash).HasMaxLength(400);
         b.Property(a => a.Phone).HasMaxLength(30);

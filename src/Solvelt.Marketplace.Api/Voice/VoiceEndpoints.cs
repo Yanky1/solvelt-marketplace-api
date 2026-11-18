@@ -16,6 +16,7 @@ public static class VoiceEndpoints
         app.MapPost(AfterStreamPath, AfterStream);
         app.MapPost(KeypadPath, Keypad);
         app.MapPost(SolaWebhookPath, SolaWebhook);
+        app.MapPhoneEmail();
         app.Map(StreamPath, Stream);
         return app;
     }
@@ -174,7 +175,9 @@ public static class VoiceEndpoints
                 var applied = await scope.ServiceProvider.GetRequiredService<PhoneAccountService>().ApplyAsync(state, pendingChange, ct);
                 if (applied != AccountApply.Refused)
                 {
-                    accountResult = applied == AccountApply.Created ? "account_created" : "account_changed"; line = applied == AccountApply.Created ? VoiceScripts.AccountCreated : VoiceScripts.AccountSaved;
+                    var created = applied is AccountApply.Created or AccountApply.CreatedWithEmail or AccountApply.CreatedEmailNotSaved;
+                    accountResult = created ? "account_created" : "account_changed";
+                    line = applied switch { AccountApply.CreatedWithEmail => VoiceScripts.AccountCreatedEmail, AccountApply.CreatedEmailNotSaved => VoiceScripts.AccountCreatedNoEmail, AccountApply.EmailSent => VoiceScripts.EmailSent, AccountApply.Created => VoiceScripts.AccountCreated, _ => VoiceScripts.AccountSaved };
                     if (pendingChange.Kind is "phone" or "create" && state.VerifiedPhone is { } nowVerified) await store.SetVerifiedKeyAsync(call.Id, store.CallerKeyOf(nowVerified), ct);
                 }
                 else { accountResult = "account_refused"; line = VoiceScripts.AccountRefused; }

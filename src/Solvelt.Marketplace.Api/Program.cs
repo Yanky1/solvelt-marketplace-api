@@ -150,6 +150,7 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Mar
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ChangeNameTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ManageSavedAddressTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ChangePhoneTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ChangeEmailTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TextAccountLinkTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.VoiceReportService>();
 builder.Services.AddPortalClient();

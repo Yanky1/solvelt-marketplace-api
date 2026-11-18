@@ -10,7 +10,7 @@ public sealed record DeliveryOption(string Kind, string? Speed, Guid? WindowId, 
 public sealed record VariantRef(Guid VariantId, string Name, long PriceCents, bool Available);
 
 /// <summary>An account change the server has read back and is waiting for the caller's yes on (slice 6, decision V-09). The model proposes; only the keypad answer applies it.</summary>
-public sealed record AccountChangeRequest(string Kind, string Text, string? Name = null, string? Phone = null, Guid? AddressId = null, Solvelt.Marketplace.Api.Account.AddressBody? Body = null, bool PhoneProved = false);
+public sealed record AccountChangeRequest(string Kind, string Text, string? Name = null, string? Phone = null, Guid? AddressId = null, Solvelt.Marketplace.Api.Account.AddressBody? Body = null, string? Email = null, bool PhoneProved = false);
 public sealed record PendingCancel(string OrderNumber, string? SellerOrderNumber, string Reason, string Text);
 
 public sealed class PaymentAttempt

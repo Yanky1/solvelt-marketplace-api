@@ -311,18 +311,19 @@ public class VoiceAccountTests
     }
 
     [Fact]
-    public async Task Email_password_payment_methods_and_deletion_are_not_done_by_phone_only_a_link_to_the_web_site_is_texted()
+    public async Task Password_payment_methods_and_deletion_are_not_done_by_phone_only_a_link_to_the_web_site_is_texted()
     {
         var (s, jane) = await AccountCall();
         using (s)
         {
-            foreach (var topic in new[] { "email", "password", "payment_methods", "delete_account" })
+            foreach (var topic in new[] { "password", "payment_methods", "delete_account" })
             {
                 Assert.Equal("sent", (await s.Tool("text_me_account_link", new { topic }))["status"]!.GetValue<string>());
                 var sms = s.Sms.Sent.Last();
                 Assert.Equal(Number, sms.To); Assert.Contains("/account", sms.Body);
             }
             Assert.Equal("bad_topic", (await s.Tool("text_me_account_link", new { topic = "everything" }))["error"]!.GetValue<string>());
+            Assert.Equal("bad_topic", (await s.Tool("text_me_account_link", new { topic = "email" }))["error"]!.GetValue<string>());   // the email IS done by phone now (V-13b)
             var a = await Account(s, jane);
             Assert.Equal((Email, null), (a.Email, a.DeletedAt is null ? null : "deleted"));              // nothing was changed or deleted by phone
         }

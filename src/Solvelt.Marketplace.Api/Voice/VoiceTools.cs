@@ -99,6 +99,9 @@ public static class VoiceScripts
     public const string AccountRetry = "Sorry, I did not catch that. To save the change, say yes or press 1. To leave it as it is, say no or press 2.";
     public const string AccountSaved = "Done. That is saved.";
     public const string AccountCreated = "Done. Your account is created, and you are signed in.";
+    public const string AccountCreatedEmail = "Done. Your account is created, and you are signed in. I sent a link to your email address: it counts once you open it.";
+    public const string AccountCreatedNoEmail = "Done. Your account is created, and you are signed in. I could not save the email address just now; you can try again by asking me to change your email.";
+    public const string EmailSent = "Done. I sent a link to that address. It counts once you open it.";
     public const string AccountKept = "Okay, I will leave it as it is.";
     public const string AccountRefused = "Sorry, I could not save that.";
     /// <summary>The ONE sentence the model says for an off-topic request: the server provides it through the <c>off_topic</c> tool (V2, V-11).</summary>
