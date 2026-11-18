@@ -31,9 +31,14 @@ internal static class PhonePaymentCompletion
 /// SAME path as every other provider: <see cref="PhoneOrderService.SettleAsync"/> believes a payment only when the amount equals our order total and the invoice is our order number.
 /// Off (404) unless the provider is <c>sola</c> and the connector is configured.
 /// </summary>
+/// <summary>How many cards an account may save by phone (each is a credential at the processor).</summary>
+public static class SavedCardLimits { public const int MaxPerAccount = 5; }
+
 public static class PayConnectorEndpoints
 {
-    public const string ExpectPath = "/api/v1/voice/pay-connector/expect", ResultPath = "/api/v1/voice/pay-connector/result";
+    public const string ExpectPath = "/api/v1/voice/pay-connector/expect", ResultPath = "/api/v1/voice/pay-connector/result", CardPath = "/api/v1/voice/pay-connector/card";
+    /// <summary>The attempt method of a card-saving step (V-16): amount 0, no order; the account is in the attempt's order field as <c>cs-{accountId}</c>.</summary>
+    public const string SaveCardMethod = "save_card";
     private const string TimestampHeader = "X-Connector-Timestamp", SignatureHeader = "X-Connector-Signature";
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(5);
 
@@ -41,6 +46,7 @@ public static class PayConnectorEndpoints
     {
         app.MapPost(ExpectPath, Expect);
         app.MapPost(ResultPath, Result);
+        app.MapPost(CardPath, Card);
         return app;
     }
 
@@ -76,8 +82,45 @@ public static class PayConnectorEndpoints
         Guid id;
         try { using var d = JsonDocument.Parse(body); if (!Guid.TryParseExact(d.RootElement.GetProperty("attemptId").GetString(), "N", out id)) return Signed(ctx, so.Value, time, new { open = false }); }
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return Results.StatusCode(400); }
-        var a = await db.VoicePaymentAttempts.AsNoTracking().Where(x => x.Id == id && x.Method == PhonePaymentMethod.Keypad && x.Status == "pending").Select(x => new { x.AmountCents, x.OrderNumber, x.Currency }).FirstOrDefaultAsync(ct);
-        return Signed(ctx, so.Value, time, a is null ? new { open = false } : new { open = true, amountCents = a.AmountCents, invoice = a.OrderNumber, currency = a.Currency });
+        var a = await db.VoicePaymentAttempts.AsNoTracking().Where(x => x.Id == id && (x.Method == PhonePaymentMethod.Keypad || x.Method == SaveCardMethod) && x.Status == "pending").Select(x => new { x.AmountCents, x.OrderNumber, x.Currency, x.Method }).FirstOrDefaultAsync(ct);
+        return Signed(ctx, so.Value, time, a is null ? new { open = false } : a.Method == SaveCardMethod ? new { open = true, amountCents = 0L, invoice = "", currency = a.Currency, purpose = "save_card" } : new { open = true, amountCents = a.AmountCents, invoice = a.OrderNumber, currency = a.Currency, purpose = "sale" });
+    }
+
+    private sealed record CardReport(string? AttemptId, string? Status, string? Token, string? Brand, string? Last4, string? Exp, string? Code);
+
+    /// <summary>
+    /// The connector's report of a card it saved (V-16): the processor's token, brand, last four digits and expiry. Believed only for a PENDING card-saving attempt this server opened (it names the account); the token is
+    /// stored for that account and nothing else (never a card number: this API never has one). A repeat of the same report changes nothing. Over the cap of saved cards the card is not kept.
+    /// </summary>
+    private static async Task<IResult> Card(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SolaOptions> so, MarketplaceDb db, VoiceStateStore states, TimeProvider time, ILoggerFactory logs, CancellationToken ct)
+    {
+        if (!Enabled(vo.Value, so.Value)) return Results.NotFound();
+        var (ok, body) = await ReadSignedAsync(ctx, so.Value, time, ct);
+        if (!ok) return Results.StatusCode(401);
+        CardReport? r;
+        try { r = JsonSerializer.Deserialize<CardReport>(body, new JsonSerializerOptions(JsonSerializerDefaults.Web)); } catch (JsonException) { return Results.StatusCode(400); }
+        if (r is null || !Guid.TryParseExact(r.AttemptId, "N", out var id)) return Results.StatusCode(400);
+        var log = logs.CreateLogger("Solvelt.Marketplace.Api.Voice.PayConnector");
+        var attempt = await db.VoicePaymentAttempts.FirstOrDefaultAsync(x => x.Id == id && x.Method == SaveCardMethod, ct);
+        if (attempt is null || !attempt.OrderNumber.StartsWith("cs-", StringComparison.Ordinal) || !Guid.TryParseExact(attempt.OrderNumber[3..], "N", out var accountId)) return Signed(ctx, so.Value, time, new { ok = false, settle = "unknown_attempt" });
+        if (attempt.Status != "pending") return Signed(ctx, so.Value, time, new { ok = true, settle = attempt.Status });   // a repeat: the first word stands
+        var now = time.GetUtcNow();
+        var status = r.Status switch { "saved" => "saved", "declined" => "declined", "failed" => "failed", _ => "unknown" };
+        if (status == "unknown") log.LogError("The pay connector could not confirm a card save (attempt {Attempt}): the card may have been tokenised at the processor. It needs a person.", attempt.Id);
+        if (status == "saved")
+        {
+            var valid = !string.IsNullOrWhiteSpace(r.Token) && r.Token.Length <= 100 && r.Last4 is { Length: 4 } l4 && l4.All(char.IsDigit) && r.Exp is { Length: 4 } e && e.All(char.IsDigit) && int.Parse(e[..2]) is >= 1 and <= 12
+                && r.Brand is { Length: > 0 and <= 20 };
+            var count = await db.SavedCards.CountAsync(c => c.AccountId == accountId, ct);
+            if (!valid) { status = "failed"; log.LogError("The pay connector reported a saved card in an unusable shape (attempt {Attempt}).", attempt.Id); }
+            else if (count >= SavedCardLimits.MaxPerAccount) { status = "failed"; log.LogError("A card was tokenised for an account that already has {Max} saved cards (attempt {Attempt}); it was not kept.", SavedCardLimits.MaxPerAccount, attempt.Id); }
+            else if (!await db.SavedCards.AnyAsync(c => c.AccountId == accountId && c.Token == r.Token, ct))
+                db.SavedCards.Add(new SavedCard { Id = Guid.NewGuid(), AccountId = accountId, Token = r.Token!.Trim(), Brand = r.Brand!.Trim(), Last4 = r.Last4!, ExpMonth = r.Exp![..2], ExpYear = r.Exp[2..], CreatedAt = now });
+        }
+        attempt.Status = status; attempt.SettledAt = now;
+        try { await db.SaveChangesAsync(ct); }
+        catch (DbUpdateException) { db.ChangeTracker.Clear(); return Signed(ctx, so.Value, time, new { ok = false, settle = "conflict" }); }   // the same report in parallel: the connector retries and sees the first word
+        return Signed(ctx, so.Value, time, new { ok = true, settle = status });
     }
 
     private sealed record Report(string? AttemptId, string? Invoice, string? Status, long PaidCents, string? TransactionId, string? Code);

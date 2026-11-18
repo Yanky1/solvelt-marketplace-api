@@ -105,7 +105,14 @@ public static class SolaNotification
 /// no way to lock them (the customer can edit the query string), so NOTHING in the link is trusted: only a verified webhook that matches our own order counts (see <see cref="SolaNotification"/>
 /// and <see cref="PhoneOrderService.SettleAsync"/>). There is no keypad method: Sola documents no IVR or SignalWire connector.
 /// </summary>
-public sealed class SolaPhonePaymentProvider(IOptions<SolaOptions> options, IServiceScopeFactory scopes) : IPhonePaymentProvider
+/// <summary>A provider that can save a card for later by phone (V-16): the keypad step asks the connector for a TOKEN (nothing is charged).</summary>
+public interface ICardSavingProvider
+{
+    bool CanSaveCards { get; }
+    XElement StartSaveCard(string attemptId, string keypadActionUrl);
+}
+
+public sealed class SolaPhonePaymentProvider(IOptions<SolaOptions> options, IServiceScopeFactory scopes) : IPhonePaymentProvider, ICardSavingProvider
 {
     public string Name => "sola";
     /// <summary>The text link always; the keypad only when the pay connector (our own, V-13) is configured: Sola itself documents no IVR connector.</summary>
@@ -124,6 +131,20 @@ public sealed class SolaPhonePaymentProvider(IOptions<SolaOptions> options, ISer
     /// The keypad payment: SignalWire collects the card digits and sends them to OUR connector, never to this API. The server's side of it is only this instruction: the amount and the attempt come from the
     /// server's order, the connector URL carries the connector's credentials, and the connector asks THIS API what to charge (it does not trust the amount in the request).
     /// </summary>
+    public bool CanSaveCards => options.Value.KeypadEnabled;
+
+    /// <summary><c>&lt;Pay chargeAmount="0" tokenType="reusable"&gt;</c>: SignalWire collects the card and sends it to OUR connector, which asks Sola for a token (<c>cc:save</c>). The attempt id is the only thing this API puts in it.</summary>
+    public XElement StartSaveCard(string attemptId, string keypadActionUrl)
+    {
+        var o = options.Value;
+        var connector = new UriBuilder(o.PayConnectorUrl!) { UserName = Uri.EscapeDataString(o.PayConnectorUser!), Password = Uri.EscapeDataString(o.PayConnectorPassword!) }.Uri.ToString();
+        return new XElement("Pay",
+            new XAttribute("chargeAmount", "0"), new XAttribute("tokenType", "reusable"), new XAttribute("currency", "usd"), new XAttribute("paymentConnectorUrl", connector),
+            new XAttribute("action", keypadActionUrl), new XAttribute("maxAttempts", 2), new XAttribute("timeout", 8), new XAttribute("postalCode", "true"), new XAttribute("securityCode", "true"),
+            new XAttribute("description", "Save a card to your Solvelt account"),
+            new XElement("Parameter", new XAttribute("name", "attempt"), new XAttribute("value", attemptId)));
+    }
+
     private PhonePaymentStart StartKeypad(PhonePaymentRequest request, string keypadActionUrl)
     {
         var o = options.Value;

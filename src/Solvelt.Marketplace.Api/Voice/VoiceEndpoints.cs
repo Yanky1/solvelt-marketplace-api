@@ -82,6 +82,7 @@ public static class VoiceEndpoints
             if (st.KeypadStep == "confirm_cancel" && st.Cancel is { } cancel) return Cxml(new XElement("Response", GatherConfirm(v, cancel.Text)));
             if (st.KeypadStep == "confirm_account" && st.AccountChange is { } change) return Cxml(new XElement("Response", GatherConfirm(v, change.Text)));
             if (st.KeypadStep == "pay" && st.Payment?.Instruction is { } pay) return Cxml(new XElement("Response", new XElement(pay)));
+            if (st.KeypadStep == "save_card" && st.CardSave?.Instruction is { } saveCard) return Cxml(new XElement("Response", new XElement(saveCard)));
         }
         return Cxml(new XElement("Response", new XElement("Hangup")));
     }
@@ -129,7 +130,7 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "save_card" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
         if (state.KeypadStep == "confirm_cancel")
         {
@@ -176,6 +177,23 @@ public static class VoiceEndpoints
             state.SetKeypadOutcome(accountResult);
             state.EndKeypadStep();
             return Cxml(new XElement("Response", new XElement("Say", line), StreamParts(v, tokens, call.Id)));
+        }
+        if (state.KeypadStep == "save_card")
+        {
+            // SignalWire's action after the card step: the connector's signed report (card endpoint) decided; this only reads the stored attempt. PayResult/PaymentToken from the form are ignored (a credential is never taken from here).
+            var saveStep = state.CardSave;
+            var savedStatus = "failed";
+            if (saveStep is not null && Guid.TryParseExact(saveStep.AttemptId, "N", out var saveId))
+            {
+                using var saveScope = ctx.RequestServices.CreateScope();
+                var row = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.AsNoTracking(saveScope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Data.MarketplaceDb>().VoicePaymentAttempts).Where(x => x.Id == saveId).Select(x => x.Status), ct);
+                form.TryGetValue("PayResult", out var saveResult);
+                savedStatus = row == "saved" ? "saved" : row == "pending" && saveResult == "success" ? "pending" : "failed";
+            }
+            state.SetCardSave(null);
+            state.SetKeypadOutcome(savedStatus == "saved" ? "card_saved" : savedStatus == "pending" ? "card_pending" : "card_failed");
+            state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", savedStatus == "saved" ? VoiceScripts.CardSaved : savedStatus == "pending" ? VoiceScripts.CardPending : VoiceScripts.CardFailed), StreamParts(v, tokens, call.Id)));
         }
         if (state.KeypadStep == "pay")
         {

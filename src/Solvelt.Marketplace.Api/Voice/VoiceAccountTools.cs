@@ -77,6 +77,8 @@ public sealed class PhoneAccountService(MarketplaceDb db, AccountService account
                 return AccountApply.Saved;
             case "email":
                 return c.Email is not null && await auth.RequestPhoneEmailAsync(account, c.Email, ct) == PhoneEmailResult.Sent ? AccountApply.EmailSent : AccountApply.Refused;
+            case "card_remove":
+                return c.CardId is { } cid && await db.SavedCards.Where(x => x.Id == cid && x.AccountId == account).ExecuteDeleteAsync(ct) == 1 ? AccountApply.Saved : AccountApply.Refused;
             case "address_add":
                 return c.Body is not null && (await accounts.CreateAddressAsync(account, c.Body, ct)).Outcome == AccountOutcome.Ok ? AccountApply.Saved : AccountApply.Refused;
             case "address_edit":

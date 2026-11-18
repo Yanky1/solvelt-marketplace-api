@@ -10,8 +10,10 @@ public sealed record DeliveryOption(string Kind, string? Speed, Guid? WindowId, 
 public sealed record VariantRef(Guid VariantId, string Name, long PriceCents, bool Available);
 
 /// <summary>An account change the server has read back and is waiting for the caller's yes on (slice 6, decision V-09). The model proposes; only the keypad answer applies it.</summary>
-public sealed record AccountChangeRequest(string Kind, string Text, string? Name = null, string? Phone = null, Guid? AddressId = null, Solvelt.Marketplace.Api.Account.AddressBody? Body = null, string? Email = null, bool PhoneProved = false);
+public sealed record AccountChangeRequest(string Kind, string Text, string? Name = null, string? Phone = null, Guid? AddressId = null, Solvelt.Marketplace.Api.Account.AddressBody? Body = null, string? Email = null, bool PhoneProved = false, Guid? CardId = null);
 public sealed record PendingCancel(string OrderNumber, string? SellerOrderNumber, string Reason, string Text);
+
+public sealed record CardSaveStep(string AttemptId, System.Xml.Linq.XElement Instruction);
 
 public sealed class PaymentAttempt
 {
@@ -126,6 +128,14 @@ public sealed class VoiceCallState
     /// <summary>The caller has heard the address read back and said it is right (a saved address counts as right when chosen).</summary>
     public bool AddressConfirmed { get; private set; }
     public IReadOnlyList<Guid> SavedAddressIds { get; private set; } = [];
+    /// <summary>The saved cards the server read out, in order (V-16): the model names a position, the server holds the ids, and only the account's own.</summary>
+    public IReadOnlyList<Guid> SavedCardIds { get; private set; } = [];
+    public void SetSavedCards(IReadOnlyList<Guid> ids) { lock (_gate) SavedCardIds = ids; }
+    public int CardSaveStarts { get; private set; }
+    public int CountCardSaveStart() { lock (_gate) return ++CardSaveStarts; }
+    /// <summary>The card-saving step that is running on the keypad (V-16): the attempt and the provider's instruction. No card data, ever.</summary>
+    public CardSaveStep? CardSave { get; private set; }
+    public void SetCardSave(CardSaveStep? step) { lock (_gate) CardSave = step; }
     public IReadOnlyList<GroupSelection> Selections { get; private set; } = [];
     public IReadOnlyList<DeliveryChoice> Choices { get; private set; } = [];
     public QuoteView? Quote { get; private set; }
@@ -228,6 +238,9 @@ public sealed class VoiceCallState
             sb.Append(Level switch { CallerLevel.Verified => VerifiedInThisCall ? "The caller is verified by SMS code in this call. " : "The caller is recognised but not verified in this call. ", CallerLevel.Guest => "The caller is a guest" + (VerifiedPhone is not null ? " whose phone is verified. " : ". "), _ => "The caller is not identified yet. " });
             if (FirstName is not null && Level == CallerLevel.Verified) sb.Append("Their first name is ").Append(FirstName).Append(". ");
             sb.Append("Current task: ").Append(Task).Append(". ");
+            if (LastKeypadOutcome == "card_saved") sb.Append("The caller just saved a card at the payment step: it is in their saved cards now (say only its last four digits if they ask, never more). ");
+            if (LastKeypadOutcome == "card_pending") sb.Append("The card the caller typed went through at the payment step but the confirmation has not arrived yet: say it is being confirmed and they can ask to hear their saved cards in a moment. ");
+            if (LastKeypadOutcome == "card_failed") sb.Append("The card could not be saved (declined or not completed): offer to try once more or to leave it. ");
             if (LastKeypadOutcome == "account_changed") sb.Append("The caller just confirmed an account change by keypad and it was saved. ");
             if (LastKeypadOutcome == "account_created") sb.Append("The caller just confirmed creating an account by keypad: it exists now and they are signed in as it (their cart is in it). ");
             if (LastKeypadOutcome == "account_declined") sb.Append("The caller did not confirm the account change: nothing was changed. ");

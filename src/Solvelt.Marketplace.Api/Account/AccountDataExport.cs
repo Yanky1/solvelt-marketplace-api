@@ -92,6 +92,8 @@ public sealed class AccountProfileExporter(MarketplaceDb db) : IAccountDataExpor
         var a = await db.BuyerAccounts.AsNoTracking().Where(x => x.Id == accountId).Select(x => new { x.Email, x.DisplayName, x.Phone, x.RelayEmail, x.CreatedAt, x.EmailVerifiedAt }).FirstOrDefaultAsync(ct);
         var addresses = await db.BuyerAddresses.AsNoTracking().Where(x => x.AccountId == accountId).OrderBy(x => x.Id)
             .Select(x => new { x.FullName, x.Line1, x.Line2, x.City, x.Region, x.PostalCode, x.Country, x.Phone, demo = x.IsDemo }).ToListAsync(ct);
-        return new { profile = a, addresses };
+        // saved cards (V-16): what the owner may see (brand, last four digits, expiry); the processor's token is a credential for OUR account and is not exported
+        var cards = await db.SavedCards.AsNoTracking().Where(x => x.AccountId == accountId).OrderBy(x => x.CreatedAt).Select(x => new { x.Brand, x.Last4, x.ExpMonth, x.ExpYear, x.CreatedAt }).ToListAsync(ct);
+        return new { profile = a, addresses, savedCards = cards };
     }
 }

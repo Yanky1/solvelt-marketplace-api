@@ -99,6 +99,9 @@ public static class VoiceScripts
     public const string CancelRefused = "Sorry, that order can not be cancelled any more.";
     public const string AccountRetry = "Sorry, I did not catch that. To save the change, say yes or press 1. To leave it as it is, say no or press 2.";
     public const string AccountSaved = "Done. That is saved.";
+    public const string CardSaved = "Done. Your card is saved. Nothing was charged.";
+    public const string CardPending = "Your card went through. It is being confirmed and will show in your saved cards in a moment.";
+    public const string CardFailed = "Sorry, I could not save that card. Nothing was charged.";
     public const string AccountCreated = "Done. Your account is created, and you are signed in.";
     public const string AccountCreatedEmail = "Done. Your account is created, and you are signed in. I sent a link to your email address: it counts once you open it.";
     public const string AccountCreatedNoEmail = "Done. Your account is created, and you are signed in. I could not save the email address just now; you can try again by asking me to change your email.";

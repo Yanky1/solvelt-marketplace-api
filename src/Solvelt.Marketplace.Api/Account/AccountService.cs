@@ -277,6 +277,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
             await gate.ClearAddressAsync(gateKeys.Address(address), ct);
             foreach (var hook in deletionHooks) await hook.OnDeletingAsync(who.AccountId, address, ct);
         }
+        await db.SavedCards.Where(c => c.AccountId == who.AccountId).ExecuteDeleteAsync(ct);   // saved cards (V-16) go at once: nothing may charge them after the account is deleted
         await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         await outbox.TryEnqueueAsync(AccountRedactionHandler.Type, new AccountRedactionPayload(who.AccountId), $"redact:{who.AccountId:N}", ct: ct);
         await tx.CommitAsync(ct);
@@ -299,6 +300,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         foreach (var e in erasers) await e.EraseAsync(accountId, ct);
         await db.BuyerAddresses.Where(a => a.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.EmailTokens.Where(t => t.AccountId == accountId).ExecuteDeleteAsync(ct);
+        await db.SavedCards.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerSessions.Where(s => s.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerPasskeys.Where(p => p.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.WebAuthnChallenges.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);

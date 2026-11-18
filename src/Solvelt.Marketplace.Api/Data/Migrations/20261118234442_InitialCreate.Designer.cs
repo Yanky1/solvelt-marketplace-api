@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261118222305_InitialCreate")]
+    [Migration("20261118234442_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -2746,6 +2746,50 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.HasIndex("AccountId");
 
                     b.ToTable("review_votes", (string)null);
+                });
+
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.SavedCard", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Brand")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ExpMonth")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)");
+
+                    b.Property<string>("ExpYear")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)");
+
+                    b.Property<string>("Last4")
+                        .IsRequired()
+                        .HasMaxLength(4)
+                        .HasColumnType("character varying(4)");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "Token")
+                        .IsUnique();
+
+                    b.ToTable("saved_cards", (string)null);
                 });
 
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.SellerOrderState", b =>

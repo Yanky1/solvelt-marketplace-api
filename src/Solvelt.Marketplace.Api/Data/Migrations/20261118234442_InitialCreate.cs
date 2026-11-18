@@ -911,6 +911,24 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "saved_cards",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Token = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Brand = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    Last4 = table.Column<string>(type: "character varying(4)", maxLength: 4, nullable: false),
+                    ExpMonth = table.Column<string>(type: "character varying(2)", maxLength: 2, nullable: false),
+                    ExpYear = table.Column<string>(type: "character varying(2)", maxLength: 2, nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_saved_cards", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "seller_order_states",
                 columns: table => new
                 {
@@ -1987,6 +2005,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "ListingId", "Status", "CreatedAt" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_saved_cards_AccountId_Token",
+                table: "saved_cards",
+                columns: new[] { "AccountId", "Token" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
                 name: "IX_seller_order_states_OrderId",
                 table: "seller_order_states",
                 column: "OrderId");
@@ -2287,6 +2311,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "reviews");
+
+            migrationBuilder.DropTable(
+                name: "saved_cards");
 
             migrationBuilder.DropTable(
                 name: "seller_order_states");

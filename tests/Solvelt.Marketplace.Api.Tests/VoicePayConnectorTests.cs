@@ -200,6 +200,8 @@ public class VoicePayConnectorTests
     {
         public int Calls;
         public Task<SolaResult> SaleAsync(SolaSale sale, ConnectorRequest card, CancellationToken ct) { Calls++; return Task.FromResult(new SolaResult(SolaOutcome.Approved, "601518451", sale.AmountCents, null)); }
+        public Task<SolaSaveResult> SaveAsync(ConnectorRequest card, CancellationToken ct) => throw new NotSupportedException();
+        public Task<SolaResult> TokenSaleAsync(SolaSale sale, string token, CancellationToken ct) => throw new NotSupportedException();
     }
 
     [Fact]
