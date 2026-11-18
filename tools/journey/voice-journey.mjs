@@ -144,7 +144,7 @@ async function main() {
     /** The model's last words before a keypad step have played: the phone acknowledges the mark, the stream ends. */
     const endStreamAfterGoodbye = async () => {
       upstream.current().send({ type: "response.done", response: { output: [] } });
-      const mark = await phone.wait("the end-of-speech mark", (m) => m.event === "mark");
+      const mark = await phone.wait("the end-of-speech mark", (m) => m.event === "mark" && m.mark?.name === "end");   // the hand-off mark; audio marks (V-12) are not it
       phone.send({ event: "mark", streamSid: "MZ1", mark: { name: mark.mark.name } });
       await phone.waitClosed();
     };

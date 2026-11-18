@@ -191,6 +191,7 @@ public class VoiceCallTests
         await fake.Send(new { type = "response.output_audio.delta", item_id = "item_7", delta = Audio });
         await phone.Wait("media");
         await FakeRealtime.Poll(() => phone.Got.Count(n => n["event"]!.GetValue<string>() == "media") == 2 ? "x" : null, 5);
+        f.Clock.Advance(TimeSpan.FromMilliseconds(10));   // the phone has been playing for a moment: what the caller heard is the played time, capped by the audio sent (V-12)
         await fake.Send(new { type = "input_audio_buffer.speech_started" });
         var clear = await phone.Wait("clear");
         Assert.Equal("MZ1", clear["streamSid"]!.GetValue<string>());

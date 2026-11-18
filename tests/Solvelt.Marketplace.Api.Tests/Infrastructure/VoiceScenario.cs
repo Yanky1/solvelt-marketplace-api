@@ -85,7 +85,7 @@ public sealed class VoiceScenario : IDisposable
     public async Task EndStreamAfterGoodbye()
     {
         await Fake.Send(new { type = "response.done", response = new { output = Array.Empty<object>() } });
-        var mark = await Phone!.Wait("mark");
+        var mark = await Phone!.Wait(n => n["event"]?.GetValue<string>() == "mark" && n["mark"]?["name"]?.GetValue<string>() == "end");   // the hand-off mark (the audio marks of V-12 are not it)
         await Phone.Send(new { @event = "mark", streamSid = "MZ1", mark = new { name = mark["mark"]!["name"]!.GetValue<string>() } });
         Assert.True(await Phone.WaitClosed());
     }

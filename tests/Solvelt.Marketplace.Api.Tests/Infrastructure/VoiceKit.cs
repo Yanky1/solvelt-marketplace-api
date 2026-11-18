@@ -132,6 +132,7 @@ public sealed class FakePhone(WebSocket ws) : IDisposable
     public Task Media(string b64) => Send(new { @event = "media", streamSid = "MZ1", media = new { track = "inbound", payload = b64 } });
     public Task Dtmf(string digit) => Send(new { @event = "dtmf", streamSid = "MZ1", dtmf = new { digit } });
     public Task<JsonNode> Wait(string @event, int seconds = 5) => FakeRealtime.Poll(() => _got.FirstOrDefault(n => n["event"]?.GetValue<string>() == @event), seconds);
+    public Task<JsonNode> Wait(Func<JsonNode, bool> match, int seconds = 5) => FakeRealtime.Poll(() => _got.FirstOrDefault(match), seconds);
     public async Task<bool> WaitClosed(int seconds = 5)
     {
         var end = DateTime.UtcNow.AddSeconds(seconds);
