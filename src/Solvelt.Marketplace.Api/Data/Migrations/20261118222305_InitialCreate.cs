@@ -132,10 +132,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     Email = table.Column<string>(type: "character varying(254)", maxLength: 254, nullable: true),
-                    PendingEmail = table.Column<string>(type: "character varying(254)", maxLength: 254, nullable: true),
                     DisplayName = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: false),
                     PasswordHash = table.Column<string>(type: "character varying(400)", maxLength: 400, nullable: true),
                     EmailVerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    PendingEmail = table.Column<string>(type: "character varying(254)", maxLength: 254, nullable: true),
                     DemoVerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     Phone = table.Column<string>(type: "character varying(30)", maxLength: 30, nullable: true),
                     PhoneVerifiedE164 = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
