@@ -126,7 +126,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
         var res = await VoiceFactory.Hook(S.C, VoiceEndpoints.PipelinePath, S.Sid, Number, extra: new() { ["Digits"] = "2" });
         var (token, _) = await VoiceScenario.StreamFrom(res);
         _phone = await FakePhone.Connect(S.F, token);
-        await _phone.Start();
+        try { await _phone.Start(); } catch (Exception ex) when (ex is IOException or ObjectDisposedException or System.Net.WebSockets.WebSocketException) { /* the server has already ended the call: that is what this test is about */ }
         await Until(() => S.Row().Result.EndedAt is not null);
         var row = await S.Row();
         Assert.Equal(Solvelt.Marketplace.Api.Data.VoiceOutcome.Abandoned, row.Outcome);
