@@ -101,6 +101,7 @@ public static class VoiceScripts
     public const string AccountSaved = "Done. That is saved.";
     public const string AskPin = "Thank you. Now please type your PIN on the keypad, then press pound.";
     public const string WrongPin = "That PIN was not right. Please try once more, then press pound.";
+    public const string PinLocked = "Your PIN is locked after too many wrong tries. To unlock it, ask me to set a new PIN. You can still order as a guest.";
     public const string PinFailed = "Sorry, I could not confirm your PIN, so I cannot open your account on this call. You can still order as a guest.";
     public const string PinChoose = "Choose a PIN of six to twelve digits. Type it now on the keypad, then press pound. Please do not say it aloud.";
     public const string PinSaved = "Done. Your PIN is saved.";

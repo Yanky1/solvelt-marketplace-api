@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 namespace Solvelt.Marketplace.Api.Voice;
 
 /// <summary>Setting or changing the phone PIN (decision V-18): needs an account verified in this call AND a FRESH text message code, then the server takes the PIN on the keypad itself (the model is off the line and never hears it).</summary>
-public sealed class SetMyPinTool(PhoneCodeService codes) : IVoiceTool
+public sealed class SetMyPinTool(PhoneCodeService codes, PhonePinService pins) : IVoiceTool
 {
     public string Name => "set_my_pin";
     public JsonObject Definition => ToolKit.Def(Name, "Set or change the caller's phone PIN, a second factor for signing in by phone. Only for a caller verified by text message in this call. Texts a NEW code to their number and moves the call to the keypad: they type the code, then choose and confirm the PIN on the keypad. Never ask for the PIN or say any digit of it.");
@@ -12,11 +12,13 @@ public sealed class SetMyPinTool(PhoneCodeService codes) : IVoiceTool
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
     {
         var s = ctx.State;
-        if (AccountTalk.Gate(s) is { } refused) return refused;
-        var sent = await codes.SendAsync(s, s.VerifiedPhone!, "pin_change", s.AccountId, ct);
+        // the unlock path: a caller whose account PIN is LOCKED is only a guest with a verified phone, and may set a NEW PIN after a fresh code (nothing else unlocks it)
+        Guid? unlock = s.PinFor is { } locked && s.VerifiedPhone is not null && await pins.IsLockedAsync(locked, ct) ? locked : null;
+        if (unlock is null && AccountTalk.Gate(s) is { } refused) return refused;
+        var sent = await codes.SendAsync(s, s.VerifiedPhone!, "pin_change", unlock ?? s.AccountId, ct);
         if (sent == SendResult.TooMany) return ToolKit.Error("too_many_codes", "No more codes can be sent right now. Offer the web site or a person.");
         if (sent == SendResult.Failed) return ToolKit.Error("sms_failed", "The text could not be sent. Offer to try once more, or a person.");
-        s.SetPin(new PinSetup("set", null));
+        s.SetPin(new PinSetup("set", null, unlock));
         s.SetTask("account");
         s.BeginKeypadStep("sms_code");
         return new(new JsonObject { ["status"] = "code_sent", ["instruction"] = "Tell the caller, in one or two short sentences: you are texting a new six digit code to their number now, and after you stop talking they should type the code on the keypad, then press pound, and then they will choose their PIN on the keypad. Do not ask them to say the code or the PIN. Then stop talking." }.ToJsonString(), EndCall: true);

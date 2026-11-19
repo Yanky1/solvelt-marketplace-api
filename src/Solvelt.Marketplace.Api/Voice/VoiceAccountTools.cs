@@ -18,7 +18,7 @@ public enum AccountApply { Saved, Created, Refused, EmailSent, CreatedWithEmail,
 /// <see cref="AccountPhoneVerifier"/>. The one thing that is new is creating an account WITHOUT an email or a password: the number the caller proved by SMS code in this call is its only
 /// credential, so there is no mailbox for anyone to claim and no password to guess.
 /// </summary>
-public sealed class PhoneAccountService(MarketplaceDb db, AccountService accounts, AccountPhoneVerifier verifier, AuthService auth, PhonePinService pins, CartService carts, IOptions<MarketplaceOptions> marketplace, TimeProvider time)
+public sealed class PhoneAccountService(MarketplaceDb db, AccountService accounts, AccountPhoneVerifier verifier, AuthService auth, PhonePinService pins, ISmsSender sms, CartService carts, IOptions<MarketplaceOptions> marketplace, TimeProvider time)
 {
     public static string? NameProblem(string? raw)
     {
@@ -81,6 +81,7 @@ public sealed class PhoneAccountService(MarketplaceDb db, AccountService account
                 if (s.Pin is not { Action: "remove" }) return AccountApply.Refused;
                 await pins.ClearAsync(account, ct);
                 s.SetPin(null);
+                if (s.VerifiedPhone is { } removedFor) await sms.SendAsync(removedFor, "Solvelt: the phone PIN on your account was just removed. If this was not you, contact us.", ct);
                 return AccountApply.Saved;
             case "card_remove":
                 return c.CardId is { } cid && await db.SavedCards.Where(x => x.Id == cid && x.AccountId == account).ExecuteDeleteAsync(ct) == 1 ? AccountApply.Saved : AccountApply.Refused;

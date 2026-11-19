@@ -8,7 +8,7 @@ using Solvelt.Marketplace.Api.Infrastructure;
 
 namespace Solvelt.Marketplace.Api.Voice;
 
-public enum PinResult { Ok, Wrong, Locked, NoPin }
+public enum PinResult { Ok, Wrong, Locked, LockedNow, NoPin }
 
 /// <summary>
 /// The phone PIN (decision V-18): a numeric PIN typed on the KEYPAD (never spoken, never sent to the model, never logged), a second factor for signing in by phone AFTER the SMS code. It is hashed with the existing password hasher
@@ -18,7 +18,6 @@ public enum PinResult { Ok, Wrong, Locked, NoPin }
 public sealed class PhonePinService(MarketplaceDb db, PasswordService passwords, IOptions<VoiceOptions> options, TimeProvider time, AttemptLimiter limiter)
 {
     public const int MinDigits = 6, MaxDigits = 12, MaxFailures = 5;
-    public static readonly TimeSpan LockFor = TimeSpan.FromMinutes(30);
 
     /// <summary>Why a PIN is refused, or null. The reason is generic enough to say aloud: it never repeats the digits.</summary>
     public static string? Problem(string? digits, string? phoneE164)
@@ -47,25 +46,33 @@ public sealed class PhonePinService(MarketplaceDb db, PasswordService passwords,
 
     public async Task<bool> HasPinAsync(Guid accountId, CancellationToken ct) => await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == accountId && a.PinHash != null && a.DeletedAt == null, ct);
 
+    /// <summary>
+    /// Checks a typed PIN. The TRY IS RECORDED FIRST, by one atomic UPDATE that only succeeds while the account has tries left (so parallel calls cannot get more than five guesses between them, whatever the timing), and only then
+    /// is the PIN compared. The count is on the ACCOUNT: five wrong tries lock PIN sign-in for every call and every number until the holder unlocks it with a fresh SMS code and a NEW PIN (<see cref="SaveAsync"/>).
+    /// </summary>
     public async Task<PinResult> VerifyAsync(Guid accountId, string? typed, string? phone, CancellationToken ct)
     {
         var now = time.GetUtcNow();
-        var a = await db.BuyerAccounts.FirstOrDefaultAsync(x => x.Id == accountId && x.DeletedAt == null, ct);
-        if (a?.PinHash is null) return PinResult.NoPin;
-        if (a.PinLockedUntil is { } until && until > now) return PinResult.Locked;
+        var hash = await db.BuyerAccounts.AsNoTracking().Where(x => x.Id == accountId && x.DeletedAt == null).Select(x => x.PinHash).FirstOrDefaultAsync(ct);
+        if (hash is null) return PinResult.NoPin;
         if (!limiter.TryAcquire("voice-pin-number", phone ?? "unknown", 20, TimeSpan.FromHours(1))) return PinResult.Locked;   // a per-number ceiling on top of the account's own lock
+        var counted = await db.BuyerAccounts.Where(x => x.Id == accountId && x.PinHash != null && x.PinFailures < MaxFailures)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.PinFailures, x => x.PinFailures + 1), ct);
+        if (counted == 0) return PinResult.Locked;
         var digits = new string((typed ?? "").Where(char.IsAsciiDigit).ToArray());
-        if (digits.Length >= MinDigits && digits.Length <= MaxDigits && Matches(a.PinHash, accountId, digits))
+        if (digits.Length >= MinDigits && digits.Length <= MaxDigits && Matches(hash, accountId, digits))
         {
-            if (a.PinFailures != 0 || a.PinLockedUntil is not null) { a.PinFailures = 0; a.PinLockedUntil = null; await db.SaveChangesAsync(ct); }
-            return PinResult.Ok;
+            var cleared = await db.BuyerAccounts.Where(x => x.Id == accountId && x.PinLockedUntil == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.PinFailures, 0), ct);
+            return cleared == 1 ? PinResult.Ok : PinResult.Locked;
         }
-        a.PinFailures++;
-        var locked = a.PinFailures >= MaxFailures;
-        if (locked) { a.PinLockedUntil = now + LockFor; a.PinFailures = 0; }
-        await db.SaveChangesAsync(ct);
-        return locked ? PinResult.Locked : PinResult.Wrong;
+        var failures = await db.BuyerAccounts.AsNoTracking().Where(x => x.Id == accountId).Select(x => x.PinFailures).FirstAsync(ct);
+        if (failures < MaxFailures) return PinResult.Wrong;
+        await db.BuyerAccounts.Where(x => x.Id == accountId && x.PinLockedUntil == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.PinLockedUntil, (DateTimeOffset?)now), ct);
+        return PinResult.LockedNow;
     }
+
+    /// <summary>True while PIN sign-in is locked (five wrong tries): only a fresh SMS code and a NEW PIN unlock it.</summary>
+    public async Task<bool> IsLockedAsync(Guid accountId, CancellationToken ct) => await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == accountId && a.PinHash != null && a.PinFailures >= MaxFailures, ct);
 
     public async Task SaveAsync(Guid accountId, string hash, CancellationToken ct)
         => await db.BuyerAccounts.Where(a => a.Id == accountId && a.DeletedAt == null).ExecuteUpdateAsync(s => s.SetProperty(a => a.PinHash, hash).SetProperty(a => a.PinFailures, 0).SetProperty(a => a.PinLockedUntil, (DateTimeOffset?)null), ct);

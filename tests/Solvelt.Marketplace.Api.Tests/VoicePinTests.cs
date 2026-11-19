@@ -181,7 +181,7 @@ public class VoicePinTests
     }
 
     [Fact]
-    public async Task The_lock_holds_even_for_the_right_PIN_until_it_expires_and_a_right_PIN_clears_the_count()
+    public async Task Five_wrong_tries_lock_the_account_for_good_until_a_new_PIN_is_set_and_the_fifth_try_can_still_be_the_right_one()
     {
         var (s, jane) = await AccountCall();
         using (s)
@@ -190,14 +190,90 @@ public class VoicePinTests
             using var scope = s.F.Services.CreateScope();
             var pins = scope.ServiceProvider.GetRequiredService<PhonePinService>();
             for (var i = 0; i < 4; i++) Assert.Equal(PinResult.Wrong, await pins.VerifyAsync(jane, "9999999", "+15551234567", default));
-            Assert.Equal(PinResult.Locked, await pins.VerifyAsync(jane, "9999999", "+15551234567", default));               // the fifth wrong one locks
+            Assert.Equal(PinResult.Ok, await pins.VerifyAsync(jane, Pin, "+15551234567", default));                           // the FIFTH try may still be the right one
+            Assert.Equal(0, (await Account(s, jane)).PinFailures);                                                             // and a right PIN clears the count
+            for (var i = 0; i < 4; i++) await pins.VerifyAsync(jane, "9999999", "+15551234567", default);
+            Assert.Equal(PinResult.LockedNow, await pins.VerifyAsync(jane, "9999999", "+15551234567", default));              // the fifth wrong one locks
             Assert.Equal(PinResult.Locked, await pins.VerifyAsync(jane, Pin, "+15551234567", default));                       // even the right PIN, while locked
-            s.F.Clock.Advance(TimeSpan.FromMinutes(29));
-            Assert.Equal(PinResult.Locked, await pins.VerifyAsync(jane, Pin, "+15551234567", default));
-            s.F.Clock.Advance(TimeSpan.FromMinutes(2));
-            Assert.Equal(PinResult.Wrong, await pins.VerifyAsync(jane, "9999999", "+15551234567", default));                  // unlocked: a wrong one counts from one again
-            Assert.Equal(PinResult.Ok, await pins.VerifyAsync(jane, Pin, "+15551234567", default));
-            Assert.Equal(0, (await Account(s, jane)).PinFailures);                                                             // a right PIN clears the count
+            s.F.Clock.Advance(TimeSpan.FromDays(2));
+            Assert.Equal(PinResult.Locked, await pins.VerifyAsync(jane, Pin, "+15551234567", default));                       // time does not unlock it
+            Assert.True(await pins.IsLockedAsync(jane, default));
+            await pins.SaveAsync(jane, pins.Prepare(jane, "2468013"), default);                                               // only a new PIN (set after a fresh code) does
+            Assert.False(await pins.IsLockedAsync(jane, default));
+            Assert.Equal(PinResult.Ok, await pins.VerifyAsync(jane, "2468013", "+15551234567", default));
+        }
+    }
+
+    [Fact]
+    public async Task Parallel_guesses_cannot_get_more_than_five_tries_because_each_try_is_recorded_before_it_is_checked()
+    {
+        var (s, jane) = await AccountCall();
+        using (s)
+        {
+            await GivePin(s, jane);
+            var results = await Task.WhenAll(Enumerable.Range(0, 14).Select(async i =>
+            {
+                using var scope = s.F.Services.CreateScope();
+                return await scope.ServiceProvider.GetRequiredService<PhonePinService>().VerifyAsync(jane, "88888" + (10 + i), "+1555123" + (4000 + i), default);   // 14 calls from 14 different numbers
+            }));
+            Assert.True(results.Count(r => r is PinResult.Wrong or PinResult.LockedNow) <= 5, string.Join(",", results));    // no more than five of them were ever compared
+            Assert.Equal(5, (await Account(s, jane)).PinFailures);
+            Assert.True(await Task.Run(async () => { using var scope = s.F.Services.CreateScope(); return await scope.ServiceProvider.GetRequiredService<PhonePinService>().IsLockedAsync(jane, default); }));
+            using var again = s.F.Services.CreateScope();
+            Assert.Equal(PinResult.Locked, await again.ServiceProvider.GetRequiredService<PhonePinService>().VerifyAsync(jane, Pin, "+15551234567", default));
+        }
+    }
+
+    [Fact]
+    public async Task A_lock_is_texted_to_the_proven_number_and_the_locked_holder_unlocks_it_with_a_fresh_code_and_a_new_PIN()
+    {
+        var t = new VoiceScenario(config: new() { ["Voice:PhonePaymentProvider"] = "fake" });
+        using (t)
+        {
+            await t.SyncCatalog(); t.PortalShipping();
+            await t.K.VerifiedSession(Email); await t.SetPhone(Email, "(555) 123-4567", verified: true);
+            var account = (await t.K.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Email == Email))).Id;
+            await GivePin(t, account);
+            await t.K.Db(async db => { await db.BuyerAccounts.Where(a => a.Id == account).ExecuteUpdateAsync(x => x.SetProperty(a => a.PinFailures, 3)); return 0; });   // earlier wrong tries on other calls
+            await t.Dial();
+            await t.Tool("identify_caller"); await t.EndStreamAfterGoodbye(); await t.AfterStream();
+            await t.Keypad(t.LastCode());
+            await t.Keypad("9999991");
+            var (locked, stream) = await t.Type("9999992");                                                                   // the fifth wrong try in all
+            Assert.Equal(VoiceScripts.PinLocked, locked.Element("Say")!.Value); await t.Attach(stream);
+            Assert.Contains(t.Sms.Sent, m => m.To == "+15551234567" && m.Body.Contains("PIN was locked"));                   // the holder is told by text
+            Assert.Equal((CallerLevel.Guest, null), (t.State().Level, t.State().AccountId));
+            // unlock: a fresh code, then a NEW PIN
+            var started = await t.Tool("set_my_pin");
+            Assert.Equal("code_sent", started["status"]!.GetValue<string>());
+            await t.EndStreamAfterGoodbye(); await t.AfterStream();
+            Assert.Equal(VoiceScripts.PinChoose, SayOf(await t.Keypad(t.LastCode())));
+            await t.Keypad("2468013");
+            var (saved, s2) = await t.Type("2468013");
+            Assert.Equal(VoiceScripts.PinSaved, saved.Element("Say")!.Value); await t.Attach(s2);
+            var row = await Account(t, account);
+            Assert.Equal((0, null), (row.PinFailures, row.PinLockedUntil));
+            Assert.Contains(t.Sms.Sent, m => m.Body.Contains("PIN on your account was just set or changed"));                 // and told of the change
+            using var scope = t.F.Services.CreateScope();
+            var pins = scope.ServiceProvider.GetRequiredService<PhonePinService>();
+            Assert.Equal(PinResult.Wrong, await pins.VerifyAsync(account, Pin, "+15551234567", default));                     // the old PIN is gone
+            Assert.Equal(PinResult.Ok, await pins.VerifyAsync(account, "2468013", "+15551234567", default));
+        }
+    }
+
+    [Fact]
+    public async Task No_PIN_step_exists_unless_the_server_opened_one_so_digits_typed_out_of_the_blue_do_nothing()
+    {
+        var (s, jane) = await AccountCall();
+        using (s)
+        {
+            var reply = await s.Keypad(Pin);                                                                                 // the caller is signed in; no keypad step is pending
+            Assert.NotNull(reply.Element("Hangup"));
+            Assert.Null((await Account(s, jane)).PinHash);
+            // the model has no tool that starts a PIN entry without the fresh code: set_my_pin only texts a code
+            var r = await s.Tool("set_my_pin");
+            Assert.Equal("code_sent", r["status"]!.GetValue<string>());
+            Assert.DoesNotContain(s.Fake.Received, m => m.Contains("Choose a PIN"));                                         // the PIN prompt is the server's, never the model's
         }
     }
 

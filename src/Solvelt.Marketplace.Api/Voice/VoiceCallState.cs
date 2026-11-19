@@ -15,7 +15,7 @@ public sealed record PendingCancel(string OrderNumber, string? SellerOrderNumber
 
 /// <summary>A saved-card payment waiting for the caller's yes (V-16): the card id (the server's, never the model's) and the sentence the SERVER reads back.</summary>
 /// <summary>What the PIN flow of this call is doing (V-18): <c>set</c> or <c>remove</c>, and the hash of the first entry while the caller types it again. The digits are never kept.</summary>
-public sealed record PinSetup(string Action, string? Hash);
+public sealed record PinSetup(string Action, string? Hash, Guid? Unlock = null);
 
 public sealed record CardPayRequest(Guid CardId, string Text);
 

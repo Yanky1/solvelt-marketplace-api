@@ -156,10 +156,15 @@ public static class VoiceEndpoints
                     state.SetKeypadOutcome("verified");
                 }
                 else state.SetKeypadOutcome("pin_failed");
-                state.SetPinFor(null); state.ResetPinTries(); state.EndKeypadStep();
-                return Cxml(new XElement("Response", new XElement("Say", checkedPin == PinResult.Ok ? VoiceScripts.CodeOk : VoiceScripts.PinFailed), StreamParts(v, tokens, call.Id)));
+                // the holder is told by text when the PIN locks (sent to the number the call just proved)
+                if (checkedPin == PinResult.LockedNow && state.VerifiedPhone is { } lockedPhone) await sms.SendAsync(lockedPhone, "Solvelt: your phone PIN was locked after too many wrong tries. If this was not you, contact us. Only a new text code and a new PIN unlock it.", ct);
+                var pinLine = checkedPin == PinResult.Ok ? VoiceScripts.CodeOk : checkedPin is PinResult.Locked or PinResult.LockedNow ? VoiceScripts.PinLocked : VoiceScripts.PinFailed;
+                if (checkedPin is PinResult.Locked or PinResult.LockedNow) state.SetPin(null);   // PinFor stays until the end of this response: the unlock path is set_my_pin, which reads it
+                if (checkedPin is not (PinResult.Locked or PinResult.LockedNow)) state.SetPinFor(null);
+                state.ResetPinTries(); state.EndKeypadStep();
+                return Cxml(new XElement("Response", new XElement("Say", pinLine), StreamParts(v, tokens, call.Id)));
             }
-            if (state.KeypadStep == "set_pin" && OrderAccess.IsAccount(state) && state.AccountId is { } setAccount && state.Pin is { Action: "set" } setting)
+            if (state.KeypadStep == "set_pin" && state.Pin is { Action: "set" } setting && (setting.Unlock ?? (OrderAccess.IsAccount(state) ? state.AccountId : null)) is { } setAccount)
             {
                 if (PhonePinService.Problem(digits, state.VerifiedPhone) is { } problem)
                 {
@@ -170,10 +175,15 @@ public static class VoiceEndpoints
                 state.BeginKeypadStep("confirm_pin");
                 return Cxml(new XElement("Response", GatherPin(v, $"I heard a PIN of {VoiceSpeech.Number(digits.Length)} digits. To confirm, type the same PIN again, then press pound.")));   // the LENGTH only is read back, never a digit
             }
-            if (state.KeypadStep == "confirm_pin" && OrderAccess.IsAccount(state) && state.AccountId is { } confirmAccount && state.Pin is { Action: "set", Hash: { } firstHash })
+            if (state.KeypadStep == "confirm_pin" && state.Pin is { Action: "set", Hash: { } firstHash } confirming && (confirming.Unlock ?? (OrderAccess.IsAccount(state) ? state.AccountId : null)) is { } confirmAccount)
             {
                 var same = digits.Length > 0 && pins.Matches(firstHash, confirmAccount, digits);
-                if (same) await pins.SaveAsync(confirmAccount, firstHash, ct);
+                if (same)
+                {
+                    await pins.SaveAsync(confirmAccount, firstHash, ct);
+                    if (state.VerifiedPhone is { } changedPhone) await sms.SendAsync(changedPhone, "Solvelt: the phone PIN on your account was just set or changed. If this was not you, contact us.", ct);
+                    if (confirming.Unlock is not null) state.SetPinFor(null);   // unlocked: the caller signs in again with the new PIN
+                }
                 state.SetPin(null); state.ResetPinTries();
                 state.SetKeypadOutcome(same ? "pin_set" : "pin_failed");
                 state.EndKeypadStep();
@@ -322,7 +332,7 @@ public static class VoiceEndpoints
         if (state.LastChallengePurpose == "pin_change")
         {
             // a fresh code in THIS call is required to set, change or remove the PIN; then the server takes the PIN on the keypad (or reads the removal back)
-            if (result == CodeResult.Ok && OrderAccess.IsAccount(state) && state.Pin is { } pinAction)
+            if (result == CodeResult.Ok && state.Pin is { } pinAction && (pinAction.Unlock is not null || OrderAccess.IsAccount(state)))
             {
                 state.SetChallenge(null);
                 if (pinAction.Action == "remove")
