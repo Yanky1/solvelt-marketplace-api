@@ -85,7 +85,12 @@ public static class CheckoutEndpoints
             CheckoutStatus.Quote when detail is not null && detail.StartsWith("TotalTooLarge") => Problems.Unprocessable("amount_too_large", "The total is above the maximum we can charge. Split the order."),
             CheckoutStatus.Quote when detail == "delivery_unavailable" => Problems.Json(409, "delivery_unavailable", "We can't deliver part of your cart to that address."),
             CheckoutStatus.Quote => Problems.Json(409, "cart_not_ready", "Your cart is empty or has items that are no longer available."),
-            CheckoutStatus.PriceChanged => Results.Json(new { code = "price_changed", message = "The price changed. Review the new total and confirm to continue.", quote = result!.Quote }, statusCode: 409),
+            CheckoutStatus.PriceChanged => Results.Json(new
+            {
+                code = "price_changed", message = "The price changed. Review the new total and confirm to continue.", quote = result!.Quote,
+                // a quote that involves a quantity offer says so (Q-08): the tier, a gift or the offer itself may be what moved
+                messageCode = QuoteSigner.HadOffers(body!.QuoteHash) || result.Quote!.Groups.Any(g => (g.Offers ?? []).Count > 0 || g.DiscountCents > 0) ? "offer_changed" : "price_changed",
+            }, statusCode: 409),
             CheckoutStatus.InProgress => Problems.Json(409, "checkout_in_progress", "A payment for this cart is still being processed. Wait for it to finish before changing your checkout."),
             CheckoutStatus.AmountTooSmall => Problems.Unprocessable("amount_too_small", "The total is below the minimum we can charge."),
             CheckoutStatus.Superseded => Problems.Json(409, "checkout_superseded", "Another checkout of this cart replaced this one. Review your cart and pay again."),

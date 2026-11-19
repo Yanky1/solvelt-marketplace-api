@@ -63,14 +63,17 @@ public sealed class QuoteSigner(IOptions<CheckoutOptions> options)
     public string Make(QuoteView v, string country, string? region, string postal, DateTimeOffset now)
     {
         var exp = now.Add(Lifetime).ToUnixTimeSeconds();
-        return exp + "." + Digest(v, country, region, postal, exp);
+        // An "o" after the expiry says the quote involved a quantity offer. It is only a hint for the wording of a later 409 (offer_changed, Q-08): it is not part of the digest and moves no money.
+        return exp + (v.Groups.Any(g => (g.Offers ?? []).Count > 0 || g.DiscountCents > 0) ? "o" : "") + "." + Digest(v, country, region, postal, exp);
     }
+
+    public static bool HadOffers(string? token) => token is not null && token.IndexOf('.') is > 1 and var dot && token[dot - 1] == 'o';
 
     public bool Valid(string? token, QuoteView v, string country, string? region, string postal, DateTimeOffset now)
     {
         if (token is null || token.Length > 100) return false;
         var dot = token.IndexOf('.');
-        if (dot < 1 || !long.TryParse(token[..dot], out var exp) || exp < now.ToUnixTimeSeconds()) return false;
+        if (dot < 1 || !long.TryParse(token[..dot].TrimEnd('o'), out var exp) || exp < now.ToUnixTimeSeconds()) return false;
         return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(token[(dot + 1)..]), Encoding.ASCII.GetBytes(Digest(v, country, region, postal, exp)));
     }
 }

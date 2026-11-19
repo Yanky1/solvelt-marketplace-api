@@ -122,8 +122,9 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
     private async Task<OutboxResult> FailAsync(MarketplaceOrder order, PortalError error, CancellationToken ct)
     {
         var offerMismatch = error.Code == "offer_mismatch";
-        if (offerMismatch) log.LogWarning("The portal rejected order {Number}: offer_mismatch ({Kinds}); nothing was created there, the order fails and is refunded in full", order.Number,
-            string.Join(",", (error.Errors ?? []).Select(e => e.Kind ?? "?").Distinct().Take(10)));
+        if (offerMismatch) log.LogWarning("The portal rejected order {Number}: offer_mismatch ({Kinds}); nothing was created there, the order fails and is refunded in full. Portal said: {Expected}", order.Number,
+            string.Join(",", (error.Errors ?? []).Select(e => e.Kind ?? "?").Distinct().Take(10)),
+            string.Join(" | ", (error.Errors ?? []).Take(5).Select(e => $"#{e.Index} {e.Kind}: {(e.Message ?? "").Replace('\n', ' ')[..Math.Min((e.Message ?? "").Length, 160)]}")));
         var code = offerMismatch ? "offer_mismatch" : error.Errors?.FirstOrDefault()?.Code is { Length: > 0 } c ? new string(c.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch == '_').Take(50).ToArray()) : "invalid_order";
         var windowGone = code.StartsWith("delivery_", StringComparison.Ordinal);
         await using var tx = await db.Database.BeginTransactionAsync(ct);

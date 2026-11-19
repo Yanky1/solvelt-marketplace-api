@@ -210,6 +210,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         Assert.Equal(HttpStatusCode.Conflict, res.StatusCode);
         var j = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
         Assert.Equal("price_changed", j.GetProperty("code").GetString());
+        Assert.Equal("offer_changed", j.GetProperty("messageCode").GetString());
         Assert.Equal(20 * 85, j.GetProperty("quote").GetProperty("itemsCents").GetInt64());
         Assert.Empty(Stripe.Intents);                                           // never charge a stale total
     }
@@ -257,5 +258,33 @@ public sealed class OfferOrderTests : OrderFlowBase
         Assert.Contains("quantity discount saves you", text);
         Assert.Contains("a free Card wallet", text);
         Assert.Contains(Solvelt.Marketplace.Api.Voice.VoiceSpeech.Money(250), text);
+    }
+
+    private async Task<JsonElement> Stale(string seen)
+    {
+        var r = new HttpRequestMessage(HttpMethod.Post, "/api/v1/checkout") { Content = JsonContent.Create(new { address = Address(), quoteHash = seen }) };
+        r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        var res = await _k.Http.SendAsync(r);
+        Assert.Equal(HttpStatusCode.Conflict, res.StatusCode);
+        var j = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement.Clone();
+        Assert.Equal("offer_changed", j.GetProperty("messageCode").GetString());
+        Assert.Empty(Stripe.Intents);                                           // nothing was charged
+        return j;
+    }
+
+    [Fact]
+    public async Task A_gift_that_became_unavailable_or_an_offer_that_ended_after_the_quote_is_refused_with_a_fresh_quote_and_nothing_is_charged()
+    {
+        await Login();
+        var id = await Offer();
+        await AddToCart("israeli-couscous", 10);
+        var seen = (await Quote()).GetProperty("quoteHash").GetString();
+        await _k.Db(async db => { var o = await db.CatalogOffers.SingleAsync(x => x.Id == id); o.GiftsJson = JsonSerializer.Serialize(new[] { new OfferGiftDoc(10, GiftProduct, 1, "Card wallet", false) }); o.Version = 2; await db.SaveChangesAsync(); return 0; });
+        var fresh = (await Stale(seen!)).GetProperty("quote");
+        Assert.Empty(Group(fresh, Judaica).GetProperty("gifts").EnumerateArray());
+        var seen2 = fresh.GetProperty("quoteHash").GetString();
+        await _k.Db(async db => { var o = await db.CatalogOffers.SingleAsync(x => x.Id == id); o.UnlistedVersion = 2; o.RecomputeVisibility(); await db.SaveChangesAsync(); return 0; });   // tombstone
+        var ended = (await Stale(seen2!)).GetProperty("quote");
+        Assert.Equal(6000, ended.GetProperty("itemsCents").GetInt64());
     }
 }
