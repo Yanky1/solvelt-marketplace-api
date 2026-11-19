@@ -8,12 +8,13 @@ namespace Solvelt.Marketplace.Api.Voice;
 
 public static class VoiceEndpoints
 {
-    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", KeypadPath = "/api/v1/voice/signalwire/keypad", SolaWebhookPath = "/api/v1/voice/sola/webhook", StreamPath = "/api/v1/voice/stream";
+    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", PipelinePath = "/api/v1/voice/signalwire/pipeline", KeypadPath = "/api/v1/voice/signalwire/keypad", SolaWebhookPath = "/api/v1/voice/sola/webhook", StreamPath = "/api/v1/voice/stream";
 
     public static IEndpointRouteBuilder MapVoice(this IEndpointRouteBuilder app)
     {
         app.MapPost(InboundPath, Inbound);
         app.MapPost(AfterStreamPath, AfterStream);
+        app.MapPost(PipelinePath, PipelineChoice);
         app.MapPost(KeypadPath, Keypad);
         app.MapPost(SolaWebhookPath, SolaWebhook);
         app.MapPhoneEmail();
@@ -53,9 +54,38 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         if (!form.TryGetValue("CallSid", out var sid) || string.IsNullOrWhiteSpace(sid) || sid.Length > 64) return Results.BadRequest();
         form.TryGetValue("From", out var from);
+        form.TryGetValue("To", out var to);
         var call = await store.StartAsync(sid, from, ct);
         states.GetOrCreate(call.Id).SetCaller(PhoneNumbers.ToE164(from));   // the full number lives only in this call's memory
+        // the test-line menu (decision V-19): off by default and offered only to the listed test numbers; everyone else gets the line exactly as before
+        if (PipelineMenu.Offered(v, from, to)) return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Disclosure), GatherPipeline(v)));
         return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Disclosure), StreamParts(v, tokens, call.Id)));
+    }
+
+    private static XElement GatherPipeline(VoiceOptions v)
+        => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", 1), new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds),
+            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Menu));
+
+    /// <summary>The caller's choice on the test-line menu: unknown or empty is option 1, an option whose pipeline is not configured says so and is option 1. The choice is recorded in the call's tier column and fixed for the call.</summary>
+    private static async Task<IResult> PipelineChoice(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)
+    {
+        var v = vo.Value;
+        if (!v.Enabled) return Results.NotFound();
+        var (ok, form) = await VerifyAsync(ctx, v, so.Value);
+        if (!ok) return Results.StatusCode(403);
+        var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
+        if (call is null || call.EndedAt is not null) return Results.NotFound();
+        form.TryGetValue("From", out var from); form.TryGetValue("To", out var to);
+        // not offered to this number, or the call already has a stream (a replay): nothing changes, the call carries on as it is
+        if (!PipelineMenu.Offered(v, from, to) || states.GetOrCreate(call.Id).Connections > 0)
+            return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
+        form.TryGetValue("Digits", out var digits);
+        var option = VoicePipelineIds.FromDigits(digits);
+        XElement say;
+        if (!registry.IsAvailable(option)) { say = new XElement("Say", PipelineScripts.Unavailable); option = VoicePipelineIds.Realtime; }
+        else say = new XElement("Say", PipelineScripts.Chosen(option));
+        await store.SetPipelineAsync(call.Id, option, ct);
+        return Cxml(new XElement("Response", say, StreamParts(v, tokens, call.Id)));
     }
 
     /// <summary>SignalWire calls this when the stream ends: a person was asked for and is reachable, so dial; otherwise hang up.</summary>
@@ -403,7 +433,7 @@ public static class VoiceEndpoints
         state.SetTask("shopping");
     }
 
-    private static async Task Stream(HttpContext ctx, IOptions<VoiceOptions> vo, StreamTokens tokens, VoiceCallStore store, VoiceStateStore states, IRealtimeConnector connector, VoiceToolRunner tools,
+    private static async Task Stream(HttpContext ctx, IOptions<VoiceOptions> vo, StreamTokens tokens, VoiceCallStore store, VoiceStateStore states, VoicePipelineRegistry pipelines,
         TimeProvider time, ILoggerFactory logs)
     {
         if (!vo.Value.Enabled) { ctx.Response.StatusCode = 404; return; }
@@ -414,22 +444,14 @@ public static class VoiceEndpoints
         var call = id is { } g ? await store.FindAsync(g, ctx.RequestAborted) : null;
         if (call is null || call.EndedAt is not null) { ctx.Response.StatusCode = 401; return; }
         var log = logs.CreateLogger("Solvelt.Marketplace.Api.Voice");
-        WebSocket upstream;
-        try { upstream = await connector.ConnectAsync(call.Model, ctx.RequestAborted); }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            log.LogError("Voice call {Call}: the model session could not be opened ({Type}).", call.Id, ex.GetType().Name);
-            await store.EndAsync(call.Id, Data.VoiceOutcome.Abandoned, CancellationToken.None);
-            ctx.Response.StatusCode = 503;
-            return;
-        }
+        // the pipeline behind the phone side (decision V-19): the Realtime line unless the caller chose another option on the test-line menu and its parts are configured
+        await using var session = await pipelines.For(call).OpenAsync(call, ctx.RequestAborted);
+        if (session is null) { ctx.Response.StatusCode = 503; return; }
         using var phone = await ctx.WebSockets.AcceptWebSocketAsync();
         log.LogInformation("Voice call {Call} started: caller {Caller}, model tier {Tier}.", call.Id, call.CallerMasked, call.Tier);
         var state = states.GetOrCreate(call.Id);
         state.Connected(time.GetUtcNow());
-        var bridge = new RealtimeBridge(phone, upstream, call, state, vo, store, tools, time, log);
-        await bridge.RunAsync(ctx.RequestAborted);
-        if (!bridge.KeypadPause && !state.OffTopicEnded) states.Remove(call.Id);   // the call is over: nothing of it stays in memory (the flag of an off-topic end stays until the grace period, for the after-stream webhook)
-        upstream.Dispose();
+        var result = await session.RunAsync(phone, state, ctx.RequestAborted);
+        if (!result.KeypadPause && !state.OffTopicEnded) states.Remove(call.Id);   // the call is over: nothing of it stays in memory (the flag of an off-topic end stays until the grace period, for the after-stream webhook)
     }
 }

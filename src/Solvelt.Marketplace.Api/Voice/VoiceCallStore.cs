@@ -93,6 +93,31 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
             .SetProperty(c => c.EstimatedCostMicros, c => c.EstimatedCostMicros + cost), ct);
     }
 
+    /// <summary>
+    /// The option the caller chose on the test-line menu (decision V-19): the tier column becomes <c>p1</c> to <c>p5</c> and, for a chained pipeline, the model column says which (<c>pipeline:p2</c>). Only before the first
+    /// stream of the call (nothing changes mid-call) and only while the call is open.
+    /// </summary>
+    public async Task<bool> SetPipelineAsync(Guid id, string option, CancellationToken ct)
+    {
+        if (!VoicePipelineIds.IsOption(option)) return false;
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+        var model = option == VoicePipelineIds.Realtime ? null : "pipeline:" + option;
+        var n = model is null
+            ? await db.VoiceCalls.Where(c => c.Id == id && c.EndedAt == null && c.LatencySamples == 0).ExecuteUpdateAsync(s => s.SetProperty(c => c.Tier, option), ct)
+            : await db.VoiceCalls.Where(c => c.Id == id && c.EndedAt == null && c.LatencySamples == 0).ExecuteUpdateAsync(s => s.SetProperty(c => c.Tier, option).SetProperty(c => c.Model, model), ct);
+        return n > 0;
+    }
+
+    /// <summary>A chained pipeline's usage so far: text tokens and the estimated cost in micro-dollars of what was priced (speech-to-text minutes, text-to-speech characters, LLM tokens).</summary>
+    public async Task AddPipelineUsageAsync(Guid id, long textIn, long textOut, long costMicros, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().VoiceCalls.Where(c => c.Id == id).ExecuteUpdateAsync(s => s
+            .SetProperty(c => c.TextInTokens, c => c.TextInTokens + textIn).SetProperty(c => c.TextOutTokens, c => c.TextOutTokens + textOut)
+            .SetProperty(c => c.EstimatedCostMicros, c => c.EstimatedCostMicros + costMicros), ct);
+    }
+
     public async Task AddLatencyAsync(Guid id, long ms, CancellationToken ct)
     {
         using var scope = scopes.CreateScope();

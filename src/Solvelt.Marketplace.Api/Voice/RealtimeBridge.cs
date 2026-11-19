@@ -200,7 +200,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
         _responseActive = false;   // the model is done; the PHONE may still be playing (see _playback)
         _fillerDone?.TrySetResult();
         if (!m.TryGetProperty("response", out var r)) return;
-        if (r.TryGetProperty("usage", out var u)) await store.AddUsageAsync(call.Id, call.Tier, ReadUsage(u), ct);
+        if (r.TryGetProperty("usage", out var u)) await store.AddUsageAsync(call.Id, VoicePipelineIds.PriceTier(_o, call.Tier, call.Model), ReadUsage(u), ct);   // a call on the test-line menu has tier p1: its model says which prices apply
         var pending = new List<(string Name, string? Args, string? CallId)>();
         if (r.TryGetProperty("output", out var output) && output.ValueKind == JsonValueKind.Array)
             foreach (var item in output.EnumerateArray())

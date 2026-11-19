@@ -62,6 +62,8 @@ public sealed class VoiceOptions
     public int MaxSmsPerHour { get; set; } = 300;
     /// <summary>Days a call's metrics row is kept (no audio, no transcript, only a masked number).</summary>
     public int CallRetentionDays { get; set; } = 400;
+    /// <summary>The test-line menu to compare voice pipelines (decision V-19). Off by default.</summary>
+    public VoicePipelineMenuOptions PipelineMenu { get; set; } = new();
 }
 
 public sealed class SignalWireOptions
@@ -118,6 +120,11 @@ public static class VoiceConfig
         if (!new[] { "full", "mini", "split" }.Contains(v.ModelMode)) p.Add("Voice:ModelMode must be full, mini or split.");
         if (v.MiniPercent is < 0 or > 100) p.Add("Voice:MiniPercent must be between 0 and 100.");
         if (!new[] { "server_vad", "semantic_vad" }.Contains(v.TurnDetection)) p.Add("Voice:TurnDetection must be server_vad or semantic_vad.");
+        var m = v.PipelineMenu;
+        if (m.Enabled && m.TestNumbers.Any(n => Infrastructure.PhoneNumbers.ToE164(n) is null)) p.Add("Voice:PipelineMenu:TestNumbers must all be phone numbers (E.164, like +15551234567).");
+        if (m.MenuTimeoutSeconds is < 1 or > 30) p.Add("Voice:PipelineMenu:MenuTimeoutSeconds must be between 1 and 30.");
+        if (m.EndpointMs is < 200 or > 5000) p.Add("Voice:PipelineMenu:EndpointMs must be between 200 and 5000.");
+        if (m.ParallelWaitMs is < 0 or > 5000 || m.ParallelBudgetMs is < 100 or > 10000 || m.ParallelWaitMs > m.ParallelBudgetMs) p.Add("Voice:PipelineMenu:ParallelWaitMs (0-5000) must not exceed ParallelBudgetMs (100-10000).");
         return p;
     }
 }
