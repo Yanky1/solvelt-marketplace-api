@@ -193,6 +193,38 @@ public sealed class ListCategoriesTool(InProcessCatalog catalog) : IVoiceTool
     }
 }
 
+/// <summary>Merges the results of the same request made in two languages: one entry per listing, the best rank wins (the caller's own words first on a tie), at most <c>cap</c> in all.</summary>
+internal static class SearchMerge
+{
+    public static List<JsonElement> Merge(IReadOnlyList<List<JsonElement>> lists, int cap, out int duplicates)
+    {
+        var ranked = new List<(Guid Id, int Rank, int List, JsonElement Item)>();
+        for (var l = 0; l < lists.Count; l++)
+            for (var r = 0; r < lists[l].Count; r++) ranked.Add((lists[l][r].GetProperty("id").GetGuid(), r, l, lists[l][r]));
+        var seen = new HashSet<Guid>();
+        var merged = new List<JsonElement>();
+        duplicates = 0;
+        foreach (var x in ranked.OrderBy(x => x.Rank).ThenBy(x => x.List))
+        {
+            if (!seen.Add(x.Id)) { duplicates++; continue; }
+            if (merged.Count < cap) merged.Add(x.Item);
+        }
+        return merged;
+    }
+
+    /// <summary>The words to search and the other-language words, if a second search is worth making: not when they are empty, too long, or the same words (ignoring case and spacing); and when only the other-language words were given they are the search.</summary>
+    public static (string Text, string? Alternate) Queries(string text, string? alternate)
+    {
+        alternate = alternate?.Trim();
+        if (text.Length == 0 && !string.IsNullOrEmpty(alternate)) return (alternate, null);
+        if (string.IsNullOrEmpty(alternate) || alternate.Length > 100 || Same(alternate, text)) return (text, null);
+        return (text, alternate);
+    }
+
+    /// <summary>The same words, ignoring case and spacing: not worth a second search.</summary>
+    public static bool Same(string a, string b) => string.Equals(string.Join(' ', a.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)), string.Join(' ', b.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)), StringComparison.CurrentCultureIgnoreCase);
+}
+
 public sealed class SearchProductsTool(InProcessCatalog catalog) : IVoiceTool
 {
     public string Name => "search_products";
@@ -200,13 +232,14 @@ public sealed class SearchProductsTool(InProcessCatalog catalog) : IVoiceTool
         new JsonObject
         {
             ["query"] = ToolKit.Prop("string", "What the caller is looking for, in their words. May be left out when the caller only named a category (\"what do you have in kitchen?\")."),
+            ["alternate_query"] = ToolKit.Prop("string", "The same request in the OTHER language: when the caller speaks Yiddish or Hebrew, the English words for it; when the caller speaks English, the Yiddish words if you know them. Always fill it when the caller is not speaking English. The server searches both and merges the results."),
             ["category"] = ToolKit.Prop("string", "Only to search inside one category: its slug from list_categories, or the name as the caller said it."),
             ["max_price_dollars"] = ToolKit.Prop("integer", "Only if the caller named a ceiling in whole dollars."),
         });
 
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
     {
-        var text = ToolKit.Str(args, "query")?.Trim() ?? "";
+        var (text, alternate) = SearchMerge.Queries(ToolKit.Str(args, "query")?.Trim() ?? "", ToolKit.Str(args, "alternate_query"));
         var categoryAsked = ToolKit.Str(args, "category")?.Trim();
         if (text.Length > 100 || (text.Length == 0 && string.IsNullOrEmpty(categoryAsked))) return ToolKit.Error("bad_query", "Ask what they are looking for, or which category.");
         string? slug = null;
@@ -216,10 +249,16 @@ public sealed class SearchProductsTool(InProcessCatalog catalog) : IVoiceTool
             if (slug is null) return ToolKit.Error("unknown_category", "There is no such category with products for sale. Call list_categories to see the real ones, or search without a category.");
         }
         var maxDollars = ToolKit.Int(args, "max_price_dollars", 0);
-        using var page = await catalog.SearchAsync(text, 3, maxDollars > 0 ? maxDollars * 100L : null, ct, slug);
-        if (page is null) return ToolKit.Error("search_unavailable", "Say the search did not work and offer to try again.");
-        var items = page.RootElement.GetProperty("items").EnumerateArray().ToList();
-        var total = page.RootElement.GetProperty("total").GetInt32();
+        var priceMax = maxDollars > 0 ? maxDollars * 100L : (long?)null;
+
+        // the caller's own words first, then the other language; one request at a time (they share one database context)
+        using var first = await catalog.SearchAsync(text, 3, priceMax, ct, slug);
+        using var second = alternate is null ? null : await catalog.SearchAsync(alternate, 3, priceMax, ct, slug);
+        if (first is null && second is null) return ToolKit.Error("search_unavailable", "Say the search did not work and offer to try again.");
+        var lists = new[] { first, second }.Where(d => d is not null).Select(d => d!.RootElement.GetProperty("items").EnumerateArray().ToList()).ToList();
+        var totals = new[] { first, second }.Where(d => d is not null).Select(d => d!.RootElement.GetProperty("total").GetInt32()).ToList();
+        var items = SearchMerge.Merge(lists, 3, out var duplicates);
+        var total = lists.Count == 1 ? totals[0] : Math.Max(items.Count, totals.Sum() - duplicates);   // two lists: the sum less the listings both found (a floor when there are more than we fetched)
         var refs = items.Select(i => new ProductRef(i.GetProperty("id").GetGuid(), i.GetProperty("slug").GetString() ?? "", i.GetProperty("title").GetString() ?? "")).ToList();
         ctx.State.SetResults(refs);
         ctx.State.SetTask("shopping");
