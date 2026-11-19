@@ -136,6 +136,12 @@ export async function stripeEvent(type, object) {
   return call(env.api, "POST", "/api/stripe/webhooks", { body, raw: true, headers: { "stripe-signature": `t=${t},v1=${sig}` } });
 }
 
+/** A seller's quantity offer (C18) through the portal's seller API: tiers [{minQuantity, unitPriceCents}], gifts [{minQuantity, productId, quantity}], scope "products" with productIds. Returns the offer detail. */
+export async function sellerOffer(seller, { name, productIds, tiers, gifts = [] }) {
+  const body = { name, brandId: seller.brandId, status: "active", scope: "products", productIds, tiers, gifts };
+  return (await must(portal("POST", "/api/v1/seller/offers", { token: seller.token, body }), 201, "create offer")).body;
+}
+
 /** Seller-portal view of the buyer's marketplace order (by marketplace id the portal stored), or null while it is not there. */
 export async function portalOrderFor(seller, marketplaceOrderNumber) {
   const list = await portal("GET", `/api/v1/seller/orders?q=${encodeURIComponent(marketplaceOrderNumber)}`, { token: seller.token });
