@@ -22,10 +22,10 @@ public sealed class VoiceScenario : IDisposable
     public string From { get; }
     private int _calls;
 
-    public VoiceScenario(string from = "+15551234567", Dictionary<string, string?>? config = null, string? sid = null)
+    public VoiceScenario(string from = "+15551234567", Dictionary<string, string?>? config = null, string? sid = null, Action<IServiceCollection>? services = null)
     {
         From = from; Sid = sid ?? "CA-" + Guid.NewGuid().ToString("N")[..10];
-        K = new AuthKit(VoiceFactory.Config(config), s => { s.RemoveAll<IRealtimeConnector>(); s.AddSingleton<IRealtimeConnector>(Fake); });
+        K = new AuthKit(VoiceFactory.Config(config), s => { s.RemoveAll<IRealtimeConnector>(); s.AddSingleton<IRealtimeConnector>(Fake); services?.Invoke(s); });
         C = K.F.CreateClient();
     }
 

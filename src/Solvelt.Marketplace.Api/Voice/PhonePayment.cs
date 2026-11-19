@@ -5,7 +5,7 @@ namespace Solvelt.Marketplace.Api.Voice;
 
 public static class PhonePaymentMethod
 {
-    public const string Keypad = "keypad", TextLink = "text_link";
+    public const string Keypad = "keypad", TextLink = "text_link", SavedCard = "saved_card";
 }
 
 /// <summary>

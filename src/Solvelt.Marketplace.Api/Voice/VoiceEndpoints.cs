@@ -81,6 +81,7 @@ public static class VoiceEndpoints
             // the payment provider's own instruction (the keypad step runs without the model; no card data touches this API or the model)
             if (st.KeypadStep == "confirm_cancel" && st.Cancel is { } cancel) return Cxml(new XElement("Response", GatherConfirm(v, cancel.Text)));
             if (st.KeypadStep == "confirm_account" && st.AccountChange is { } change) return Cxml(new XElement("Response", GatherConfirm(v, change.Text)));
+            if (st.KeypadStep == "confirm_card_pay" && st.CardPay is { } cardPay) return Cxml(new XElement("Response", GatherConfirm(v, cardPay.Text)));
             if (st.KeypadStep == "pay" && st.Payment?.Instruction is { } pay) return Cxml(new XElement("Response", new XElement(pay)));
             if (st.KeypadStep == "save_card" && st.CardSave?.Instruction is { } saveCard) return Cxml(new XElement("Response", new XElement(saveCard)));
         }
@@ -130,7 +131,7 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "save_card" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "save_card" or "confirm_card_pay" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
         if (state.KeypadStep == "confirm_cancel")
         {
@@ -177,6 +178,25 @@ public static class VoiceEndpoints
             state.SetKeypadOutcome(accountResult);
             state.EndKeypadStep();
             return Cxml(new XElement("Response", new XElement("Say", line), StreamParts(v, tokens, call.Id)));
+        }
+        if (state.KeypadStep == "confirm_card_pay")
+        {
+            // the ONLY path that charges a saved card: the caller heard the server's read-back (card and amount) and said yes (or pressed 1)
+            form.TryGetValue("SpeechResult", out var cardHeard);
+            var cardReply = ReadBackAnswer.Parse(typed, cardHeard);
+            if (cardReply == ConfirmChoice.Unclear && state.CountConfirmFailure() < 2) return Cxml(new XElement("Response", GatherConfirm(v, VoiceScripts.AccountRetry)));
+            var request = state.CardPay;
+            string cardOutcome = "card_pay_declined", cardSay = VoiceScripts.AccountKept;
+            if (cardReply == ConfirmChoice.Yes && request is not null)
+            {
+                using var cardScope = ctx.RequestServices.CreateScope();
+                var cardPaid = await cardScope.ServiceProvider.GetRequiredService<SavedCardPayment>().PayAsync(state, call, request.CardId, ct);
+                (cardOutcome, cardSay) = cardPaid switch { SavedCardPayResult.Paid => ("paid", VoiceScripts.PayThanks), SavedCardPayResult.Pending => ("pay_pending", VoiceScripts.PayPending), _ => ("pay_failed", VoiceScripts.PayFailed) };
+            }
+            state.SetCardPay(null);
+            state.SetKeypadOutcome(cardOutcome);
+            state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", cardSay), StreamParts(v, tokens, call.Id)));
         }
         if (state.KeypadStep == "save_card")
         {

@@ -82,7 +82,7 @@ public static class PayConnectorEndpoints
         Guid id;
         try { using var d = JsonDocument.Parse(body); if (!Guid.TryParseExact(d.RootElement.GetProperty("attemptId").GetString(), "N", out id)) return Signed(ctx, so.Value, time, new { open = false }); }
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return Results.StatusCode(400); }
-        var a = await db.VoicePaymentAttempts.AsNoTracking().Where(x => x.Id == id && (x.Method == PhonePaymentMethod.Keypad || x.Method == SaveCardMethod) && x.Status == "pending").Select(x => new { x.AmountCents, x.OrderNumber, x.Currency, x.Method }).FirstOrDefaultAsync(ct);
+        var a = await db.VoicePaymentAttempts.AsNoTracking().Where(x => x.Id == id && (x.Method == PhonePaymentMethod.Keypad || x.Method == PhonePaymentMethod.SavedCard || x.Method == SaveCardMethod) && x.Status == "pending").Select(x => new { x.AmountCents, x.OrderNumber, x.Currency, x.Method }).FirstOrDefaultAsync(ct);
         return Signed(ctx, so.Value, time, a is null ? new { open = false } : a.Method == SaveCardMethod ? new { open = true, amountCents = 0L, invoice = "", currency = a.Currency, purpose = "save_card" } : new { open = true, amountCents = a.AmountCents, invoice = a.OrderNumber, currency = a.Currency, purpose = "sale" });
     }
 
@@ -136,7 +136,7 @@ public static class PayConnectorEndpoints
         Report? r;
         try { r = JsonSerializer.Deserialize<Report>(body, new JsonSerializerOptions(JsonSerializerDefaults.Web)); } catch (JsonException) { return Results.StatusCode(400); }
         if (r is null || !Guid.TryParseExact(r.AttemptId, "N", out var id) || string.IsNullOrWhiteSpace(r.Invoice)) return Results.StatusCode(400);
-        var attempt = await db.VoicePaymentAttempts.FirstOrDefaultAsync(x => x.Id == id && x.Method == PhonePaymentMethod.Keypad, ct);
+        var attempt = await db.VoicePaymentAttempts.FirstOrDefaultAsync(x => x.Id == id && (x.Method == PhonePaymentMethod.Keypad || x.Method == PhonePaymentMethod.SavedCard), ct);
         if (attempt is null) return Signed(ctx, so.Value, time, new { ok = false, settle = "unknown_attempt" });
         var log = logs.CreateLogger("Solvelt.Marketplace.Api.Voice.PayConnector");
         var status = r.Status switch { "paid" => PhonePaymentStatus.Paid, "declined" => PhonePaymentStatus.Declined, _ => PhonePaymentStatus.Failed };

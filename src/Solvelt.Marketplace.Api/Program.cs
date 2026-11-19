@@ -132,6 +132,8 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Mar
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ReadBackOrderTool>();
 builder.Services.Configure<Solvelt.Marketplace.Api.Voice.SolaOptions>(builder.Configuration.GetSection("Sola"));
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.SavedCardVault>();
+builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IPayConnectorClient, Solvelt.Marketplace.Api.Voice.PayConnectorClient>(c => c.Timeout = TimeSpan.FromSeconds(20));
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.SavedCardPayment>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.FakePhonePaymentProvider>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.SolaPhonePaymentProvider>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhonePayments>();

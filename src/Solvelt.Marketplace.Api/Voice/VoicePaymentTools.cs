@@ -36,11 +36,11 @@ public sealed class ConfirmGuestEmailTool : IVoiceTool
 /// Pays for the order the caller confirmed. The model chooses nothing but the method: the server places the order through the existing checkout at the amount it priced and read back, and the card
 /// is entered by the caller on the keypad into the payment provider's own path while the model is off the line (or on the provider's page, from a text link). The model never sees a card.
 /// </summary>
-public sealed class PayForOrderTool(PhoneOrderService orders, PhonePayments payments, VoiceCallStore calls, ISmsSender sms, IOptions<VoiceOptions> options) : IVoiceTool
+public sealed class PayForOrderTool(PhoneOrderService orders, PhonePayments payments, VoiceCallStore calls, ISmsSender sms, IOptions<VoiceOptions> options, Solvelt.Marketplace.Api.Data.MarketplaceDb db) : IVoiceTool
 {
     public string Name => "pay_for_order";
     public JsonObject Definition => ToolKit.Def(Name, "After the caller confirmed the read-back: place the order and start the payment. Say one short sentence that the payment step is starting, then stop talking.",
-        new JsonObject { ["method"] = ToolKit.Prop("string", "keypad (the caller types the card on the phone keypad, the default) or text_link (a link by text message).") });
+        new JsonObject { ["method"] = ToolKit.Prop("string", "keypad (the caller types the card on the phone keypad, the default), text_link (a link by text message) or saved_card (one of their saved cards, for a verified account: read the list with list_saved_cards first and pass its position)."), ["position"] = ToolKit.Prop("integer", "For saved_card: the position in the list just read out.") });
 
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
     {
@@ -48,6 +48,23 @@ public sealed class PayForOrderTool(PhoneOrderService orders, PhonePayments paym
         var provider = payments.Provider;
         if (provider is null) return ToolKit.Error("payments_unavailable", "Say that ordering by phone is not available yet, and offer the web site or a person.");
         var method = ToolKit.Str(args, "method") ?? PhonePaymentMethod.Keypad;
+        if (method == PhonePaymentMethod.SavedCard)
+        {
+            // a saved card (V-16): the server reads back the card and the amount and only the caller's yes starts the charge; the model chooses nothing but the position of a card in the list the server read out
+            if (provider is not ICardSavingProvider saver || !saver.CanSaveCards) return ToolKit.Error("method_unavailable", "Paying with a saved card is not available: offer the keypad or a text link.");
+            if (!OrderAccess.IsAccount(s) || s.AccountId is not { } account) return ToolKit.Error("need_verification", "A saved card belongs to an account verified by text message in this call: offer identify_caller, or the keypad.");
+            if (s.Confirmation != ConfirmationStatus.Confirmed || s.QuoteKey is null || s.QuoteTotalCents is not { } cents) return ToolKit.Error("not_confirmed", "The caller has not confirmed the order read-back: call read_back_order first.");
+            if (s.OrderNumber is not null) return ToolKit.Error("already_placed", "The order is already placed and paid.");
+            if (s.CountPaymentStart() > Math.Max(1, options.Value.MaxPaymentAttempts)) return ToolKit.Error("too_many_attempts", "Too many payment attempts in this call: offer to connect a person, or to order on the web site.");
+            var pos = ToolKit.Int(args, "position", 0);
+            if (pos < 1 || pos > s.SavedCardIds.Count) return ToolKit.Error("no_such_position", "Read the saved cards first with list_saved_cards, then ask which one.");
+            var chosen = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.AsNoTracking(db.SavedCards), c => c.Id == s.SavedCardIds[pos - 1] && c.AccountId == account, ct);   // by account id: another buyer's card is simply not found
+            if (chosen is null) return ToolKit.Error("not_available", "That card is not there any more: read the list again.");
+            s.SetCardPay(new CardPayRequest(chosen.Id, $"I will charge your {SavedCardTalk.Spoken(chosen)} {VoiceSpeech.Money(cents)} for your order." + AccountTalk.Ask));
+            s.SetTask("payment");
+            s.BeginKeypadStep("confirm_card_pay");
+            return new(new JsonObject { ["status"] = "reading_back", ["instruction"] = "Tell the caller in one short sentence that you will read the charge back now. Do not say it yourself. Then stop talking." }.ToJsonString(), EndCall: true);
+        }
         if (!provider.Supports(method)) return ToolKit.Error("method_unavailable", "That way of paying is not available: offer the other one.");
         if (s.Confirmation != ConfirmationStatus.Confirmed || s.QuoteKey is null) return ToolKit.Error("not_confirmed", "The caller has not confirmed the order read-back: call read_back_order first.");
         if (s.OrderNumber is not null) return ToolKit.Error("already_placed", "The order is already placed and paid.");
