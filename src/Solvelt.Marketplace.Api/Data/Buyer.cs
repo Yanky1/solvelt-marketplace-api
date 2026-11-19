@@ -14,6 +14,11 @@ public sealed class BuyerAccount
     public DateTimeOffset? EmailVerifiedAt { get; set; }
     /// <summary>An address given BY PHONE (decision V-13b): saved but NOT an email of the account yet. It becomes <see cref="Email"/> (verified) only when the link mailed to it is clicked; until then it is not usable for sign-in or password reset and is never linked to any account that already has it. Cleared when it is confirmed, replaced or the account is deleted.</summary>
     public string? PendingEmail { get; set; }
+    /// <summary>The PHONE PIN (decision V-18): a salted, peppered hash of a numeric PIN typed on the keypad, a second factor for signing in by PHONE after the SMS code. Never used on the web, never exported or shown. Null when the account has none.</summary>
+    public string? PinHash { get; set; }
+    /// <summary>Wrong PIN tries since the last right one (the fifth locks the PIN for <see cref="PinLockedUntil"/>).</summary>
+    public int PinFailures { get; set; }
+    public DateTimeOffset? PinLockedUntil { get; set; }
     /// <summary>
     /// Set when the test-only "Verify this account" (M9) marked the address verified WITHOUT a mailbox proof. While it is set no guest order is ever attached to the account (the
     /// address was never proven, so an order placed later by whoever owns that mailbox must not move to this account); a real proof (the verification link) or a password reset
@@ -183,6 +188,7 @@ internal sealed class BuyerAccountConfiguration : IEntityTypeConfiguration<Buyer
         b.Property(a => a.Id).ValueGeneratedNever();
         b.Property(a => a.Email).HasMaxLength(254);
         b.Property(a => a.PendingEmail).HasMaxLength(254);
+        b.Property(a => a.PinHash).HasMaxLength(200);
         b.Property(a => a.DisplayName).HasMaxLength(60).IsRequired();
         b.Property(a => a.PasswordHash).HasMaxLength(400);
         b.Property(a => a.Phone).HasMaxLength(30);

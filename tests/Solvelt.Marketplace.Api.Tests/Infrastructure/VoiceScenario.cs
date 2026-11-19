@@ -101,6 +101,13 @@ public sealed class VoiceScenario : IDisposable
         return (xml, token);
     }
 
+    /// <summary>Digits typed on the keypad where the server answers with ANOTHER prompt (a Gather) and no stream: the raw cXML.</summary>
+    public async Task<XElement> Keypad(string digits)
+    {
+        var r = await VoiceFactory.Hook(C, VoiceEndpoints.KeypadPath, Sid, From, extra: new Dictionary<string, string> { ["Digits"] = digits });
+        return XDocument.Parse(await r.Content.ReadAsStringAsync()).Root!;
+    }
+
     /// <summary>SignalWire's <c>action</c> after a <c>&lt;Pay&gt;</c> step: the result of the card step (never any card data).</summary>
     public async Task<(XElement Xml, string Token)> PayAction(string result)
     {

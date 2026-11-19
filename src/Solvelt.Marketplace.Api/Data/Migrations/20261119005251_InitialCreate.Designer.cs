@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261118235641_InitialCreate")]
+    [Migration("20261119005251_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -412,6 +412,16 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<string>("PhoneVerifiedE164")
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
+
+                    b.Property<int>("PinFailures")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("PinHash")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset?>("PinLockedUntil")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset?>("RedactedAt")
                         .HasColumnType("timestamp with time zone");

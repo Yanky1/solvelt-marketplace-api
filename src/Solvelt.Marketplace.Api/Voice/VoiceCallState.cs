@@ -14,6 +14,9 @@ public sealed record AccountChangeRequest(string Kind, string Text, string? Name
 public sealed record PendingCancel(string OrderNumber, string? SellerOrderNumber, string Reason, string Text);
 
 /// <summary>A saved-card payment waiting for the caller's yes (V-16): the card id (the server's, never the model's) and the sentence the SERVER reads back.</summary>
+/// <summary>What the PIN flow of this call is doing (V-18): <c>set</c> or <c>remove</c>, and the hash of the first entry while the caller types it again. The digits are never kept.</summary>
+public sealed record PinSetup(string Action, string? Hash);
+
 public sealed record CardPayRequest(Guid CardId, string Text);
 
 public sealed record CardSaveStep(string AttemptId, System.Xml.Linq.XElement Instruction);
@@ -134,6 +137,14 @@ public sealed class VoiceCallState
     /// <summary>The saved cards the server read out, in order (V-16): the model names a position, the server holds the ids, and only the account's own.</summary>
     public IReadOnlyList<Guid> SavedCardIds { get; private set; } = [];
     public void SetSavedCards(IReadOnlyList<Guid> ids) { lock (_gate) SavedCardIds = ids; }
+    /// <summary>The account whose PIN the caller must still type before this call is signed in as it (V-18).</summary>
+    public Guid? PinFor { get; private set; }
+    public void SetPinFor(Guid? account) { lock (_gate) PinFor = account; }
+    public int PinTries { get; private set; }
+    public int CountPinTry() { lock (_gate) return ++PinTries; }
+    public void ResetPinTries() { lock (_gate) PinTries = 0; }
+    public PinSetup? Pin { get; private set; }
+    public void SetPin(PinSetup? pin) { lock (_gate) Pin = pin; }
     public CardPayRequest? CardPay { get; private set; }
     public void SetCardPay(CardPayRequest? request) { lock (_gate) CardPay = request; }
     public int CardSaveStarts { get; private set; }
@@ -243,6 +254,9 @@ public sealed class VoiceCallState
             sb.Append(Level switch { CallerLevel.Verified => VerifiedInThisCall ? "The caller is verified by SMS code in this call. " : "The caller is recognised but not verified in this call. ", CallerLevel.Guest => "The caller is a guest" + (VerifiedPhone is not null ? " whose phone is verified. " : ". "), _ => "The caller is not identified yet. " });
             if (FirstName is not null && Level == CallerLevel.Verified) sb.Append("Their first name is ").Append(FirstName).Append(". ");
             sb.Append("Current task: ").Append(Task).Append(". ");
+            if (LastKeypadOutcome == "pin_set") sb.Append("The caller just set a PIN on the keypad and it is saved: say so, and never ask for or repeat it. ");
+            if (LastKeypadOutcome == "pin_removed") sb.Append("The caller's PIN was removed. ");
+            if (LastKeypadOutcome == "pin_failed") sb.Append("The caller did not give the right PIN (or the PIN could not be set): they are NOT signed in to the account on this call; they can still order as a guest. Never ask for the PIN aloud. ");
             if (LastKeypadOutcome == "card_pay_declined") sb.Append("The caller did not confirm paying with the saved card: nothing was charged. Offer the keypad or a text link. ");
             if (LastKeypadOutcome == "card_saved") sb.Append("The caller just saved a card at the payment step: it is in their saved cards now (say only its last four digits if they ask, never more). ");
             if (LastKeypadOutcome == "card_pending") sb.Append("The card the caller typed went through at the payment step but the confirmation has not arrived yet: say it is being confirmed and they can ask to hear their saved cards in a moment. ");

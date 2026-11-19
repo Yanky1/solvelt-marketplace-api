@@ -99,6 +99,12 @@ public static class VoiceScripts
     public const string CancelRefused = "Sorry, that order can not be cancelled any more.";
     public const string AccountRetry = "Sorry, I did not catch that. To save the change, say yes or press 1. To leave it as it is, say no or press 2.";
     public const string AccountSaved = "Done. That is saved.";
+    public const string AskPin = "Thank you. Now please type your PIN on the keypad, then press pound.";
+    public const string WrongPin = "That PIN was not right. Please try once more, then press pound.";
+    public const string PinFailed = "Sorry, I could not confirm your PIN, so I cannot open your account on this call. You can still order as a guest.";
+    public const string PinChoose = "Choose a PIN of six to twelve digits. Type it now on the keypad, then press pound. Please do not say it aloud.";
+    public const string PinSaved = "Done. Your PIN is saved.";
+    public const string PinMismatch = "The two PINs were not the same, so nothing was changed.";
     public const string CardSaved = "Done. Your card is saved. Nothing was charged.";
     public const string CardPending = "Your card went through. It is being confirmed and will show in your saved cards in a moment.";
     public const string CardFailed = "Sorry, I could not save that card. Nothing was charged.";

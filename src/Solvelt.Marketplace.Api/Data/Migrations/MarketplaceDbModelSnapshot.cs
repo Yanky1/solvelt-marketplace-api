@@ -410,6 +410,16 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<int>("PinFailures")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("PinHash")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset?>("PinLockedUntil")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTimeOffset?>("RedactedAt")
                         .HasColumnType("timestamp with time zone");
 

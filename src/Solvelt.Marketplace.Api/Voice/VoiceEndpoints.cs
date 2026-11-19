@@ -83,6 +83,8 @@ public static class VoiceEndpoints
             if (st.KeypadStep == "confirm_account" && st.AccountChange is { } change) return Cxml(new XElement("Response", GatherConfirm(v, change.Text)));
             if (st.KeypadStep == "confirm_card_pay" && st.CardPay is { } cardPay) return Cxml(new XElement("Response", GatherConfirm(v, cardPay.Text)));
             if (st.KeypadStep == "pay" && st.Payment?.Instruction is { } pay) return Cxml(new XElement("Response", new XElement(pay)));
+            if (st.KeypadStep == "pin") return Cxml(new XElement("Response", GatherPin(v, VoiceScripts.AskPin)));
+            if (st.KeypadStep == "set_pin") return Cxml(new XElement("Response", GatherPin(v, VoiceScripts.PinChoose)));
             if (st.KeypadStep == "save_card" && st.CardSave?.Instruction is { } saveCard) return Cxml(new XElement("Response", new XElement(saveCard)));
         }
         return Cxml(new XElement("Response", new XElement("Hangup")));
@@ -91,6 +93,11 @@ public static class VoiceEndpoints
     /// <summary>The caller types the six-digit code on the keypad; SignalWire, not the model, collects the digits and posts them to us.</summary>
     private static XElement GatherCode(VoiceOptions v, string prompt)
         => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", PhoneCodeService.Digits), new XAttribute("timeout", 20), new XAttribute("finishOnKey", "#"),
+            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", prompt));
+
+    /// <summary>A PIN typed on the keypad, any length, ended with pound. The digits go to the keypad endpoint only: never to the model, never to a log.</summary>
+    private static XElement GatherPin(VoiceOptions v, string prompt)
+        => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("timeout", 20), new XAttribute("finishOnKey", "#"),
             new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", prompt));
 
     private static XElement GatherConfirm(VoiceOptions v, string say)
@@ -131,8 +138,50 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "save_card" or "confirm_card_pay" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "pin" or "set_pin" or "confirm_pin" or "save_card" or "confirm_card_pay" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
+        if (state.KeypadStep is "pin" or "set_pin" or "confirm_pin")
+        {
+            // the PIN (V-18): typed digits only; they are checked or hashed here and never kept, logged or given to the model
+            using var pinScope = ctx.RequestServices.CreateScope();
+            var pins = pinScope.ServiceProvider.GetRequiredService<PhonePinService>();
+            var digits = new string((typed ?? "").Where(char.IsAsciiDigit).ToArray());
+            if (state.KeypadStep == "pin" && state.PinFor is { } pinAccount)
+            {
+                var checkedPin = await pins.VerifyAsync(pinAccount, digits, state.VerifiedPhone, ct);
+                if (checkedPin == PinResult.Wrong && state.CountPinTry() < 3) return Cxml(new XElement("Response", GatherPin(v, VoiceScripts.WrongPin)));
+                if (checkedPin == PinResult.Ok)
+                {
+                    await IdentifyAccountAsync(state, scopes, pinAccount, ct);
+                    state.SetKeypadOutcome("verified");
+                }
+                else state.SetKeypadOutcome("pin_failed");
+                state.SetPinFor(null); state.ResetPinTries(); state.EndKeypadStep();
+                return Cxml(new XElement("Response", new XElement("Say", checkedPin == PinResult.Ok ? VoiceScripts.CodeOk : VoiceScripts.PinFailed), StreamParts(v, tokens, call.Id)));
+            }
+            if (state.KeypadStep == "set_pin" && OrderAccess.IsAccount(state) && state.AccountId is { } setAccount && state.Pin is { Action: "set" } setting)
+            {
+                if (PhonePinService.Problem(digits, state.VerifiedPhone) is { } problem)
+                {
+                    if (state.CountPinTry() >= 3) { state.SetPin(null); state.ResetPinTries(); state.SetKeypadOutcome("pin_failed"); state.EndKeypadStep(); return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.PinFailed), StreamParts(v, tokens, call.Id))); }
+                    return Cxml(new XElement("Response", GatherPin(v, problem + " " + VoiceScripts.PinChoose)));
+                }
+                state.SetPin(setting with { Hash = pins.Prepare(setAccount, digits) });
+                state.BeginKeypadStep("confirm_pin");
+                return Cxml(new XElement("Response", GatherPin(v, $"I heard a PIN of {VoiceSpeech.Number(digits.Length)} digits. To confirm, type the same PIN again, then press pound.")));   // the LENGTH only is read back, never a digit
+            }
+            if (state.KeypadStep == "confirm_pin" && OrderAccess.IsAccount(state) && state.AccountId is { } confirmAccount && state.Pin is { Action: "set", Hash: { } firstHash })
+            {
+                var same = digits.Length > 0 && pins.Matches(firstHash, confirmAccount, digits);
+                if (same) await pins.SaveAsync(confirmAccount, firstHash, ct);
+                state.SetPin(null); state.ResetPinTries();
+                state.SetKeypadOutcome(same ? "pin_set" : "pin_failed");
+                state.EndKeypadStep();
+                return Cxml(new XElement("Response", new XElement("Say", same ? VoiceScripts.PinSaved : VoiceScripts.PinMismatch), StreamParts(v, tokens, call.Id)));
+            }
+            state.SetPin(null); state.SetPinFor(null); state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Hangup")));
+        }
         if (state.KeypadStep == "confirm_cancel")
         {
             form.TryGetValue("SpeechResult", out var said);
@@ -270,14 +319,41 @@ public static class VoiceEndpoints
             state.EndKeypadStep();
             return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
         }
-        if (result == CodeResult.Ok) await ApplyVerifiedAsync(state, scopes, store, call.Id, time, ct);
+        if (state.LastChallengePurpose == "pin_change")
+        {
+            // a fresh code in THIS call is required to set, change or remove the PIN; then the server takes the PIN on the keypad (or reads the removal back)
+            if (result == CodeResult.Ok && OrderAccess.IsAccount(state) && state.Pin is { } pinAction)
+            {
+                state.SetChallenge(null);
+                if (pinAction.Action == "remove")
+                {
+                    state.SetAccountChange(new AccountChangeRequest("pin_remove", "I will remove the PIN from your account. From then on a text message code alone opens it by phone." + AccountTalk.Ask));
+                    state.BeginKeypadStep("confirm_account");
+                    return Cxml(new XElement("Response", GatherConfirm(v, state.AccountChange!.Text)));
+                }
+                state.ResetPinTries();
+                state.BeginKeypadStep("set_pin");
+                return Cxml(new XElement("Response", GatherPin(v, VoiceScripts.PinChoose)));
+            }
+            state.SetPin(null); state.SetKeypadOutcome("account_refused"); state.SetChallenge(null); state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
+        }
+        if (result == CodeResult.Ok)
+        {
+            if (await ApplyVerifiedAsync(state, scopes, store, call.Id, time, ct))
+            {
+                state.ResetPinTries();
+                state.BeginKeypadStep("pin");   // the account has a PIN: the SMS code is the first factor, the PIN the second
+                return Cxml(new XElement("Response", GatherPin(v, VoiceScripts.AskPin)));
+            }
+        }
         else { state.SetKeypadOutcome("failed"); state.SetChallenge(null); }
         state.EndKeypadStep();
         return Cxml(new XElement("Response", new XElement("Say", result == CodeResult.Ok ? VoiceScripts.CodeOk : VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
     }
 
     /// <summary>A right code proves the caller holds the number: the matching account (if exactly one) is now theirs for this call, otherwise they are a guest with a verified phone. A guest cart moves into the account.</summary>
-    private static async Task ApplyVerifiedAsync(VoiceCallState state, IServiceScopeFactory scopes, VoiceCallStore store, Guid callId, TimeProvider time, CancellationToken ct)
+    private static async Task<bool> ApplyVerifiedAsync(VoiceCallState state, IServiceScopeFactory scopes, VoiceCallStore store, Guid callId, TimeProvider time, CancellationToken ct)
     {
         var phone = state.LastChallengePhone;
         state.SetVerifiedPhone(phone);
@@ -286,17 +362,34 @@ public static class VoiceEndpoints
         state.SetKeypadOutcome("verified");
         if (state.LastChallengeAccount is { } accountId)
         {
-            using var scope = scopes.CreateScope();
-            var cart = scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Carts.CartService>();
-            var db = scope.ServiceProvider.GetRequiredService<Data.MarketplaceDb>();
-            var name = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.AsNoTracking(db.BuyerAccounts).Where(a => a.Id == accountId).Select(a => a.DisplayName), ct);
-            if (state.CartToken is { } guestToken) await cart.MergeGuestAsync(accountId, guestToken, ct);   // the cart carries over into the account
-            state.SetCartToken(null);
-            state.Identify(CallerLevel.Verified, accountId, verifiedNow: true);
-            state.SetFirstName(name?.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault());
-            state.SetCart("cart", (await cart.GetAsync(new Solvelt.Marketplace.Api.Carts.CartOwner(accountId, null), ct)).ItemCount);
+            using var pinScope = scopes.CreateScope();
+            if (await pinScope.ServiceProvider.GetRequiredService<PhonePinService>().HasPinAsync(accountId, ct))
+            {
+                // the code proved the number; the account has a PIN, so the call is only a GUEST with a verified phone until the PIN is typed (V-18)
+                state.SetPinFor(accountId);
+                state.Identify(CallerLevel.Guest, null, verifiedNow: true);
+                state.SetTask("shopping");
+                return true;
+            }
+            await IdentifyAccountAsync(state, scopes, accountId, ct);
         }
         else state.Identify(CallerLevel.Guest, null, verifiedNow: true);
+        state.SetTask("shopping");
+        return false;
+    }
+
+    /// <summary>The account is now this call's: the guest cart moves into it and the caller is signed in as it.</summary>
+    private static async Task IdentifyAccountAsync(VoiceCallState state, IServiceScopeFactory scopes, Guid accountId, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var cart = scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Carts.CartService>();
+        var db = scope.ServiceProvider.GetRequiredService<Data.MarketplaceDb>();
+        var name = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.AsNoTracking(db.BuyerAccounts).Where(a => a.Id == accountId).Select(a => a.DisplayName), ct);
+        if (state.CartToken is { } guestToken) await cart.MergeGuestAsync(accountId, guestToken, ct);   // the cart carries over into the account
+        state.SetCartToken(null);
+        state.Identify(CallerLevel.Verified, accountId, verifiedNow: true);
+        state.SetFirstName(name?.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault());
+        state.SetCart("cart", (await cart.GetAsync(new Solvelt.Marketplace.Api.Carts.CartOwner(accountId, null), ct)).ItemCount);
         state.SetTask("shopping");
     }
 
