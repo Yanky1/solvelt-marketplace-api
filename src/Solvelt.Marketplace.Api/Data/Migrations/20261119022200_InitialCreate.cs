@@ -315,6 +315,38 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "catalog_offers",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    SellerId = table.Column<Guid>(type: "uuid", nullable: false),
+                    BrandId = table.Column<Guid>(type: "uuid", nullable: false),
+                    Name = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
+                    Currency = table.Column<string>(type: "character varying(3)", maxLength: 3, nullable: false),
+                    Scope = table.Column<string>(type: "character varying(12)", maxLength: 12, nullable: false),
+                    ProductIdsJson = table.Column<string>(type: "text", nullable: false),
+                    CategoryIdsJson = table.Column<string>(type: "text", nullable: false),
+                    TiersJson = table.Column<string>(type: "text", nullable: false),
+                    GiftsJson = table.Column<string>(type: "text", nullable: false),
+                    ActiveFrom = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    ActiveTo = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    Demo = table.Column<bool>(type: "boolean", nullable: false),
+                    Version = table.Column<long>(type: "bigint", nullable: false),
+                    KnownVersion = table.Column<long>(type: "bigint", nullable: false),
+                    UnlistedVersion = table.Column<long>(type: "bigint", nullable: true),
+                    Visible = table.Column<bool>(type: "boolean", nullable: false),
+                    FirstSeenAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    FetchAttempts = table.Column<int>(type: "integer", nullable: false),
+                    NextFetchAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    Row = table.Column<long>(type: "bigint", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_catalog_offers", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "catalog_quarantine",
                 columns: table => new
                 {
@@ -1692,6 +1724,16 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "Visible", "SellerId" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_catalog_offers_KnownVersion",
+                table: "catalog_offers",
+                column: "KnownVersion");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_catalog_offers_SellerId_BrandId_Visible",
+                table: "catalog_offers",
+                columns: new[] { "SellerId", "BrandId", "Visible" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_catalog_search_brand_id",
                 table: "catalog_search",
                 column: "brand_id");
@@ -2219,6 +2261,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "catalog_images");
+
+            migrationBuilder.DropTable(
+                name: "catalog_offers");
 
             migrationBuilder.DropTable(
                 name: "catalog_quarantine");

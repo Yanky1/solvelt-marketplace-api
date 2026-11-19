@@ -186,10 +186,20 @@ builder.Services.AddSingleton<ICatalogImageSource>(sp =>
 builder.Services.AddSingleton<ISearchIndex>(_ => (builder.Configuration["Database:Provider"] ?? "Sqlite").Equals("Postgres", StringComparison.OrdinalIgnoreCase)
     ? new PostgresSearchIndex() : new SqliteSearchIndex());
 builder.Services.AddSingleton<IProjectionHandler, CatalogEventHandler>();
+builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Offers.OfferEventHandler>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Offers.FixtureOfferSource>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Offers.IOfferSource>(sp =>
+    CatalogSourceSelection.Resolve(sp.GetRequiredService<IConfiguration>()["Catalog:Source"], devLike).ToLowerInvariant() switch
+    {
+        "fixture" => sp.GetRequiredService<Solvelt.Marketplace.Api.Offers.FixtureOfferSource>(),
+        "http" => new Solvelt.Marketplace.Api.Offers.HttpOfferSource(sp.GetRequiredService<ISignedPortalClient>(), sp.GetRequiredService<ILogger<Solvelt.Marketplace.Api.Offers.HttpOfferSource>>()),
+        _ => new Solvelt.Marketplace.Api.Offers.EmptyOfferSource(),
+    });
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Offers.OfferSyncService>();
 builder.Services.AddScoped<CatalogSyncService>();
 builder.Services.AddScoped<CategoryMap>();
 if (!builder.Environment.IsEnvironment("Testing") && !string.Equals(builder.Configuration["Catalog:Source"], "None", StringComparison.OrdinalIgnoreCase) )
-    builder.Services.AddHostedService<CatalogSyncWorker>();
+    { builder.Services.AddHostedService<CatalogSyncWorker>(); builder.Services.AddHostedService<Solvelt.Marketplace.Api.Offers.OfferSyncWorker>(); }
 builder.Services.AddSingleton<ProjectionRegistry>();
 builder.Services.AddSingleton<TerminalStateRules>();
 builder.Services.AddScoped<ProjectionStore>();

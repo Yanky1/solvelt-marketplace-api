@@ -69,6 +69,9 @@ public interface ISignedPortalClient
     Task<PortalResult<JsonElement>> GetCatalogListingsAsync(string? since, int limit, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> GetCatalogListingAsync(Guid listingId, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> GetCatalogCategoriesAsync(CancellationToken ct = default);
+    /// <summary>The quantity-offer feed (portal C18.2): <c>GET /catalog/offers?since=&amp;limit=</c> and <c>GET /catalog/offers/{id}</c>.</summary>
+    Task<PortalResult<JsonElement>> GetCatalogOffersAsync(string? since, int limit, CancellationToken ct = default);
+    Task<PortalResult<JsonElement>> GetCatalogOfferAsync(Guid offerId, CancellationToken ct = default);
     Task<PortalResult<JsonElement>> GetCatalogBrandsAsync(Guid? since, int limit, CancellationToken ct = default);
     /// <summary><c>GET /catalog/images/{imageId}</c>: the original bytes of an image of a visible listing (the portal answers 404 for anything else). Server-side only.</summary>
     Task<PortalImageResult> GetCatalogImageAsync(Guid imageId, CancellationToken ct = default);
@@ -235,6 +238,12 @@ public sealed partial class SignedPortalClient(HttpClient http, IOptions<PortalO
 
     public Task<PortalResult<JsonElement>> GetCatalogListingAsync(Guid listingId, CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/listings/{listingId:D}", null, Retry.Standard, ct, CatalogMaxResponseBytes);
+
+    public Task<PortalResult<JsonElement>> GetCatalogOffersAsync(string? since, int limit, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/offers?{(string.IsNullOrEmpty(since) ? "" : $"since={Uri.EscapeDataString(since)}&")}limit={Math.Clamp(limit, 1, 200)}", null, Retry.Standard, ct, CatalogMaxResponseBytes);
+
+    public Task<PortalResult<JsonElement>> GetCatalogOfferAsync(Guid offerId, CancellationToken ct = default)
+        => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/offers/{offerId:D}", null, Retry.Standard, ct, CatalogMaxResponseBytes);
 
     public Task<PortalResult<JsonElement>> GetCatalogCategoriesAsync(CancellationToken ct = default)
         => Call<JsonElement>(HttpMethod.Get, $"{ApiBase}/catalog/categories", null, Retry.Standard, ct, CatalogMaxResponseBytes);

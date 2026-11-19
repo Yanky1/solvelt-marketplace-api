@@ -1140,6 +1140,94 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.ToTable("catalog_listings", (string)null);
                 });
 
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.CatalogOffer", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("ActiveFrom")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ActiveTo")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("BrandId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CategoryIdsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<bool>("Demo")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("FetchAttempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("FirstSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("GiftsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("KnownVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset?>("NextFetchAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ProductIdsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("Row")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Scope")
+                        .IsRequired()
+                        .HasMaxLength(12)
+                        .HasColumnType("character varying(12)");
+
+                    b.Property<Guid>("SellerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TiersJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long?>("UnlistedVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.Property<bool>("Visible")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("KnownVersion");
+
+                    b.HasIndex("SellerId", "BrandId", "Visible");
+
+                    b.ToTable("catalog_offers", (string)null);
+                });
+
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.CatalogQuarantine", b =>
                 {
                     b.Property<Guid>("ListingId")
