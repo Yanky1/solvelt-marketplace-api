@@ -54,6 +54,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             }
             await PollAsync(counts, ct);
             await FetchPendingAsync(counts, ct);
+            await SearchIndexer.ReindexIfStaleAsync(db, ct);     // first: rows written by an older tokenizer are rewritten once (V-21)
             await SearchIndexer.BackfillAsync(db, ct);
             await MaintainSellersAsync(ct);
         }

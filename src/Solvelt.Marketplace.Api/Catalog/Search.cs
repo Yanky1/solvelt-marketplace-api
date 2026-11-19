@@ -56,6 +56,40 @@ public static class SearchIndexer
 
     private static string Cut(string s, int max) => SearchText.Clip(s, max);
 
+    /// <summary>The sync-state row that records which tokenizer version the search rows were built with.</summary>
+    public const string TokenizerStateKey = "search-tokenizer";
+
+    /// <summary>
+    /// The rows hold text already normalised by <see cref="SearchText"/>, so a change of its rules needs the rows rewritten. When the recorded version is not the current
+    /// one, every row's fields are normalised again (the earlier output is a fixed point of the old rules, so this equals normalising the original text; the PostgreSQL
+    /// vector is generated from these columns and follows) and the version is recorded. A database without rows just records it. Idempotent; returns the rows rewritten.
+    /// </summary>
+    public static async Task<int> ReindexIfStaleAsync(MarketplaceDb db, CancellationToken ct)
+    {
+        var state = await db.CatalogSyncStates.AsNoTracking().FirstOrDefaultAsync(s => s.Key == TokenizerStateKey, ct);
+        if (state?.Cursor == SearchText.Version) return 0;
+        var ids = await db.CatalogSearch.AsNoTracking().Select(r => r.ListingId).ToListAsync(ct);
+        foreach (var chunk in ids.Chunk(200))
+        {
+            var rows = await db.CatalogSearch.Where(r => chunk.Contains(r.ListingId)).ToListAsync(ct);
+            foreach (var row in rows)
+            {
+                row.Title = Cut(SearchText.Normalize(row.Title), 400);
+                row.Brand = Cut(SearchText.Normalize(row.Brand), 300);
+                row.Terms = Cut(SearchText.Normalize(row.Terms), MaxTermsText);
+                row.Description = Cut(SearchText.Normalize(row.Description), MaxDescription);
+                row.Text = Cut($"{row.Title} {row.Brand} {row.Terms}".Trim(), 2800);
+            }
+            await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
+        }
+        if (state is null) db.CatalogSyncStates.Add(new CatalogSyncState { Key = TokenizerStateKey, Cursor = SearchText.Version });
+        else await db.CatalogSyncStates.Where(s => s.Key == TokenizerStateKey).ExecuteUpdateAsync(u => u.SetProperty(s => s.Cursor, SearchText.Version), ct);
+        await db.SaveChangesAsync(ct);
+        db.ChangeTracker.Clear();
+        return ids.Count;
+    }
+
     /// <summary>Indexes every listing that has no search row yet (a database that predates the index, or a crash between steps). Idempotent.</summary>
     public static async Task<int> BackfillAsync(MarketplaceDb db, CancellationToken ct)
     {
