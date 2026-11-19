@@ -27,10 +27,15 @@ public sealed class InProcessCatalog(IServiceProvider sp)
         return await JsonDocument.ParseAsync(ctx.Response.Body, cancellationToken: ct);
     }
 
-    public Task<JsonDocument?> SearchAsync(string text, int pageSize, long? priceMaxCents, CancellationToken ct)
+    /// <summary>The category tree as the web shows it, but counting only products that can be bought now (a category with none is left out).</summary>
+    public Task<JsonDocument?> CategoriesAsync(CancellationToken ct)
+        => RunAsync(_ => CatalogEndpoints.CategoriesAsync(sp.GetRequiredService<MarketplaceDb>(), sp.GetRequiredService<CategoryMap>(), true, ct), null, ct);
+
+    public Task<JsonDocument?> SearchAsync(string text, int pageSize, long? priceMaxCents, CancellationToken ct, string? categorySlug = null)
     {
         var q = new Dictionary<string, string?> { ["q"] = text, ["type"] = "product", ["available"] = "true", ["pageSize"] = pageSize.ToString(), ["sort"] = "relevance" };
         if (priceMaxCents is > 0) q["priceMax"] = priceMaxCents.Value.ToString();
+        if (!string.IsNullOrEmpty(categorySlug)) q["category"] = categorySlug;
         return RunAsync(ctx => CatalogEndpoints.Listings(ctx.Request, sp.GetRequiredService<MarketplaceDb>(), sp.GetRequiredService<ISearchIndex>(), sp.GetRequiredService<CategoryMap>(), ct),
             QueryString.Create(q), ct);
     }
@@ -105,18 +110,113 @@ public sealed class SetGuestNameTool : IVoiceTool
     }
 }
 
+/// <summary>Reads the category tree through the same handler as the web (see <see cref="InProcessCatalog.CategoriesAsync"/>): only categories that have something to buy, in the tree's own order.</summary>
+internal static class VoiceCategories
+{
+    internal sealed record Node(string Slug, string Name, int Count, List<Node> Children);
+
+    public static async Task<List<Node>?> LoadAsync(InProcessCatalog catalog, CancellationToken ct)
+    {
+        using var doc = await catalog.CategoriesAsync(ct);
+        return doc is null ? null : doc.RootElement.EnumerateArray().Select(Read).ToList();
+    }
+
+    private static Node Read(JsonElement e) => new(e.GetProperty("slug").GetString() ?? "", e.GetProperty("name").GetString() ?? "", e.GetProperty("listingCount").GetInt32(),
+        e.GetProperty("children").EnumerateArray().Select(Read).ToList());
+
+    /// <summary>The node whose slug or spoken name matches (letters and digits only, any case), searching the whole tree; null when nothing with products matches.</summary>
+    public static Node? Find(List<Node> tree, string asked)
+    {
+        var want = Norm(asked);
+        if (want.Length == 0) return null;
+        Node? byName = null;
+        foreach (var n in Walk(tree))
+        {
+            if (Norm(n.Slug) == want) return n;
+            if (byName is null && Norm(n.Name) == want) byName = n;
+        }
+        return byName;
+    }
+
+    public static async Task<string?> ResolveAsync(InProcessCatalog catalog, string asked, CancellationToken ct)
+        => await LoadAsync(catalog, ct) is { } tree ? Find(tree, asked)?.Slug : null;
+
+    private static IEnumerable<Node> Walk(IEnumerable<Node> nodes) { foreach (var n in nodes) { yield return n; foreach (var c in Walk(n.Children)) yield return c; } }
+    private static string Norm(string s) => new(s.Replace("&", " and ").Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());   // "Food & Drink" is what a caller says as "food and drink"
+}
+
+/// <summary>What Solvelt sells, by category: the top level first, then one level down on request. Only categories with something that can be bought now.</summary>
+public sealed class ListCategoriesTool(InProcessCatalog catalog) : IVoiceTool
+{
+    private const int PerAnswer = 3;
+    public string Name => "list_categories";
+    public JsonObject Definition => ToolKit.Def(Name,
+        "List the kinds of products Solvelt sells, by category. With no parent it gives the top-level categories; with a parent (a slug from an earlier answer, or the name the caller used) it gives the categories inside it. Returns at most three at a time; use skip to hear more.",
+        new JsonObject
+        {
+            ["parent"] = ToolKit.Prop("string", "Only to look inside one category: its slug from an earlier list_categories answer, or the name as the caller said it."),
+            ["skip"] = ToolKit.Prop("integer", "How many of the categories already read out to skip, to hear the next ones. Leave out the first time."),
+        });
+
+    public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        var tree = await VoiceCategories.LoadAsync(catalog, ct);
+        if (tree is null) return ToolKit.Error("categories_unavailable", "Say the list did not load and offer to try again, or to search for something by name.");
+        var parentAsked = ToolKit.Str(args, "parent")?.Trim();
+        VoiceCategories.Node? parent = null;
+        var level = tree;
+        if (!string.IsNullOrEmpty(parentAsked))
+        {
+            parent = VoiceCategories.Find(tree, parentAsked);
+            if (parent is null) return ToolKit.Error("unknown_category", "There is no such category with products for sale. Offer the top-level list instead (call list_categories with no parent).");
+            level = parent.Children;
+        }
+        var skip = Math.Max(0, ToolKit.Int(args, "skip", 0));
+        var page = level.Skip(skip).Take(PerAnswer).ToList();
+        var more = Math.Max(0, level.Count - skip - page.Count);
+        ctx.State.SetTask("shopping");
+        var items = new JsonArray();
+        foreach (var n in page) items.Add(new JsonObject { ["slug"] = n.Slug, ["name"] = VoiceSpeech.Plain(n.Name, 60), ["has_subcategories"] = n.Children.Count > 0 });
+        string instruction;
+        if (level.Count == 0) instruction = parent is null ? "Say there is nothing for sale right now." : "Say this category has no subcategories; offer to search it (search_products with this category).";
+        else if (page.Count == 0) instruction = "That was all of them: say so and ask what they would like.";
+        else instruction = "Say at most these names, then" + (more > 0 ? $" offer to read more (there are {more} more; call again with skip {skip + page.Count})," : "") + " ask which one they want to explore. To see what is in one, search_products with its slug as category, or list_categories with it as parent for its subcategories.";
+        return ToolKit.Json(new JsonObject
+        {
+            ["parent"] = parent is null ? null : VoiceSpeech.Plain(parent.Name, 60),
+            ["total"] = level.Count,
+            ["categories"] = items,
+            ["say"] = page.Count == 0 ? "" : VoiceSpeech.List(page.Select(n => VoiceSpeech.Plain(n.Name, 60)).ToList()),
+            ["more"] = more,
+            ["instruction"] = instruction,
+        });
+    }
+}
+
 public sealed class SearchProductsTool(InProcessCatalog catalog) : IVoiceTool
 {
     public string Name => "search_products";
     public JsonObject Definition => ToolKit.Def(Name, "Search the marketplace's products. Returns at most three, with positions the caller can refer to.",
-        new JsonObject { ["query"] = ToolKit.Prop("string", "What the caller is looking for, in their words."), ["max_price_dollars"] = ToolKit.Prop("integer", "Only if the caller named a ceiling in whole dollars.") }, "query");
+        new JsonObject
+        {
+            ["query"] = ToolKit.Prop("string", "What the caller is looking for, in their words. May be left out when the caller only named a category (\"what do you have in kitchen?\")."),
+            ["category"] = ToolKit.Prop("string", "Only to search inside one category: its slug from list_categories, or the name as the caller said it."),
+            ["max_price_dollars"] = ToolKit.Prop("integer", "Only if the caller named a ceiling in whole dollars."),
+        });
 
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
     {
-        var text = ToolKit.Str(args, "query")?.Trim();
-        if (string.IsNullOrEmpty(text) || text.Length > 100) return ToolKit.Error("bad_query", "Ask what they are looking for.");
+        var text = ToolKit.Str(args, "query")?.Trim() ?? "";
+        var categoryAsked = ToolKit.Str(args, "category")?.Trim();
+        if (text.Length > 100 || (text.Length == 0 && string.IsNullOrEmpty(categoryAsked))) return ToolKit.Error("bad_query", "Ask what they are looking for, or which category.");
+        string? slug = null;
+        if (!string.IsNullOrEmpty(categoryAsked))
+        {
+            slug = await VoiceCategories.ResolveAsync(catalog, categoryAsked, ct);
+            if (slug is null) return ToolKit.Error("unknown_category", "There is no such category with products for sale. Call list_categories to see the real ones, or search without a category.");
+        }
         var maxDollars = ToolKit.Int(args, "max_price_dollars", 0);
-        using var page = await catalog.SearchAsync(text, 3, maxDollars > 0 ? maxDollars * 100L : null, ct);
+        using var page = await catalog.SearchAsync(text, 3, maxDollars > 0 ? maxDollars * 100L : null, ct, slug);
         if (page is null) return ToolKit.Error("search_unavailable", "Say the search did not work and offer to try again.");
         var items = page.RootElement.GetProperty("items").EnumerateArray().ToList();
         var total = page.RootElement.GetProperty("total").GetInt32();

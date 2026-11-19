@@ -65,10 +65,15 @@ public static class CatalogEndpoints
     internal static IQueryable<CatalogListing> Visible(MarketplaceDb db)
         => db.CatalogListings.AsNoTracking().Where(l => l.Visible && db.CatalogSellers.Any(s => s.Id == l.SellerId && s.Active));
 
-    private static async Task<IResult> Categories(MarketplaceDb db, CategoryMap map, CancellationToken ct)
+    private static Task<IResult> Categories(MarketplaceDb db, CategoryMap map, CancellationToken ct) => CategoriesAsync(db, map, false, ct);
+
+    /// <summary>The category tree. <paramref name="buyableOnly"/> counts only PRODUCTS that can be bought now (the voice line sells only those, as its search does); the public endpoint passes false and is unchanged.</summary>
+    internal static async Task<IResult> CategoriesAsync(MarketplaceDb db, CategoryMap map, bool buyableOnly, CancellationToken ct)
     {
         var categories = await map.AllAsync(ct);
-        var direct = await Visible(db).GroupBy(l => l.CategoryId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
+        var listings = Visible(db);
+        if (buyableOnly) listings = listings.Where(l => l.Available && l.Type == ListingTypes.Product);
+        var direct = await listings.GroupBy(l => l.CategoryId).Select(g => new { Id = g.Key, N = g.Count() }).ToDictionaryAsync(x => x.Id, x => x.N, ct);
         return Results.Json(BuildTree(categories, direct));
     }
 

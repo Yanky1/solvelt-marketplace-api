@@ -120,6 +120,7 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessCatalog>(sp =>
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TransferToPersonTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.IdentifyCallerTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SetGuestNameTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.ListCategoriesTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SearchProductsTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.DescribeProductTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.AddToCartTool>();
