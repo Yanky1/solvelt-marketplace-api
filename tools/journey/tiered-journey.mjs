@@ -9,7 +9,8 @@ const run = L.uniq();
 
 async function main() {
   step("a seller creates two products, a free-gift product and a quantity offer in the real portal");
-  const seller = await L.newApprovedSeller(`Journey Tiers ${run}`);
+  // free shipping from 23.00: the discounted subtotal (2250) is UNDER it and the list price (2500) is OVER it, so the order only passes if the buyer side compares the discounted subtotal (Q-04)
+  const seller = await L.newApprovedSeller(`Journey Tiers ${run}`, { freeOverCents: 2300 });
   const titleA = `Tierpen ${run} alpha`, titleB = `Tierpen ${run} beta`, titleG = `Tiergift ${run} wallet`;
   const a = await L.sellerProduct(seller, { title: titleA, price: 1, quantity: 100 });
   const b = await L.sellerProduct(seller, { title: titleB, price: 1, quantity: 100, color: [200, 60, 60] });
@@ -43,6 +44,7 @@ async function main() {
   const quote = (await L.must(api("POST", "/api/v1/checkout/quote", { token: buyer.token, body: { address: { country: "US", region: "NY", postalCode: "11201" } } }), 200, "quote")).body;
   check(quote.itemsCents === 2250, `quote items ${quote.itemsCents}`);
   const qg = quote.groups[0];
+  check(qg.shippingCents === 500, `shipping is charged (500) because the DISCOUNTED subtotal 2250 is under the free-shipping threshold 2300 (${qg.shippingCents})`);
   check(qg.gifts?.length === 1 && qg.gifts[0].quantity === 1, "the quote holds one free gift");
   check(qg.offers?.[0]?.offerId === offer.id && qg.offers[0].version === offer.version, "the quote names the offer and its version");
   const placed = (await L.must(api("POST", "/api/v1/checkout", { token: buyer.token, body: { address: L.ADDRESS, quoteHash: quote.quoteHash } }), 200, "checkout")).body;

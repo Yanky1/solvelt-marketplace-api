@@ -77,7 +77,7 @@ export async function sellerLogin(email, password = SELLER_PASSWORD) {
 }
 
 /** Signs a seller up (mail code read from the portal's Testing mail sink), fills the application, has the seeded staff admin approve it. Returns { email, token, sellerId, brandId }. */
-export async function newApprovedSeller(label = "Journey Seller") {
+export async function newApprovedSeller(label = "Journey Seller", { freeOverCents = null } = {}) {
   const email = `seller-${uniq()}@example.com`;
   await must(portal("POST", "/api/v1/auth/signup", { body: { email, password: SELLER_PASSWORD, acceptTerms: true } }), 202, "seller sign-up");
   const mails = await until("the portal's verification mail", async () => { const m = (await portal("GET", `/api/test/emails?to=${encodeURIComponent(email)}&kind=verify-code`)).body; return Array.isArray(m) && m.length ? m : null; });
@@ -93,7 +93,7 @@ export async function newApprovedSeller(label = "Journey Seller") {
   const brands = await must(portal("GET", "/api/v1/brands", { token }), 200, "brands");
   const brandId = brands.body[0].id;
   // a default shipping profile: flat 5.00 standard shipping inside the US (without one the checkout says "this seller can't deliver to that address")
-  await must(portal("POST", "/api/v1/seller/shipping/profiles", { token, body: { name: "Default", currency: "USD", isDefault: true, zones: [{ name: "US", kind: "domestic", countries: ["US"], speeds: [{ speed: "standard", enabled: true, method: "flat", flatCents: 500 }] }] } }), [200, 201], "shipping profile");
+  await must(portal("POST", "/api/v1/seller/shipping/profiles", { token, body: { name: "Default", currency: "USD", isDefault: true, freeShippingThresholdCents: freeOverCents, zones: [{ name: "US", kind: "domestic", countries: ["US"], speeds: [{ speed: "standard", enabled: true, method: "flat", flatCents: 500 }] }] } }), [200, 201], "shipping profile");
   return { email, token, sellerId, brandId };
 }
 
