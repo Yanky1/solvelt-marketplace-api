@@ -110,7 +110,8 @@ public class VoiceBargeInTests
         await Medias(s, 2);                                                                                 // it plays normally (a new media reached the phone)
         s.F.Clock.Advance(TimeSpan.FromMilliseconds(250));
         await s.Fake.Send(new { type = "input_audio_buffer.speech_started" });
-        await FakeRealtime.Poll(() => Clears(s) == 2 ? "x" : null, 5);
+        // the bridge tells the PHONE to clear first and the model to truncate right after: wait for the second truncate itself, not for the clear (which can be seen before the truncate was sent)
+        await FakeRealtime.Poll(() => Clears(s) == 2 && s.Fake.Of("conversation.item.truncate").Count() == 2 ? "x" : null, 5);
         var second = s.Fake.Of("conversation.item.truncate").Last();
         Assert.Equal("item_2", second["item_id"]!.GetValue<string>());
         Assert.Equal(250, second["audio_end_ms"]!.GetValue<int>());                                         // counted from the NEW item's start, nothing carried over from the cleared one
