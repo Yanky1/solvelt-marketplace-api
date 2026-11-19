@@ -102,6 +102,8 @@ public sealed class OrderGroup
     public string? SellerOrderNumber { get; set; }
     /// <summary>The portal could not cover every unit from stock; the seller will sort it out (shown to the buyer).</summary>
     public bool Oversold { get; set; }
+    /// <summary>The portal left an earned free gift out (out of stock, C18.1-7): shown to the buyer as "free gift unavailable"; the order itself is unaffected.</summary>
+    public bool GiftUnavailable { get; set; }
     /// <summary>Per seller order, the same cap as on the order (items + shipping + tax).</summary>
     public long RefundedCents { get; set; }
     /// <summary>Shipping returned so far (shipping excl. tax; never above <see cref="ShippingCents"/>).</summary>
@@ -290,6 +292,7 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceO
         b.Property(g => g.SellerOrderNumber).HasMaxLength(60);
         b.HasIndex(g => new { g.OrderId, g.SellerId, g.BrandId }).IsUnique();
         b.Property(g => g.DiscountCents).HasDefaultValue(0L);
+        b.Property(g => g.GiftUnavailable).HasDefaultValue(false);
         b.HasIndex(g => g.SellerOrderId);
     }
 

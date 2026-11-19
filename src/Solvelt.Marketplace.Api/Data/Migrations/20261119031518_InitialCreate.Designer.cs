@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261119022653_InitialCreate")]
+    [Migration("20261119031518_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -1921,6 +1921,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("bigint")
                         .HasDefaultValue(0L);
+
+                    b.Property<bool>("GiftUnavailable")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
 
                     b.Property<long>("ItemsCents")
                         .HasColumnType("bigint");

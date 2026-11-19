@@ -103,7 +103,7 @@ public static class OrderEndpoints
                 {
                     sellerOrderNumber = g.SellerOrderNumber, sellerName = g.SellerName, brandName = g.BrandName, status,
                     deliveryKind = st?.DeliveryMethodChangedTo ?? g.DeliveryKind, shippingSpeed = g.ShippingSpeed, localDate = g.LocalDate,
-                    itemsCents = g.ItemsCents, shippingCents = g.ShippingCents, taxCents = g.TaxCents, totalCents = g.TotalCents, refundedCents = g.RefundedCents, oversold = g.Oversold,
+                    itemsCents = g.ItemsCents, shippingCents = g.ShippingCents, taxCents = g.TaxCents, totalCents = g.TotalCents, refundedCents = g.RefundedCents, oversold = g.Oversold, giftUnavailable = g.GiftUnavailable || (g.OffersJson != null && g.OffersJson.Contains("\"GiftUnavailable\":true")), discountCents = g.DiscountCents,
                     acceptedAt = st?.AcceptedAt, shippedAt = st?.ShippedAt, deliveredAt = st?.DeliveredAt, deliveredBy = st?.DeliveredBy, cancelledAt = st?.CancelledAt,
                     deliveryAttemptsFailed = st?.DeliveryAttemptsFailed ?? 0, lastAttemptFailedReason = st?.LastAttemptFailedReason, buyerConfirmedAt = st?.BuyerConfirmedAt,
                     canCancel = g.SellerOrderId is not null && open is null && status is FulfilmentStatus.New or FulfilmentStatus.Accepted or FulfilmentStatus.OnHold or FulfilmentStatus.PartiallyShipped,
@@ -115,7 +115,7 @@ public static class OrderEndpoints
                         fulfil.TryGetValue(l.Id, out var f);
                         return new
                         {
-                            lineId = l.MarketplaceLineId, title = l.Title, variantName = l.VariantName, quantity = l.Quantity, unitPriceCents = l.UnitPriceCents, lineTotalCents = l.LineTotalCents, taxCents = l.TaxCents,
+                            lineId = l.MarketplaceLineId, title = l.Title, variantName = l.VariantName, quantity = l.Quantity, unitPriceCents = l.UnitPriceCents, lineTotalCents = l.LineTotalCents, taxCents = l.TaxCents, discountCents = l.DiscountCents, offerId = l.OfferId, isGift = l.IsGift,
                             shippedQty = f?.ShippedQty ?? 0, cancelledQty = f?.CancelledQty ?? 0, returnedQty = f?.ReturnedQty ?? 0, refundedQty = f?.RefundedQty ?? 0,
                             returnableQty = f is null ? 0 : Math.Max(0, f.ShippedQty - f.ReturnedQty - f.RefundedQty - f.ReturnPendingQty),
                         };

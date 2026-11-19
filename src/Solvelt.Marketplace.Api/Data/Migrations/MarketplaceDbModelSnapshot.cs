@@ -1919,6 +1919,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasColumnType("bigint")
                         .HasDefaultValue(0L);
 
+                    b.Property<bool>("GiftUnavailable")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
+
                     b.Property<long>("ItemsCents")
                         .HasColumnType("bigint");
 

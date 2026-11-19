@@ -76,7 +76,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         Assert.Equal(25, offer.GetProperty("eligibleUnits").GetInt32());
         Assert.Equal(20, offer.GetProperty("tier").GetProperty("minQuantity").GetInt32());
         Assert.Equal(90, offer.GetProperty("tier").GetProperty("unitPriceCents").GetInt64());
-        Assert.Equal(1800, Group(cart, Judaica).GetProperty("lines")[0].GetProperty("lineTotalCents").GetInt64());   // net of the discount
+        Assert.Equal(1800, Group(cart, Judaica).GetProperty("lines").EnumerateArray().Single(l => l.GetProperty("quantity").GetInt32() == 20).GetProperty("lineTotalCents").GetInt64());   // net of the discount
         Assert.Equal(25, cart.GetProperty("itemCount").GetInt32());
     }
 
@@ -194,6 +194,13 @@ public sealed class OfferOrderTests : OrderFlowBase
         Assert.Equal(2250, order.ItemsCents);
         Assert.Equal(order.TotalCents, order.Groups.Sum(g => g.TotalCents));
         Assert.Equal(14250, order.Lines.Where(l => !l.IsGift).Sum(l => l.DiscountCents));
+        // the order view shows the discount per line and the free gift line
+        var rq = new HttpRequestMessage(HttpMethod.Get, "/api/v1/orders/" + number);
+        rq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        var view = JsonDocument.Parse(await (await _k.Http.SendAsync(rq)).Content.ReadAsStringAsync()).RootElement;
+        var vlines = view.GetProperty("groups")[0].GetProperty("lines").EnumerateArray().ToList();
+        Assert.Equal(14250, vlines.Where(l => !l.GetProperty("isGift").GetBoolean()).Sum(l => l.GetProperty("discountCents").GetInt64()));
+        Assert.Single(vlines, l => l.GetProperty("isGift").GetBoolean());
     }
 
     [Fact]
@@ -286,5 +293,27 @@ public sealed class OfferOrderTests : OrderFlowBase
         await _k.Db(async db => { var o = await db.CatalogOffers.SingleAsync(x => x.Id == id); o.UnlistedVersion = 2; o.RecomputeVisibility(); await db.SaveChangesAsync(); return 0; });   // tombstone
         var ended = (await Stale(seen2!)).GetProperty("quote");
         Assert.Equal(6000, ended.GetProperty("itemsCents").GetInt64());
+    }
+
+    [Fact]
+    public async Task A_gift_the_portal_left_out_is_shown_on_the_order_and_changes_nothing_else()
+    {
+        await Login();
+        await Offer();
+        await AddToCart("israeli-couscous", 10);
+        var (number, intent, total) = await Checkout();
+        _onOrder = c =>
+        {
+            var created = Created(c, 201, true);
+            var json = created.Content.ReadAsStringAsync().Result.Replace("\"oversold\":false", "\"oversold\":false,\"giftUnavailable\":true");
+            return FakePortal.Json(HttpStatusCode.Created, json);
+        };
+        await Pay(number, intent, total);
+        await Drain();
+        Assert.Equal("placed", (await Order(number)).Status);
+        var rq = new HttpRequestMessage(HttpMethod.Get, "/api/v1/orders/" + number);
+        rq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        var view = JsonDocument.Parse(await (await _k.Http.SendAsync(rq)).Content.ReadAsStringAsync()).RootElement;
+        Assert.True(view.GetProperty("groups")[0].GetProperty("giftUnavailable").GetBoolean());
     }
 }

@@ -41,7 +41,7 @@ public sealed record CreateOrderRequest(string MarketplaceOrderId, DateTimeOffse
 {
     public string Currency { get; init; } = Currency.Trim().ToUpperInvariant();
 }
-public sealed record SellerOrderRef(Guid SellerOrderId, string Number, Guid SellerId, Guid BrandId, string Status, bool Oversold, long TotalCents, long FeeCents, long NetCents);
+public sealed record SellerOrderRef(Guid SellerOrderId, string Number, Guid SellerId, Guid BrandId, string Status, bool Oversold, long TotalCents, long FeeCents, long NetCents, bool GiftUnavailable = false);
 public sealed record CreateOrderResponse(bool Created, IReadOnlyList<SellerOrderRef> Orders);
 
 // ---- buyer events (ORDERS.md §3.3). Response shapes are per-order result lists the portal docs do not pin as a schema: returned raw. ----

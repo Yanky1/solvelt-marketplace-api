@@ -1402,6 +1402,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     SellerOrderId = table.Column<Guid>(type: "uuid", nullable: true),
                     SellerOrderNumber = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: true),
                     Oversold = table.Column<bool>(type: "boolean", nullable: false),
+                    GiftUnavailable = table.Column<bool>(type: "boolean", nullable: false, defaultValue: false),
                     RefundedCents = table.Column<long>(type: "bigint", nullable: false),
                     RefundedShippingCents = table.Column<long>(type: "bigint", nullable: false),
                     RefundedShippingTaxCents = table.Column<long>(type: "bigint", nullable: false),

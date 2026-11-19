@@ -105,7 +105,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         if (claimed == 0) { await tx.RollbackAsync(ct); return OutboxResult.Delivered(); }   // a parallel delivery stored it first
         foreach (var (r, g) in pairs)
         {
-            await db.OrderGroups.Where(x => x.Id == g[0].Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.SellerOrderId, (Guid?)r.SellerOrderId).SetProperty(x => x.SellerOrderNumber, r.Number).SetProperty(x => x.Oversold, r.Oversold), ct);
+            await db.OrderGroups.Where(x => x.Id == g[0].Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.SellerOrderId, (Guid?)r.SellerOrderId).SetProperty(x => x.SellerOrderNumber, r.Number).SetProperty(x => x.Oversold, r.Oversold).SetProperty(x => x.GiftUnavailable, r.GiftUnavailable), ct);
             // payment.captured goes only after the portal returned the seller order (the portal would answer 404 order_not_found otherwise).
             outbox.EnqueuePaymentEvent($"captured:{order.Number}:{r.Number}", PaymentEventTypes.Captured,
                 new PaymentCapturedData(PaymentKinds.Order, order.Number, null, r.Number, order.PaymentIntentId!, order.Currency, g[0].TotalCents, order.PaidAt));

@@ -128,3 +128,32 @@ public sealed class QuoteBindingTests
         Assert.Empty(ShippingRates.Options(Settings(new ShippingSpeedSetting("standard", true, "weight", null, 1, long.MaxValue / 2)), "US", 100, 5000, today, new ShippingOptions()).Options);               // 5 x per kg overflows
     }
 }
+
+/// <summary>The quote token covers the quantity offers (decision Q-04): one input varied per case, so a stale offer, version or gift can never ride on an old consent.</summary>
+public sealed class QuoteOfferBindingTests
+{
+    private static readonly Guid Seller = Guid.Parse("11111111-1111-1111-1111-111111111111"), Brand = Guid.Parse("22222222-2222-2222-2222-222222222222"),
+        Offer = Guid.Parse("55555555-5555-5555-5555-555555555555"), Gift = Guid.Parse("66666666-6666-6666-6666-666666666666");
+    private static readonly DateTimeOffset Now = new(2026, 11, 4, 12, 0, 0, TimeSpan.Zero);
+
+    private static string Token(long version = 1, Guid? gift = null, int giftQty = 1, long lineDiscount = 100, Guid? lineOffer = null, bool noGift = false)
+    {
+        var l = new QuoteLine(Guid.Parse("33333333-3333-3333-3333-333333333333"), Guid.NewGuid(), Guid.Parse("77777777-7777-7777-7777-777777777777"), "T", "V", 2, 1500, 2900, 0, lineDiscount, lineOffer ?? Offer);
+        var g = new QuoteGroup(Seller, "S", Brand, "B", [l], 2900, [], [], null, new SelectedDelivery("carrier", "standard", null, null, 0), 0, 0, 0, 2900, lineDiscount,
+            [new QuoteOffer(Offer, version, "N", lineDiscount, false)], noGift ? [] : [new QuoteGift(Offer, gift ?? Gift, "G", giftQty)]);
+        return new QuoteSigner(Options.Create(new CheckoutOptions { QuoteKey = "test-quote-key-0123456789abcdef0123" })).Make(new QuoteView("USD", [g], 2900, 0, 0, 2900, true), "US", "NY", "11201", Now);
+    }
+
+    [Fact]
+    public void Offer_version_gift_gift_quantity_and_line_offer_each_change_the_token()
+    {
+        var t = Token();
+        Assert.Equal(t, Token());
+        Assert.NotEqual(t, Token(version: 2));                       // the version the portal will check
+        Assert.NotEqual(t, Token(gift: Guid.NewGuid()));             // another gift product
+        Assert.NotEqual(t, Token(giftQty: 2));
+        Assert.NotEqual(t, Token(noGift: true));
+        Assert.NotEqual(t, Token(lineOffer: Guid.NewGuid()));
+        Assert.NotEqual(t, Token(lineDiscount: 101));
+    }
+}
