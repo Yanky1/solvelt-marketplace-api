@@ -64,16 +64,17 @@ public class VoicePipelineUnitTests
 
     private sealed class Rig : IAsyncDisposable
     {
-        public readonly FakeTimeProvider Time = new();
+        public readonly FakeTimeProvider Time;
+        private Rig(FakeTimeProvider? time) { Time = time ?? new FakeTimeProvider(); }
         public readonly FakeStt A = new(), B = new(), C = new();
         public readonly List<SttEvent> Out = [];
         public ISttSession Session = null!;
         private Task _reader = Task.CompletedTask;
         private readonly CancellationTokenSource _cts = new();
 
-        public static async Task<Rig> Open(ITranscriptJudge[] judges, int waitMs = 500, int budgetMs = 1200, bool three = false)
+        public static async Task<Rig> Open(ITranscriptJudge[] judges, int waitMs = 500, int budgetMs = 1200, bool three = false, FakeTimeProvider? time = null)
         {
-            var r = new Rig();
+            var r = new Rig(time);
             var engines = new List<(string, IStreamingStt)> { ("alpha", r.A), ("beta", r.B) };
             if (three) engines.Add(("gamma", r.C));
             r.Session = await new ParallelStt(engines, judges, waitMs, budgetMs, r.Time).OpenAsync(CancellationToken.None);
@@ -138,13 +139,27 @@ public class VoicePipelineUnitTests
     }
 
     [Fact]
+    public async Task The_budget_is_hard_even_for_a_judge_that_ignores_its_cancellation_token()
+    {
+        var gate = new TaskCompletionSource<JudgeResult?>();
+        var stubborn = new FakeJudge((_, _) => gate.Task);                                                      // never looks at the token
+        await using var r = await Rig.Open([stubborn], waitMs: 500, budgetMs: 1200);
+        r.A.Emit(new SttEvent(SttEventKind.Final, "alpha text")); r.B.Emit(new SttEvent(SttEventKind.Final, "beta text"));
+        await r.Pump(1300);
+        Assert.Equal("alpha text", Assert.Single(r.Finals()).Text);
+        gate.SetResult(new JudgeResult("far too late"));
+    }
+
+    [Fact]
     public async Task The_budget_counts_from_the_first_final_so_waiting_for_a_slow_engine_shortens_the_judges_time()
     {
         // beta's text arrives 400 ms after alpha's; the judge needs 700 ms: 400 + 700 = 1100 <= 1200 works, a 900 ms judge (1300) does not
-        var ok = new FakeJudge(async (_, ct) => { await Task.Delay(700, ct); return new JudgeResult("fast enough"); });
-        await using (var r = await Rig.Open([ok], waitMs: 500, budgetMs: 1200)) { await RunLate(r); Assert.Equal("fast enough", Assert.Single(r.Finals()).Text); }
-        var tooSlow = new FakeJudge(async (_, ct) => { await Task.Delay(900, ct); return new JudgeResult("too late"); });
-        await using (var r = await Rig.Open([tooSlow], waitMs: 500, budgetMs: 1200)) { await RunLate(r); Assert.Equal("alpha", Assert.Single(r.Finals()).Text); }
+        var t1 = new FakeTimeProvider();
+        var ok = new FakeJudge(async (_, ct) => { await Task.Delay(TimeSpan.FromMilliseconds(700), t1, ct); return new JudgeResult("fast enough"); });
+        await using (var r = await Rig.Open([ok], waitMs: 500, budgetMs: 1200, time: t1)) { await RunLate(r); Assert.Equal("fast enough", Assert.Single(r.Finals()).Text); }
+        var t2 = new FakeTimeProvider();
+        var tooSlow = new FakeJudge(async (_, ct) => { await Task.Delay(TimeSpan.FromMilliseconds(900), t2, ct); return new JudgeResult("too late"); });
+        await using (var r = await Rig.Open([tooSlow], waitMs: 500, budgetMs: 1200, time: t2)) { await RunLate(r); Assert.Equal("alpha", Assert.Single(r.Finals()).Text); }
 
         static async Task RunLate(Rig r)
         {

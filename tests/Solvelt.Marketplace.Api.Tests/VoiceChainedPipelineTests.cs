@@ -111,9 +111,9 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         await _phone!.Send(new { @event = "stop" });                                                          // the caller hangs up
         await FakeRealtime.Poll(() => S.Row().Result.EndedAt is not null ? "x" : null, 5);
         var row = await S.Row();
-        // 100+100 input tokens at 2 micro-dollars and 15+15 output at 4 = 400 + 120; spoken characters at 10 per million are 53 + 12 = 65 -> 0.65 micro-dollars, rounded into the total
+        // 100+100 input tokens at 2 micro-dollars and 15+15 output at 4 = 400 + 120; spoken characters at $10 per million are 10 micro-dollars each: 29 + 25 + 12 = 66 -> 660
         Assert.Equal((200, 30), (row.TextInTokens, row.TextOutTokens));
-        Assert.Equal(521, row.EstimatedCostMicros);
+        Assert.Equal(1180, row.EstimatedCostMicros);
     }
 
     // ---------- barge-in with the same marks ----------
@@ -242,7 +242,7 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         Assert.DoesNotContain("purple", json, StringComparison.OrdinalIgnoreCase);                           // the call's row holds counters and a masked number only
         Assert.DoesNotContain("elephants", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(S.F.Logs.Lines, l => l.Contains("purple", StringComparison.OrdinalIgnoreCase) || l.Contains("elephant", StringComparison.OrdinalIgnoreCase) || l.Contains(Number.Replace("+", "")));
-        Assert.DoesNotContain(S.F.Logs.Lines, l => l.Contains("Solvelt"));                                    // not even the greeting
+        Assert.DoesNotContain(S.F.Logs.Lines, l => l.Contains("welcome", StringComparison.OrdinalIgnoreCase));  // not even the greeting
         // and the state of the call is gone from memory once it is over
         Assert.Null(S.F.Services.GetRequiredService<VoiceStateStore>().Find(row.Id));
         // no table holds text of the call: the only voice table is the counters row (and payment attempts, which this call has none of)
