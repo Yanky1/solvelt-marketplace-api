@@ -181,6 +181,46 @@ public class CatalogSearchYiddishTests
     }
 
     [Fact]
+    public async Task A_row_the_sync_rewrote_after_it_was_read_is_not_overwritten_with_older_text()
+    {
+        using var f = Catalog(out _);
+        await Sync(f);
+        WriteOldRows(f);
+        var read = WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs));         // what the rebuild read: the old text
+        WithDb(f, db =>                                                                                              // meanwhile the sync applied a newer snapshot of that listing
+        {
+            var row = db.CatalogSearch.Single(r => r.ListingId == WithPairs);
+            row.Title = "חדש לגמרי"; row.Text = "חדש לגמרי"; row.Description = "חדש";
+            db.SaveChanges();
+            return 0;
+        });
+        using (var scope = f.Services.CreateScope())
+            Assert.False(await SearchIndexer.TryRewriteAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), read, CancellationToken.None));   // it yields
+        var now = WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs));
+        Assert.Equal("חדש לגמרי", now.Title);                                                                       // the newer text stands
+        Assert.Equal("חדש", now.Description);
+
+        // and a row nobody touched is rewritten
+        WriteOldRows(f);
+        var unchanged = WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs));
+        using (var scope = f.Services.CreateScope())
+            Assert.True(await SearchIndexer.TryRewriteAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), unchanged, CancellationToken.None));
+        Assert.Equal("יידישע וואכנבלאט", WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs)).Title);
+    }
+
+    [Fact]
+    public async Task A_catalogue_larger_than_one_batch_is_rebuilt_in_batches_and_every_stale_row_is_fixed()
+    {
+        using var f = Catalog(out _);
+        await Sync(f);
+        var total = WithDb(f, db => db.CatalogSearch.Count());
+        WithDb(f, db => { foreach (var r in db.CatalogSearch) { r.Title = "ײדיש " + r.ListingId.ToString("N"); r.Text = r.Title; } db.SaveChanges(); return 0; });   // all of them stale (43+ rows)
+        Assert.Equal(total, await Reindex(f));
+        Assert.All(WithDb(f, db => db.CatalogSearch.AsNoTracking().ToList()), r => Assert.StartsWith("יידיש ", r.Title));
+        Assert.Equal(0, await Reindex(f));
+    }
+
+    [Fact]
     public async Task The_catalog_sync_itself_rebuilds_old_rows_so_a_deploy_needs_no_manual_step_and_does_it_once_per_start()
     {
         using var f = Catalog(out _);

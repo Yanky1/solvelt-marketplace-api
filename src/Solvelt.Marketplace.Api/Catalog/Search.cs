@@ -70,21 +70,31 @@ public static class SearchIndexer
                 || EF.Functions.Like(r.Terms, "%ײ%") || EF.Functions.Like(r.Terms, "%װ%") || EF.Functions.Like(r.Terms, "%ױ%")
                 || EF.Functions.Like(r.Description, "%ײ%") || EF.Functions.Like(r.Description, "%װ%") || EF.Functions.Like(r.Description, "%ױ%"))
             .Select(r => r.ListingId).ToListAsync(ct);
-        foreach (var chunk in stale.Chunk(200))       // each stale row once: no loop that could chase a row the rules cannot change
+        var rewritten = 0;
+        foreach (var chunk in stale.Chunk(200))       // bounded batches, each row once: no long transaction and no loop that could chase a row the rules cannot change
         {
-            var rows = await db.CatalogSearch.Where(r => chunk.Contains(r.ListingId)).ToListAsync(ct);
-            foreach (var row in rows)
-            {
-                row.Title = Cut(SearchText.Normalize(row.Title), 400);
-                row.Brand = Cut(SearchText.Normalize(row.Brand), 300);
-                row.Terms = Cut(SearchText.Normalize(row.Terms), MaxTermsText);
-                row.Description = Cut(SearchText.Normalize(row.Description), MaxDescription);
-                row.Text = Cut($"{row.Title} {row.Brand} {row.Terms}".Trim(), 2800);
-            }
-            await db.SaveChangesAsync(ct);
-            db.ChangeTracker.Clear();
+            var rows = await db.CatalogSearch.AsNoTracking().Where(r => chunk.Contains(r.ListingId)).ToListAsync(ct);
+            foreach (var row in rows) if (await TryRewriteAsync(db, row, ct)) rewritten++;
         }
-        return stale.Count;
+        return rewritten;
+    }
+
+    /// <summary>
+    /// Rewrites one stale row from the values just read, and ONLY if the row still holds exactly those values: a row the sync wrote in the meantime already carries the new
+    /// rules' text and must not be overwritten with older text (last write wins; this one yields). Returns whether the row was rewritten.
+    /// </summary>
+    internal static async Task<bool> TryRewriteAsync(MarketplaceDb db, CatalogSearchRow read, CancellationToken ct)
+    {
+        var title = Cut(SearchText.Normalize(read.Title), 400);
+        var brand = Cut(SearchText.Normalize(read.Brand), 300);
+        var terms = Cut(SearchText.Normalize(read.Terms), MaxTermsText);
+        var description = Cut(SearchText.Normalize(read.Description), MaxDescription);
+        var text = Cut($"{title} {brand} {terms}".Trim(), 2800);
+        var id = read.ListingId; var (oldTitle, oldBrand, oldTerms, oldDescription) = (read.Title, read.Brand, read.Terms, read.Description);
+        var n = await db.CatalogSearch.Where(r => r.ListingId == id && r.Title == oldTitle && r.Brand == oldBrand && r.Terms == oldTerms && r.Description == oldDescription)
+            .ExecuteUpdateAsync(u => u.SetProperty(r => r.Title, title).SetProperty(r => r.Brand, brand).SetProperty(r => r.Terms, terms)
+                .SetProperty(r => r.Description, description).SetProperty(r => r.Text, text), ct);
+        return n > 0;
     }
 
     /// <summary>Indexes every listing that has no search row yet (a database that predates the index, or a crash between steps). Idempotent.</summary>
