@@ -78,6 +78,22 @@ public class OfferSyncTests
     }
 
     [Fact]
+    public async Task Two_offers_first_seen_in_one_sync_keep_the_feed_order_so_the_tie_break_never_falls_to_the_id()
+    {
+        using var f = new TestFactory();
+        var src = f.Services.GetRequiredService<FixtureOfferSource>();
+        var first = Guid.Parse("ffffffff-0000-0000-0000-000000000001"); var second = Guid.Parse("00000000-0000-0000-0000-000000000002");   // the id order is the OPPOSITE of the feed order
+        src.Upsert(Doc(first, scope: "all")); src.Upsert(Doc(second, scope: "all"));
+        Assert.Equal(2, (await Sync(f)).Applied);
+        Assert.True(Row(f, first).FirstSeenAt < Row(f, second).FirstSeenAt);
+        using var scope = f.Services.CreateScope();
+        var loaded = await scope.ServiceProvider.GetRequiredService<OfferLoader>().ActiveAsync([Seller], DateTimeOffset.UtcNow, default);
+        var line = new OfferLineInput(Guid.NewGuid(), P1, Seller, Brand, [], 100, 20);
+        var priced = OfferPricing.Price([line], loaded.Select(o => o.Def).ToList());
+        Assert.Equal(first, Assert.Single(priced.Offers).OfferId);                       // the earlier one wins, as the portal's older-offer rule says
+    }
+
+    [Fact]
     public async Task An_ended_offer_stops_applying_and_a_new_version_brings_it_back_a_deleted_one_never_returns()
     {
         using var f = new TestFactory();
