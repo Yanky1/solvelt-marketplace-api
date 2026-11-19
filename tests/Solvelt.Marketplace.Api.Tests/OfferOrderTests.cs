@@ -246,7 +246,9 @@ public sealed class OfferOrderTests : OrderFlowBase
         var view = JsonDocument.Parse(await (await _k.Http.SendAsync(rq)).Content.ReadAsStringAsync()).RootElement;
         Assert.Equal("failed", view.GetProperty("status").GetString());
         Assert.Equal("offer_mismatch", view.GetProperty("failureCode").GetString());
-        Assert.Equal(5050, view.GetProperty("groups")[0].GetProperty("lines")[0].GetProperty("discountCents").GetInt64());
+        var vlines = view.GetProperty("groups")[0].GetProperty("lines").EnumerateArray().ToList();   // the gift line (discount 0) is also a line, and a database owes no order
+        Assert.Equal(5050, vlines.Single(l => !l.GetProperty("isGift").GetBoolean()).GetProperty("discountCents").GetInt64());
+        Assert.Single(vlines, l => l.GetProperty("isGift").GetBoolean());
     }
 
     [Fact]

@@ -142,7 +142,7 @@ public static class CheckoutEndpoints
             {
                 sellerName = g.SellerName, brandName = g.BrandName, deliveryKind = g.DeliveryKind, shippingSpeed = g.ShippingSpeed, localDate = g.LocalDate, itemsCents = g.ItemsCents, shippingCents = g.ShippingCents, taxCents = g.TaxCents, totalCents = g.TotalCents,
                 sellerOrderNumber = g.SellerOrderNumber, discountCents = g.DiscountCents, giftUnavailable = g.GiftUnavailable,
-                lines = o.Lines.Where(l => l.GroupId == g.Id).Select(l => new { title = l.Title, variantName = l.VariantName, quantity = l.Quantity, unitPriceCents = l.UnitPriceCents, lineTotalCents = l.LineTotalCents, taxCents = l.TaxCents, discountCents = l.DiscountCents, offerId = l.OfferId, isGift = l.IsGift }),
+                lines = o.Lines.Where(l => l.GroupId == g.Id).OrderBy(l => l.IsGift).ThenBy(l => l.MarketplaceLineId, StringComparer.Ordinal).Select(l => new { title = l.Title, variantName = l.VariantName, quantity = l.Quantity, unitPriceCents = l.UnitPriceCents, lineTotalCents = l.LineTotalCents, taxCents = l.TaxCents, discountCents = l.DiscountCents, offerId = l.OfferId, isGift = l.IsGift }),
             }),
         });
     }
