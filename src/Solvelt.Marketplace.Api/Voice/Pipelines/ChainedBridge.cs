@@ -49,7 +49,12 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
         Task phoneLoop = Task.CompletedTask, sttLoop = Task.CompletedTask, tickLoop = Task.CompletedTask;
         try
         {
-            stt = await parts.Stt.OpenAsync(token);
+            try { stt = await parts.Stt.OpenAsync(token); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning("Voice call {Call}: the speech recogniser could not be opened ({Type}).", call.Id, ex.GetType().Name);   // never the message; the call ends as Abandoned below (there is no fallback to option 1 yet, V-23)
+                return outcome;
+            }
             var detector = parts.NewTurnDetector();
             // the opening turn: a first greeting, or (after a keypad step) where things stand
             if (state.Connections > 1) { _history.Add(new LlmMessage("system", state.Summary())); StartTurn(VoiceScripts.Resume); }
@@ -62,6 +67,7 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
         }
         catch (OperationCanceledException) { logger.LogInformation("Voice call {Call} reached its time limit or was cancelled.", call.Id); }
         catch (WebSocketException) { logger.LogWarning("Voice call {Call}: the phone socket closed abnormally.", call.Id); }
+        catch (Exception ex) { logger.LogWarning("Voice call {Call}: the pipeline could not start or stopped ({Type}).", call.Id, ex.GetType().Name); }   // a vendor that refuses: the call ends as Abandoned below; never the message, it could hold what was said
         finally
         {
             KeypadPause = state.KeypadStep is not null;
