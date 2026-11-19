@@ -316,4 +316,20 @@ public sealed class OfferOrderTests : OrderFlowBase
         var view = JsonDocument.Parse(await (await _k.Http.SendAsync(rq)).Content.ReadAsStringAsync()).RootElement;
         Assert.True(view.GetProperty("groups")[0].GetProperty("giftUnavailable").GetBoolean());
     }
+
+    [Fact]
+    public async Task A_listing_shows_the_one_offer_that_applies_now_and_nothing_once_it_ended()
+    {
+        await Login();
+        var id = await Offer(scope: "products", products: ["israeli-couscous"]);
+        async Task<JsonElement> Detail(string slug) => JsonDocument.Parse(await (await _k.Http.GetAsync("/api/v1/catalog/listings/" + FixtureCatalogSource.Id("listing:" + slug))).Content.ReadAsStringAsync()).RootElement.Clone();
+        var d = await Detail("israeli-couscous");
+        var offer = d.GetProperty("offers").EnumerateArray().Single();
+        Assert.Equal(id, offer.GetProperty("offerId").GetGuid());
+        Assert.Equal([10, 20], offer.GetProperty("tiers").EnumerateArray().Select(t => t.GetProperty("minQuantity").GetInt32()).ToArray());
+        Assert.Equal("Card wallet", offer.GetProperty("gifts")[0].GetProperty("title").GetString());
+        Assert.Empty((await Detail("halva-pistachio")).GetProperty("offers").EnumerateArray());      // not in the offer's scope
+        await _k.Db(async db => { var o = await db.CatalogOffers.SingleAsync(x => x.Id == id); o.UnlistedVersion = 1; o.RecomputeVisibility(); await db.SaveChangesAsync(); return 0; });
+        Assert.Empty((await Detail("israeli-couscous")).GetProperty("offers").EnumerateArray());
+    }
 }

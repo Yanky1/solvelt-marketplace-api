@@ -36,7 +36,7 @@ public sealed class InProcessCatalog(IServiceProvider sp)
     }
 
     public Task<JsonDocument?> DetailAsync(Guid listingId, CancellationToken ct)
-        => RunAsync(_ => CatalogEndpoints.Listing(sp.GetRequiredService<MarketplaceDb>(), sp.GetRequiredService<CategoryMap>(), listingId.ToString(), ct), null, ct);
+        => RunAsync(_ => CatalogEndpoints.Listing(sp.GetRequiredService<MarketplaceDb>(), sp.GetRequiredService<CategoryMap>(), sp.GetRequiredService<TimeProvider>(), listingId.ToString(), ct), null, ct);
 }
 
 internal static class ToolKit

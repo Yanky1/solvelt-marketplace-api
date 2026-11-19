@@ -25,7 +25,11 @@ public sealed record FaqItem(string Question, string Answer);
 public sealed record ListingDetailDto(Guid Id, string Slug, string Type, string Title, string Summary, string Description, long PriceFromCents, long PriceToCents,
     long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, IReadOnlyList<CategoryCard> CategoryPath,
     IReadOnlyList<VariantItem> Variants, IReadOnlyList<ImageCard> Images, IReadOnlyList<AttributeItem> Attributes, IReadOnlyList<FaqItem> Faqs,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, bool Demo = false);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, bool Demo = false, IReadOnlyList<ListingOfferDto>? Offers = null);
+/// <summary>The quantity offer that applies to this listing right now, for the badge ("20+ for $0.90 each", "free wallet from 10"; decision Q-07). At most one: the most specific wins, never stacked.</summary>
+public sealed record ListingOfferDto(Guid OfferId, string Name, IReadOnlyList<ListingOfferTier> Tiers, IReadOnlyList<ListingOfferGift> Gifts, DateTimeOffset? ActiveTo);
+public sealed record ListingOfferTier(int MinQuantity, long UnitPriceCents);
+public sealed record ListingOfferGift(Guid ProductId, string Title, int Quantity, int MinQuantity, bool Available);
 
 /// <summary>Public, anonymous catalog reads (docs/API.md). Only visible listings of active sellers are ever returned; everything else is a 404.</summary>
 public static class CatalogEndpoints
@@ -168,7 +172,7 @@ public static class CatalogEndpoints
         return await q.AnyAsync(l => (l.UnlistedVersion != null && l.UnlistedVersion >= l.Version) || l.Status == "Archived" || l.Status == "Removed", ct);
     }
 
-    internal static async Task<IResult> Listing(MarketplaceDb db, CategoryMap map, string slugOrId, CancellationToken ct)
+    internal static async Task<IResult> Listing(MarketplaceDb db, CategoryMap map, TimeProvider time, string slugOrId, CancellationToken ct)
     {
         if (ListingQuery.HasControl(slugOrId)) return Problems.NotFound("Listing not found.");     // no such slug can exist (and PostgreSQL cannot compare a NUL)
         var q = Visible(db).Include(l => l.Variants).Include(l => l.Images).Include(l => l.Attributes).Include(l => l.Faqs).AsSplitQuery();
@@ -177,12 +181,25 @@ public static class CatalogEndpoints
         var brand = await db.CatalogBrands.AsNoTracking().FirstAsync(b => b.Id == l.BrandId, ct);
         var seller = await db.CatalogSellers.AsNoTracking().FirstAsync(s => s.Id == l.SellerId, ct);
         var path = (await map.PathAsync(l.CategoryId, ct)).Select(c => new CategoryCard(c.Id, c.Slug, c.Name)).ToList();
+        var offers = l.Type == ListingTypes.Product ? await ListingOffers(db, map, l, time.GetUtcNow().ToUniversalTime(), ct) : [];
         return Results.Json(new ListingDetailDto(l.Id, l.Slug, l.Type, l.Title, l.Summary, l.Description, l.PriceFromCents, l.PriceToCents, l.CompareAtFromCents, l.Currency, l.Available,
             new BrandCard(brand.Id, brand.Slug, brand.Name), new SellerCard(seller.Id, seller.DisplayName), path,
             l.Variants.OrderBy(v => v.SortOrder).Select(v => new VariantItem(v.Id, v.Name, v.PriceCents, v.CompareAtCents, v.Available)).ToList(),
             l.Images.OrderBy(i => i.SortOrder).Select(i => new ImageCard(i.Id, i.Width, i.Height, i.Alt)).ToList(),
             l.Attributes.OrderBy(a => a.SortOrder).Select(a => new AttributeItem(a.Key, a.Value)).ToList(),
-            l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt, l.IsDemoListing));
+            l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt, l.IsDemoListing, offers));
+    }
+
+    private static async Task<IReadOnlyList<ListingOfferDto>> ListingOffers(MarketplaceDb db, CategoryMap map, CatalogListing l, DateTimeOffset now, CancellationToken ct)
+    {
+        var loaded = await new Solvelt.Marketplace.Api.Offers.OfferLoader(db, map).ActiveAsync([l.SellerId], now, ct);
+        var line = new Solvelt.Marketplace.Api.Offers.OfferLineInput(l.Id, l.Id, l.SellerId, l.BrandId, (await map.PathAsync(l.CategoryId, ct)).Select(c => c.Id).DefaultIfEmpty(l.CategoryId).ToList(), l.PriceFromCents, 1);
+        var winner = Solvelt.Marketplace.Api.Offers.OfferPricing.Price([line], loaded.Select(o => o.Def).ToList()).Offers.FirstOrDefault();
+        if (winner is null) return [];
+        var o = loaded.First(x => x.Def.OfferId == winner.OfferId);
+        var till = db.CatalogOffers.AsNoTracking().Where(x => x.Id == o.Def.OfferId).Select(x => x.ActiveTo).FirstOrDefault();
+        return [new ListingOfferDto(o.Def.OfferId, o.Name, o.Def.Tiers.OrderBy(t => t.MinQuantity).Select(t => new ListingOfferTier(t.MinQuantity, t.UnitPriceCents)).ToList(),
+            o.Def.Gifts.OrderBy(g => g.MinQuantity).Select(g => new ListingOfferGift(g.ProductId, g.Title, g.Quantity, g.MinQuantity, o.GiftAvailable.GetValueOrDefault(g.ProductId, true))).ToList(), till)];
     }
 
     /// <summary>Autocomplete: listing titles from the search index, plus brands and categories whose name starts with the text. Nothing below two characters.</summary>

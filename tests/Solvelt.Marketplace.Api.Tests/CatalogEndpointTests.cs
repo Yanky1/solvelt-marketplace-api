@@ -191,7 +191,7 @@ public class CatalogEndpointTests : IAsyncLifetime
     {
         var d = await Get($"{Base}/listings/classic-braided-challah");
         Assert.Equal(["id", "slug", "type", "title", "summary", "description", "priceFromCents", "priceToCents", "compareAtFromCents", "currency", "available", "brand", "seller",
-            "categoryPath", "variants", "images", "attributes", "faqs", "createdAt", "updatedAt", "demo"], d.EnumerateObject().Select(p => p.Name));
+            "categoryPath", "variants", "images", "attributes", "faqs", "createdAt", "updatedAt", "demo", "offers"], d.EnumerateObject().Select(p => p.Name));
         Assert.False(d.GetProperty("demo").GetBoolean());
         Assert.Equal(["food-drink", "bakery"], d.GetProperty("categoryPath").EnumerateArray().Select(c => c.GetProperty("slug").GetString()));
         var variants = d.GetProperty("variants").EnumerateArray().ToList();
