@@ -106,6 +106,7 @@ public sealed class OfferSyncService(MarketplaceDb db, IOfferSource source, Time
                     await BackoffAsync(id, ct);
                 }
             }
+            fetched += await BackfillCreatedAtAsync(ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { error = ex.GetType().Name; log.LogWarning("Offer sync failed ({Type}).", ex.GetType().Name); }
         finally
@@ -118,6 +119,46 @@ public sealed class OfferSyncService(MarketplaceDb db, IOfferSource source, Time
         return new(true, applied, fetched, error);
     }
 
+    private const int BackfillPerRun = 20;
+
+    /// <summary>
+    /// Offers projected before the portal's feed carried <c>createdAt</c> (a42c32b) have none. Each run fetches the document of a few of them: a document with <c>createdAt</c> fills it in (never changing the version),
+    /// so the tie-break between equally specific offers uses the portal's own order for them too; an older portal that still sends none is asked again after a day. The first-seen time stays the fallback for a row
+    /// that has no <c>createdAt</c> (decision Q-01).
+    /// </summary>
+    private async Task<int> BackfillCreatedAtAsync(CancellationToken ct)
+    {
+        var due = time.GetUtcNow().ToUniversalTime();
+        var recheck = due.AddDays(-1);
+        var ids = await db.CatalogOffers.AsNoTracking().Where(o => o.CreatedAtTicks == null && o.Version > 0 && (o.CreatedAtCheckedAt == null || o.CreatedAtCheckedAt <= recheck)).OrderBy(o => o.UpdatedAt).Select(o => o.Id).Take(BackfillPerRun).ToListAsync(ct);
+        var fetched = 0;
+        foreach (var id in ids)
+        {
+            try
+            {
+                var doc = await source.GetOfferAsync(id, ct);
+                fetched++;
+                if (doc?.CreatedAt is { } created)
+                {
+                    var ticks = created.UtcTicks;
+                    var held = await db.CatalogOffers.AsNoTracking().Where(o => o.Id == id).Select(o => o.Version).FirstOrDefaultAsync(ct);
+                    if (doc.Version > held) await ApplyAsync(doc, ct);   // a newer version came with it: apply it (it also sets createdAt)
+                    else await db.CatalogOffers.Where(o => o.Id == id && o.CreatedAtTicks == null).ExecuteUpdateAsync(s => s.SetProperty(o => o.CreatedAtTicks, (long?)ticks), ct);
+                }
+                else
+                {
+                    // no createdAt (an older portal, or gone): not asked again for a day
+                    await db.CatalogOffers.Where(o => o.Id == id && o.CreatedAtTicks == null).ExecuteUpdateAsync(s => s.SetProperty(o => o.CreatedAtCheckedAt, (DateTimeOffset?)due), ct);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.LogWarning("An offer's creation time could not be fetched ({Type}); it is tried again later.", ex.GetType().Name);
+            }
+        }
+        return fetched;
+    }
+
     private async Task<bool> ApplyAsync(OfferSnapshot s, CancellationToken ct)
     {
         var now = time.GetUtcNow().ToUniversalTime();
@@ -128,7 +169,7 @@ public sealed class OfferSyncService(MarketplaceDb db, IOfferSource source, Time
         row.ProductIdsJson = JsonSerializer.Serialize(s.ProductIds); row.CategoryIdsJson = JsonSerializer.Serialize(s.CategoryIds);
         row.TiersJson = JsonSerializer.Serialize(s.Tiers); row.GiftsJson = JsonSerializer.Serialize(s.Gifts);
         row.ActiveFrom = s.ActiveFrom; row.ActiveTo = s.ActiveTo; row.Demo = s.Demo;
-        if (s.CreatedAt is { } created) row.CreatedAtTicks = created.UtcTicks;
+        if (s.CreatedAt is { } created) row.CreatedAtTicks = created.UtcTicks; else if (row.CreatedAtTicks is null) row.CreatedAtCheckedAt = now;   // a document without createdAt was just read: no need to ask again at once
         row.Version = s.Version; row.KnownVersion = Math.Max(row.KnownVersion, s.Version); row.UpdatedAt = now; row.FetchAttempts = 0; row.NextFetchAt = null;
         row.RecomputeVisibility(); row.Row++;
         try { await db.SaveChangesAsync(ct); return true; }

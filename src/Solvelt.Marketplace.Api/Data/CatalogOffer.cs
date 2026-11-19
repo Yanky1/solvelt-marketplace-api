@@ -31,6 +31,8 @@ public sealed class CatalogOffer
     public DateTimeOffset FirstSeenAt { get; set; }
     /// <summary>The portal's creation time of the offer (C18.2 <c>createdAt</c>, immutable, 100 ns precision) as UTC ticks: a tick count, because PostgreSQL keeps only microseconds and the tie-break compares exactly. Null from a portal that does not send it yet.</summary>
     public long? CreatedAtTicks { get; set; }
+    /// <summary>When we last looked for <see cref="CreatedAtTicks"/> and the portal sent none: asked again only after a day (the backfill of rows projected before the field existed).</summary>
+    public DateTimeOffset? CreatedAtCheckedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public int FetchAttempts { get; set; }
     public DateTimeOffset? NextFetchAt { get; set; }

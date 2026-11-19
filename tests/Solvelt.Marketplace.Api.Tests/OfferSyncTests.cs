@@ -197,6 +197,61 @@ public class OfferSyncTests
     }
 
     /// <summary>A source that answers one fixed page (a stale or lagging feed in a test).</summary>
+    [Fact]
+    public async Task A_row_projected_without_createdAt_gets_it_on_a_later_sync_and_the_tie_break_then_uses_it()
+    {
+        using var f = new TestFactory();
+        var fixture = f.Services.GetRequiredService<FixtureOfferSource>();
+        var high = Guid.Parse("ffffffff-0000-0000-0000-0000000000bb"); var low = Guid.Parse("00000000-0000-0000-0000-0000000000bb");
+        fixture.Upsert(Doc(high, scope: "all")); fixture.Upsert(Doc(low, scope: "all"));          // the portal did not send createdAt yet: first-seen order (feed order) decides
+        await Sync(f);
+        Assert.Null(Row(f, high).CreatedAtTicks); Assert.Null(Row(f, low).CreatedAtTicks);
+        async Task<Guid> Winner()
+        {
+            using var scope = f.Services.CreateScope();
+            var loaded = await scope.ServiceProvider.GetRequiredService<OfferLoader>().ActiveAsync([Seller], DateTimeOffset.UtcNow, default);
+            return OfferPricing.Price([new OfferLineInput(Guid.NewGuid(), P1, Seller, Brand, [], 100, 20)], loaded.Select(o => o.Def).ToList()).Offers.Single().OfferId;
+        }
+        Assert.Equal(high, await Winner());                                                          // seen first
+        // the portal now sends createdAt: the LOW id is the older offer. Same versions, so only the backfill can bring it in.
+        var versionBefore = Row(f, low).Version;
+        var docs = new Dictionary<Guid, OfferSnapshot>
+        {
+            [high] = Doc(high, scope: "all") with { Version = Row(f, high).Version, CreatedAt = new DateTimeOffset(2026, 11, 2, 0, 0, 0, TimeSpan.Zero) },
+            [low] = Doc(low, scope: "all") with { Version = Row(f, low).Version, CreatedAt = new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero) },
+        };
+        WithDb(f, db => db.CatalogOffers.ExecuteUpdate(s => s.SetProperty(o => o.CreatedAtCheckedAt, (DateTimeOffset?)null)));          // a day has passed since the portal answered without it
+        using (var scope = f.Services.CreateScope()) await Service(scope, new DocsSource(docs)).RunAsync();
+        Assert.Equal(new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero).UtcTicks, Row(f, low).CreatedAtTicks);
+        Assert.Equal(versionBefore, Row(f, low).Version);                                           // a backfill never changes a version
+        Assert.Equal(low, await Winner());                                                           // the older createdAt now decides, not the first-seen order
+    }
+
+    [Fact]
+    public async Task A_portal_that_still_sends_no_createdAt_is_asked_again_only_after_a_day()
+    {
+        using var f = new TestFactory();
+        var fixture = f.Services.GetRequiredService<FixtureOfferSource>();
+        var id = Guid.NewGuid();
+        fixture.Upsert(Doc(id, scope: "all"));
+        await Sync(f);
+        var source = new DocsSource(new Dictionary<Guid, OfferSnapshot> { [id] = Doc(id, scope: "all") with { Version = Row(f, id).Version } });   // no createdAt
+        using (var scope = f.Services.CreateScope()) { var r = await Service(scope, source).RunAsync(); Assert.Equal(0, r.Fetched); }          // the document was just read without createdAt: not asked at once
+        Assert.Equal(0, source.OfferCalls);
+        WithDb(f, db => db.CatalogOffers.ExecuteUpdate(s => s.SetProperty(o => o.CreatedAtCheckedAt, (DateTimeOffset?)DateTimeOffset.UnixEpoch)));   // a day later
+        using (var scope = f.Services.CreateScope()) { var r = await Service(scope, source).RunAsync(); Assert.Equal(1, r.Fetched); }          // asked once, still none
+        using (var scope = f.Services.CreateScope()) { var r = await Service(scope, source).RunAsync(); Assert.Equal(0, r.Fetched); }          // and not again right away
+        Assert.Equal(1, source.OfferCalls);
+        Assert.Null(Row(f, id).CreatedAtTicks);
+    }
+
+    private sealed class DocsSource(Dictionary<Guid, OfferSnapshot> docs) : IOfferSource
+    {
+        public int OfferCalls { get; private set; }
+        public Task<OfferPage> GetOffersAsync(string? since, int limit, CancellationToken ct) => Task.FromResult(new OfferPage([], [], since, false));
+        public Task<OfferSnapshot?> GetOfferAsync(Guid id, CancellationToken ct) { OfferCalls++; return Task.FromResult(docs.GetValueOrDefault(id)); }
+    }
+
     private sealed class OneShotSource(OfferSnapshot doc) : IOfferSource
     {
         public Task<OfferPage> GetOffersAsync(string? since, int limit, CancellationToken ct) => Task.FromResult(new OfferPage([doc], [], "1", false));
