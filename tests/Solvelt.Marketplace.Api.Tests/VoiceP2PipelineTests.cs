@@ -119,25 +119,6 @@ public sealed class VoiceP2PipelineTests : IDisposable
     }
 
     [Fact]
-    public async Task A_vendor_that_refuses_the_connection_ends_the_call_as_Abandoned_and_only_the_error_type_is_logged()
-    {
-        var sockets = new FakeSocketConnector { Fail = true };                                   // Deepgram refuses
-        _s = new VoiceScenario(Number, VoicePipelineMenuTests.MenuConfig(more: P2Settings()), services: svc => { svc.RemoveAll<IVendorSocketConnector>(); svc.AddSingleton<IVendorSocketConnector>(sockets); });
-        await S.SyncCatalog();
-        await VoiceFactory.Hook(S.C, VoiceEndpoints.InboundPath, S.Sid, Number);
-        var res = await VoiceFactory.Hook(S.C, VoiceEndpoints.PipelinePath, S.Sid, Number, extra: new() { ["Digits"] = "2" });
-        var (token, _) = await VoiceScenario.StreamFrom(res);
-        _phone = await FakePhone.Connect(S.F, token);
-        try { await _phone.Start(); } catch (Exception ex) when (ex is IOException or ObjectDisposedException or System.Net.WebSockets.WebSocketException) { /* the server has already ended the call: that is what this test is about */ }
-        await Until(() => S.Row().Result.EndedAt is not null);
-        var row = await S.Row();
-        Assert.Equal(Solvelt.Marketplace.Api.Data.VoiceOutcome.Abandoned, row.Outcome);
-        Assert.Equal("p2", row.Tier);                                                            // the menu choice stays recorded: it is what was tried
-        Assert.Contains(S.F.Logs.Lines, l => l.Contains("speech recogniser could not be opened") && l.Contains("WebSocketException"));
-        Assert.DoesNotContain(S.F.Logs.Lines, l => l.Contains("refused") || l.Contains("dg-key-not-real"));   // the vendor's message is not logged
-    }
-
-    [Fact]
     public async Task Without_the_settings_the_option_is_not_available_and_the_caller_is_told_and_gets_the_normal_line()
     {
         _s = new VoiceScenario(Number, VoicePipelineMenuTests.MenuConfig());

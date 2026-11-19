@@ -7,7 +7,9 @@ public static class VoiceOutcome
 {
     public const string InProgress = "in_progress", Abandoned = "abandoned", Transferred = "transferred", OrderPlaced = "order_placed",
         /// <summary>The server ended the AI part of the call after too many off-topic requests (V2, V-11).</summary>
-        EndedOffTopic = "ended_off_topic";
+        EndedOffTopic = "ended_off_topic",
+        /// <summary>A chained pipeline's vendor failed during the call and the platform ended it with an apology (decision V-25).</summary>
+        VendorLost = "vendor_lost";
 }
 
 /// <summary>
@@ -27,6 +29,11 @@ public sealed class VoiceCall
     public string Model { get; set; } = "";
     /// <summary><c>full</c> or <c>mini</c>.</summary>
     public string Tier { get; set; } = "full";
+    /// <summary>The tier and model chosen when the call started, kept while the test-line menu replaces <see cref="Tier"/> and <see cref="Model"/> with its option (V-19); empty until the menu has. A fallback to the Realtime line puts them back (decision V-25).</summary>
+    public string BaseTier { get; set; } = "";
+    public string BaseModel { get; set; } = "";
+    /// <summary>The menu option (<c>p2</c> to <c>p5</c>) whose vendor failed before the call began and which was handed to the Realtime line; null when no fallback happened.</summary>
+    public string? FallbackFrom { get; set; }
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset? EndedAt { get; set; }
     public int DurationSeconds { get; set; }
@@ -55,6 +62,9 @@ internal sealed class VoiceCallConfiguration : IEntityTypeConfiguration<VoiceCal
         b.Property(c => c.CallerMasked).HasMaxLength(16).IsRequired();
         b.Property(c => c.Model).HasMaxLength(100).IsRequired();
         b.Property(c => c.Tier).HasMaxLength(10).IsRequired();
+        b.Property(c => c.BaseTier).HasMaxLength(10).IsRequired().HasDefaultValue("");
+        b.Property(c => c.BaseModel).HasMaxLength(100).IsRequired().HasDefaultValue("");
+        b.Property(c => c.FallbackFrom).HasMaxLength(10);
         b.Property(c => c.Outcome).HasMaxLength(20).IsRequired();
         b.Property(c => c.Version).IsConcurrencyToken();
         b.HasIndex(c => c.CallSid).IsUnique();        // SignalWire retries its webhook: one row per call

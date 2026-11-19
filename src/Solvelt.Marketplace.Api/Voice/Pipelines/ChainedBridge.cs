@@ -17,8 +17,9 @@ namespace Solvelt.Marketplace.Api.Voice;
 /// stored and not logged (log lines carry counts and timings only).
 /// </summary>
 public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallState state, IChainedPipelineParts parts, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools,
-    TimeProvider time, ILogger logger)
+    TimeProvider time, ILogger logger, ISttSession? opened = null)
 {
+    private bool _vendorLost;
     private const int BytesPerMs = 8;   // mu-law, 8000 samples per second, one byte each
     private readonly VoiceOptions _o = options.Value;
     private readonly SemaphoreSlim _phoneSend = new(1, 1);
@@ -49,7 +50,7 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
         Task phoneLoop = Task.CompletedTask, sttLoop = Task.CompletedTask, tickLoop = Task.CompletedTask;
         try
         {
-            try { stt = await parts.Stt.OpenAsync(token); }
+            try { stt = opened ?? await parts.Stt.OpenAsync(token); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogWarning("Voice call {Call}: the speech recogniser could not be opened ({Type}).", call.Id, ex.GetType().Name);   // never the message; the call ends as Abandoned below (there is no fallback to option 1 yet, V-23)
@@ -64,6 +65,12 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
             tickLoop = TickAsync(detector, token);
             await Task.WhenAny(phoneLoop, sttLoop);
             if (_dtmfTransfer) outcome = VoiceOutcome.Transferred;
+            // a vendor failed DURING the call: a turn could not be spoken or written, or the recogniser went away while the caller was still on the line (not a hang-up, not a keypad step, not an end we asked for)
+            else if (_vendorLost || (sttLoop.IsCompleted && !phoneLoop.IsCompleted && !cts.IsCancellationRequested && state.KeypadStep is null && phone.State == WebSocketState.Open))
+            {
+                outcome = VoiceOutcome.VendorLost;
+                logger.LogWarning("Voice call {Call}: ended on a vendor failure ({Where}); the platform apologises.", call.Id, _vendorLost ? "a turn" : "the speech recogniser");
+            }
         }
         catch (OperationCanceledException) { logger.LogInformation("Voice call {Call} reached its time limit or was cancelled.", call.Id); }
         catch (WebSocketException) { logger.LogWarning("Voice call {Call}: the phone socket closed abnormally.", call.Id); }
@@ -210,8 +217,9 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
             try { await previous; } catch (Exception) { /* the earlier turn ended by cancellation */ }
             try { await RunTurnAsync(instruction, cts.Token); }
             catch (OperationCanceledException) { /* barge-in, or the call ended */ }
+            catch (VendorFailure vf) { logger.LogWarning("Voice call {Call}: the speech vendor failed ({Type}).", call.Id, vf.Kind); _vendorLost = true; _cts.Cancel(); }
             catch (WebSocketException) { /* the phone closed */ }
-            catch (Exception ex) { logger.LogWarning("Voice call {Call}: a turn failed ({Type}).", call.Id, ex.GetType().Name); }   // never the message: it could hold what was said
+            catch (Exception ex) { logger.LogWarning("Voice call {Call}: a turn failed ({Type}).", call.Id, ex.GetType().Name); }   // never the message: it could hold what was said; a failed text-model turn does not end the call (V-19)
         }, CancellationToken.None);
     }
 
@@ -297,8 +305,14 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
         Interlocked.Add(ref _ttsChars, sentence.Length);
         var entry = new SpokenSentence(sentence);
         lock (spoken) spoken.Add(entry);   // from the first chunk on: a barge-in that cuts it half way still finds what was being said
-        await foreach (var chunk in parts.Tts.SynthesizeAsync(sentence, ct))
+        await using var speech = parts.Tts.SynthesizeAsync(sentence, ct).GetAsyncEnumerator(ct);
+        while (true)
         {
+            bool more;
+            try { more = await speech.MoveNextAsync(); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { throw new VendorFailure(ex.GetType().Name); }   // the vendor, not the phone: told apart so a failing voice is not mistaken for a hang-up
+            if (!more) break;
+            var chunk = speech.Current;
             ct.ThrowIfCancellationRequested();
             if (chunk.Length == 0) continue;
             if (isFirstAudio() && _lastUserEvent != 0) { await store.AddLatencyAsync(call.Id, (long)time.GetElapsedTime(_lastUserEvent).TotalMilliseconds, ct); _lastUserEvent = 0; }
@@ -379,23 +393,45 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
 /// <summary>A sentence handed to the phone and how much audio of it has been sent so far.</summary>
 public sealed class SpokenSentence(string text) { public string Text { get; } = text; public long Ms { get; set; } }
 
+/// <summary>A speech vendor failed while the phone was fine. Only the exception type travels (<see cref="Kind"/>), never a message.</summary>
+internal sealed class VendorFailure(string kind) : Exception("A speech vendor failed.") { public string Kind { get; } = kind; }
+
 /// <summary>Option p2 to p5 at run time: the stages of one option behind the pipeline seam.</summary>
-public sealed class ChainedPipeline(IChainedPipelineParts parts, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs) : IVoicePipeline
+public sealed class ChainedPipeline(IChainedPipelineParts parts, RealtimePipeline realtime, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs) : IVoicePipeline
 {
     public string Id => parts.OptionId;
 
-    public Task<IVoicePipelineSession?> OpenAsync(VoiceCall call, CancellationToken ct)
-        => Task.FromResult<IVoicePipelineSession?>(new Session(call, parts, options, store, tools, time, logs.CreateLogger("Solvelt.Marketplace.Api.Voice")));
-
-    private sealed class Session(VoiceCall call, IChainedPipelineParts parts, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILogger log) : IVoicePipelineSession
+    /// <summary>
+    /// Opens the speech recogniser BEFORE the phone socket is accepted. When the vendor refuses, the call is handed to the Realtime line on the same call (decision V-25): the tier and model the call started with
+    /// are put back, the option that failed is recorded in <c>FallbackFrom</c>, and the Realtime pipeline opens as for any normal call.
+    /// </summary>
+    public async Task<IVoicePipelineSession?> OpenAsync(VoiceCall call, CancellationToken ct)
     {
+        var log = logs.CreateLogger("Solvelt.Marketplace.Api.Voice");
+        ISttSession stt;
+        try { stt = await parts.Stt.OpenAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning("Voice call {Call}: option {Option} could not open its speech recogniser ({Type}); handing the call to the Realtime line.", call.Id, Id, ex.GetType().Name);   // never the message
+            var fallback = await store.FallBackToRealtimeAsync(call.Id, CancellationToken.None);
+            if (fallback is null) { await store.EndAsync(call.Id, VoiceOutcome.Abandoned, CancellationToken.None); return null; }     // nothing to fall back to: the call ends like a failing Realtime connector (503)
+            return await realtime.OpenAsync(fallback, ct);
+        }
+        return new Session(call, parts, stt, options, store, tools, time, log);
+    }
+
+    private sealed class Session(VoiceCall call, IChainedPipelineParts parts, ISttSession stt, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILogger log) : IVoicePipelineSession
+    {
+        private bool _handedOver;
+
         public async Task<VoicePipelineResult> RunAsync(WebSocket phone, VoiceCallState state, CancellationToken ct)
         {
-            var bridge = new ChainedBridge(phone, call, state, parts, options, store, tools, time, log);
+            _handedOver = true;        // the bridge owns the recogniser from here and disposes it when the stream ends
+            var bridge = new ChainedBridge(phone, call, state, parts, options, store, tools, time, log, stt);
             await bridge.RunAsync(ct);
             return new VoicePipelineResult(bridge.KeypadPause);
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public async ValueTask DisposeAsync() { if (!_handedOver) { try { await stt.DisposeAsync(); } catch (Exception) { /* already gone */ } } }
     }
 }

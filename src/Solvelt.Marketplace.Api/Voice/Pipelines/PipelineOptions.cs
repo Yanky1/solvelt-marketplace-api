@@ -64,6 +64,9 @@ public static class PipelineMenu
 /// <summary>What the PLATFORM says on the test line (never the model).</summary>
 public static class PipelineScripts
 {
+    /// <summary>What the PLATFORM says (never the model, and not through the failing vendor) when a chained option's vendor fails during the call (decision V-25).</summary>
+    public const string VendorLost = "Sorry, we are having trouble with the line right now. Please call back in a moment.";
+
     public const string Menu = "Test line. Press 1 for the standard assistant, 2 for pipeline two, 3 for pipeline three, 4 for pipeline four, or 5 for pipeline five.";
     public const string Unavailable = "That option is not available on this line. Using option one.";
     public static string Chosen(string option) => "Option " + option[1..] + ".";

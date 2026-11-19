@@ -102,11 +102,28 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
         if (!VoicePipelineIds.IsOption(option)) return false;
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
-        var model = option == VoicePipelineIds.Realtime ? null : "pipeline:" + option;
-        var n = model is null
-            ? await db.VoiceCalls.Where(c => c.Id == id && c.EndedAt == null && c.LatencySamples == 0).ExecuteUpdateAsync(s => s.SetProperty(c => c.Tier, option), ct)
-            : await db.VoiceCalls.Where(c => c.Id == id && c.EndedAt == null && c.LatencySamples == 0).ExecuteUpdateAsync(s => s.SetProperty(c => c.Tier, option).SetProperty(c => c.Model, model), ct);
+        var open = db.VoiceCalls.Where(c => c.Id == id && c.EndedAt == null && c.LatencySamples == 0);
+        // the menu replaces Tier and Model with its option; the tier and model chosen at the start are kept (once) so a fallback to the Realtime line can put them back (V-25)
+        var n = option == VoicePipelineIds.Realtime
+            ? await open.ExecuteUpdateAsync(s => s.SetProperty(c => c.Tier, option), ct)
+            : await open.ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.BaseTier, c => c.BaseTier == "" ? c.Tier : c.BaseTier)
+                .SetProperty(c => c.BaseModel, c => c.BaseModel == "" ? c.Model : c.BaseModel)
+                .SetProperty(c => c.Tier, option).SetProperty(c => c.Model, "pipeline:" + option), ct);
         return n > 0;
+    }
+
+    /// <summary>
+    /// A chained option's vendor failed before the call began: put back the tier and model the call started with (so the Realtime line connects to a real model and the call is priced by it), and
+    /// record which option failed. Once per call; returns the updated row, or null when there is nothing to fall back to (not a menu call, already fallen back, ended).
+    /// </summary>
+    public async Task<VoiceCall?> FallBackToRealtimeAsync(Guid id, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+        var n = await db.VoiceCalls.Where(c => c.Id == id && c.EndedAt == null && c.FallbackFrom == null && c.BaseModel != "" && c.Tier != "p1")
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.FallbackFrom, c => c.Tier).SetProperty(c => c.Tier, c => c.BaseTier).SetProperty(c => c.Model, c => c.BaseModel), ct);
+        return n > 0 ? await db.VoiceCalls.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id, ct) : null;
     }
 
     /// <summary>A chained pipeline's usage so far: text tokens and the estimated cost in micro-dollars of what was priced (speech-to-text minutes, text-to-speech characters, LLM tokens).</summary>

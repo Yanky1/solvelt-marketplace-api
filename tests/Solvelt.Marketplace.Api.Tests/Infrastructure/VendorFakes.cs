@@ -59,6 +59,8 @@ public sealed class FakeSocketConnector : IVendorSocketConnector
 {
     private readonly System.Collections.Concurrent.ConcurrentQueue<Connection> _connections = new();
     public bool Fail { get; set; }
+    /// <summary>Refuses the connections for which this is true (one vendor failing while the others work).</summary>
+    public Func<Uri, bool>? FailWhen { get; set; }
     public IReadOnlyList<Connection> Connections => _connections.ToArray();
 
     public sealed record Connection(Uri Uri, IReadOnlyDictionary<string, string> Headers, MemorySocketPair Pair)
@@ -68,7 +70,7 @@ public sealed class FakeSocketConnector : IVendorSocketConnector
 
     public Task<WebSocket> ConnectAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken ct)
     {
-        if (Fail) throw new WebSocketException("vendor refused");
+        if (Fail || FailWhen?.Invoke(uri) == true) throw new WebSocketException("vendor refused");
         var pair = new MemorySocketPair();
         _connections.Enqueue(new Connection(uri, new Dictionary<string, string>(headers), pair));
         return Task.FromResult(pair.Client);

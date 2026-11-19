@@ -101,6 +101,8 @@ public static class VoiceEndpoints
             return Cxml(call.TransferRequestedAt is not null && !string.IsNullOrWhiteSpace(v.SupportNumber)
                 ? new XElement("Response", new XElement("Say", VoiceScripts.OffTopicTransfer), new XElement("Dial", v.SupportNumber))
                 : new XElement("Response", new XElement("Say", VoiceScripts.OffTopicGoodbye), new XElement("Hangup")));
+        // a chained option's vendor failed during the call: the platform apologises and hangs up (decision V-25)
+        if (call?.Outcome == Data.VoiceOutcome.VendorLost) return Cxml(new XElement("Response", new XElement("Say", PipelineScripts.VendorLost), new XElement("Hangup")));
         if (call?.TransferRequestedAt is not null && !string.IsNullOrWhiteSpace(v.SupportNumber))
             return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Connecting), new XElement("Dial", v.SupportNumber)));
         if (call is not null && states.Find(call.Id) is { } st)

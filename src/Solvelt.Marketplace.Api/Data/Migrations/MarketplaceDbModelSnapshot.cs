@@ -3369,6 +3369,20 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<long>("AudioOutTokens")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("BaseModel")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasDefaultValue("");
+
+                    b.Property<string>("BaseTier")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasDefaultValue("");
+
                     b.Property<string>("CallSid")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -3391,6 +3405,10 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<long>("EstimatedCostMicros")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("FallbackFrom")
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
 
                     b.Property<int>("LatencySamples")
                         .HasColumnType("integer");
