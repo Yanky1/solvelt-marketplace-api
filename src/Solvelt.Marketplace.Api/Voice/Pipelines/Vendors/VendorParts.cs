@@ -5,23 +5,24 @@ using Microsoft.Extensions.Options;
 namespace Solvelt.Marketplace.Api.Voice;
 
 /// <summary>The stages of one vendor-backed option.</summary>
-public sealed class VendorChainedParts(string optionId, IStreamingStt stt, ITts tts, IVoiceLlm llm, int endpointMs) : IChainedPipelineParts
+public sealed class VendorChainedParts(string optionId, IStreamingStt stt, ITts tts, IVoiceLlm llm, Func<ITurnDetector> detector) : IChainedPipelineParts
 {
     public string OptionId => optionId;
     public IStreamingStt Stt => stt;
     public ITts Tts => tts;
     public IVoiceLlm Llm => llm;
-    public ITurnDetector NewTurnDetector() => new SilenceTurnDetector(endpointMs);
+    public ITurnDetector NewTurnDetector() => detector();
 }
 
 public static class VoicePipelineVendors
 {
-    public const string LlmClient = "voice-llm", GladiaClient = "voice-gladia";
+    public const string LlmClient = "voice-llm", GladiaClient = "voice-gladia", YiddishLabsClient = "voice-yiddishlabs";
 
     /// <summary>The provider pairs that have an adapter. A pair outside this list is a start-up problem, so a typo cannot silently leave an option off.</summary>
     internal static bool Supported(string option, PipelineProviders p)
         => (option == "p2" && Is(p.Stt, VendorNames.Deepgram) && Is(p.Tts, VendorNames.ElevenLabs))
-        || (option == "p3" && Is(p.Stt, VendorNames.Gladia) && Is(p.Tts, VendorNames.ElevenLabs));
+        || (option == "p3" && Is(p.Stt, VendorNames.Gladia) && Is(p.Tts, VendorNames.ElevenLabs))
+        || (option == "p4" && Is(p.Stt, VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs));
 
     private static bool Is(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
@@ -31,6 +32,7 @@ public static class VoicePipelineVendors
         services.AddSingleton<IVendorSocketConnector, ClientWebSocketConnector>();
         services.AddHttpClient(LlmClient, c => c.Timeout = Timeout.InfiniteTimeSpan);       // the adapter bounds the wait itself
         services.AddHttpClient(GladiaClient, c => c.Timeout = TimeSpan.FromSeconds(15));
+        services.AddHttpClient(YiddishLabsClient, c => c.Timeout = TimeSpan.FromSeconds(20));
         services.AddSingleton<IChainedPartsSource, VendorPartsSource>();
         return services;
     }
@@ -54,6 +56,18 @@ public static class VoicePipelineVendors
         }
         if (configured.Count == 0) return;
         if (v.Pipelines.Llm.TimeoutSeconds is < 1 or > 120) p.Add("Voice:Pipelines:Llm:TimeoutSeconds must be between 1 and 120.");
+        if (configured.Contains("p4"))
+        {
+            var y = v.YiddishLabs;
+            if (y.TtsVoiceId.Length > 0 && y.TtsVoiceId.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-')) p.Add("Voice:YiddishLabs:TtsVoiceId may only hold letters, digits, - and _.");
+            if (y.SttLanguage is not ("yi" or "en" or "he" or "auto")) p.Add("Voice:YiddishLabs:SttLanguage must be yi, en, he or auto.");
+            if (y.UploadSampleRate is not (8000 or 16000)) p.Add("Voice:YiddishLabs:UploadSampleRate must be 8000 or 16000.");
+            if (y.VadSilenceMs is < 200 or > 2000) p.Add("Voice:YiddishLabs:VadSilenceMs must be between 200 and 2000.");
+            if (y.VadEnergy is < 50 or > 5000) p.Add("Voice:YiddishLabs:VadEnergy must be between 50 and 5000.");
+            if (y.MaxConcurrentTtsSessions is < 1 or > 50) p.Add("Voice:YiddishLabs:MaxConcurrentTtsSessions must be between 1 and 50.");
+            if (y.SttPrompt.Length > 500) p.Add("Voice:YiddishLabs:SttPrompt must be at most 500 characters.");
+            if (y.ConsentLine.Length > 600) p.Add("Voice:YiddishLabs:ConsentLine must be at most 600 characters.");
+        }
         if (configured.Contains("p2") || configured.Contains("p3"))
         {
             if (v.ElevenLabs.VoiceId.Length > 0 && v.ElevenLabs.VoiceId.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-')) p.Add("Voice:ElevenLabs:VoiceId may only hold letters, digits, - and _.");
@@ -80,6 +94,14 @@ public static class VoicePipelineVendors
                 if (string.IsNullOrWhiteSpace(v.Gladia.Model)) m.Add("Voice:Gladia:Model");
                 if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
                 MissingEleven(v, m);
+                break;
+            case "p4":
+                var y = v.YiddishLabs;
+                if (string.IsNullOrWhiteSpace(y.FlashApiKey)) m.Add("Voice:YiddishLabs:FlashApiKey");
+                if (string.IsNullOrWhiteSpace(y.TtsVoiceId)) m.Add("Voice:YiddishLabs:TtsVoiceId");
+                if (string.IsNullOrWhiteSpace(y.SttModel)) m.Add("Voice:YiddishLabs:SttModel");
+                // the owner's approved wording is what makes the option usable: no wording, no option (the vendor's terms ask for consent before third-party personal data is sent)
+                if (string.IsNullOrWhiteSpace(y.ConsentLine)) m.Add("Voice:YiddishLabs:ConsentLine");
                 break;
         }
         return m;
@@ -115,12 +137,20 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         }
         var p2 = Ready("p2");
         var p3 = Ready("p3");
-        if (!p2 && !p3) yield break;
+        var p4 = Ready("p4");
+        if (!p2 && !p3 && !p4) yield break;
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
         var http = sp.GetRequiredService<IHttpClientFactory>();
         var llm = new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
-        var tts = new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs"));
-        if (p2) yield return new VendorChainedParts("p2", new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram")), tts, llm, v.PipelineMenu.EndpointMs);
-        if (p3) yield return new VendorChainedParts("p3", new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia")), tts, llm, v.PipelineMenu.EndpointMs);
+        Func<ITurnDetector> silence = () => new SilenceTurnDetector(v.PipelineMenu.EndpointMs);
+        if (p2 || p3)
+        {
+            var tts = new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs"));
+            if (p2) yield return new VendorChainedParts("p2", new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram")), tts, llm, silence);
+            if (p3) yield return new VendorChainedParts("p3", new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia")), tts, llm, silence);
+        }
+        if (p4)
+            yield return new VendorChainedParts("p4", new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")),
+                new YiddishLabsTts(v.YiddishLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")), llm, () => new FinalTurnDetector());   // the recogniser already waited for the end of speech
     }
 }

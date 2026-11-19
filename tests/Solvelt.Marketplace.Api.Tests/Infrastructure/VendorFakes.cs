@@ -114,3 +114,41 @@ public sealed class ListLogger : ILogger
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     { lock (Lines) Lines.Add(formatter(state, exception) + (exception is null ? "" : " | " + exception.GetType().Name)); }
 }
+
+/// <summary>A scripted answer for the recogniser's upload: status, body, optional Retry-After.</summary>
+public sealed record FlashAnswer(HttpStatusCode Status, string Body, int? RetryAfterSeconds = null)
+{
+    public static FlashAnswer Text(string text) => new(HttpStatusCode.OK, $"{{\"text\":{System.Text.Json.JsonSerializer.Serialize(text)},\"duration\":1.0}}");
+}
+
+/// <summary>Answers the Yiddish Labs upload with scripted answers (the last one repeats) and keeps every request with its raw multipart parts.</summary>
+public sealed class FakeFlashHandler : HttpMessageHandler
+{
+    private readonly Queue<FlashAnswer> _answers;
+    private FlashAnswer _last = FlashAnswer.Text("");
+    public FakeFlashHandler(params FlashAnswer[] answers) { _answers = new(answers); }
+    public List<FlashRequest> Requests { get; } = [];
+
+    public sealed record FlashRequest(Uri? Uri, string? Auth, Dictionary<string, string> Fields, byte[]? File);
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        var fields = new Dictionary<string, string>(); byte[]? file = null;
+        if (request.Content is MultipartFormDataContent)
+        {
+            var type = request.Content.Headers.ContentType!;
+            var reader = new Microsoft.AspNetCore.WebUtilities.MultipartReader(type.Parameters.First(p => p.Name == "boundary").Value!.Trim('"'), await request.Content.ReadAsStreamAsync(ct));
+            while (await reader.ReadNextSectionAsync(ct) is { } section)
+            {
+                var name = System.Net.Http.Headers.ContentDispositionHeaderValue.Parse(section.ContentDisposition!).Name!.Trim('"');
+                using var ms = new MemoryStream(); await section.Body.CopyToAsync(ms, ct);
+                if (name == "file") file = ms.ToArray(); else fields[name] = Encoding.UTF8.GetString(ms.ToArray());
+            }
+        }
+        lock (Requests) Requests.Add(new FlashRequest(request.RequestUri, request.Headers.Authorization?.ToString(), fields, file));
+        var a = _answers.Count > 0 ? (_last = _answers.Dequeue()) : _last;
+        var resp = new HttpResponseMessage(a.Status) { Content = new StringContent(a.Body, Encoding.UTF8, "application/json") };
+        if (a.RetryAfterSeconds is { } s) resp.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(s));
+        return resp;
+    }
+}

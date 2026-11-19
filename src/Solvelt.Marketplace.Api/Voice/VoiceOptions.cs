@@ -69,6 +69,7 @@ public sealed class VoiceOptions
     public DeepgramOptions Deepgram { get; set; } = new();
     public ElevenLabsOptions ElevenLabs { get; set; } = new();
     public GladiaOptions Gladia { get; set; } = new();
+    public YiddishLabsOptions YiddishLabs { get; set; } = new();
 }
 
 public sealed class SignalWireOptions

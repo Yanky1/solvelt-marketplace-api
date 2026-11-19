@@ -22,6 +22,9 @@ public sealed class VoicePipelinesOptions
     public VoiceLlmOptions Llm { get; set; } = new();
 
     public PipelineProviders For(string option) => option switch { "p2" => P2, "p3" => P3, "p4" => P4, "p5" => P5, _ => new() };
+
+    /// <summary>Whether the option sends the caller's speech or words to Yiddish Labs: those options need the consent step.</summary>
+    public bool UsesYiddishLabs(string option) { var p = For(option); return p.Configured && (p.Stt.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase) || p.Tts.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase)); }
 }
 
 public sealed class VoiceLlmOptions
@@ -60,6 +63,29 @@ public sealed class GladiaOptions
     public string Language { get; set; } = "yi";
 }
 
+/// <summary><c>Voice:YiddishLabs</c>: Yiddish speech to text (Flash, one request per caller turn) and realtime text to speech (options p4 and p5). The vendor has no streaming recogniser and its voice is a preview.</summary>
+public sealed class YiddishLabsOptions
+{
+    public string FlashApiKey { get; set; } = "";      // secret (a yl_flash_ key: the same key does the recogniser and the voice)
+    public string SttModel { get; set; } = "yiddishlabs-3-turbo";
+    /// <summary><c>yi</c>, <c>en</c>, <c>he</c> or <c>auto</c>.</summary>
+    public string SttLanguage { get; set; } = "yi";
+    /// <summary>Optional words that bias the start of the transcription (product names).</summary>
+    public string SttPrompt { get; set; } = "";
+    /// <summary>The rate of the WAV that is uploaded: 8000 (as the telephone sends it) or 16000 (up-sampled). Whether 8 kHz is accepted is OPEN until a key exists.</summary>
+    public int UploadSampleRate { get; set; } = 8000;
+    /// <summary>Silence that ends a caller's turn: the recogniser only takes whole recordings, so the adapter listens for the end of speech itself.</summary>
+    public int VadSilenceMs { get; set; } = 450;
+    /// <summary>Mean absolute amplitude (0 to 32767) of a 20 ms frame that counts as speech.</summary>
+    public int VadEnergy { get; set; } = 400;
+    public string TtsVoiceId { get; set; } = "";
+    public bool TtsHd { get; set; }
+    /// <summary>The vendor allows five concurrent sessions per account; this process keeps to the number set here.</summary>
+    public int MaxConcurrentTtsSessions { get; set; } = 5;
+    /// <summary>The consent line (the vendor's terms ask for consent before third-party personal data is sent): the OWNER's approved wording, never written in code. It is played with a keypad press before the pipeline starts; required for the options that use this vendor.</summary>
+    public string ConsentLine { get; set; } = "";
+}
+
 public static class VendorNames
 {
     public const string Deepgram = "deepgram", ElevenLabs = "elevenlabs", Gladia = "gladia", YiddishLabs = "yiddishlabs";
@@ -69,6 +95,7 @@ public static class VendorNames
 public static class VendorHosts
 {
     public const string Deepgram = "api.deepgram.com";
+    public const string YiddishLabsFlash = "flash.yiddishlabs.com", YiddishLabsRealtime = "rt.yiddishlabs.com";
     public static string? ElevenLabs(string region) => region.ToLowerInvariant() switch
     {
         "" => "api.elevenlabs.io", "us" => "api.us.elevenlabs.io", "eu" => "api.eu.residency.elevenlabs.io", "in" => "api.in.residency.elevenlabs.io", "sg" => "api.sg.residency.elevenlabs.io", _ => null,
