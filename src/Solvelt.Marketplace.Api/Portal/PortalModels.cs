@@ -5,7 +5,7 @@ namespace Solvelt.Marketplace.Api.Portal;
 
 // ---- shared ----
 public sealed record PortalError(string? Code, string? Message, IReadOnlyList<InvalidOrderError>? Errors = null);
-public sealed record InvalidOrderError(int Index, string Code, string Message);
+public sealed record InvalidOrderError(int Index, string Code, string Message, string? Kind = null, Guid? OfferId = null);
 
 public sealed record PortalResult<T>(int Status, T? Value, PortalError? Error, int Attempts)
 {
@@ -26,7 +26,9 @@ public sealed record PortalBuyer(string DisplayName, string RelayEmail, string? 
 public sealed record PortalAddress(string Name, string Line1, string? Line2, string City, string? Region, string PostalCode, string Country, double? Lat = null, double? Lng = null);
 /// <summary>A line names its product by ids, never by SKU (CONTRACT.md §3).</summary>
 public sealed record OrderLineRequest(string MarketplaceLineId, Guid SellerId, Guid BrandId, Guid ProductId, Guid? VariantId,
-    int Quantity, long UnitPriceCents, long DiscountCents = 0, long TaxCents = 0);
+    int Quantity, long UnitPriceCents, long DiscountCents = 0, long TaxCents = 0, Guid? OfferId = null, bool? IsGift = null, Guid? GiftOfOfferId = null);
+/// <summary>An offer applied to the order, with the version priced with (C18.4). <see cref="GiftUnavailable"/> is sent only when true.</summary>
+public sealed record OrderOfferRequest(Guid OfferId, long OfferVersion, bool? GiftUnavailable = null);
 /// <summary>
 /// One shipping charge per (seller, brand) group. <see cref="Speed"/>, <see cref="Method"/> and <see cref="TaxCents"/> are contract request C8 (merged by the portal, decision M3-37):
 /// they are sent only when <c>Portal:PerGroupShipping</c> is on, and omitted (null) otherwise.
@@ -35,7 +37,7 @@ public sealed record ShippingChargeRequest(Guid SellerId, Guid BrandId, long Amo
 public sealed record LocalDeliveryRequest(Guid SellerId, Guid BrandId, string Method, Guid WindowId, string Date);
 public sealed record CreateOrderRequest(string MarketplaceOrderId, DateTimeOffset PlacedAt, string Currency, PortalBuyer Buyer, PortalAddress ShippingAddress,
     string ShippingMethod, string ShippingSpeed, string? GiftMessage, IReadOnlyList<OrderLineRequest> Lines, IReadOnlyList<ShippingChargeRequest> Shipping,
-    IReadOnlyList<LocalDeliveryRequest>? Deliveries = null)
+    IReadOnlyList<LocalDeliveryRequest>? Deliveries = null, IReadOnlyList<OrderOfferRequest>? Offers = null)
 {
     public string Currency { get; init; } = Currency.Trim().ToUpperInvariant();
 }

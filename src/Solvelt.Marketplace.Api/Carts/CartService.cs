@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Solvelt.Marketplace.Api.Offers;
 using Solvelt.Marketplace.Api.Auth;
 using Solvelt.Marketplace.Api.Data;
 
@@ -24,9 +25,14 @@ public static class CartLineStatus
 }
 
 public sealed record CartLineView(Guid Id, Guid ListingId, Guid VariantId, string Slug, string Title, string VariantName, Guid? ImageId, int Quantity,
-    long UnitPriceCents, long? CompareAtCents, long LineTotalCents, string Status, long? PreviousUnitPriceCents);
+    long UnitPriceCents, long? CompareAtCents, long LineTotalCents, string Status, long? PreviousUnitPriceCents, long DiscountCents = 0, Guid? OfferId = null);
+/// <summary>A tier of a quantity offer as the buyer sees it.</summary>
+public sealed record CartOfferTier(int MinQuantity, long UnitPriceCents);
+public sealed record CartOfferGift(Guid ProductId, string Title, int Quantity, int MinQuantity, string Status);
+/// <summary>What one quantity offer does in this cart: the tier reached, the next one ("add N more") and the gifts earned. <c>Status</c> of a gift is <c>included</c> or <c>unavailable</c>.</summary>
+public sealed record CartOfferView(Guid OfferId, long Version, string Name, int EligibleUnits, CartOfferTier? Tier, CartOfferTier? NextTier, int UnitsToNextTier, long DiscountCents, IReadOnlyList<CartOfferGift> Gifts);
 /// <summary>One group per (seller, brand), exactly how the portal splits seller orders (CONTRACT.md §3).</summary>
-public sealed record CartGroupView(Guid SellerId, string SellerName, Guid BrandId, string BrandName, long SubtotalCents, IReadOnlyList<CartLineView> Lines);
+public sealed record CartGroupView(Guid SellerId, string SellerName, Guid BrandId, string BrandName, long SubtotalCents, IReadOnlyList<CartLineView> Lines, long DiscountCents = 0, IReadOnlyList<CartOfferView>? Offers = null);
 public sealed record CartView(string Currency, IReadOnlyList<CartGroupView> Groups, int ItemCount, long SubtotalCents, bool CanCheckout, string? CartToken = null, [property: System.Text.Json.Serialization.JsonIgnore] bool HasDemoLines = false);
 
 public enum AddStatus { Ok, NotFound, NotPurchasable, QuantityLimit, TooManyLines, CurrencyMismatch, Busy }
@@ -42,7 +48,7 @@ public sealed class CartHooks
     public Func<Task>? AfterLineRead { get; set; }
 }
 
-public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks hooks)
+public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks hooks, OfferLoader offers)
 {
     private DateTimeOffset Now => time.GetUtcNow().ToUniversalTime();
 
@@ -221,7 +227,7 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
                           {
                               cl.Id, cl.IsDemo, ListingId = v == null ? cl.ListingId : v.ListingId, cl.VariantId, cl.Quantity, cl.SeenUnitPriceCents,
                               VName = v == null ? null : v.Name, PriceCents = v == null ? 0L : v.PriceCents, CompareAtCents = v == null ? null : v.CompareAtCents, VAvail = v != null && v.Available,
-                              LTitle = l == null ? null : l.Title, LSlug = l == null ? null : l.Slug, LVisible = l != null && l.Visible, LType = l == null ? null : l.Type,
+                              LTitle = l == null ? null : l.Title, LSlug = l == null ? null : l.Slug, LVisible = l != null && l.Visible, LType = l == null ? null : l.Type, CategoryId = l == null ? Guid.Empty : l.CategoryId,
                               Currency = l == null ? null : l.Currency, SellerId = l == null ? Guid.Empty : l.SellerId, BrandId = l == null ? Guid.Empty : l.BrandId,
                               SellerActive = s != null && s.Active, SName = s == null ? null : s.DisplayName, BName = b == null ? null : b.Name,
                           }).ToListAsync(ct);
@@ -232,20 +238,34 @@ public sealed class CartService(MarketplaceDb db, TimeProvider time, CartHooks h
         var currency = CartLimits.Currency;
         var groups = new List<CartGroupView>();
         var canCheckout = rows.Count > 0;
+        var okRows = rows.Where(r => r.VName is not null && r.LVisible && r.SellerActive && r.VAvail && r.LType == ListingTypes.Product && r.Currency == CartLimits.Currency && r.PriceCents is >= 0 and <= CartLimits.MaxUnitPriceCents).ToList();
+        var loaded = await offers.ActiveAsync(okRows.Select(r => r.SellerId).Distinct().ToList(), Now, ct);
+        var inputs = new List<OfferLineInput>();
+        foreach (var r in okRows) inputs.Add(new OfferLineInput(r.Id, r.ListingId, r.SellerId, r.BrandId, await offers.ChainAsync(r.CategoryId, ct), r.PriceCents, r.Quantity));
+        var priced = OfferPricing.Price(inputs, loaded.Select(o => o.Def).ToList());
         foreach (var g in rows.GroupBy(r => (r.SellerId, r.BrandId)))
         {
             var views = new List<CartLineView>();
             foreach (var r in g)
             {
-                var ok = r.VName is not null && r.LVisible && r.SellerActive && r.VAvail && r.LType == ListingTypes.Product && r.Currency == CartLimits.Currency && r.PriceCents is >= 0 and <= CartLimits.MaxUnitPriceCents;
+                var ok = okRows.Contains(r);
                 if (!ok) canCheckout = false;
                 var unit = ok ? r.PriceCents : 0;
+                var offer = ok ? priced.For(r.Id) : null;
+                var discount = offer?.DiscountCents ?? 0;
                 views.Add(new CartLineView(r.Id, r.ListingId, r.VariantId, r.LSlug ?? "", r.LTitle ?? "", r.VName ?? "",
-                    firstImage.TryGetValue(r.ListingId, out var im) ? im : (Guid?)null, r.Quantity, unit, ok ? r.CompareAtCents : null, unit * r.Quantity,
-                    ok ? CartLineStatus.Ok : CartLineStatus.Unavailable, ok && r.PriceCents != r.SeenUnitPriceCents ? r.SeenUnitPriceCents : null));
+                    firstImage.TryGetValue(r.ListingId, out var im) ? im : (Guid?)null, r.Quantity, unit, ok ? r.CompareAtCents : null, unit * r.Quantity - discount,
+                    ok ? CartLineStatus.Ok : CartLineStatus.Unavailable, ok && r.PriceCents != r.SeenUnitPriceCents ? r.SeenUnitPriceCents : null, discount, discount > 0 || offer?.OfferId is not null ? offer?.OfferId : null));
             }
             var first = g.First();
-            groups.Add(new CartGroupView(g.Key.SellerId, first.SName ?? "", g.Key.BrandId, first.BName ?? "", views.Sum(v => v.LineTotalCents), views));
+            var outcomes = priced.Offers.Where(o => o.SellerId == g.Key.SellerId && o.BrandId == g.Key.BrandId).Select(o =>
+            {
+                var l = loaded.First(x => x.Def.OfferId == o.OfferId);
+                return new CartOfferView(o.OfferId, o.Version, l.Name, o.EligibleUnits, o.Tier is null ? null : new CartOfferTier(o.Tier.MinQuantity, o.Tier.UnitPriceCents),
+                    o.NextTier is null ? null : new CartOfferTier(o.NextTier.MinQuantity, o.NextTier.UnitPriceCents), o.UnitsToNextTier, o.DiscountCents,
+                    o.Gifts.Select(x => new CartOfferGift(x.ProductId, x.Title, x.Quantity, x.MinQuantity, l.GiftAvailable.GetValueOrDefault(x.ProductId, true) ? "included" : "unavailable")).ToList());
+            }).ToList();
+            groups.Add(new CartGroupView(g.Key.SellerId, first.SName ?? "", g.Key.BrandId, first.BName ?? "", views.Sum(v => v.LineTotalCents), views, views.Sum(v => v.DiscountCents), outcomes));
         }
         // Lines of a seller/brand the catalog no longer knows share the empty group; they are all unavailable.
         var items = groups.SelectMany(g => g.Lines).Where(l => l.Status == CartLineStatus.Ok).Sum(l => l.Quantity);

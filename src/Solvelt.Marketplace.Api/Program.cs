@@ -266,6 +266,7 @@ builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.Ca
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.ReturnRequestOutboxHandler>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Fulfilment.DeliveryConfirmationOutboxHandler>();
 builder.Services.AddSingleton<CartHooks>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Offers.OfferLoader>();
 builder.Services.AddScoped<CartService>();
 builder.Services.AddScoped<CartMaintenance>();
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<CartWorker>();

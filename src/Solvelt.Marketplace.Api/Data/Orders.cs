@@ -94,6 +94,9 @@ public sealed class OrderGroup
     public long ShippingTaxCents { get; set; }
     public long TaxCents { get; set; }
     public long TotalCents { get; set; }
+    /// <summary>Discount of the group's offers, and the offers priced with (<c>[{offerId, version, giftUnavailable}]</c> as JSON): exactly what the portal is told at ingest (decision Q-04).</summary>
+    public long DiscountCents { get; set; }
+    public string? OffersJson { get; set; }
     /// <summary>The portal's seller order, stored when the order is ingested.</summary>
     public Guid? SellerOrderId { get; set; }
     public string? SellerOrderNumber { get; set; }
@@ -129,6 +132,11 @@ public sealed class OrderLine
     public long UnitPriceCents { get; set; }
     public long LineTotalCents { get; set; }
     public long TaxCents { get; set; }
+    /// <summary>The quantity offer that priced this line (decision Q-04) and what it took off (<c>LineTotalCents</c> is already net of it). A gift line (<see cref="IsGift"/>) has no variant, a $0 price and names its offer in <see cref="GiftOfOfferId"/>.</summary>
+    public Guid? OfferId { get; set; }
+    public long DiscountCents { get; set; }
+    public bool IsGift { get; set; }
+    public Guid? GiftOfOfferId { get; set; }
     /// <summary>Units refunded or cancelled so far (never above <see cref="Quantity"/>).</summary>
     public int RefundedQuantity { get; set; }
     /// <summary>Tax backed out of the refunds of this line so far (of the tax we sent at ingest).</summary>
@@ -281,6 +289,7 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceO
         b.Property(g => g.LocalDate).HasMaxLength(10);
         b.Property(g => g.SellerOrderNumber).HasMaxLength(60);
         b.HasIndex(g => new { g.OrderId, g.SellerId, g.BrandId }).IsUnique();
+        b.Property(g => g.DiscountCents).HasDefaultValue(0L);
         b.HasIndex(g => g.SellerOrderId);
     }
 
@@ -292,6 +301,8 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceO
         b.Property(l => l.MarketplaceLineId).HasMaxLength(60).IsRequired();
         b.Property(l => l.Title).HasMaxLength(300);
         b.Property(l => l.VariantName).HasMaxLength(200);
+        b.Property(l => l.DiscountCents).HasDefaultValue(0L);
+        b.Property(l => l.IsGift).HasDefaultValue(false);
         b.HasIndex(l => l.MarketplaceLineId).IsUnique();
     }
 }

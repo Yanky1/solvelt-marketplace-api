@@ -34,6 +34,9 @@ public sealed class CheckoutHooks
     public Func<MarketplaceDb, Task>? BeforeSupersedeUpdate { get; set; }
 }
 
+/// <summary>An offer as stored on an order group and sent to the portal.</summary>
+public sealed record OrderOfferRef(Guid OfferId, long Version, bool GiftUnavailable);
+
 public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, QuoteSigner signer, CartService carts, IPaymentProvider payments, IOptions<StripeOptions> stripe, Outbox.OutboxWriter outbox, CheckoutHooks hooks, TimeProvider time, ILogger<CheckoutService> log)
 {
     private DateTimeOffset Now => time.GetUtcNow().ToUniversalTime();
@@ -139,6 +142,8 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
                 Id = Guid.NewGuid(), OrderId = id, SellerId = g.SellerId, BrandId = g.BrandId, SellerName = g.SellerName, BrandName = g.BrandName,
                 DeliveryKind = g.Selected!.Kind, ShippingSpeed = g.Selected.Speed, LocalWindowId = g.Selected.WindowId, LocalDate = g.Selected.Date,
                 ItemsCents = g.ItemsCents, ShippingCents = g.ShippingCents, ShippingTaxCents = g.ShippingTaxCents, TaxCents = g.TaxCents, TotalCents = g.TotalCents,
+                DiscountCents = g.DiscountCents,
+                OffersJson = g.Offers is { Count: > 0 } offs ? System.Text.Json.JsonSerializer.Serialize(offs.Select(o => new OrderOfferRef(o.OfferId, o.Version, o.GiftUnavailable))) : null,
             };
             order.Groups.Add(group);
             foreach (var l in g.Lines)
@@ -146,6 +151,13 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
                 {
                     Id = Guid.NewGuid(), OrderId = id, GroupId = group.Id, MarketplaceLineId = $"{number}-{++n}", ListingId = l.ListingId, VariantId = l.VariantId, SellerId = g.SellerId, BrandId = g.BrandId,
                     Title = l.Title, VariantName = l.VariantName, Quantity = l.Quantity, UnitPriceCents = l.UnitPriceCents, LineTotalCents = l.LineTotalCents, TaxCents = l.TaxCents,
+                    OfferId = l.OfferId, DiscountCents = l.DiscountCents,
+                });
+            foreach (var gf in g.Gifts ?? [])
+                order.Lines.Add(new OrderLine
+                {
+                    Id = Guid.NewGuid(), OrderId = id, GroupId = group.Id, MarketplaceLineId = $"{number}-{++n}", ListingId = gf.ProductId, VariantId = Guid.Empty, SellerId = g.SellerId, BrandId = g.BrandId,
+                    Title = gf.Title, VariantName = "", Quantity = gf.Quantity, UnitPriceCents = 0, LineTotalCents = 0, TaxCents = 0, IsGift = true, GiftOfOfferId = gf.OfferId, OfferId = gf.OfferId,
                 });
         }
         order.ActiveKey = Fingerprint(order);
@@ -159,9 +171,9 @@ public sealed class CheckoutService(MarketplaceDb db, QuoteService quotes, Quote
         var sb = new StringBuilder().Field(o.AccountId).Field(o.GuestEmail).Field(o.CartId).Field(o.Currency).Field(o.TotalCents)
           .Field(o.ShipName).Field(o.ShipLine1).Field(o.ShipLine2).Field(o.ShipCity).Field(o.ShipRegion).Field(o.ShipPostalCode).Field(o.ShipCountry).Field(o.Phone).Field(o.GiftMessage).Field(o.ShipLat).Field(o.ShipLng);
         foreach (var g in o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId))
-            sb.Field("G").Field(g.SellerId).Field(g.BrandId).Field(g.DeliveryKind).Field(g.ShippingSpeed).Field(g.LocalWindowId).Field(g.LocalDate).Field(g.ShippingCents).Field(g.TaxCents);
-        foreach (var l in o.Lines.OrderBy(l => l.VariantId))
-            sb.Field("L").Field(l.VariantId).Field(l.Quantity).Field(l.UnitPriceCents).Field(l.TaxCents);
+            sb.Field("G").Field(g.SellerId).Field(g.BrandId).Field(g.DeliveryKind).Field(g.ShippingSpeed).Field(g.LocalWindowId).Field(g.LocalDate).Field(g.ShippingCents).Field(g.TaxCents).Field(g.DiscountCents).Field(g.OffersJson);
+        foreach (var l in o.Lines.OrderBy(l => l.IsGift).ThenBy(l => l.VariantId).ThenBy(l => l.ListingId))
+            sb.Field("L").Field(l.VariantId).Field(l.Quantity).Field(l.UnitPriceCents).Field(l.TaxCents).Field(l.DiscountCents).Field(l.OfferId).Field(l.IsGift).Field(l.GiftOfOfferId);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
     }
 

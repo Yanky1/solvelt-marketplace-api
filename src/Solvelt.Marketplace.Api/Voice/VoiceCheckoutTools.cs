@@ -50,6 +50,12 @@ public static class OrderReadBack
             var when = sel.Kind == "carrier" && g.ShippingOptions.FirstOrDefault(o => o.Speed == sel.Speed) is { } o ? VoiceSpeech.DateRange(o.Estimate.Earliest, o.Estimate.Latest, today) : sel.Date is { } d && DateOnly.TryParse(d, CultureInfo.InvariantCulture, out var day) ? VoiceSpeech.Date(day, today) : "";
             parts.Add($"{(q.Groups.Count > 1 ? VoiceSpeech.Plain(g.SellerName, 40) + ": " : "")}{how}, {(sel.ShippingCents == 0 ? "free" : VoiceSpeech.Money(sel.ShippingCents))}{(when.Length > 0 ? ", arriving " + when : "")}.");
         }
+        // Quantity offers come from the same pricing as the website (decision Q-06): the discount is already inside the item total, the gifts are free lines.
+        var discount = q.Groups.Sum(g => g.Lines.Sum(l => l.DiscountCents));
+        if (discount > 0) parts.Add($"Your quantity discount saves you {VoiceSpeech.Money(discount)}.");
+        foreach (var gift in q.Groups.SelectMany(g => g.Gifts ?? []))
+            parts.Add($"You also get {(gift.Quantity > 1 ? VoiceSpeech.Number(gift.Quantity) + " free " : "a free ")}{VoiceSpeech.Plain(gift.Title, 60)}.");
+        if (q.Groups.Any(g => (g.Offers ?? []).Any(o => o.GiftUnavailable))) parts.Add("A free gift is unavailable right now.");
         parts.Add($"Items {VoiceSpeech.Money(q.ItemsCents)}" + (q.ShippingCents > 0 ? $", shipping {VoiceSpeech.Money(q.ShippingCents)}" : "") + (q.TaxCents > 0 ? $", tax {VoiceSpeech.Money(q.TaxCents)}" : "") + ".");
         parts.Add($"Your total is {VoiceSpeech.Money(q.TotalCents)}.");
         parts.Add(VoiceScripts.ConfirmQuestion);

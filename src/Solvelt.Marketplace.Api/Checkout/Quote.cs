@@ -17,9 +17,13 @@ public sealed record QuoteRequest(QuoteAddress? Address, IReadOnlyList<GroupSele
 
 public sealed record LocalOption(bool Eligible, string? Reason, long? FeeCents, string? TimeZone, IReadOnlyList<DeliveryWindow> Windows);
 public sealed record SelectedDelivery(string Kind, string? Speed, Guid? WindowId, string? Date, long ShippingCents);
-public sealed record QuoteLine(Guid LineId, Guid ListingId, Guid VariantId, string Title, string VariantName, int Quantity, long UnitPriceCents, long LineTotalCents, long TaxCents);
+public sealed record QuoteLine(Guid LineId, Guid ListingId, Guid VariantId, string Title, string VariantName, int Quantity, long UnitPriceCents, long LineTotalCents, long TaxCents, long DiscountCents = 0, Guid? OfferId = null);
+/// <summary>An offer applied to a group (the version priced with is what the portal checks) and whether an earned gift had to be left out. Gifts are free lines with no variant and no tax.</summary>
+public sealed record QuoteOffer(Guid OfferId, long Version, string Name, long DiscountCents, bool GiftUnavailable);
+public sealed record QuoteGift(Guid OfferId, Guid ProductId, string Title, int Quantity);
 public sealed record QuoteGroup(Guid SellerId, string SellerName, Guid BrandId, string BrandName, IReadOnlyList<QuoteLine> Lines, long ItemsCents,
-    IReadOnlyList<ShippingOption> ShippingOptions, IReadOnlyList<UnavailableSpeed> UnavailableSpeeds, LocalOption? Local, SelectedDelivery? Selected, long ShippingCents, long ShippingTaxCents, long TaxCents, long TotalCents);
+    IReadOnlyList<ShippingOption> ShippingOptions, IReadOnlyList<UnavailableSpeed> UnavailableSpeeds, LocalOption? Local, SelectedDelivery? Selected, long ShippingCents, long ShippingTaxCents, long TaxCents, long TotalCents,
+    long DiscountCents = 0, IReadOnlyList<QuoteOffer>? Offers = null, IReadOnlyList<QuoteGift>? Gifts = null);
 public sealed record QuoteView(string Currency, IReadOnlyList<QuoteGroup> Groups, long ItemsCents, long ShippingCents, long TaxCents, long TotalCents, bool CanPay, string? QuoteHash = null, DateTimeOffset? ExpiresAt = null);
 
 /// <summary>Canonical text for hashing: every field length-prefixed, so no value can contain a separator that shifts a neighbour (a name with a `|` can never collide with another split of the same characters).</summary>
@@ -48,7 +52,9 @@ public sealed class QuoteSigner(IOptions<CheckoutOptions> options)
         {
             sb.Field("G").Field(g.SellerId).Field(g.BrandId).Field(g.Selected?.Kind).Field(g.Selected?.Speed).Field(g.Selected?.WindowId).Field(g.Selected?.Date)
               .Field(g.ShippingCents).Field(g.ShippingTaxCents).Field(g.TaxCents);
-            foreach (var l in g.Lines.OrderBy(l => l.VariantId)) sb.Field("L").Field(l.VariantId).Field(l.Quantity).Field(l.UnitPriceCents).Field(l.TaxCents);
+            foreach (var l in g.Lines.OrderBy(l => l.VariantId)) sb.Field("L").Field(l.VariantId).Field(l.Quantity).Field(l.UnitPriceCents).Field(l.TaxCents).Field(l.DiscountCents).Field(l.OfferId);
+            foreach (var o in (g.Offers ?? []).OrderBy(o => o.OfferId)) sb.Field("O").Field(o.OfferId).Field(o.Version).Field(o.DiscountCents).Field(o.GiftUnavailable);
+            foreach (var x in (g.Gifts ?? []).OrderBy(x => x.OfferId).ThenBy(x => x.ProductId)) sb.Field("F").Field(x.OfferId).Field(x.ProductId).Field(x.Quantity);
         }
         var key = Encoding.UTF8.GetBytes(options.Value.QuoteKey ?? throw new InvalidOperationException("Checkout:QuoteKey is not configured."));
         return Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(sb.ToString())));
@@ -164,11 +170,13 @@ public sealed class QuoteService(MarketplaceDb db, CartService carts, ShippingSe
         var groups = new List<QuoteGroup>();
         foreach (var (g, opts, unavailable, local, sel, _) in built)
         {
-            var lines = g.Lines.Select(l => new QuoteLine(l.Id, l.ListingId, l.VariantId, l.Title, l.VariantName, l.Quantity, l.UnitPriceCents, l.LineTotalCents, taxes.LineTaxCents[l.Id.ToString()])).ToList();
+            var lines = g.Lines.Select(l => new QuoteLine(l.Id, l.ListingId, l.VariantId, l.Title, l.VariantName, l.Quantity, l.UnitPriceCents, l.LineTotalCents, taxes.LineTaxCents[l.Id.ToString()], l.DiscountCents, l.OfferId)).ToList();
+            var qOffers = (g.Offers ?? []).Select(o => new QuoteOffer(o.OfferId, o.Version, o.Name, o.DiscountCents, o.Gifts.Any(x => x.Status != "included"))).ToList();
+            var qGifts = (g.Offers ?? []).SelectMany(o => o.Gifts.Where(x => x.Status == "included").Select(x => new QuoteGift(o.OfferId, x.ProductId, x.Title, x.Quantity))).ToList();
             var shipping = sel?.ShippingCents ?? 0;
             var shipTax = taxes.ShippingTaxCents[g.SellerId + ":" + g.BrandId];
             var groupTax = lines.Sum(l => l.TaxCents) + shipTax;
-            groups.Add(new QuoteGroup(g.SellerId, g.SellerName, g.BrandId, g.BrandName, lines, g.SubtotalCents, opts, unavailable, local, sel, shipping, shipTax, groupTax, g.SubtotalCents + shipping + groupTax));
+            groups.Add(new QuoteGroup(g.SellerId, g.SellerName, g.BrandId, g.BrandName, lines, g.SubtotalCents, opts, unavailable, local, sel, shipping, shipTax, groupTax, g.SubtotalCents + shipping + groupTax, g.DiscountCents, qOffers, qGifts));
         }
         var view = new QuoteView(cart.Currency, groups, groups.Sum(x => x.ItemsCents), groups.Sum(x => x.ShippingCents), groups.Sum(x => x.TaxCents), groups.Sum(x => x.TotalCents), groups.All(x => x.Selected is not null));
         if (view.TotalCents > CartLimits.MaxTotalCents) return (QuoteStatus.TotalTooLarge, null, null);

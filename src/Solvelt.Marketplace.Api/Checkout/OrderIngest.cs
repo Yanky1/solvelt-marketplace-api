@@ -48,7 +48,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         catch (PortalNotConfiguredException) { return OutboxResult.Retry("portal_not_configured"); }
 
         if (result.IsSuccess && result.Value is { } created) return await StoreAsync(order, created, ct);
-        if (result.Status == 422 && result.Error?.Code == "invalid_order") return await FailAsync(order, result.Error, ct);
+        if (result.Status == 422 && result.Error?.Code is "invalid_order" or "offer_mismatch") return await FailAsync(order, result.Error, ct);
         return PortalOutcome.From(result);
     }
 
@@ -57,15 +57,23 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
     {
         var groups = o.Groups.OrderBy(g => g.SellerId).ThenBy(g => g.BrandId).ToList();
         var lines = new List<OrderLineRequest>();
+        var offers = new List<OrderOfferRequest>();
         foreach (var g in groups)
         {
             var gl = o.Lines.Where(l => l.GroupId == g.Id).OrderBy(l => l.MarketplaceLineId, StringComparer.Ordinal).ToList();
-            var shipTax = IngestMapping.LineShippingTax(g, gl, perGroupShipping);
+            // Shipping tax rides on the paying lines only: a gift line carries no tax (C18.1-10).
+            var paying = gl.Where(l => !l.IsGift).ToList();
+            var payTax = IngestMapping.LineShippingTax(g, paying, perGroupShipping);
             for (var i = 0; i < gl.Count; i++)
             {
                 var l = gl[i];
-                lines.Add(new OrderLineRequest(l.MarketplaceLineId, l.SellerId, l.BrandId, l.ListingId, syntheticVariants?.Contains(l.VariantId) == true || l.VariantId == l.ListingId ? null : l.VariantId, l.Quantity, l.UnitPriceCents, 0, l.TaxCents + shipTax[i]));
+                var shipTax = l.IsGift ? 0 : payTax[paying.IndexOf(l)];
+                var variant = l.IsGift || syntheticVariants?.Contains(l.VariantId) == true || l.VariantId == l.ListingId ? null : (Guid?)l.VariantId;
+                lines.Add(new OrderLineRequest(l.MarketplaceLineId, l.SellerId, l.BrandId, l.ListingId, variant, l.Quantity, l.UnitPriceCents, l.DiscountCents, l.TaxCents + shipTax,
+                    l.OfferId, l.IsGift ? true : null, l.GiftOfOfferId));
             }
+            if (g.OffersJson is { } oj && System.Text.Json.JsonSerializer.Deserialize<List<OrderOfferRef>>(oj) is { } refs)
+                offers.AddRange(refs.Select(r => new OrderOfferRequest(r.OfferId, r.Version, r.GiftUnavailable ? true : null)));
         }
         var (method, speed) = IngestMapping.OrderMethodAndSpeed(groups);
         if (groups.Count > IngestMapping.MaxShippingEntries) throw new InvalidShippingException("too many shipping entries for the portal");
@@ -73,7 +81,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         var deliveries = groups.Where(g => g.DeliveryKind == "local").Select(g => new LocalDeliveryRequest(g.SellerId, g.BrandId, "local", g.LocalWindowId!.Value, g.LocalDate!)).ToList();
         return new CreateOrderRequest(o.Number, o.PaidAt ?? o.CreatedAt, o.Currency, new PortalBuyer(o.BuyerName, o.RelayEmail, o.Phone),
             new PortalAddress(o.ShipName, o.ShipLine1, o.ShipLine2, o.ShipCity, o.ShipRegion, o.ShipPostalCode, o.ShipCountry, o.ShipLat, o.ShipLng),
-            method, speed, o.GiftMessage, lines, groups.Select(g => IngestMapping.ShippingCharge(g, perGroupShipping)).ToList(), deliveries.Count == 0 ? null : deliveries);
+            method, speed, o.GiftMessage, lines, groups.Select(g => IngestMapping.ShippingCharge(g, perGroupShipping)).ToList(), deliveries.Count == 0 ? null : deliveries, offers.Count == 0 ? null : offers);
     }
 
 
@@ -113,7 +121,10 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
 
     private async Task<OutboxResult> FailAsync(MarketplaceOrder order, PortalError error, CancellationToken ct)
     {
-        var code = error.Errors?.FirstOrDefault()?.Code is { Length: > 0 } c ? new string(c.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch == '_').Take(50).ToArray()) : "invalid_order";
+        var offerMismatch = error.Code == "offer_mismatch";
+        if (offerMismatch) log.LogWarning("The portal rejected order {Number}: offer_mismatch ({Kinds}); nothing was created there, the order fails and is refunded in full", order.Number,
+            string.Join(",", (error.Errors ?? []).Select(e => e.Kind ?? "?").Distinct().Take(10)));
+        var code = offerMismatch ? "offer_mismatch" : error.Errors?.FirstOrDefault()?.Code is { Length: > 0 } c ? new string(c.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch == '_').Take(50).ToArray()) : "invalid_order";
         var windowGone = code.StartsWith("delivery_", StringComparison.Ordinal);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = time.GetUtcNow().ToUniversalTime();
@@ -139,7 +150,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         // everything was already returned another way, there is no refund to wait for: say so now.
         if (owed <= 0)
             await EnqueueBuyerMailAsync(order, "We couldn't place your order " + order.Number,
-                (windowGone ? "The delivery time you chose is no longer available, so the seller couldn't accept your order. " : "One of the items could no longer be ordered, so the sellers couldn't accept your order. ")
+                (offerMismatch ? "A quantity offer changed while you were paying, so the seller couldn't accept the order at that price. " : windowGone ? "The delivery time you chose is no longer available, so the seller couldn't accept your order. " : "One of the items could no longer be ordered, so the sellers couldn't accept your order. ")
                 + "You have not been charged: everything has already been returned to your card (it can take a few days to show). Please place the order again and choose again.\n", $"failed:{order.Number}", ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);

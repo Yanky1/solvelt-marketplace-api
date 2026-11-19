@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261119022200_InitialCreate")]
+    [Migration("20261119022653_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -1917,6 +1917,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasMaxLength(10)
                         .HasColumnType("character varying(10)");
 
+                    b.Property<long>("DiscountCents")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L);
+
                     b.Property<long>("ItemsCents")
                         .HasColumnType("bigint");
 
@@ -1926,6 +1931,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
                     b.Property<Guid?>("LocalWindowId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("OffersJson")
+                        .HasColumnType("text");
 
                     b.Property<Guid>("OrderId")
                         .HasColumnType("uuid");
@@ -1994,8 +2002,21 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<Guid>("BrandId")
                         .HasColumnType("uuid");
 
+                    b.Property<long>("DiscountCents")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L);
+
+                    b.Property<Guid?>("GiftOfOfferId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("GroupId")
                         .HasColumnType("uuid");
+
+                    b.Property<bool>("IsGift")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false);
 
                     b.Property<long>("LineTotalCents")
                         .HasColumnType("bigint");
@@ -2007,6 +2028,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(60)
                         .HasColumnType("character varying(60)");
+
+                    b.Property<Guid?>("OfferId")
+                        .HasColumnType("uuid");
 
                     b.Property<Guid>("OrderId")
                         .HasColumnType("uuid");

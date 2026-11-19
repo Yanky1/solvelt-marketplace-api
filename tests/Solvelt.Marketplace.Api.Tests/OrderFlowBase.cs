@@ -77,7 +77,7 @@ public abstract class OrderFlowBase : IDisposable
         {
             var key = $"{mid}|{g.Key.Item1}|{g.Key.Item2}";
             if (!_sellerOrders.TryGetValue(key, out var so)) _sellerOrders[key] = so = (Guid.NewGuid(), $"SO-2026-{_sellerOrders.Count + 1:D6}");
-            var items = g.Sum(l => l.GetProperty("unitPriceCents").GetInt64() * l.GetProperty("quantity").GetInt64());
+            var items = g.Sum(l => l.GetProperty("unitPriceCents").GetInt64() * l.GetProperty("quantity").GetInt64() - (l.TryGetProperty("discountCents", out var dc) ? dc.GetInt64() : 0));   // the portal totals items net of discounts (C18)
             var tax = g.Sum(l => l.GetProperty("taxCents").GetInt64());
             var ship = doc.RootElement.GetProperty("shipping").EnumerateArray().Where(s => s.GetProperty("sellerId").GetGuid() == g.Key.Item1 && s.GetProperty("brandId").GetGuid() == g.Key.Item2).Sum(s => s.GetProperty("amountCents").GetInt64());
             orders.Add(new { sellerOrderId = so.Id, number = so.Number, sellerId = g.Key.Item1, brandId = g.Key.Item2, status = "New", oversold = _oversold, totalCents = items + tax + ship, feeCents = items / 10, netCents = items + ship - items / 10 });
