@@ -154,6 +154,32 @@ public class CatalogSearchYiddishTests
         Assert.Equal(0, await Reindex(f));                                                       // nothing stale is left: the next run does nothing
     }
 
+    [Theory]
+    [InlineData("title", "\u05F2")] [InlineData("title", "\u05F0")] [InlineData("title", "\u05F1")]
+    [InlineData("brand", "\u05F2")] [InlineData("brand", "\u05F0")] [InlineData("brand", "\u05F1")]
+    [InlineData("terms", "\u05F2")] [InlineData("terms", "\u05F0")] [InlineData("terms", "\u05F1")]
+    [InlineData("description", "\u05F2")] [InlineData("description", "\u05F0")] [InlineData("description", "\u05F1")]
+    public async Task A_row_that_is_stale_in_just_one_field_by_just_one_letter_is_found_and_fixed(string field, string letter)
+    {
+        using var f = Catalog(out _);
+        await Sync(f);
+        var stale = "בא" + letter + "ג";
+        var folded = SearchText.Normalize(stale);
+        Assert.DoesNotContain(letter, folded);
+        WithDb(f, db =>
+        {
+            var row = db.CatalogSearch.Single(r => r.ListingId == WithPairs);
+            row.Title = "בבב"; row.Brand = "גגג"; row.Terms = "דדד"; row.Description = "ההה"; row.Text = "בבב גגג דדד";   // every field clean ...
+            switch (field) { case "title": row.Title = stale; break; case "brand": row.Brand = stale; break; case "terms": row.Terms = stale; break; default: row.Description = stale; break; }   // ... except one
+            db.SaveChanges();
+            return 0;
+        });
+        Assert.Equal(1, await Reindex(f));                                                       // found through that one field and letter alone
+        var row = WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs));
+        Assert.Equal(folded, field switch { "title" => row.Title, "brand" => row.Brand, "terms" => row.Terms, _ => row.Description });
+        Assert.Equal(0, await Reindex(f));
+    }
+
     [Fact]
     public async Task The_catalog_sync_itself_rebuilds_old_rows_so_a_deploy_needs_no_manual_step_and_does_it_once_per_start()
     {

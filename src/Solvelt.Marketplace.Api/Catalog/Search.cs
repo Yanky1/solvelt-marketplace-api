@@ -64,17 +64,15 @@ public static class SearchIndexer
     /// </summary>
     public static async Task<int> ReindexStaleAsync(MarketplaceDb db, CancellationToken ct)
     {
-        var total = 0;
-        while (true)
+        var stale = await db.CatalogSearch.AsNoTracking()
+            .Where(r => EF.Functions.Like(r.Title, "%ײ%") || EF.Functions.Like(r.Title, "%װ%") || EF.Functions.Like(r.Title, "%ױ%")
+                || EF.Functions.Like(r.Brand, "%ײ%") || EF.Functions.Like(r.Brand, "%װ%") || EF.Functions.Like(r.Brand, "%ױ%")
+                || EF.Functions.Like(r.Terms, "%ײ%") || EF.Functions.Like(r.Terms, "%װ%") || EF.Functions.Like(r.Terms, "%ױ%")
+                || EF.Functions.Like(r.Description, "%ײ%") || EF.Functions.Like(r.Description, "%װ%") || EF.Functions.Like(r.Description, "%ױ%"))
+            .Select(r => r.ListingId).ToListAsync(ct);
+        foreach (var chunk in stale.Chunk(200))       // each stale row once: no loop that could chase a row the rules cannot change
         {
-            var ids = await db.CatalogSearch.AsNoTracking()
-                .Where(r => EF.Functions.Like(r.Title, "%ײ%") || EF.Functions.Like(r.Title, "%װ%") || EF.Functions.Like(r.Title, "%ױ%")
-                    || EF.Functions.Like(r.Brand, "%ײ%") || EF.Functions.Like(r.Brand, "%װ%") || EF.Functions.Like(r.Brand, "%ױ%")
-                    || EF.Functions.Like(r.Terms, "%ײ%") || EF.Functions.Like(r.Terms, "%װ%") || EF.Functions.Like(r.Terms, "%ױ%")
-                    || EF.Functions.Like(r.Description, "%ײ%") || EF.Functions.Like(r.Description, "%װ%") || EF.Functions.Like(r.Description, "%ױ%"))
-                .Select(r => r.ListingId).Take(200).ToListAsync(ct);
-            if (ids.Count == 0) return total;
-            var rows = await db.CatalogSearch.Where(r => ids.Contains(r.ListingId)).ToListAsync(ct);
+            var rows = await db.CatalogSearch.Where(r => chunk.Contains(r.ListingId)).ToListAsync(ct);
             foreach (var row in rows)
             {
                 row.Title = Cut(SearchText.Normalize(row.Title), 400);
@@ -85,9 +83,8 @@ public static class SearchIndexer
             }
             await db.SaveChangesAsync(ct);
             db.ChangeTracker.Clear();
-            total += rows.Count;
-            if (rows.Count < ids.Count) return total;      // a row that vanished meanwhile: nothing more to chase
         }
+        return stale.Count;
     }
 
     /// <summary>Indexes every listing that has no search row yet (a database that predates the index, or a crash between steps). Idempotent.</summary>
