@@ -191,3 +191,30 @@ OPENAI_API_KEY=sk-...  VOICES=cedar,marin,echo SAMPLE_TEXT="Your own sentence." 
 ```
 
 `-hd.wav` (24 kHz) is how the voice sounds; `-phone.wav` (8 kHz, telephone-style compression) is closer to what a caller hears, so **judge by the phone file**. The key is read from `OPENAI_API_KEY` only (never an argument or a file) and is never printed. One short Realtime session per voice: a few cents for all ten. Set the winner in `Voice:OpenAiVoice` and note it in `DECISIONS.md`. `npm run selftest` checks the tool offline against a local script. **It has not been run against OpenAI itself** (no key in the build environment): its event names follow OpenAI's Realtime documentation as checked in V-01, and if OpenAI answers with an error the tool prints the error code and message.
+
+## 12. The voice pipeline test menu (option 1 to 5; off by default)
+
+A test line (or a flag for named numbers) can offer five ways of running the same conversation so they can be compared by ear, by cost and by latency. **It is off by default and changes nothing for any other caller.**
+
+**What a caller on the list hears.** The usual disclosure, then "press 1 to 5": the keypad digit is read before the AI starts. Anything else, nothing, or a digit that is not 1 to 5 means **option 1**. The choice is recorded for the call in the existing `Tier` column as `p1` to `p5` (the model column says `pipeline:pN` for 2 to 5); no migration. An option that is not configured on this line says "not available on this line" and the call runs on option 1.
+
+| Option | What it is | State |
+|---|---|---|
+| 1 | The current Realtime bridge (`RealtimeBridge`), unchanged. The default for everyone. | built |
+| 2 to 4 | Chained: streaming speech-to-text, then OUR model with the SAME instructions, tools and `off_topic` limit, then streaming text-to-speech. Barge-in uses the same mark/clear logic as option 1. | skeleton only, against fakes; vendor adapters wait for the vendor design note |
+| 5 | Chained, with several speech-to-text engines in parallel and a judge that picks the transcript, inside a hard latency budget, with a fallback to the first engine's text | orchestration built against fakes; no vendor adapters yet |
+
+**Guarantees (each has tests that go red when it is broken).** What the caller says and what the pipeline answers are held **in memory only**: no transcript is stored, logged or put in the call row (logs carry counts and exception types only). The card number is typed on the keypad outside every pipeline, exactly as for option 1, and keypad digits are never sent to a speech engine. Cost (estimated from the `Prices` below, in micro-dollars) and latency (the caller's last speech event to the first audio sent back) are recorded per call, so the options can be compared. A failing turn ends cleanly and never leaks text into a log.
+
+**Configuration (names only; values live in the host's secret store).**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `Voice:PipelineMenu:Enabled` | `false` | the switch |
+| `Voice:PipelineMenu:TestNumbers` | empty | E.164 numbers; the menu is offered when the CALLER or the DIALED number is on the list. Empty means nobody. Required when enabled |
+| `Voice:PipelineMenu:MenuTimeoutSeconds` | 6 | how long to wait for the digit (1 to 30) |
+| `Voice:PipelineMenu:EndpointMs` | 700 | silence that ends a caller's turn in a chained option (200 to 5000) |
+| `Voice:PipelineMenu:ParallelWaitMs` / `ParallelBudgetMs` | 500 / 1200 | option 5: how long to wait for the slower engines, and the hard budget counted from the first transcript (wait must not exceed budget) |
+| `Voice:PipelineMenu:Prices:SttPerMinute` / `TtsPerMillionChars` / `LlmInPerMillionTokens` / `LlmOutPerMillionTokens` | 0 | cost estimate inputs (published vendor prices, entered by the owner) |
+
+**Reserved names for the vendor adapters (not read by any code yet; placeholders only, no values, nothing to set today).** One block per option and part: `Voice:Pipelines:P2`, `P3`, `P4`, `P5`, each with `Stt:Host`, `Stt:ApiKey` (secret), `Tts:Host`, `Tts:ApiKey` (secret) and `Tts:Voice`; option 5 adds a second engine block and `Judge:Model`. The vendors, hosts and final key names are fixed by the pipeline design note once the owner has answered which hosts may be used. Until an adapter exists, options 2 to 5 stay "not available on this line".
