@@ -86,7 +86,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
         var (sockets, llm) = await Call();
         await Until(() => Frames("media").Count() >= 4);                                       // two sentences, two chunks each
         Assert.All(Frames("media"), m => Assert.Equal(Enumerable.Repeat((byte)7, 800), Convert.FromBase64String(m["media"]!["payload"]!.GetValue<string>())));
-        Assert.Contains(sockets.Connections, c => c.Uri.Host == "api.deepgram.com");           // the recogniser is open for the whole call
+        Assert.Single(sockets.Connections, c => c.Uri.Host == "api.deepgram.com");             // ONE recogniser for the call: the one opened before the phone was accepted is the one used
         Assert.Equal(2, sockets.Connections.Count(c => c.Uri.Host == "api.elevenlabs.io"));    // one speech socket per sentence
         var first = JsonNode.Parse(llm.Requests[0].Body)!;
         Assert.Equal(VoiceScripts.Instructions, first["instructions"]!.GetValue<string>());     // the SAME instructions as the Realtime line
