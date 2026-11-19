@@ -8,13 +8,14 @@ namespace Solvelt.Marketplace.Api.Voice;
 
 public static class VoiceEndpoints
 {
-    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", PipelinePath = "/api/v1/voice/signalwire/pipeline", KeypadPath = "/api/v1/voice/signalwire/keypad", SolaWebhookPath = "/api/v1/voice/sola/webhook", StreamPath = "/api/v1/voice/stream";
+    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", PipelinePath = "/api/v1/voice/signalwire/pipeline", PipelineConsentPath = "/api/v1/voice/signalwire/pipeline-consent", KeypadPath = "/api/v1/voice/signalwire/keypad", SolaWebhookPath = "/api/v1/voice/sola/webhook", StreamPath = "/api/v1/voice/stream";
 
     public static IEndpointRouteBuilder MapVoice(this IEndpointRouteBuilder app)
     {
         app.MapPost(InboundPath, Inbound);
         app.MapPost(AfterStreamPath, AfterStream);
         app.MapPost(PipelinePath, PipelineChoice);
+        app.MapPost(PipelineConsentPath, PipelineConsent);
         app.MapPost(KeypadPath, Keypad);
         app.MapPost(SolaWebhookPath, SolaWebhook);
         app.MapPhoneEmail();
@@ -83,9 +84,37 @@ public static class VoiceEndpoints
         var option = VoicePipelineIds.FromDigits(digits);
         XElement say;
         if (!registry.IsAvailable(option)) { say = new XElement("Say", PipelineScripts.Unavailable); option = VoicePipelineIds.Realtime; }
+        else if (v.Pipelines.UsesYiddishLabs(option))
+        {
+            // this option sends the caller's voice to a third party: the owner's approved consent line is played first and one key continues; nothing is chosen or recorded until then (decision V-26)
+            return Cxml(new XElement("Response", new XElement("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", 1), new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds),
+                new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelineConsentPath + "?o=" + option),
+                new XElement("Say", v.YiddishLabs.ConsentLine))));
+        }
         else say = new XElement("Say", PipelineScripts.Chosen(option));
         await store.SetPipelineAsync(call.Id, option, ct);
         return Cxml(new XElement("Response", say, StreamParts(v, tokens, call.Id)));
+    }
+
+    /// <summary>The answer to the consent line: key 1 continues on the option that asked for it; any other key, or none, gives the standard assistant (option 1). Nothing but the call's tier records the answer.</summary>
+    private static async Task<IResult> PipelineConsent(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)
+    {
+        var v = vo.Value;
+        if (!v.Enabled) return Results.NotFound();
+        var (ok, form) = await VerifyAsync(ctx, v, so.Value);
+        if (!ok) return Results.StatusCode(403);
+        var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
+        if (call is null || call.EndedAt is not null) return Results.NotFound();
+        form.TryGetValue("From", out var from); form.TryGetValue("To", out var to);
+        if (!PipelineMenu.Offered(v, from, to) || states.GetOrCreate(call.Id).Connections > 0)
+            return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
+        var option = ctx.Request.Query["o"].ToString();
+        form.TryGetValue("Digits", out var digits);
+        // only an option that really asks for consent and is available can be continued with; the option comes from the signed address, and anything else is option 1
+        var agreed = digits?.Trim() == "1" && VoicePipelineIds.IsOption(option) && option != VoicePipelineIds.Realtime && v.Pipelines.UsesYiddishLabs(option) && registry.IsAvailable(option);
+        if (!agreed) option = VoicePipelineIds.Realtime;
+        await store.SetPipelineAsync(call.Id, option, ct);
+        return Cxml(new XElement("Response", new XElement("Say", agreed ? PipelineScripts.Chosen(option) : PipelineScripts.ConsentDeclined), StreamParts(v, tokens, call.Id)));
     }
 
     /// <summary>SignalWire calls this when the stream ends: a person was asked for and is reachable, so dial; otherwise hang up.</summary>

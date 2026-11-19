@@ -68,6 +68,7 @@ public static class PipelineScripts
     public const string VendorLost = "Sorry, we are having trouble with the line right now. Please call back in a moment.";
 
     public const string Menu = "Test line. Press 1 for the standard assistant, 2 for pipeline two, 3 for pipeline three, 4 for pipeline four, or 5 for pipeline five.";
+    public const string ConsentDeclined = "Okay. Using the standard assistant.";
     public const string Unavailable = "That option is not available on this line. Using option one.";
     public static string Chosen(string option) => "Option " + option[1..] + ".";
     public const string Filler = "One moment, please.";

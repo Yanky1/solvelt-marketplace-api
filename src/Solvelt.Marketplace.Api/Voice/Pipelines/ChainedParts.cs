@@ -104,6 +104,23 @@ public sealed class SilenceTurnDetector(int endpointMs) : ITurnDetector
     }
 }
 
+/// <summary>
+/// For a recogniser that only hands over a finished transcript after the end of speech has already been waited for (the adapter's own voice-activity wait): the turn is over when a final transcript arrives, so there is
+/// no second silence wait on top of it.
+/// </summary>
+public sealed class FinalTurnDetector : ITurnDetector
+{
+    public TurnSignal OnEvent(SttEvent e, DateTimeOffset now)
+        => e.Kind switch
+        {
+            SttEventKind.Final when !string.IsNullOrWhiteSpace(e.Text) => new(TurnSignalKind.TurnEnded, e.Text.Trim()),
+            SttEventKind.SpeechStarted or SttEventKind.Partial => new(TurnSignalKind.UserSpeaking),
+            _ => TurnSignal.None,
+        };
+
+    public TurnSignal OnTick(DateTimeOffset now) => TurnSignal.None;
+}
+
 /// <summary>Cuts an assistant answer into sentences as text arrives, so the first sentence can be spoken while the model is still writing the rest.</summary>
 public sealed class SentenceChunker
 {
