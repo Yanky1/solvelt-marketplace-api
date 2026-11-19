@@ -372,7 +372,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
             : refunded >= order.PaidCents ? $"{Checkout.OrderIngestHandler.Money(refunded, order.Currency)} is being refunded to your card in full"
             : $"the remaining {Checkout.OrderIngestHandler.Money(refunded, order.Currency)} is being refunded to your card (the rest was already returned)";
         outbox.EnqueueEmail(new EmailMessage(email, "We couldn't place your order " + order.Number,
-            (windowGone ? "The delivery time you chose is no longer available, so the seller couldn't accept your order. " : "One of the items could no longer be ordered, so the sellers couldn't accept your order. ")
+            (order.FailureCode == "offer_mismatch" ? "A quantity offer changed while you were paying, so the seller couldn't accept the order at that price. " : windowGone ? "The delivery time you chose is no longer available, so the seller couldn't accept your order. " : "One of the items could no longer be ordered, so the sellers couldn't accept your order. ")
             + $"You have not been charged: {text} (it can take a few days to show). Please place the order again and choose again.\n"), $"mail:failed:{order.Number}");
     }
 }

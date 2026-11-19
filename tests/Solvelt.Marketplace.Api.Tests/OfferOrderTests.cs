@@ -59,7 +59,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         return JsonDocument.Parse(s).RootElement.Clone();
     }
 
-    private static JsonElement Group(JsonElement cart, Guid seller) => cart.GetProperty("groups").EnumerateArray().Single(g => g.GetProperty("sellerId").GetGuid() == seller);
+    private static JsonElement Group(JsonElement cart, Guid seller) => cart.GetProperty("groups").EnumerateArray().Single(g => g.GetProperty("sellerId").GetGuid() == seller && g.GetProperty("brandId").GetGuid() == ShabbatTable);
     private static long Net(JsonElement cart) => cart.GetProperty("subtotalCents").GetInt64();
 
     [Fact]
@@ -72,7 +72,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         var cart = await Cart();
         Assert.Equal(2250, Net(cart));
         Assert.Equal(10200 + 4050, Group(cart, Judaica).GetProperty("discountCents").GetInt64());
-        var offer = Group(cart, Judaica).GetProperty("offers").Single();
+        var offer = Group(cart, Judaica).GetProperty("offers").EnumerateArray().Single();
         Assert.Equal(25, offer.GetProperty("eligibleUnits").GetInt32());
         Assert.Equal(20, offer.GetProperty("tier").GetProperty("minQuantity").GetInt32());
         Assert.Equal(90, offer.GetProperty("tier").GetProperty("unitPriceCents").GetInt64());
@@ -88,7 +88,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         await AddToCart("israeli-couscous", 15);
         var cart = await Cart();
         Assert.Equal(1425, Net(cart));
-        var offer = Group(cart, Judaica).GetProperty("offers").Single();
+        var offer = Group(cart, Judaica).GetProperty("offers").EnumerateArray().Single();
         Assert.Equal(5, offer.GetProperty("unitsToNextTier").GetInt32());
         Assert.Equal(90, offer.GetProperty("nextTier").GetProperty("unitPriceCents").GetInt64());
         await AddToCart("israeli-couscous", 5);                                 // 20 units: the next step prices every unit again
@@ -118,7 +118,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         var mine = Group(cart, Judaica).GetProperty("lines").EnumerateArray().Where(l => l.GetProperty("offerId").ValueKind != JsonValueKind.Null).ToList();
         Assert.Single(mine);
         Assert.Equal(950, mine[0].GetProperty("lineTotalCents").GetInt64());
-        Assert.Equal(10, Group(cart, Judaica).GetProperty("offers").Single().GetProperty("eligibleUnits").GetInt32());
+        Assert.Equal(10, Group(cart, Judaica).GetProperty("offers").EnumerateArray().Single().GetProperty("eligibleUnits").GetInt32());
         var other = cart.GetProperty("groups").EnumerateArray().Where(g => g.GetProperty("sellerId").GetGuid() != Judaica || g.GetProperty("brandId").GetGuid() != ShabbatTable);
         Assert.All(other, g => Assert.Equal(0, g.GetProperty("discountCents").GetInt64()));
     }
@@ -146,9 +146,9 @@ public sealed class OfferOrderTests : OrderFlowBase
         await AddToCart("halva-pistachio", 20);                                 // 40 units
         var q = await Quote();
         var g = Group(q, Judaica);
-        var gift = g.GetProperty("gifts").Single();                             // once, never multiplied
+        var gift = g.GetProperty("gifts").EnumerateArray().Single();                             // once, never multiplied
         Assert.Equal((GiftProduct, 1), (gift.GetProperty("productId").GetGuid(), gift.GetProperty("quantity").GetInt32()));
-        Assert.False(g.GetProperty("offers").Single().GetProperty("giftUnavailable").GetBoolean());
+        Assert.False(g.GetProperty("offers").EnumerateArray().Single().GetProperty("giftUnavailable").GetBoolean());
         Assert.Equal(40 * 90, q.GetProperty("itemsCents").GetInt64());          // the gift is $0
     }
 
@@ -161,7 +161,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         var q = await Quote();
         var g = Group(q, Judaica);
         Assert.Empty(g.GetProperty("gifts").EnumerateArray());
-        Assert.True(g.GetProperty("offers").Single().GetProperty("giftUnavailable").GetBoolean());
+        Assert.True(g.GetProperty("offers").EnumerateArray().Single().GetProperty("giftUnavailable").GetBoolean());
         var (number, _, total) = await Checkout();
         Assert.Equal(950 + (await Order(number)).Groups.Sum(x => x.ShippingCents + x.TaxCents), total);
     }
@@ -179,7 +179,7 @@ public sealed class OfferOrderTests : OrderFlowBase
         var order = await Order(number);
         Assert.Equal("placed", order.Status);
         var body = JsonDocument.Parse(Portal("orders").Single().BodyText).RootElement;
-        var offer = body.GetProperty("offers").Single();
+        var offer = body.GetProperty("offers").EnumerateArray().Single();
         Assert.Equal((oid, 3L), (offer.GetProperty("offerId").GetGuid(), offer.GetProperty("offerVersion").GetInt64()));
         Assert.False(offer.TryGetProperty("giftUnavailable", out _));
         var lines = body.GetProperty("lines").EnumerateArray().ToList();
