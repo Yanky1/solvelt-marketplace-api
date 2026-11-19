@@ -113,6 +113,34 @@ public class VoiceDeliveryTests
         Assert.DoesNotContain(s.Fake.Received, m => m.Contains("Your total is") || m.Contains("11201") || m.Contains("4B"));
     }
 
+    [Fact]
+    public async Task A_tiered_cart_is_read_back_with_the_discount_and_the_free_gift_and_the_phone_total_equals_the_web_quote()
+    {
+        using var s = await GuestWithCart(qty: 10);
+        using (var scope = s.F.Services.CreateScope())                       // "10+ at $1.00 each, with a free card wallet", Mazel / Challah Corner
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+            db.CatalogOffers.Add(new CatalogOffer
+            {
+                Id = Guid.NewGuid(), SellerId = Catalog.FixtureCatalogSource.Id("seller:mazel"), BrandId = Catalog.FixtureCatalogSource.Id("brand:challah-corner"), Name = "Bundle", Currency = "USD", Scope = "all",
+                ProductIdsJson = "[]", CategoryIdsJson = "[]", TiersJson = System.Text.Json.JsonSerializer.Serialize(new[] { new Offers.OfferTier(10, 100) }),
+                GiftsJson = System.Text.Json.JsonSerializer.Serialize(new[] { new Offers.OfferGiftDoc(10, Guid.NewGuid(), 1, "Card wallet", true) }),
+                Version = 1, KnownVersion = 1, Visible = true, FirstSeenAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch,
+            });
+            await db.SaveChangesAsync();
+        }
+        await SetAddress(s);
+        await s.Tool("get_delivery_options");
+        await s.Tool("choose_delivery", new { option_position = 1 });
+        var spoken = (await ReadBack(s)).Element("Gather")!.Element("Say")!.Value;
+        Assert.Contains("quantity discount saves you", spoken);
+        Assert.Contains("You also get a free Card wallet", spoken);
+        Assert.Contains("Items " + VoiceSpeech.Money(1000), spoken);          // ten units at the tier price, the same figure the web quote shows
+        var total = await TotalNow(s);
+        Assert.Contains("Your total is " + VoiceSpeech.Money(total), spoken);
+        Assert.Equal(total, s.State().QuoteTotalCents);
+    }
+
     [Theory]
     [InlineData("", "yes", true)]
     [InlineData("1", null, true)]
