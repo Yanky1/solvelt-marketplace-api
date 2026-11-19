@@ -328,6 +328,7 @@ public class GladiaSttTests
         Assert.True(j["messages_config"]!["receive_partial_transcripts"]!.GetValue<bool>());
         Assert.False(j["messages_config"]!["receive_post_processing_events"]!.GetValue<bool>());
         Assert.DoesNotContain(Key, body);
+        Assert.Equal(Key, http.Headers.Single()["x-gladia-key"]);                              // the key travels in this header and nowhere else
         Assert.Equal("wss://api.gladia.io/v2/live?token=one-time-token", conn.Uri.ToString());
     }
 

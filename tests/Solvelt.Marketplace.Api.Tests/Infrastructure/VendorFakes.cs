@@ -89,9 +89,12 @@ public sealed class FakeLlmHandler : HttpMessageHandler
     public string Body { get; set; } = "";
     public bool NeverAnswer { get; set; }
     public List<(Uri? Uri, string? Auth, string Body)> Requests { get; } = [];
+    /// <summary>Every header of every request, in the same order as <see cref="Requests"/>.</summary>
+    public List<Dictionary<string, string>> Headers { get; } = [];
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
+        Headers.Add(request.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value), StringComparer.OrdinalIgnoreCase));
         Requests.Add((request.RequestUri, request.Headers.Authorization?.ToString(), request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct)));
         if (NeverAnswer) await Task.Delay(Timeout.Infinite, ct);
         return new HttpResponseMessage(Status) { Content = new StringContent(Body, Encoding.UTF8, "text/event-stream") };
