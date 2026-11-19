@@ -29,7 +29,7 @@ public static class SnapshotLimits
 /// care about order (CONTRACT.md §2). One instance runs at a time (a lease row with an owner token, renewed per page). The cursor moves in the
 /// same transaction as the page, and only a <b>deterministic</b> failure skips a record (see <see cref="SyncErrors"/>).
 /// </summary>
-public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, TimeProvider time, IOptions<CatalogOptions> options, ILogger<CatalogSyncService> log, Outbox.OpsCounters? ops = null)
+public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, TimeProvider time, IOptions<CatalogOptions> options, ILogger<CatalogSyncService> log, Outbox.OpsCounters? ops = null, SearchRebuildGate? rebuild = null)
 {
     public const string StateKey = "listings";
     private static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
@@ -54,7 +54,7 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
             }
             await PollAsync(counts, ct);
             await FetchPendingAsync(counts, ct);
-            await SearchIndexer.ReindexIfStaleAsync(db, ct);     // first: rows written by an older tokenizer are rewritten once (V-21)
+            if (rebuild is not { Checked: true }) { await SearchIndexer.ReindexStaleAsync(db, ct); if (rebuild is not null) rebuild.Checked = true; }   // rows written by the older tokenizer are rewritten once after a start (V-21)
             await SearchIndexer.BackfillAsync(db, ct);
             await MaintainSellersAsync(ct);
         }

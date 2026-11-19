@@ -199,6 +199,7 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Offers.IOfferSource>(sp =>
         _ => new Solvelt.Marketplace.Api.Offers.EmptyOfferSource(),
     });
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Offers.OfferSyncService>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Catalog.SearchRebuildGate>();
 builder.Services.AddScoped<CatalogSyncService>();
 builder.Services.AddScoped<CategoryMap>();
 if (!builder.Environment.IsEnvironment("Testing") && !string.Equals(builder.Configuration["Catalog:Source"], "None", StringComparison.OrdinalIgnoreCase) )

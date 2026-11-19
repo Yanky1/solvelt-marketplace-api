@@ -27,10 +27,10 @@ public static class SearchText
     public const int MaxTokenLength = 64;
 
     /// <summary>
-    /// The version of this tokenizer. The search rows hold text already normalised by it, so when its rules change this number changes and the rows are rebuilt once
-    /// (<see cref="SearchIndexer.ReindexIfStaleAsync"/>). 1: before the Yiddish digraph folds; 2: with them (V-21).
+    /// The letters the earlier rules left in the stored search text and these rules fold away (the Yiddish digraphs, V-21). The rows hold text already normalised, so a
+    /// row that still contains one of them was written by the older tokenizer and is rewritten once (<see cref="SearchIndexer.ReindexStaleAsync"/>); after the fold none can occur.
     /// </summary>
-    public const string Version = "2";
+    public const string StaleLetters = "\u05F0\u05F1\u05F2";
 
     // The Yiddish digraph letters (U+05F0 to U+05F2) and the pointed yod-yod ligature are the letter pairs they stand for.
     private static readonly Dictionary<int, string> Digraphs = new() { [0x05F0] = "וו", [0x05F1] = "וי", [0x05F2] = "יי", [0xFB1F] = "יי" };

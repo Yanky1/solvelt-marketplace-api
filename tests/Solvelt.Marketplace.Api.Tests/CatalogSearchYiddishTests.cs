@@ -41,9 +41,6 @@ public class SearchTextYiddishTests
         Assert.Equal("creme brulee", SearchText.Normalize("Crème Brûlée"));       // Latin as before
         Assert.Equal("שבת", SearchText.Normalize("שבת"));                         // a final tav is not touched: no other Yiddish fold is made
     }
-
-    [Fact]
-    public void The_tokenizer_version_moved_with_the_rules() => Assert.Equal("2", SearchText.Version);
 }
 
 public class CatalogSearchYiddishTests
@@ -130,65 +127,66 @@ public class CatalogSearchYiddishTests
 
     // ---------- the rebuild of rows written by the older tokenizer ----------
 
+    private static void WriteOldRows(TestFactory f)
+        => WithDb(f, db =>
+        {
+            // what the OLD rules stored: the digraph letters kept as they were typed
+            var row = db.CatalogSearch.Single(r => r.ListingId == WithPairs);
+            row.Title = "ײדישע װאכנבלאט"; row.Text = "ײדישע װאכנבלאט"; row.Description = "װאכנבלאט";
+            db.SaveChanges();
+            return 0;
+        });
+
     [Fact]
     public async Task Rows_written_by_an_older_tokenizer_are_rebuilt_once_and_then_left_alone()
     {
         using var f = Catalog(out _);
-        await Sync(f);                                                                           // current rules; the version is recorded
-        Assert.Equal(SearchText.Version, WithDb(f, db => db.CatalogSyncStates.AsNoTracking().Single(s => s.Key == SearchIndexer.TokenizerStateKey).Cursor));
-
-        // what the OLD rules stored: the digraph kept as it was typed, and no recorded version
-        WithDb(f, db =>
-        {
-            var row = db.CatalogSearch.Single(r => r.ListingId == WithPairs);
-            row.Title = "ײדישע װאכנבלאט"; row.Text = "ײדישע װאכנבלאט"; row.Description = "װאכנבלאט";
-            db.SaveChanges();
-            db.CatalogSyncStates.Where(s => s.Key == SearchIndexer.TokenizerStateKey).ExecuteDelete();
-            return 0;
-        });
+        await Sync(f);
+        WriteOldRows(f);
         using (var c = f.CreateClient()) Assert.DoesNotContain(WithPairs, await Found(c, "יידישע"));   // before the rebuild the old text does not match the folded query
 
-        Assert.True(await Reindex(f) >= 2);                                                      // every row is rewritten
+        Assert.Equal(1, await Reindex(f));                                                       // exactly the stale row is rewritten
         var rebuilt = WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs));
         Assert.Equal("יידישע וואכנבלאט", rebuilt.Title);
-        Assert.StartsWith("יידישע וואכנבלאט", rebuilt.Text);                                  // the typo-match text is title, brand and terms
+        Assert.StartsWith("יידישע וואכנבלאט", rebuilt.Text);                                      // the typo-match text is title, brand and terms
+        Assert.Equal("וואכנבלאט", rebuilt.Description);
         using (var c = f.CreateClient()) Assert.Contains(WithPairs, await Found(c, "יידישע"));
-        Assert.Equal(SearchText.Version, WithDb(f, db => db.CatalogSyncStates.AsNoTracking().Single(s => s.Key == SearchIndexer.TokenizerStateKey).Cursor));
-        Assert.Equal(0, await Reindex(f));                                                       // recorded: the next run does nothing
+        Assert.Equal(0, await Reindex(f));                                                       // nothing stale is left: the next run does nothing
     }
 
     [Fact]
-    public async Task The_catalog_sync_itself_rebuilds_old_rows_so_a_deploy_needs_no_manual_step()
+    public async Task The_catalog_sync_itself_rebuilds_old_rows_so_a_deploy_needs_no_manual_step_and_does_it_once_per_start()
     {
         using var f = Catalog(out _);
         await Sync(f);
-        WithDb(f, db =>
-        {
-            var row = db.CatalogSearch.Single(r => r.ListingId == WithPairs);
-            row.Title = "ײדישע װאכנבלאט"; row.Text = "ײדישע װאכנבלאט";
-            db.SaveChanges();
-            db.CatalogSyncStates.Where(s => s.Key == SearchIndexer.TokenizerStateKey).ExecuteDelete();
-            return 0;
-        });
+        var gate = f.Services.GetRequiredService<SearchRebuildGate>();
+        Assert.True(gate.Checked);                                                               // the first run after a start did the check
+        WriteOldRows(f);
+        gate.Checked = false;                                                                    // a new process start, with old rows in the database
         await Sync(f);                                                                           // an ordinary run, as the background job does it
         Assert.StartsWith("יידישע וואכנבלאט", WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs)).Title);
         using var c = f.CreateClient();
         Assert.Contains(WithPairs, await Found(c, "יידישע"));
-        Assert.Equal(SearchText.Version, WithDb(f, db => db.CatalogSyncStates.AsNoTracking().Single(s => s.Key == SearchIndexer.TokenizerStateKey).Cursor));
+        Assert.True(gate.Checked);                                                               // the scan is not repeated on every poll
+
+        WriteOldRows(f);                                                                         // an old row appearing AFTER the check is not chased by every poll
+        await Sync(f);
+        Assert.StartsWith("ײדישע", WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs)).Title);
     }
 
     [Fact]
-    public async Task A_database_without_search_rows_only_records_the_version()
+    public async Task The_rebuild_adds_no_state_row_and_a_database_without_rows_has_nothing_to_do()
     {
         using var f = new TestFactory();
         Assert.Equal(0, await Reindex(f));
-        Assert.Equal(SearchText.Version, WithDb(f, db => db.CatalogSyncStates.AsNoTracking().Single(s => s.Key == SearchIndexer.TokenizerStateKey).Cursor));
+        await Sync(f);
+        Assert.Equal(1, WithDb(f, db => db.CatalogSyncStates.Count()));                          // the one sync row, as before
     }
 
     private static async Task<int> Reindex(TestFactory f)
     {
         using var scope = f.Services.CreateScope();
-        return await SearchIndexer.ReindexIfStaleAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), CancellationToken.None);
+        return await SearchIndexer.ReindexStaleAsync(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), CancellationToken.None);
     }
 }
 
