@@ -68,10 +68,10 @@ public sealed class VoicePipelineRegistry
     private readonly RealtimePipeline _realtime;
     private readonly Dictionary<string, IVoicePipeline> _byId;
 
-    public VoicePipelineRegistry(RealtimePipeline realtime, IEnumerable<IChainedPipelineParts> parts, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs)
+    public VoicePipelineRegistry(RealtimePipeline realtime, IEnumerable<IChainedPipelineParts> parts, IEnumerable<IChainedPartsSource> sources, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs)
     {
         _realtime = realtime;
-        _byId = parts.Where(p => p.OptionId != VoicePipelineIds.Realtime && VoicePipelineIds.IsOption(p.OptionId)).GroupBy(p => p.OptionId)
+        _byId = parts.Concat(sources.SelectMany(s => s.Create(options.Value))).Where(p => p.OptionId != VoicePipelineIds.Realtime && VoicePipelineIds.IsOption(p.OptionId)).GroupBy(p => p.OptionId)
             .ToDictionary(g => g.Key, g => (IVoicePipeline)new ChainedPipeline(g.First(), options, store, tools, time, logs));
     }
 
