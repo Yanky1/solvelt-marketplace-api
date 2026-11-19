@@ -158,6 +158,26 @@ public class CatalogSearchYiddishTests
     }
 
     [Fact]
+    public async Task The_catalog_sync_itself_rebuilds_old_rows_so_a_deploy_needs_no_manual_step()
+    {
+        using var f = Catalog(out _);
+        await Sync(f);
+        WithDb(f, db =>
+        {
+            var row = db.CatalogSearch.Single(r => r.ListingId == WithPairs);
+            row.Title = "ײדישע װאכנבלאט"; row.Text = "ײדישע װאכנבלאט";
+            db.SaveChanges();
+            db.CatalogSyncStates.Where(s => s.Key == SearchIndexer.TokenizerStateKey).ExecuteDelete();
+            return 0;
+        });
+        await Sync(f);                                                                           // an ordinary run, as the background job does it
+        Assert.StartsWith("יידישע וואכנבלאט", WithDb(f, db => db.CatalogSearch.AsNoTracking().Single(r => r.ListingId == WithPairs)).Title);
+        using var c = f.CreateClient();
+        Assert.Contains(WithPairs, await Found(c, "יידישע"));
+        Assert.Equal(SearchText.Version, WithDb(f, db => db.CatalogSyncStates.AsNoTracking().Single(s => s.Key == SearchIndexer.TokenizerStateKey).Cursor));
+    }
+
+    [Fact]
     public async Task A_database_without_search_rows_only_records_the_version()
     {
         using var f = new TestFactory();
