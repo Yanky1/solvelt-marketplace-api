@@ -52,6 +52,14 @@ public sealed class ElevenLabsOptions
     public bool EnableLogging { get; set; }
 }
 
+/// <summary><c>Voice:Gladia</c>: live speech to text with Yiddish (options p3 and p5).</summary>
+public sealed class GladiaOptions
+{
+    public string ApiKey { get; set; } = "";     // secret
+    public string Model { get; set; } = "solaria-1";     // the only model live transcription supports
+    public string Language { get; set; } = "yi";
+}
+
 public static class VendorNames
 {
     public const string Deepgram = "deepgram", ElevenLabs = "elevenlabs", Gladia = "gladia", YiddishLabs = "yiddishlabs";

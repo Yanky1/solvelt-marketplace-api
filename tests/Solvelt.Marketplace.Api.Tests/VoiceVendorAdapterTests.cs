@@ -300,3 +300,116 @@ public class OpenAiVoiceLlmTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Run(llm, Req(new LlmMessage("user", "x"))).WaitAsync(TimeSpan.FromSeconds(10)));
     }
 }
+
+public class GladiaSttTests
+{
+    private const string Key = "gl-key-not-real";
+    private static GladiaOptions Opts() => new() { ApiKey = Key, Model = "solaria-1", Language = "yi" };
+    private const string Init = """{"id":"s1","created_at":"2026-01-01T00:00:00Z","url":"wss://api.gladia.io/v2/live?token=one-time-token"}""";
+
+    private static async Task<(FakeLlmHandler Http, FakeSocketConnector Sockets, ListLogger Log, ISttSession Session, FakeSocketConnector.Connection Conn)> Open(string initBody = Init)
+    {
+        var http = new FakeLlmHandler { Body = initBody }; var sockets = new FakeSocketConnector(); var log = new ListLogger();
+        var session = await new GladiaStt(Opts(), new HttpClient(http), sockets, log).OpenAsync(CancellationToken.None);
+        return (http, sockets, log, session, await sockets.NextAsync());
+    }
+
+    [Fact]
+    public async Task It_opens_a_Yiddish_session_for_mulaw_8k_with_the_key_in_the_header_and_follows_the_vendors_own_address()
+    {
+        var (http, _, _, session, conn) = await Open();
+        await using var _s = session;
+        var (uri, _, body) = http.Requests.Single();
+        Assert.Equal("https://api.gladia.io/v2/live", uri!.ToString());
+        var j = System.Text.Json.Nodes.JsonNode.Parse(body)!;
+        Assert.Equal(("wav/ulaw", 8, 8000, 1), (j["encoding"]!.GetValue<string>(), j["bit_depth"]!.GetValue<int>(), j["sample_rate"]!.GetValue<int>(), j["channels"]!.GetValue<int>()));
+        Assert.Equal("solaria-1", j["model"]!.GetValue<string>());
+        Assert.Equal("yi", j["language_config"]!["languages"]![0]!.GetValue<string>());
+        Assert.True(j["messages_config"]!["receive_partial_transcripts"]!.GetValue<bool>());
+        Assert.False(j["messages_config"]!["receive_post_processing_events"]!.GetValue<bool>());
+        Assert.DoesNotContain(Key, body);
+        Assert.Equal("wss://api.gladia.io/v2/live?token=one-time-token", conn.Uri.ToString());
+    }
+
+    [Theory]
+    [InlineData("""{"url":"ws://api.gladia.io/v2/live?token=t"}""")]                     // not wss
+    [InlineData("""{"url":"wss://evil.example.com/v2/live?token=t"}""")]                  // not the vendor's host
+    [InlineData("""{"url":"wss://api.gladia.io.evil.example.com/v2/live"}""")]            // a look-alike host
+    [InlineData("""{"id":"x"}""")]                                                          // none
+    [InlineData("""{"url":"not a url"}""")]
+    public async Task An_address_that_is_not_the_vendors_own_wss_address_is_never_followed(string body)
+    {
+        var http = new FakeLlmHandler { Body = body }; var sockets = new FakeSocketConnector();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new GladiaStt(Opts(), new HttpClient(http), sockets, new ListLogger()).OpenAsync(CancellationToken.None));
+        Assert.Empty(sockets.Connections);                                                  // nothing was connected to
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)] [InlineData(HttpStatusCode.TooManyRequests)] [InlineData(HttpStatusCode.UnprocessableEntity)]
+    public async Task A_refused_session_throws_without_reading_or_leaking_the_body(HttpStatusCode status)
+    {
+        var http = new FakeLlmHandler { Status = status, Body = "echo: " + Key };
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => new GladiaStt(Opts(), new HttpClient(http), new FakeSocketConnector(), new ListLogger()).OpenAsync(CancellationToken.None));
+        Assert.DoesNotContain(Key, ex.Message);
+        Assert.Equal(status, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task Caller_audio_goes_out_as_binary_frames_in_order()
+    {
+        var (_, _, _, session, conn) = await Open();
+        await using var _s = session;
+        await session.SendAudioAsync(new byte[] { 9, 8, 7 }, CancellationToken.None);
+        await session.SendAudioAsync(ReadOnlyMemory<byte>.Empty, CancellationToken.None);
+        await session.SendAudioAsync(new byte[] { 6 }, CancellationToken.None);
+        var a = await MemorySocketPair.ReceiveAsync(conn.Server); var b = await MemorySocketPair.ReceiveAsync(conn.Server);
+        Assert.Equal(WebSocketMessageType.Binary, a!.Value.Type); Assert.Equal(new byte[] { 9, 8, 7 }, a.Value.Data);
+        Assert.Equal(new byte[] { 6 }, b!.Value.Data);
+    }
+
+    [Fact]
+    public async Task Gladia_messages_become_the_pipelines_events_and_everything_else_is_ignored()
+    {
+        var (_, _, _, session, conn) = await Open();
+        await using var _s = session;
+        foreach (var m in new[]
+        {
+            """{"type":"speech_start","data":{"time":1.0}}""",
+            """{"type":"transcript","data":{"id":"u1","is_final":false,"utterance":{"text":"איך וויל","language":"yi"}}}""",
+            """{"type":"transcript","data":{"id":"u1","is_final":true,"utterance":{"text":"איך וויל א חלה","language":"yi","confidence":0.9}}}""",
+            """{"type":"transcript","data":{"id":"u2","is_final":true,"utterance":{"text":"  "}}}""",
+            """{"type":"post_final_transcript","data":{}}""",
+            "garbage",
+            """{"type":"speech_end","data":{"time":3.0}}""",
+            """{"nothing":1}""",
+        }) await MemorySocketPair.SendTextAsync(conn.Server, m);
+        await conn.Server.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+        var events = new List<SttEvent>();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await foreach (var e in session.Events(cts.Token)) events.Add(e);
+        Assert.Equal([SttEventKind.SpeechStarted, SttEventKind.Partial, SttEventKind.Final, SttEventKind.SpeechEnded], events.Select(e => e.Kind));
+        Assert.Equal(("איך וויל א חלה", "yi", 0.9), (events[2].Text, events[2].Language, events[2].Confidence));
+    }
+
+    [Fact]
+    public async Task Closing_the_session_sends_stop_recording()
+    {
+        var (_, _, _, session, conn) = await Open();
+        var stop = Task.Run(async () => Encoding.UTF8.GetString((await MemorySocketPair.ReceiveAsync(conn.Server))!.Value.Data));
+        await session.DisposeAsync();
+        Assert.Contains("stop_recording", await stop);
+    }
+
+    [Fact]
+    public async Task When_the_vendor_goes_away_the_event_stream_ends_and_nothing_the_caller_said_is_logged()
+    {
+        var (_, _, log, session, conn) = await Open();
+        await MemorySocketPair.SendTextAsync(conn.Server, """{"type":"transcript","data":{"is_final":true,"utterance":{"text":"my secret words"}}}""");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await foreach (var e in session.Events(cts.Token)) { Assert.Equal("my secret words", e.Text); break; }
+        conn.Pair.Server.Abort();
+        await foreach (var _ in session.Events(cts.Token)) { }
+        await session.DisposeAsync();
+        Assert.DoesNotContain(log.Lines, l => l.Contains("secret") || l.Contains(Key) || l.Contains("one-time-token"));
+    }
+}

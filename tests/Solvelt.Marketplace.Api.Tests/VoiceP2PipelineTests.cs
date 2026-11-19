@@ -48,7 +48,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
     private VoiceScenario S => _s!;
 
     /// <summary>The fake ElevenLabs: for every sentence it is asked to speak it answers two audio chunks of 800 bytes (all 7s) and the final frame.</summary>
-    private static async Task ElevenLabsVendor(FakeSocketConnector sockets, CancellationToken ct)
+    internal static async Task ElevenLabsVendor(FakeSocketConnector sockets, CancellationToken ct)
     {
         var seen = 0;
         while (!ct.IsCancellationRequested)
@@ -183,7 +183,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
     {
         Assert.Contains(Problems(o => o.Pipelines.P2.Stt = "deepgram"), p => p.Contains("both Stt and Tts"));
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.P2.Tts = "somewhere"; }), p => p.Contains("no adapter"));
-        Assert.Contains(Problems(o => { Full(o); o.Pipelines.P3 = new PipelineProviders { Stt = "gladia", Tts = "elevenlabs" }; }), p => p.Contains("P3") && p.Contains("no adapter"));   // later slices
+        Assert.Contains(Problems(o => { Full(o); o.Pipelines.P4 = new PipelineProviders { Stt = "yiddishlabs", Tts = "yiddishlabs" }; }), p => p.Contains("P4") && p.Contains("no adapter"));   // later slices
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.Llm.Model = ""; }), p => p.Contains("Llm:Model"));
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.Llm.TimeoutSeconds = 0; }), p => p.Contains("TimeoutSeconds"));
         Assert.Contains(Problems(o => { Full(o); o.Deepgram.ApiKey = ""; }), p => p.Contains("Deepgram:ApiKey"));
@@ -199,5 +199,92 @@ public sealed class VoiceP2PipelineTests : IDisposable
     {
         var all = string.Join("\n", Problems(o => { Full(o); o.Deepgram.ApiKey = ""; o.ElevenLabs.VoiceId = "../evil"; o.ElevenLabs.ApiKey = "el-secret-value"; }));
         Assert.DoesNotContain("el-secret-value", all);
+    }
+}
+
+/// <summary>Option p3 end to end through the real Gladia and ElevenLabs adapters and the text model, with fake vendors behind them.</summary>
+public sealed class VoiceP3PipelineTests : IDisposable
+{
+    private const string Number = "+15551234567";
+    private const string Hello = "Hello and welcome to Solvelt. How can I help you today?";
+    private VoiceScenario? _s;
+    private FakePhone? _phone;
+    private readonly CancellationTokenSource _stop = new();
+
+    public void Dispose() { _stop.Cancel(); _phone?.Dispose(); _s?.Dispose(); }
+    private VoiceScenario S => _s!;
+
+    internal static Dictionary<string, string?> P3Settings() => new()
+    {
+        ["Voice:Pipelines:P3:Stt"] = "gladia", ["Voice:Pipelines:P3:Tts"] = "elevenlabs", ["Voice:Pipelines:Llm:Model"] = "model-x",
+        ["Voice:Gladia:ApiKey"] = "gl-key-not-real", ["Voice:ElevenLabs:ApiKey"] = "el-key-not-real", ["Voice:ElevenLabs:VoiceId"] = "voice_ABC", ["Voice:ElevenLabs:TtsModel"] = "model-t",
+    };
+
+    private async Task<(FakeSocketConnector Sockets, FakeLlmHandler Llm, FakeLlmHandler Gladia)> Call()
+    {
+        var sockets = new FakeSocketConnector();
+        var llm = new FakeLlmHandler { Body = FakeLlmHandler.Sse($$"""{"type":"response.output_text.delta","delta":"{{Hello}}"}""", """{"type":"response.completed","response":{"usage":{"input_tokens":50,"output_tokens":9}}}""") };
+        var gladia = new FakeLlmHandler { Body = """{"id":"s1","url":"wss://api.gladia.io/v2/live?token=one-time"}""" };
+        _s = new VoiceScenario(Number, VoicePipelineMenuTests.MenuConfig(more: P3Settings()), services: svc =>
+        {
+            svc.RemoveAll<IVendorSocketConnector>(); svc.AddSingleton<IVendorSocketConnector>(sockets);
+            svc.AddHttpClient(VoicePipelineVendors.LlmClient).ConfigurePrimaryHttpMessageHandler(() => llm);
+            svc.AddHttpClient(VoicePipelineVendors.GladiaClient).ConfigurePrimaryHttpMessageHandler(() => gladia);
+        });
+        _ = Task.Run(() => VoiceP2PipelineTests.ElevenLabsVendor(sockets, _stop.Token));
+        await S.SyncCatalog();
+        await VoiceFactory.Hook(S.C, VoiceEndpoints.InboundPath, S.Sid, Number);
+        var res = await VoiceFactory.Hook(S.C, VoiceEndpoints.PipelinePath, S.Sid, Number, extra: new() { ["Digits"] = "3" });
+        var (token, _) = await VoiceScenario.StreamFrom(res);
+        _phone = await FakePhone.Connect(S.F, token);
+        await _phone.Start();
+        return (sockets, llm, gladia);
+    }
+
+    private async Task Advance(int ms) { for (var i = 0; i < ms / 50; i++) { S.F.Clock.Advance(TimeSpan.FromMilliseconds(50)); await Task.Delay(3); } }
+    private static async Task Until(Func<bool> done, int seconds = 5) => await FakeRealtime.Poll(() => done() ? "x" : null, seconds);
+    private IEnumerable<JsonNode> Frames(string name) => _phone!.Got.Where(n => n["event"]?.GetValue<string>() == name);
+
+    [Fact]
+    public async Task A_Yiddish_speaking_turn_goes_audio_to_Gladia_then_words_to_the_text_model_then_English_speech_back()
+    {
+        var (sockets, llm, gladia) = await Call();
+        await Until(() => Frames("media").Count() >= 4);
+        Assert.Equal(("p3", "pipeline:p3"), ((await S.Row()).Tier, (await S.Row()).Model));
+        Assert.Equal("https://api.gladia.io/v2/live", gladia.Requests.Single().Uri!.ToString());
+        var g = sockets.Connections.First(c => c.Uri.Host == "api.gladia.io");
+        await _phone!.Send(new { @event = "media", streamSid = "MZ1", media = new { payload = Convert.ToBase64String(new byte[] { 5, 6, 7 }) } });
+        Assert.Equal(new byte[] { 5, 6, 7 }, (await MemorySocketPair.ReceiveAsync(g.Server))!.Value.Data);          // the telephone's bytes, as mu-law
+
+        var before = llm.Requests.Count;
+        await MemorySocketPair.SendTextAsync(g.Server, """{"type":"transcript","data":{"id":"u1","is_final":true,"utterance":{"text":"איך וויל א חלה","language":"yi"}}}""");
+        await Advance(900);
+        await Until(() => llm.Requests.Count > before);
+        var input = JsonNode.Parse(llm.Requests[^1].Body)!["input"]!.AsArray();
+        Assert.Contains(input, i => i!["role"]?.GetValue<string>() == "user" && i["content"]!.GetValue<string>() == "איך וויל א חלה");
+        Assert.Contains(sockets.Connections, c => c.Uri.Host == "api.elevenlabs.io");                                  // the answer is spoken by ElevenLabs
+        Assert.DoesNotContain(sockets.Connections, c => c.Uri.Host.Contains("yiddishlabs"));                            // Yiddish Labs is not part of p3
+        Assert.Empty(S.Fake.Of("session.update"));
+    }
+
+    [Fact]
+    public async Task P3_is_offered_only_with_its_settings_and_p2_is_not_offered_by_them()
+    {
+        _s = new VoiceScenario(Number, VoicePipelineMenuTests.MenuConfig(more: P3Settings()));
+        var registry = S.F.Services.GetRequiredService<VoicePipelineRegistry>();
+        Assert.True(registry.IsAvailable("p3")); Assert.False(registry.IsAvailable("p2")); Assert.False(registry.IsAvailable("p4"));
+        await Task.CompletedTask;
+    }
+
+    [Fact]
+    public void Start_up_refuses_a_p3_without_the_Gladia_key_or_with_empty_model_or_language()
+    {
+        VoiceOptions V(Action<VoiceOptions> f) { var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://v.test" }; f(o); return o; }
+        void Ok(VoiceOptions o) { o.Pipelines.P3 = new PipelineProviders { Stt = "gladia", Tts = "elevenlabs" }; o.Pipelines.Llm.Model = "m"; o.Gladia.ApiKey = "k"; o.ElevenLabs.ApiKey = "k"; o.ElevenLabs.VoiceId = "v1"; o.ElevenLabs.TtsModel = "t"; }
+        var sw = new SignalWireOptions { SigningKey = "sw" };
+        Assert.Empty(VoiceConfig.Problems(V(Ok), sw, true));
+        Assert.Contains(VoiceConfig.Problems(V(o => { Ok(o); o.Gladia.ApiKey = ""; }), sw, true), p => p.Contains("Gladia:ApiKey"));
+        Assert.Contains(VoiceConfig.Problems(V(o => { Ok(o); o.Gladia.Language = ""; }), sw, true), p => p.Contains("Gladia:Model and Language"));
+        Assert.Contains(VoiceConfig.Problems(V(o => { Ok(o); o.ElevenLabs.ApiKey = ""; }), sw, true), p => p.Contains("ElevenLabs:ApiKey"));    // p3 needs the ElevenLabs voice too
     }
 }

@@ -16,11 +16,12 @@ public sealed class VendorChainedParts(string optionId, IStreamingStt stt, ITts 
 
 public static class VoicePipelineVendors
 {
-    public const string LlmClient = "voice-llm";
+    public const string LlmClient = "voice-llm", GladiaClient = "voice-gladia";
 
     /// <summary>The provider pairs that have an adapter. A pair outside this list is a start-up problem, so a typo cannot silently leave an option off.</summary>
     internal static bool Supported(string option, PipelineProviders p)
-        => option == "p2" && Is(p.Stt, VendorNames.Deepgram) && Is(p.Tts, VendorNames.ElevenLabs);
+        => (option == "p2" && Is(p.Stt, VendorNames.Deepgram) && Is(p.Tts, VendorNames.ElevenLabs))
+        || (option == "p3" && Is(p.Stt, VendorNames.Gladia) && Is(p.Tts, VendorNames.ElevenLabs));
 
     private static bool Is(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
@@ -29,6 +30,7 @@ public static class VoicePipelineVendors
     {
         services.AddSingleton<IVendorSocketConnector, ClientWebSocketConnector>();
         services.AddHttpClient(LlmClient, c => c.Timeout = Timeout.InfiniteTimeSpan);       // the adapter bounds the wait itself
+        services.AddHttpClient(GladiaClient, c => c.Timeout = TimeSpan.FromSeconds(15));
         services.AddSingleton<IChainedPartsSource, VendorPartsSource>();
         return services;
     }
@@ -54,6 +56,11 @@ public static class VoicePipelineVendors
             if (string.IsNullOrWhiteSpace(v.Deepgram.ApiKey)) p.Add("Voice:Deepgram:ApiKey is required for option p2.");
             if (string.IsNullOrWhiteSpace(v.Deepgram.Model) || string.IsNullOrWhiteSpace(v.Deepgram.Language)) p.Add("Voice:Deepgram:Model and Language must not be empty.");
         }
+        if (configured.Contains("p3"))
+        {
+            if (string.IsNullOrWhiteSpace(v.Gladia.ApiKey)) p.Add("Voice:Gladia:ApiKey is required for option p3.");
+            if (string.IsNullOrWhiteSpace(v.Gladia.Model) || string.IsNullOrWhiteSpace(v.Gladia.Language)) p.Add("Voice:Gladia:Model and Language must not be empty.");
+        }
         if (configured.Contains("p2") || configured.Contains("p3"))
         {
             if (string.IsNullOrWhiteSpace(v.ElevenLabs.ApiKey)) p.Add("Voice:ElevenLabs:ApiKey is required for options p2 and p3.");
@@ -74,13 +81,15 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
 {
     public IEnumerable<IChainedPipelineParts> Create(VoiceOptions v)
     {
-        if (VoicePipelineVendors.Supported("p2", v.Pipelines.P2))
-        {
-            var logs = sp.GetRequiredService<ILoggerFactory>();
-            var sockets = sp.GetRequiredService<IVendorSocketConnector>();
-            var llm = new OpenAiVoiceLlm(sp.GetRequiredService<IHttpClientFactory>().CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
-            yield return new VendorChainedParts("p2", new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram")),
-                new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs")), llm, v.PipelineMenu.EndpointMs);
-        }
+        var p2 = VoicePipelineVendors.Supported("p2", v.Pipelines.P2);
+        var p3 = VoicePipelineVendors.Supported("p3", v.Pipelines.P3);
+        if (!p2 && !p3) yield break;
+        var logs = sp.GetRequiredService<ILoggerFactory>();
+        var sockets = sp.GetRequiredService<IVendorSocketConnector>();
+        var http = sp.GetRequiredService<IHttpClientFactory>();
+        var llm = new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
+        var tts = new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs"));
+        if (p2) yield return new VendorChainedParts("p2", new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram")), tts, llm, v.PipelineMenu.EndpointMs);
+        if (p3) yield return new VendorChainedParts("p3", new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia")), tts, llm, v.PipelineMenu.EndpointMs);
     }
 }

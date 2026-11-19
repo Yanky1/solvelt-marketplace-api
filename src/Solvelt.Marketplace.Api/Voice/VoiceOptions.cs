@@ -68,6 +68,7 @@ public sealed class VoiceOptions
     public VoicePipelinesOptions Pipelines { get; set; } = new();
     public DeepgramOptions Deepgram { get; set; } = new();
     public ElevenLabsOptions ElevenLabs { get; set; } = new();
+    public GladiaOptions Gladia { get; set; } = new();
 }
 
 public sealed class SignalWireOptions
