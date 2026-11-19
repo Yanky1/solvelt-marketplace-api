@@ -128,6 +128,7 @@ public sealed class OfferSyncService(MarketplaceDb db, IOfferSource source, Time
         row.ProductIdsJson = JsonSerializer.Serialize(s.ProductIds); row.CategoryIdsJson = JsonSerializer.Serialize(s.CategoryIds);
         row.TiersJson = JsonSerializer.Serialize(s.Tiers); row.GiftsJson = JsonSerializer.Serialize(s.Gifts);
         row.ActiveFrom = s.ActiveFrom; row.ActiveTo = s.ActiveTo; row.Demo = s.Demo;
+        if (s.CreatedAt is { } created) row.CreatedAtTicks = created.UtcTicks;
         row.Version = s.Version; row.KnownVersion = Math.Max(row.KnownVersion, s.Version); row.UpdatedAt = now; row.FetchAttempts = 0; row.NextFetchAt = null;
         row.RecomputeVisibility(); row.Row++;
         try { await db.SaveChangesAsync(ct); return true; }

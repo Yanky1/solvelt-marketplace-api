@@ -9,7 +9,7 @@ public sealed record OfferGiftDoc(int MinQuantity, Guid ProductId, int Quantity,
 /// <summary>One offer document of the portal feed (C18.2). Money is <c>long</c> cents.</summary>
 public sealed record OfferSnapshot(Guid OfferId, long Version, long FeedVersion, Guid SellerId, Guid BrandId, string Name, string Currency, string Scope,
     IReadOnlyList<Guid> ProductIds, IReadOnlyList<Guid> CategoryIds, IReadOnlyList<OfferTier> Tiers, IReadOnlyList<OfferGiftDoc> Gifts,
-    DateTimeOffset? ActiveFrom, DateTimeOffset? ActiveTo, bool Demo, DateTimeOffset UpdatedAt);
+    DateTimeOffset? ActiveFrom, DateTimeOffset? ActiveTo, bool Demo, DateTimeOffset UpdatedAt, DateTimeOffset? CreatedAt = null);
 
 /// <summary>An offer that stopped applying (<c>ended</c>, <c>paused</c> or <c>deleted</c>). <see cref="Version"/> is null for a deleted one (gone for good).</summary>
 public sealed record OfferTombstone(Guid OfferId, long? Version, string Reason);
@@ -138,7 +138,7 @@ public sealed class HttpOfferSource(ISignedPortalClient portal, ILogger<HttpOffe
         var name = (Str(e, "name") ?? "").Trim();
         return new OfferSnapshot(id, version, Long(e, "feedVersion") ?? 0, seller, brand, name.Length == 0 ? "Quantity offer" : name[..Math.Min(name.Length, 200)], (Str(e, "currency") ?? "USD").ToUpperInvariant(), kind,
             products, categories, tiers.OrderBy(t => t.MinQuantity).ToList(), gifts, Time(e, "activeFrom"), Time(e, "activeTo"), e.TryGetProperty("demo", out var d) && d.ValueKind == JsonValueKind.True,
-            Time(e, "updatedAt") ?? DateTimeOffset.UnixEpoch);
+            Time(e, "updatedAt") ?? DateTimeOffset.UnixEpoch, Time(e, "createdAt"));
     }
 
     private static string? Str(JsonElement e, string n) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;

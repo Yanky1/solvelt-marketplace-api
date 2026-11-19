@@ -94,6 +94,25 @@ public class OfferSyncTests
     }
 
     [Fact]
+    public async Task The_portals_createdAt_is_kept_to_the_tick_and_never_changed_by_a_later_version()
+    {
+        using var f = new TestFactory();
+        var src = f.Services.GetRequiredService<FixtureOfferSource>();
+        var id = Guid.NewGuid();
+        var created = new DateTimeOffset(2026, 11, 1, 8, 30, 15, TimeSpan.Zero).AddTicks(1234567 % 10_000_000);
+        src.Upsert(Doc(id) with { CreatedAt = created });
+        await Sync(f);
+        Assert.Equal(created.UtcTicks, Row(f, id).CreatedAtTicks);                          // 100 ns: PostgreSQL timestamps would cut it to microseconds, so it is stored as ticks
+        src.Upsert(Doc(id, price: 85) with { CreatedAt = created.AddDays(3) });              // a portal never sends another one; a later value is simply the newest document
+        await Sync(f);
+        Assert.NotNull(Row(f, id).CreatedAtTicks);
+        var old = Guid.NewGuid();
+        src.Upsert(Doc(old));                                                                // an older portal sends none: null, and the first-seen time stands in
+        await Sync(f);
+        Assert.Null(Row(f, old).CreatedAtTicks);
+    }
+
+    [Fact]
     public async Task An_ended_offer_stops_applying_and_a_new_version_brings_it_back_a_deleted_one_never_returns()
     {
         using var f = new TestFactory();

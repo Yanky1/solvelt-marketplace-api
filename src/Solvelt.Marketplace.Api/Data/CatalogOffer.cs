@@ -29,6 +29,8 @@ public sealed class CatalogOffer
     public long? UnlistedVersion { get; set; }
     public bool Visible { get; set; }
     public DateTimeOffset FirstSeenAt { get; set; }
+    /// <summary>The portal's creation time of the offer (C18.2 <c>createdAt</c>, immutable, 100 ns precision) as UTC ticks: a tick count, because PostgreSQL keeps only microseconds and the tie-break compares exactly. Null from a portal that does not send it yet.</summary>
+    public long? CreatedAtTicks { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public int FetchAttempts { get; set; }
     public DateTimeOffset? NextFetchAt { get; set; }

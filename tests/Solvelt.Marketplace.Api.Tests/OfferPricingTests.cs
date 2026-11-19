@@ -9,8 +9,8 @@ public sealed class OfferPricingTests
     private static readonly Guid P1 = Guid.NewGuid(), P2 = Guid.NewGuid(), Gift1 = Guid.NewGuid(), Gift2 = Guid.NewGuid();
     private static readonly DateTimeOffset T0 = new(2026, 11, 1, 0, 0, 0, TimeSpan.Zero);
 
-    private static OfferDef Offer(string scope = "products", Guid? id = null, DateTimeOffset? seen = null, IEnumerable<OfferTier>? tiers = null, IEnumerable<OfferGiftDef>? gifts = null, Guid[]? cats = null, Guid? brand = null)
-        => new(id ?? Guid.NewGuid(), 2, Seller, brand ?? Brand, scope, new HashSet<Guid> { P1, P2 }, new HashSet<Guid>(cats ?? []), (tiers ?? [new OfferTier(20, 90)]).ToList(), (gifts ?? []).ToList(), seen ?? T0);
+    private static OfferDef Offer(string scope = "products", Guid? id = null, DateTimeOffset? seen = null, IEnumerable<OfferTier>? tiers = null, IEnumerable<OfferGiftDef>? gifts = null, Guid[]? cats = null, Guid? brand = null, DateTimeOffset? created = null)
+        => new(id ?? Guid.NewGuid(), 2, Seller, brand ?? Brand, scope, new HashSet<Guid> { P1, P2 }, new HashSet<Guid>(cats ?? []), (tiers ?? [new OfferTier(20, 90)]).ToList(), (gifts ?? []).ToList(), seen ?? T0, created);
 
     private static OfferLineInput Line(Guid listing, int qty, long unit = 100, Guid? seller = null, Guid? brand = null, Guid[]? chain = null)
         => new(Guid.NewGuid(), listing, seller ?? Seller, brand ?? Brand, chain ?? [], unit, qty);
@@ -119,5 +119,47 @@ public sealed class OfferPricingTests
     public void No_offers_means_no_change()
     {
         Assert.Empty(OfferPricing.Price([Line(P1, 30)], []).Lines);
+    }
+
+    // ---------- the tie-break is the portal's (OfferIntake.cs:111 with C18.1-2 createdAt): rank, older createdAt compared exactly, lower id as a lowercase 36-character string ----------
+
+    private static readonly Guid LowId = Guid.Parse("00000000-0000-0000-0000-0000000000aa"), HighId = Guid.Parse("ffffffff-0000-0000-0000-0000000000aa");
+
+    [Fact]
+    public void The_older_createdAt_wins_even_when_its_id_is_the_higher_one_and_even_when_we_saw_it_later()
+    {
+        var created = new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero);
+        var older = Offer("all", HighId, seen: T0.AddDays(5), tiers: [new OfferTier(1, 90)], created: created);
+        var newer = Offer("all", LowId, seen: T0, tiers: [new OfferTier(1, 80)], created: created.AddTicks(1));    // one 100 ns tick younger: compared exactly
+        var r = OfferPricing.Price([Line(P1, 1)], [newer, older]);
+        Assert.Equal(HighId, r.Offers.Single().OfferId);
+    }
+
+    [Fact]
+    public void An_equal_createdAt_falls_to_the_lower_id_string()
+    {
+        var created = new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero);
+        var a = Offer("all", HighId, created: created, tiers: [new OfferTier(1, 90)]);
+        var b = Offer("all", LowId, created: created, tiers: [new OfferTier(1, 80)]);
+        Assert.Equal(LowId, OfferPricing.Price([Line(P1, 1)], [a, b]).Offers.Single().OfferId);
+        Assert.Equal(LowId, OfferPricing.Price([Line(P1, 1)], [b, a]).Offers.Single().OfferId);                    // the input order never decides
+    }
+
+    [Fact]
+    public void A_category_offer_and_a_parent_category_offer_have_the_same_rank_so_the_older_one_wins()
+    {
+        var parent = Guid.NewGuid(); var child = Guid.NewGuid();
+        var olderParent = Offer("category", cats: [parent], created: T0, tiers: [new OfferTier(1, 90)]);
+        var newerChild = Offer("category", cats: [child], created: T0.AddDays(1), tiers: [new OfferTier(1, 80)]);   // the more specific category does NOT win: rank is the scope kind
+        var line = Line(P1, 1, chain: [child, parent]);
+        Assert.Equal(olderParent.OfferId, OfferPricing.Price([line], [newerChild, olderParent]).Offers.Single().OfferId);
+    }
+
+    [Fact]
+    public void Without_a_createdAt_the_first_seen_time_stands_in()
+    {
+        var a = Offer("all", HighId, seen: T0, tiers: [new OfferTier(1, 90)]);
+        var b = Offer("all", LowId, seen: T0.AddDays(1), tiers: [new OfferTier(1, 80)]);
+        Assert.Equal(HighId, OfferPricing.Price([Line(P1, 1)], [b, a]).Offers.Single().OfferId);
     }
 }

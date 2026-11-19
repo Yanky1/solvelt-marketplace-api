@@ -8,7 +8,7 @@ public sealed record OfferGiftDef(int MinQuantity, Guid ProductId, int Quantity,
 /// (the older one wins, C18.1-2). Money is <c>long</c> cents.
 /// </summary>
 public sealed record OfferDef(Guid OfferId, long Version, Guid SellerId, Guid BrandId, string Scope, IReadOnlySet<Guid> ProductIds, IReadOnlySet<Guid> CategoryIds,
-    IReadOnlyList<OfferTier> Tiers, IReadOnlyList<OfferGiftDef> Gifts, DateTimeOffset FirstSeenAt);
+    IReadOnlyList<OfferTier> Tiers, IReadOnlyList<OfferGiftDef> Gifts, DateTimeOffset FirstSeenAt, DateTimeOffset? CreatedAt = null);
 
 /// <summary>One physical product line. <see cref="CategoryChain"/> is the listing's category and all its ancestors. <see cref="UnitPriceCents"/> is the price charged before any offer, sale price included.</summary>
 public sealed record OfferLineInput(Guid Key, Guid ListingId, Guid SellerId, Guid BrandId, IReadOnlyCollection<Guid> CategoryChain, long UnitPriceCents, int Quantity);
@@ -52,7 +52,7 @@ public static class OfferPricing
     public static OfferPricingResult Price(IReadOnlyList<OfferLineInput> lines, IReadOnlyList<OfferDef> offers)
     {
         if (lines.Count == 0 || offers.Count == 0) return OfferPricingResult.None;
-        var ordered = offers.OrderBy(o => Specificity(o.Scope)).ThenBy(o => o.FirstSeenAt).ThenBy(o => o.OfferId).ToList();
+        var ordered = offers.OrderBy(o => Specificity(o.Scope)).ThenBy(o => o.CreatedAt ?? o.FirstSeenAt).ThenBy(o => o.OfferId.ToString("D"), StringComparer.Ordinal).ToList();   // the portal's order (OfferIntake.cs:111 with createdAt, C18.1-2): rank, older createdAt, lower id as a lowercase 36-character string
         var pricedBy = new Dictionary<Guid, OfferDef>();
         foreach (var l in lines)
             if (ordered.FirstOrDefault(o => Covers(o, l)) is { } winner) pricedBy[l.Key] = winner;

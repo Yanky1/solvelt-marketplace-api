@@ -26,7 +26,7 @@ public sealed class OfferLoader(MarketplaceDb db, CategoryMap categories)
             var gifts = JsonSerializer.Deserialize<List<OfferGiftDoc>>(o.GiftsJson) ?? [];
             var def = new OfferDef(o.Id, o.Version, o.SellerId, o.BrandId, o.Scope,
                 (JsonSerializer.Deserialize<List<Guid>>(o.ProductIdsJson) ?? []).ToHashSet(), (JsonSerializer.Deserialize<List<Guid>>(o.CategoryIdsJson) ?? []).ToHashSet(),
-                tiers, gifts.Select(g => new OfferGiftDef(g.MinQuantity, g.ProductId, g.Quantity, g.Title)).ToList(), o.FirstSeenAt);
+                tiers, gifts.Select(g => new OfferGiftDef(g.MinQuantity, g.ProductId, g.Quantity, g.Title)).ToList(), o.FirstSeenAt, o.CreatedAtTicks is { } ct ? new DateTimeOffset(ct, TimeSpan.Zero) : null);
             result.Add(new LoadedOffer(def, o.Name, gifts.GroupBy(g => g.ProductId).ToDictionary(g => g.Key, g => g.All(x => x.Available))));
         }
         return result;
