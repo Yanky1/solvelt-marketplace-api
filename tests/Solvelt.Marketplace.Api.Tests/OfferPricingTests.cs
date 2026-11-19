@@ -65,7 +65,7 @@ public sealed class OfferPricingTests
         var r = OfferPricing.Price([mine, otherSeller, otherBrand], [Offer()]);
         Assert.Equal(15, r.Offers.Single().EligibleUnits);
         Assert.Null(r.Offers.Single().Tier);
-        Assert.Empty(r.Lines.Where(x => x.Key != mine.Key));
+        Assert.DoesNotContain(r.Lines, x => x.Key != mine.Key);
         Assert.Equal(0, r.For(mine.Key)!.DiscountCents);
     }
 
@@ -75,7 +75,7 @@ public sealed class OfferPricingTests
         var l = Line(P1, 40);
         var r = OfferPricing.Price([l], [Offer(gifts: [new OfferGiftDef(10, Gift1, 1, "Wallet"), new OfferGiftDef(10, Gift2, 1, "Pack")])]);
         var earned = r.Offers.Single().Gifts;
-        Assert.Equal([Gift1, Gift2].Order(), earned.Select(g => g.ProductId).Order());
+        Assert.Equal(new[] { Gift1, Gift2 }.Order(), earned.Select(g => g.ProductId).Order());
         Assert.All(earned, g => Assert.Equal(1, g.Quantity));
     }
 
