@@ -411,7 +411,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasColumnType("character varying(20)");
 
                     b.Property<int>("PinFailures")
-                        .HasColumnType("integer");
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
 
                     b.Property<string>("PinHash")
                         .HasMaxLength(200)

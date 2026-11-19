@@ -137,7 +137,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     EmailVerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     PendingEmail = table.Column<string>(type: "character varying(254)", maxLength: 254, nullable: true),
                     PinHash = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: true),
-                    PinFailures = table.Column<int>(type: "integer", nullable: false),
+                    PinFailures = table.Column<int>(type: "integer", nullable: false, defaultValue: 0),
                     PinLockedUntil = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     DemoVerifiedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
                     Phone = table.Column<string>(type: "character varying(30)", maxLength: 30, nullable: true),

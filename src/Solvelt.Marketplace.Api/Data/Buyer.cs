@@ -189,6 +189,7 @@ internal sealed class BuyerAccountConfiguration : IEntityTypeConfiguration<Buyer
         b.Property(a => a.Email).HasMaxLength(254);
         b.Property(a => a.PendingEmail).HasMaxLength(254);
         b.Property(a => a.PinHash).HasMaxLength(200);
+        b.Property(a => a.PinFailures).HasDefaultValue(0);   // a NOT NULL column added to existing databases (and rows written without it) needs a default
         b.Property(a => a.DisplayName).HasMaxLength(60).IsRequired();
         b.Property(a => a.PasswordHash).HasMaxLength(400);
         b.Property(a => a.Phone).HasMaxLength(30);
