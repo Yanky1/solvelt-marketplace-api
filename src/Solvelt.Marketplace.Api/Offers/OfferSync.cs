@@ -58,7 +58,7 @@ public sealed class OfferSyncService(MarketplaceDb db, IOfferSource source, Time
     public const string StateKey = "offers";
     private static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
     /// <summary>
-    /// Offers first seen in one run get strictly increasing <c>FirstSeenAt</c> (a tick apart) in FEED order. The portal breaks a tie between equally specific offers by the offer's own creation time (then id; portal
+    /// Offers first seen in one run get strictly increasing <c>FirstSeenAt</c> (a millisecond apart: the stored time keeps milliseconds on SQLite and microseconds on PostgreSQL) in FEED order. The portal breaks a tie between equally specific offers by the offer's own creation time (then id; portal
     /// <c>Offers/OfferIntake.cs:111</c>), which the feed does not carry yet (decision Q-01, field requested): until it does, the feed order (version order, which follows creation order for new offers) is the nearest
     /// stand-in, and it is deterministic, where a shared timestamp would leave the id alone to decide.
     /// </summary>
@@ -122,7 +122,7 @@ public sealed class OfferSyncService(MarketplaceDb db, IOfferSource source, Time
     {
         var now = time.GetUtcNow().ToUniversalTime();
         var row = await db.CatalogOffers.FirstOrDefaultAsync(o => o.Id == s.OfferId, ct);
-        if (row is null) { row = new CatalogOffer { Id = s.OfferId, FirstSeenAt = now.AddTicks(++_firstSeenSeq) }; db.CatalogOffers.Add(row); }
+        if (row is null) { row = new CatalogOffer { Id = s.OfferId, FirstSeenAt = now.AddMilliseconds(++_firstSeenSeq) }; db.CatalogOffers.Add(row); }
         if (s.Version <= row.Version && row.Version > 0) { db.ChangeTracker.Clear(); return false; }   // an older (or the same) version than we hold: nothing to do
         row.SellerId = s.SellerId; row.BrandId = s.BrandId; row.Name = s.Name; row.Currency = s.Currency; row.Scope = s.Scope;
         row.ProductIdsJson = JsonSerializer.Serialize(s.ProductIds); row.CategoryIdsJson = JsonSerializer.Serialize(s.CategoryIds);

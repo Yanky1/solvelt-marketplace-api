@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261119031518_InitialCreate")]
+    [Migration("20261119035751_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -1160,6 +1160,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<string>("CategoryIdsJson")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<long?>("CreatedAtTicks")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Currency")
                         .IsRequired()

@@ -336,6 +336,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     UnlistedVersion = table.Column<long>(type: "bigint", nullable: true),
                     Visible = table.Column<bool>(type: "boolean", nullable: false),
                     FirstSeenAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    CreatedAtTicks = table.Column<long>(type: "bigint", nullable: true),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     FetchAttempts = table.Column<int>(type: "integer", nullable: false),
                     NextFetchAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),

@@ -1158,6 +1158,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<long?>("CreatedAtTicks")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("Currency")
                         .IsRequired()
                         .HasMaxLength(3)
