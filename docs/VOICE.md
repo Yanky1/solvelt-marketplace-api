@@ -217,4 +217,18 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | `Voice:PipelineMenu:ParallelWaitMs` / `ParallelBudgetMs` | 500 / 1200 | option 5: how long to wait for the slower engines, and the hard budget counted from the first transcript (wait must not exceed budget) |
 | `Voice:PipelineMenu:Prices:SttPerMinute` / `TtsPerMillionChars` / `LlmInPerMillionTokens` / `LlmOutPerMillionTokens` | 0 | cost estimate inputs (published vendor prices, entered by the owner) |
 
-**Names for the vendor adapters.** The vendors, runtime hosts and final setting names are in `docs/VOICE-PIPELINE-OPTIONS.md` (decision V-22): `Voice:Pipelines:P2` to `P5` (`Stt`, `Tts`), `Voice:Pipelines:Llm:Model`, `Voice:Pipelines:P5:JudgeModel` and `YiddishLabsInJudge`, and one block per vendor, `Voice:Deepgram:*`, `Voice:ElevenLabs:*`, `Voice:Gladia:*` and `Voice:YiddishLabs:*` (the keys are secrets). None is read by any code yet and no value is set. Until an adapter exists, options 2 to 5 stay "not available on this line".
+**Settings of the vendor adapters.** The vendors, runtime hosts and setting names are in `docs/VOICE-PIPELINE-OPTIONS.md` (decision V-22). **Option p2 is built and read now (decision V-23), off by default:**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `Voice:Pipelines:P2:Stt`, `Voice:Pipelines:P2:Tts` | empty | `deepgram` and `elevenlabs`; name both or neither (start-up refuses half a pair and any other pair: "no adapter yet") |
+| `Voice:Pipelines:Llm:Model` | none | the OpenAI text model of the chained options; required when any option is configured |
+| `Voice:Pipelines:Llm:TimeoutSeconds` | 30 | longest wait for the model's answer to start (1 to 120) |
+| `Voice:Deepgram:ApiKey` | none | **secret** |
+| `Voice:Deepgram:Model`, `:Language` | `nova-3`, `en` | recogniser model and language |
+| `Voice:ElevenLabs:ApiKey` | none | **secret** |
+| `Voice:ElevenLabs:VoiceId`, `:TtsModel` | none | the voice (letters, digits, `-` and `_`) and the model id; both required |
+| `Voice:ElevenLabs:Region` | empty | empty (default host), `us`, `eu`, `in` or `sg`: a fixed list, never a free host |
+| `Voice:ElevenLabs:EnableLogging` | `false` | the vendor's own request logging; leave off unless the plan cannot turn it off |
+
+The hosts are fixed in code and no setting names a host. Keys travel in request headers only and are never logged. Options p3 to p5 are not built yet (`Voice:Pipelines:P3` to `P5` are refused at start-up until their adapter exists); the other names in the design note are reserved. Until an adapter exists, its option stays "not available on this line".
