@@ -136,11 +136,13 @@ public static class CheckoutEndpoints
         return Results.Json(new
         {
             number = o.Number, status = o.Status, currency = o.Currency, itemsCents = o.ItemsCents, shippingCents = o.ShippingCents, taxCents = o.TaxCents, totalCents = o.TotalCents, createdAt = o.CreatedAt, paidAt = o.PaidAt,
+            // the short stored code only (for example offer_mismatch, delivery_window_full), and only on a failed order: it lets the page say WHY (decision Q-08); nothing else of the failure is exposed
+            failureCode = o.Status == OrderStatus.Failed ? o.FailureCode : null,
             groups = o.Groups.Select(g => new
             {
                 sellerName = g.SellerName, brandName = g.BrandName, deliveryKind = g.DeliveryKind, shippingSpeed = g.ShippingSpeed, localDate = g.LocalDate, itemsCents = g.ItemsCents, shippingCents = g.ShippingCents, taxCents = g.TaxCents, totalCents = g.TotalCents,
-                sellerOrderNumber = g.SellerOrderNumber,
-                lines = o.Lines.Where(l => l.GroupId == g.Id).Select(l => new { title = l.Title, variantName = l.VariantName, quantity = l.Quantity, unitPriceCents = l.UnitPriceCents, lineTotalCents = l.LineTotalCents, taxCents = l.TaxCents }),
+                sellerOrderNumber = g.SellerOrderNumber, discountCents = g.DiscountCents, giftUnavailable = g.GiftUnavailable,
+                lines = o.Lines.Where(l => l.GroupId == g.Id).Select(l => new { title = l.Title, variantName = l.VariantName, quantity = l.Quantity, unitPriceCents = l.UnitPriceCents, lineTotalCents = l.LineTotalCents, taxCents = l.TaxCents, discountCents = l.DiscountCents, offerId = l.OfferId, isGift = l.IsGift }),
             }),
         });
     }

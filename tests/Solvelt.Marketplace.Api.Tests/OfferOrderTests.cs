@@ -240,6 +240,13 @@ public sealed class OfferOrderTests : OrderFlowBase
         Assert.Equal(total, Assert.Single(Stripe.Refunds).AmountCents);
         Assert.Empty(Portal("payment-events"));                                 // nothing captured at the portal
         Assert.Contains("quantity offer", Assert.Single(_k.Sink.Sent, m => m.Subject.Contains("couldn't place")).TextBody);
+        // the confirmation page can say why: the short code only, and the order lines show the discount
+        var rq = new HttpRequestMessage(HttpMethod.Get, "/api/v1/checkout/orders/" + number);
+        rq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _session);
+        var view = JsonDocument.Parse(await (await _k.Http.SendAsync(rq)).Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("failed", view.GetProperty("status").GetString());
+        Assert.Equal("offer_mismatch", view.GetProperty("failureCode").GetString());
+        Assert.Equal(5050, view.GetProperty("groups")[0].GetProperty("lines")[0].GetProperty("discountCents").GetInt64());
     }
 
     [Fact]
