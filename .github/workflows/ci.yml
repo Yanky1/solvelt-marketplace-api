@@ -56,6 +56,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      # the runner prints the service container's log after the last step, and the tests create hundreds of databases (a checkpoint each), which buried the end of the job under thousands of lines. Only logging changes
+      # here (checkpoint and normal messages off, fatal errors kept); nothing about how the server behaves. A failure of this step must not fail the job.
+      - name: Quiet the PostgreSQL server log
+        continue-on-error: true
+        run: |
+          psql "host=localhost port=5432 user=postgres password=postgres dbname=postgres" -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET log_min_messages = 'fatal'" -c "ALTER SYSTEM SET log_min_error_statement = 'panic'" -c "ALTER SYSTEM SET log_checkpoints = 'off'" -c "SELECT pg_reload_conf()"
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release -warnaserror
       # same guard as above; the .trx is new here so a failure can be named (see the step after)
