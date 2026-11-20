@@ -75,7 +75,7 @@ Sources: their public developer documentation (`https://app.yiddishlabs.com/deve
 
 ## 5. Option 5 and the judge (Terms §6) — a question for Ronald
 
-The judge is an OpenAI text model that reads the candidate transcripts of one turn (Gladia's and Yiddish Labs') and returns the one to use. Whether choosing between a competitor's output and another engine's output counts as "evaluating other models" under Terms §6 is a legal reading this note cannot make. **Flagged for Ronald.** Until he answers, p5 is designed so Yiddish Labs output can be kept out of the judge by one setting: `Voice:Pipelines:P5:YiddishLabsInJudge` (default **false**). With it false, p5 uses Gladia for the text the model sees and Yiddish Labs only for the voice; with it true, Flash's text is a candidate as designed. Either way the judge's choice is never logged or stored.
+The judge is an OpenAI text model that reads the candidate transcripts of one turn (Gladia's and Yiddish Labs') and returns the one to use. Whether choosing between a competitor's output and another engine's output counts as "evaluating other models" under Terms §6 is a legal reading this note cannot make. **Flagged for Ronald.** Until he answers, p5 is designed so Yiddish Labs output can be kept out of the judge by one setting: `Voice:Pipelines:P5:YiddishLabsInJudge` (default **false**). With it false, p5 uses Gladia for the text the model sees and Yiddish Labs only for the voice; with it true, Flash's text is a candidate as designed. Either way the judge's choice is never logged or stored. *(Built in decision V-29: with the switch false Flash is never contacted at all.)*
 
 ## 6. Consent line for p4 and p5 (draft; the wording is Ronald's decision)
 

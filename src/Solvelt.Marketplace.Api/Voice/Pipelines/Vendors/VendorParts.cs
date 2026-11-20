@@ -22,7 +22,8 @@ public static class VoicePipelineVendors
     internal static bool Supported(string option, PipelineProviders p)
         => (option == "p2" && Is(p.Stt, VendorNames.Deepgram) && Is(p.Tts, VendorNames.ElevenLabs))
         || (option == "p3" && Is(p.Stt, VendorNames.Gladia) && Is(p.Tts, VendorNames.ElevenLabs))
-        || (option == "p4" && Is(p.Stt, VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs));
+        || (option == "p4" && Is(p.Stt, VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs))
+        || (option == "p5" && Is(p.Stt, VendorNames.Gladia + "+" + VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs));
 
     private static bool Is(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
@@ -56,7 +57,7 @@ public static class VoicePipelineVendors
         }
         if (configured.Count == 0) return;
         if (v.Pipelines.Llm.TimeoutSeconds is < 1 or > 120) p.Add("Voice:Pipelines:Llm:TimeoutSeconds must be between 1 and 120.");
-        if (configured.Contains("p4"))
+        if (configured.Contains("p4") || configured.Contains("p5"))
         {
             var y = v.YiddishLabs;
             if (y.TtsVoiceId.Length > 0 && y.TtsVoiceId.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-')) p.Add("Voice:YiddishLabs:TtsVoiceId may only hold letters, digits, - and _.");
@@ -68,6 +69,7 @@ public static class VoicePipelineVendors
             if (y.SttPrompt.Length > 500) p.Add("Voice:YiddishLabs:SttPrompt must be at most 500 characters.");
             if (y.ConsentLine.Length > 600) p.Add("Voice:YiddishLabs:ConsentLine must be at most 600 characters.");
         }
+        if (configured.Contains("p5") && v.Pipelines.P5.JudgeModel.Length > 100) p.Add("Voice:Pipelines:P5:JudgeModel must be at most 100 characters.");
         if (configured.Contains("p2") || configured.Contains("p3"))
         {
             if (v.ElevenLabs.VoiceId.Length > 0 && v.ElevenLabs.VoiceId.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-')) p.Add("Voice:ElevenLabs:VoiceId may only hold letters, digits, - and _.");
@@ -95,16 +97,28 @@ public static class VoicePipelineVendors
                 if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
                 MissingEleven(v, m);
                 break;
+            case "p5":
+                if (string.IsNullOrWhiteSpace(v.Gladia.ApiKey)) m.Add("Voice:Gladia:ApiKey");
+                if (string.IsNullOrWhiteSpace(v.Gladia.Model)) m.Add("Voice:Gladia:Model");
+                if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
+                MissingYiddishLabs(v, m);
+                if (v.Pipelines.P5.YiddishLabsInJudge && string.IsNullOrWhiteSpace(v.Pipelines.P5.JudgeModel)) m.Add("Voice:Pipelines:P5:JudgeModel");
+                break;
             case "p4":
-                var y = v.YiddishLabs;
-                if (string.IsNullOrWhiteSpace(y.FlashApiKey)) m.Add("Voice:YiddishLabs:FlashApiKey");
-                if (string.IsNullOrWhiteSpace(y.TtsVoiceId)) m.Add("Voice:YiddishLabs:TtsVoiceId");
-                if (string.IsNullOrWhiteSpace(y.SttModel)) m.Add("Voice:YiddishLabs:SttModel");
-                // the owner's approved wording is what makes the option usable: no wording, no option (the vendor's terms ask for consent before third-party personal data is sent)
-                if (string.IsNullOrWhiteSpace(y.ConsentLine)) m.Add("Voice:YiddishLabs:ConsentLine");
+                MissingYiddishLabs(v, m);
                 break;
         }
         return m;
+    }
+
+    private static void MissingYiddishLabs(VoiceOptions v, List<string> m)
+    {
+        var y = v.YiddishLabs;
+        if (string.IsNullOrWhiteSpace(y.FlashApiKey)) m.Add("Voice:YiddishLabs:FlashApiKey");
+        if (string.IsNullOrWhiteSpace(y.TtsVoiceId)) m.Add("Voice:YiddishLabs:TtsVoiceId");
+        if (string.IsNullOrWhiteSpace(y.SttModel)) m.Add("Voice:YiddishLabs:SttModel");
+        // the owner's approved wording is what makes the option usable: no wording, no option (the vendor's terms ask for consent before third-party personal data is sent)
+        if (string.IsNullOrWhiteSpace(y.ConsentLine)) m.Add("Voice:YiddishLabs:ConsentLine");
     }
 
     private static void MissingEleven(VoiceOptions v, List<string> m)
@@ -138,7 +152,8 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         var p2 = Ready("p2");
         var p3 = Ready("p3");
         var p4 = Ready("p4");
-        if (!p2 && !p3 && !p4) yield break;
+        var p5 = Ready("p5");
+        if (!p2 && !p3 && !p4 && !p5) yield break;
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
         var http = sp.GetRequiredService<IHttpClientFactory>();
         var llm = new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
@@ -152,5 +167,19 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         if (p4)
             yield return new VendorChainedParts("p4", new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")),
                 new YiddishLabsTts(v.YiddishLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")), llm, () => new FinalTurnDetector());   // the recogniser already waited for the end of speech
+        if (p5)
+        {
+            // Gladia is the primary engine (it alone reports speech start, partials and speech end). Flash is only contacted when the owner has switched YiddishLabsInJudge on (Terms section 6): until then p5 is
+            // Gladia for the words and Yiddish Labs for the voice only, and no audio or text of the caller goes to the Flash recogniser.
+            var gladia = new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"));
+            IStreamingStt stt = gladia;
+            if (v.Pipelines.P5.YiddishLabsInJudge)
+            {
+                var flash = new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"));
+                var judge = new OpenAiTranscriptJudge(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.P5.JudgeModel);
+                stt = new ParallelStt([("gladia", gladia), ("yiddishlabs", flash)], [judge], v.PipelineMenu.ParallelWaitMs, v.PipelineMenu.ParallelBudgetMs, TimeProvider.System, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Parallel"));
+            }
+            yield return new VendorChainedParts("p5", stt, new YiddishLabsTts(v.YiddishLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")), llm, silence);
+        }
     }
 }
