@@ -231,4 +231,20 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | `Voice:ElevenLabs:Region` | empty | empty (default host), `us`, `eu`, `in` or `sg`: a fixed list, never a free host |
 | `Voice:ElevenLabs:EnableLogging` | `false` | the vendor's own request logging; leave off unless the plan cannot turn it off |
 
-The hosts are fixed in code and no setting names a host. Keys travel in request headers only and are never logged. A setting that is only MISSING (a key, a voice id, a model) never stops the start: the option is "not available on this line" and one start-up warning names the setting (decision V-26). Invalid values (out of range, odd characters, an unknown pair) are refused at start-up, only when `Voice:PipelineMenu:Enabled` is true. Options p3 to p5 are not built yet (`Voice:Pipelines:P3` to `P5` are refused at start-up until their adapter exists); the other names in the design note are reserved. Until an adapter exists, its option stays "not available on this line".
+**Options p3 and p4 (decisions V-24, V-25, V-28), off by default, built against fakes only (no vendor key exists yet):**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `Voice:Pipelines:P3:Stt`, `:Tts` | empty | `gladia` and `elevenlabs` (the ElevenLabs settings above are shared) |
+| `Voice:Gladia:ApiKey` | none | **secret** |
+| `Voice:Gladia:Model`, `:Language` | see `GladiaOptions` | live recogniser model and language (`yi` for Yiddish) |
+| `Voice:Pipelines:P4:Stt`, `:Tts` | empty | `yiddishlabs` and `yiddishlabs` |
+| `Voice:YiddishLabs:FlashApiKey` | none | **secret** (one key serves the recogniser and the voice) |
+| `Voice:YiddishLabs:SttModel`, `:SttLanguage`, `:SttPrompt`, `:UploadSampleRate` | `yiddishlabs-3-turbo`, `yi`, empty, 8000 | the whole-utterance recogniser (`yi`, `en`, `he` or `auto`; 8000 or 16000) |
+| `Voice:YiddishLabs:VadSilenceMs`, `:VadEnergy` | 450, 400 | the adapter's own end-of-speech detector (200 to 2000 ms; 50 to 5000) |
+| `Voice:YiddishLabs:TtsVoiceId`, `:TtsHd`, `:MaxConcurrentTtsSessions` | none, false, 5 | the voice (letters, digits, `-`, `_`), HD, the session gate (1 to 50) |
+| `Voice:YiddishLabs:ConsentLine` | none | the OWNER's approved consent wording, played before p4 starts (at most 600 characters); key 1 continues, anything else gives p1; without it p4 is unavailable (decision V-26 rule: a missing setting makes an option unavailable, one warning) |
+
+**Failures:** a vendor that cannot start hands the call to option 1; one that dies mid-call ends it with an apology (`VendorLost`); the columns `BaseTier`, `BaseModel` and `FallbackFrom` record it.
+
+The hosts are fixed in code and no setting names a host. Keys travel in request headers only and are never logged. A setting that is only MISSING (a key, a voice id, a model, the consent wording) never stops the start: the option is "not available on this line" and one start-up warning names the setting (decision V-26). Invalid values (out of range, odd characters, an unknown pair) are refused at start-up, only when `Voice:PipelineMenu:Enabled` is true. Option p5 is not built yet (`Voice:Pipelines:P5` is refused at start-up with the menu on until its adapter exists); the other names in the design note are reserved. Until an adapter exists, its option stays "not available on this line".
