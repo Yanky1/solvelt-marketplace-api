@@ -22,6 +22,9 @@ public interface ITranscriptJudge
 /// </summary>
 public sealed class ParallelStt : IStreamingStt
 {
+    /// <summary>A test seam: how many finals the coordinator has taken from the engines so far (opening a round, joining one, or dropping a late one). A test that moves the fake clock must first wait until the coordinator has consumed what it emitted, or the clock outruns the thread pool and the test measures the speed of the machine.</summary>
+    internal interface IProbe { int FinalsSeen { get; } }
+
     private readonly IReadOnlyList<(string Name, IStreamingStt Stt)> engines;
     private readonly IReadOnlyList<ITranscriptJudge> judges;
     private readonly int waitMs, budgetMs;
@@ -45,8 +48,10 @@ public sealed class ParallelStt : IStreamingStt
         return new Session(this, sessions);
     }
 
-    private sealed class Session : ISttSession
+    private sealed class Session : ISttSession, IProbe
     {
+        private int _finalsSeen;
+        public int FinalsSeen => Volatile.Read(ref _finalsSeen);
         private readonly ParallelStt _o;
         private readonly List<ISttSession?> _engines;
         private readonly Channel<(int Engine, SttEvent Event)> _merged = Channel.CreateUnbounded<(int, SttEvent)>();
@@ -93,9 +98,11 @@ public sealed class ParallelStt : IStreamingStt
                 while (true)
                 {
                     (int Engine, SttEvent Event) item;
-                    if (pending.Count > 0) item = pending.Dequeue();
+                    var fromPending = pending.Count > 0;
+                    if (fromPending) item = pending.Dequeue();
                     else { if (!await _merged.Reader.WaitToReadAsync(ct)) break; if (!_merged.Reader.TryRead(out item)) continue; }
                     if (item.Event.Kind != SttEventKind.Final) { Forward(item); continue; }
+                    if (!fromPending) Interlocked.Increment(ref _finalsSeen);
                     if (owed[item.Engine] > 0) { owed[item.Engine]--; continue; }   // a slow engine's text for an utterance already decided: dropped
 
                     // a round: this final opens it; the others may join until waitMs has passed
@@ -111,7 +118,7 @@ public sealed class ParallelStt : IStreamingStt
                         while (_merged.Reader.TryRead(out var next))
                         {
                             if (next.Event.Kind != SttEventKind.Final) Forward(next);
-                            else if (!round.ContainsKey(next.Engine)) round[next.Engine] = next.Event;
+                            else if (Count(next) && !round.ContainsKey(next.Engine)) round[next.Engine] = next.Event;
                             else pending.Enqueue(next);   // a second final of an engine belongs to the next utterance
                         }
                     }
@@ -124,6 +131,7 @@ public sealed class ParallelStt : IStreamingStt
             catch (OperationCanceledException) { }
             finally { _out.Writer.TryComplete(); }
 
+            bool Count((int Engine, SttEvent Event) _) { Interlocked.Increment(ref _finalsSeen); return true; }
             TimeSpan? time_left(long since, TimeSpan total) => total - _o.time.GetElapsedTime(since);
         }
 

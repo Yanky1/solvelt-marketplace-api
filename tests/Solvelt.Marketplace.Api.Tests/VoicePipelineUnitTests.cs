@@ -84,6 +84,34 @@ public class VoicePipelineUnitTests
 
         public async Task Pump(int ms) { for (var i = 0; i < ms / 10; i++) { Time.Advance(TimeSpan.FromMilliseconds(10)); await Task.Delay(1); } await Task.Delay(20); }
         public List<SttEvent> Finals() { lock (Out) return Out.Where(e => e.Kind == SttEventKind.Final).ToList(); }
+
+        private int _emittedFinals;
+        /// <summary>
+        /// Emits a final on an engine and waits (real time) until the coordinator has TAKEN it. Time may only move after that: the orchestration runs on the thread pool and the fake clock does not wait for it, so
+        /// a clock that outruns a slow machine changes when a round opened and what the budget allows, and the test then measures the speed of the build agent.
+        /// </summary>
+        public async Task Final(FakeStt engine, string text)
+        {
+            engine.Emit(new SttEvent(SttEventKind.Final, text));
+            var want = Interlocked.Increment(ref _emittedFinals);
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (((ParallelStt.IProbe)Session).FinalsSeen < want && DateTime.UtcNow < deadline) await Task.Delay(2);
+            Assert.True(((ParallelStt.IProbe)Session).FinalsSeen >= want, "the coordinator did not take the final within 10 s");
+        }
+
+        /// <summary>
+        /// Waits (in REAL time; the fake clock only creeps on while nothing has arrived, see below) until <paramref name="count"/> finals have left, then gives a second chance for a wrongly doubled one to show up. The orchestration runs on the thread pool, so how
+        /// long it needs depends on the machine; a test that asserts after a fixed pause tests the speed of the build agent. Fails with the state after <paramref name="seconds"/>.
+        /// </summary>
+        public async Task<List<SttEvent>> WaitForFinals(int count, int seconds = 10)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(seconds);
+            // the fake clock keeps creeping on while the final is awaited: a timer the coordinator creates AFTER the test stopped moving time (it computed its remaining budget a moment before the last step) would never fire
+            // otherwise. A late nudge cannot change what the final is: the deadline passes first and the text is the same.
+            while (Finals().Count < count && DateTime.UtcNow < deadline) { Time.Advance(TimeSpan.FromMilliseconds(10)); await Task.Delay(5); }
+            await Task.Delay(30);
+            return Finals();
+        }
         public async ValueTask DisposeAsync() { _cts.Cancel(); await Session.DisposeAsync(); try { await _reader; } catch (Exception) { } }
     }
 
@@ -94,9 +122,8 @@ public class VoicePipelineUnitTests
     {
         var judge = new FakeJudge((c, _) => Task.FromResult<JudgeResult?>(new JudgeResult(c.Single(x => x.Engine == "beta").Text + "!", "yi")));
         await using var r = await Rig.Open([judge]);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "a challah")); r.B.Emit(new SttEvent(SttEventKind.Final, "a hallah"));
-        await r.Pump(50);
-        var final = Assert.Single(r.Finals());
+        await r.Final(r.A, "a challah"); await r.Final(r.B, "a hallah");
+        var final = Assert.Single(await r.WaitForFinals(1));
         Assert.Equal(("a hallah!", "yi"), (final.Text, final.Language));
         Assert.Equal(["alpha", "beta"], judge.Seen.Single().Select(c => c.Engine));                              // both candidates, in engine order
     }
@@ -108,7 +135,9 @@ public class VoicePipelineUnitTests
         r.A.Emit(new SttEvent(SttEventKind.SpeechStarted)); r.B.Emit(new SttEvent(SttEventKind.SpeechStarted));
         r.A.Emit(new SttEvent(SttEventKind.Partial, "a cha")); r.B.Emit(new SttEvent(SttEventKind.Partial, "a ha"));
         r.A.Emit(new SttEvent(SttEventKind.SpeechEnded)); r.B.Emit(new SttEvent(SttEventKind.SpeechEnded));
-        await r.Pump(50);
+        var until = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < until) { lock (r.Out) if (r.Out.Count >= 3) break; await Task.Delay(5); }
+        await Task.Delay(30);                                                                                    // and a moment for a wrongly forwarded second voice to show up
         lock (r.Out) Assert.Equal([SttEventKind.SpeechStarted, SttEventKind.Partial, SttEventKind.SpeechEnded], r.Out.Select(e => e.Kind));
     }
 
@@ -117,11 +146,11 @@ public class VoicePipelineUnitTests
     {
         var judge = Pick("judged");
         await using var r = await Rig.Open([judge], waitMs: 500);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "alpha text"));
+        await r.Final(r.A, "alpha text");
         await r.Pump(400);
         Assert.Empty(r.Finals());                                                                                // still inside the wait for beta
         await r.Pump(200);
-        Assert.Equal("judged", Assert.Single(r.Finals()).Text);
+        Assert.Equal("judged", Assert.Single(await r.WaitForFinals(1)).Text);
         Assert.Equal(["alpha"], judge.Seen.Single().Select(c => c.Engine));
     }
 
@@ -130,11 +159,11 @@ public class VoicePipelineUnitTests
     {
         var slow = new FakeJudge(async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return new JudgeResult("never"); });
         await using var r = await Rig.Open([slow], waitMs: 500, budgetMs: 1200);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "alpha text")); r.B.Emit(new SttEvent(SttEventKind.Final, "beta text"));
+        await r.Final(r.A, "alpha text"); await r.Final(r.B, "beta text");
         await r.Pump(1100);
         Assert.Empty(r.Finals());                                                                                // the judge still has time
         await r.Pump(200);
-        var final = Assert.Single(r.Finals());
+        var final = Assert.Single(await r.WaitForFinals(1));
         Assert.Equal("alpha text", final.Text);                                                                  // the FALLBACK: the primary engine, never the judge's silence
     }
 
@@ -144,9 +173,9 @@ public class VoicePipelineUnitTests
         var gate = new TaskCompletionSource<JudgeResult?>();
         var stubborn = new FakeJudge((_, _) => gate.Task);                                                      // never looks at the token
         await using var r = await Rig.Open([stubborn], waitMs: 500, budgetMs: 1200);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "alpha text")); r.B.Emit(new SttEvent(SttEventKind.Final, "beta text"));
+        await r.Final(r.A, "alpha text"); await r.Final(r.B, "beta text");
         await r.Pump(1300);
-        Assert.Equal("alpha text", Assert.Single(r.Finals()).Text);
+        Assert.Equal("alpha text", Assert.Single(await r.WaitForFinals(1)).Text);
         gate.SetResult(new JudgeResult("far too late"));
     }
 
@@ -156,16 +185,16 @@ public class VoicePipelineUnitTests
         // beta's text arrives 400 ms after alpha's; the judge needs 700 ms: 400 + 700 = 1100 <= 1200 works, a 900 ms judge (1300) does not
         var t1 = new FakeTimeProvider();
         var ok = new FakeJudge(async (_, ct) => { await Task.Delay(TimeSpan.FromMilliseconds(700), t1, ct); return new JudgeResult("fast enough"); });
-        await using (var r = await Rig.Open([ok], waitMs: 500, budgetMs: 1200, time: t1)) { await RunLate(r); Assert.Equal("fast enough", Assert.Single(r.Finals()).Text); }
+        await using (var r = await Rig.Open([ok], waitMs: 500, budgetMs: 1200, time: t1)) { await RunLate(r); Assert.Equal("fast enough", Assert.Single(await r.WaitForFinals(1)).Text); }
         var t2 = new FakeTimeProvider();
         var tooSlow = new FakeJudge(async (_, ct) => { await Task.Delay(TimeSpan.FromMilliseconds(900), t2, ct); return new JudgeResult("too late"); });
-        await using (var r = await Rig.Open([tooSlow], waitMs: 500, budgetMs: 1200, time: t2)) { await RunLate(r); Assert.Equal("alpha", Assert.Single(r.Finals()).Text); }
+        await using (var r = await Rig.Open([tooSlow], waitMs: 500, budgetMs: 1200, time: t2)) { await RunLate(r); Assert.Equal("alpha", Assert.Single(await r.WaitForFinals(1)).Text); }
 
         static async Task RunLate(Rig r)
         {
-            r.A.Emit(new SttEvent(SttEventKind.Final, "alpha"));
+            await r.Final(r.A, "alpha");
             await r.Pump(400);
-            r.B.Emit(new SttEvent(SttEventKind.Final, "beta"));
+            await r.Final(r.B, "beta");
             await r.Pump(1400);
         }
     }
@@ -176,9 +205,8 @@ public class VoicePipelineUnitTests
         foreach (var judge in new[] { new FakeJudge((_, _) => throw new InvalidOperationException("model down")), new FakeJudge((_, _) => Task.FromResult<JudgeResult?>(null)), new FakeJudge((_, _) => Task.FromResult<JudgeResult?>(new JudgeResult("  "))) })
         {
             await using var r = await Rig.Open([judge]);
-            r.A.Emit(new SttEvent(SttEventKind.Final, "alpha text")); r.B.Emit(new SttEvent(SttEventKind.Final, "beta text"));
-            await r.Pump(50);
-            Assert.Equal("alpha text", Assert.Single(r.Finals()).Text);
+            await r.Final(r.A, "alpha text"); await r.Final(r.B, "beta text");
+            Assert.Equal("alpha text", Assert.Single(await r.WaitForFinals(1)).Text);
         }
     }
 
@@ -189,9 +217,8 @@ public class VoicePipelineUnitTests
         var second = Pick("second judge");
         var third = Pick("third judge");
         await using var r = await Rig.Open([first, second, third]);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "a")); r.B.Emit(new SttEvent(SttEventKind.Final, "b"));
-        await r.Pump(50);
-        Assert.Equal("second judge", Assert.Single(r.Finals()).Text);
+        await r.Final(r.A, "a"); await r.Final(r.B, "b");
+        Assert.Equal("second judge", Assert.Single(await r.WaitForFinals(1)).Text);
         Assert.Equal((1, 1, 1), (first.Calls, second.Calls, third.Calls));
     }
 
@@ -199,29 +226,29 @@ public class VoicePipelineUnitTests
     public async Task A_late_text_from_a_slow_engine_is_not_a_new_utterance_and_a_failing_engine_never_stops_the_call()
     {
         await using var r = await Rig.Open([Pick("judged")], waitMs: 200, budgetMs: 800);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "first"));
+        await r.Final(r.A, "first");
         await r.Pump(400);
-        Assert.Equal("judged", Assert.Single(r.Finals()).Text);
-        r.B.Emit(new SttEvent(SttEventKind.Final, "first but late"));                                            // beta's text for the SAME utterance, after the round closed
+        Assert.Equal("judged", Assert.Single(await r.WaitForFinals(1)).Text);
+        await r.Final(r.B, "first but late");                                            // beta's text for the SAME utterance, after the round closed
         await r.Pump(600);
         Assert.Single(r.Finals());                                                                               // dropped, not a second utterance
         r.B.FailOnSend = true;
         await r.Session.SendAudioAsync(new byte[] { 1 }, CancellationToken.None);                                // beta throws: ignored from now on
         await r.Session.SendAudioAsync(new byte[] { 2 }, CancellationToken.None);
         Assert.Equal(2, r.A.Audio.Count);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "second"));
+        await r.Final(r.A, "second");
         await r.Pump(300);
-        Assert.Equal(2, r.Finals().Count);
+        Assert.Equal(2, (await r.WaitForFinals(2)).Count);
     }
 
     [Fact]
     public async Task With_no_judge_and_one_engine_the_text_passes_through_and_three_engines_all_feed_the_judge()
     {
-        await using (var one = await Rig.Open([], waitMs: 100, budgetMs: 500)) { one.A.Emit(new SttEvent(SttEventKind.Final, "only alpha")); await one.Pump(200); Assert.Equal("only alpha", Assert.Single(one.Finals()).Text); }
+        await using (var one = await Rig.Open([], waitMs: 100, budgetMs: 500)) { await one.Final(one.A, "only alpha"); await one.Pump(200); Assert.Equal("only alpha", Assert.Single(await one.WaitForFinals(1)).Text); }
         var judge = Pick("x");
         await using var r = await Rig.Open([judge], three: true);
-        r.A.Emit(new SttEvent(SttEventKind.Final, "a")); r.B.Emit(new SttEvent(SttEventKind.Final, "b")); r.C.Emit(new SttEvent(SttEventKind.Final, "c"));
-        await r.Pump(50);
+        await r.Final(r.A, "a"); await r.Final(r.B, "b"); await r.Final(r.C, "c");
+        await r.WaitForFinals(1);
         Assert.Equal(["alpha", "beta", "gamma"], judge.Seen.Single().Select(c => c.Engine));
     }
 
