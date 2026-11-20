@@ -1,3 +1,5 @@
+using System.Xml.Linq;
+using Microsoft.Extensions.Logging;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -162,6 +164,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
     private static VoiceOptions V(Action<VoiceOptions>? f = null)
     {
         var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://v.test" };
+        o.PipelineMenu.Enabled = true;                                           // invalid values are only validated when the menu is on
         f?.Invoke(o); return o;
     }
     private static IReadOnlyList<string> Problems(Action<VoiceOptions>? f = null) => VoiceConfig.Problems(V(f), new SignalWireOptions { SigningKey = "sw" }, true);
@@ -179,25 +182,77 @@ public sealed class VoiceP2PipelineTests : IDisposable
     }
 
     [Fact]
-    public void Start_up_refuses_half_a_pair_an_unsupported_pair_and_missing_settings()
+    public void Start_up_refuses_half_a_pair_an_unsupported_pair_and_invalid_values_but_only_with_the_menu_on()
     {
         Assert.Contains(Problems(o => o.Pipelines.P2.Stt = "deepgram"), p => p.Contains("both Stt and Tts"));
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.P2.Tts = "somewhere"; }), p => p.Contains("no adapter"));
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.P4 = new PipelineProviders { Stt = "yiddishlabs", Tts = "yiddishlabs" }; }), p => p.Contains("P4") && p.Contains("no adapter"));   // later slices
-        Assert.Contains(Problems(o => { Full(o); o.Pipelines.Llm.Model = ""; }), p => p.Contains("Llm:Model"));
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.Llm.TimeoutSeconds = 0; }), p => p.Contains("TimeoutSeconds"));
-        Assert.Contains(Problems(o => { Full(o); o.Deepgram.ApiKey = ""; }), p => p.Contains("Deepgram:ApiKey"));
-        Assert.Contains(Problems(o => { Full(o); o.Deepgram.Language = ""; }), p => p.Contains("Deepgram:Model and Language"));
-        Assert.Contains(Problems(o => { Full(o); o.ElevenLabs.ApiKey = ""; }), p => p.Contains("ElevenLabs:ApiKey"));
         Assert.Contains(Problems(o => { Full(o); o.ElevenLabs.VoiceId = "../evil"; }), p => p.Contains("VoiceId"));
-        Assert.Contains(Problems(o => { Full(o); o.ElevenLabs.TtsModel = ""; }), p => p.Contains("TtsModel"));
         Assert.Contains(Problems(o => { Full(o); o.ElevenLabs.Region = "evil.example.com"; }), p => p.Contains("Region"));
+        // the menu off: nobody can reach the options, so nothing about them stops the start
+        Assert.Empty(Problems(o => { Full(o); o.PipelineMenu.Enabled = false; o.ElevenLabs.Region = "evil.example.com"; o.Pipelines.P2.Stt = ""; }));
+    }
+
+    [Fact]
+    public void A_missing_setting_never_refuses_start_up_and_the_option_names_what_it_lacks()
+    {
+        // before: each of these was a start-up refusal; now the same condition is detected (Missing names the setting) and the outcome is "unavailable" (see the registry test below)
+        foreach (var (name, blank) in new (string, Action<VoiceOptions>)[]
+        {
+            ("Voice:Pipelines:Llm:Model", o => o.Pipelines.Llm.Model = ""), ("Voice:Deepgram:ApiKey", o => o.Deepgram.ApiKey = ""), ("Voice:Deepgram:Language", o => o.Deepgram.Language = ""),
+            ("Voice:Deepgram:Model", o => o.Deepgram.Model = ""), ("Voice:ElevenLabs:ApiKey", o => o.ElevenLabs.ApiKey = ""), ("Voice:ElevenLabs:VoiceId", o => o.ElevenLabs.VoiceId = ""), ("Voice:ElevenLabs:TtsModel", o => o.ElevenLabs.TtsModel = ""),
+        })
+        {
+            Assert.Empty(Problems(o => { Full(o); blank(o); }));                                       // start-up goes on
+            Assert.Contains(name, VoicePipelineVendors.Missing(V(o => { Full(o); blank(o); }), "p2"));  // and the option says what it lacks
+        }
+        Assert.Empty(VoicePipelineVendors.Missing(V(Full), "p2"));
+    }
+
+    [Fact]
+    public void A_partial_p2_configuration_gives_ONE_warning_naming_the_setting_and_no_option()
+    {
+        var lines = new ListLogger();
+        var sp = new ServiceCollection().AddSingleton<ILoggerFactory>(new OneLoggerFactory(lines)).BuildServiceProvider();
+        var o = V(x => { Full(x); x.Deepgram.ApiKey = "dg-secret-value"; x.ElevenLabs.VoiceId = ""; });
+        Assert.Empty(new VendorPartsSource(sp).Create(o));
+        var warnings = lines.Lines.Where(l => l.Contains("p2")).ToList();
+        Assert.Single(warnings);
+        Assert.Contains("Voice:ElevenLabs:VoiceId", warnings[0]);
+        Assert.DoesNotContain("dg-secret-value", warnings[0]);
+    }
+
+    private sealed class OneLoggerFactory(ILogger logger) : ILoggerFactory
+    {
+        public void AddProvider(ILoggerProvider provider) { }
+        public ILogger CreateLogger(string categoryName) => logger;
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public async Task An_app_with_a_partial_p2_configuration_starts_and_serves_p1()
+    {
+        var more = P2Settings(); more.Remove("Voice:ElevenLabs:VoiceId");
+        _s = new VoiceScenario(Number, VoicePipelineMenuTests.MenuConfig(more: more));                       // the host builds and the call works
+        var registry = S.F.Services.GetRequiredService<VoicePipelineRegistry>();
+        Assert.True(registry.IsAvailable("p1")); Assert.False(registry.IsAvailable("p2"));
+        await S.SyncCatalog();
+        var res = await VoiceFactory.Hook(S.C, VoiceEndpoints.InboundPath, S.Sid, Number);
+        Assert.True(res.IsSuccessStatusCode);
+        var x = XDocument.Parse(await res.Content.ReadAsStringAsync()).Root!;
+        Assert.NotNull(x.Descendants("Gather").FirstOrDefault() ?? x);                                       // the menu is answered, nothing refused
+        var pick = await VoiceFactory.Hook(S.C, VoiceEndpoints.PipelinePath, S.Sid, Number, extra: new() { ["Digits"] = "2" });
+        var xml = XDocument.Parse(await pick.Content.ReadAsStringAsync()).Root!;
+        Assert.Equal(PipelineScripts.Unavailable, xml.Element("Say")!.Value);                                 // choosing p2 is "not available on this line"
+        Assert.Equal("p1", (await S.Row()).Tier);                                                            // and the call is on the Realtime line
     }
 
     [Fact]
     public void The_secrets_are_never_part_of_a_problem_message()
     {
-        var all = string.Join("\n", Problems(o => { Full(o); o.Deepgram.ApiKey = ""; o.ElevenLabs.VoiceId = "../evil"; o.ElevenLabs.ApiKey = "el-secret-value"; }));
+        var o2 = V(o => { Full(o); o.Deepgram.ApiKey = ""; o.ElevenLabs.VoiceId = "../evil"; o.ElevenLabs.ApiKey = "el-secret-value"; });
+        var all = string.Join("\n", VoiceConfig.Problems(o2, new SignalWireOptions { SigningKey = "sw" }, true).Concat(VoicePipelineVendors.Missing(o2, "p2")));
         Assert.DoesNotContain("el-secret-value", all);
     }
 }
@@ -277,14 +332,17 @@ public sealed class VoiceP3PipelineTests : IDisposable
     }
 
     [Fact]
-    public void Start_up_refuses_a_p3_without_the_Gladia_key_or_with_empty_model_or_language()
+    public void A_p3_without_the_Gladia_key_or_with_an_empty_model_or_language_is_unavailable_not_a_start_up_failure()
     {
-        VoiceOptions V(Action<VoiceOptions> f) { var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://v.test" }; f(o); return o; }
+        VoiceOptions V(Action<VoiceOptions> f) { var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://v.test" }; o.PipelineMenu.Enabled = true; f(o); return o; }
         void Ok(VoiceOptions o) { o.Pipelines.P3 = new PipelineProviders { Stt = "gladia", Tts = "elevenlabs" }; o.Pipelines.Llm.Model = "m"; o.Gladia.ApiKey = "k"; o.ElevenLabs.ApiKey = "k"; o.ElevenLabs.VoiceId = "v1"; o.ElevenLabs.TtsModel = "t"; }
         var sw = new SignalWireOptions { SigningKey = "sw" };
         Assert.Empty(VoiceConfig.Problems(V(Ok), sw, true));
-        Assert.Contains(VoiceConfig.Problems(V(o => { Ok(o); o.Gladia.ApiKey = ""; }), sw, true), p => p.Contains("Gladia:ApiKey"));
-        Assert.Contains(VoiceConfig.Problems(V(o => { Ok(o); o.Gladia.Language = ""; }), sw, true), p => p.Contains("Gladia:Model and Language"));
-        Assert.Contains(VoiceConfig.Problems(V(o => { Ok(o); o.ElevenLabs.ApiKey = ""; }), sw, true), p => p.Contains("ElevenLabs:ApiKey"));    // p3 needs the ElevenLabs voice too
+        Assert.Empty(VoiceConfig.Problems(V(o => { Ok(o); o.Gladia.ApiKey = ""; }), sw, true));
+        Assert.Contains("Voice:Gladia:ApiKey", VoicePipelineVendors.Missing(V(o => { Ok(o); o.Gladia.ApiKey = ""; }), "p3"));
+        Assert.Empty(VoiceConfig.Problems(V(o => { Ok(o); o.Gladia.Language = ""; }), sw, true));
+        Assert.Contains("Voice:Gladia:Language", VoicePipelineVendors.Missing(V(o => { Ok(o); o.Gladia.Language = ""; }), "p3"));
+        Assert.Empty(VoiceConfig.Problems(V(o => { Ok(o); o.ElevenLabs.ApiKey = ""; }), sw, true));
+        Assert.Contains("Voice:ElevenLabs:ApiKey", VoicePipelineVendors.Missing(V(o => { Ok(o); o.ElevenLabs.ApiKey = ""; }), "p3"));
     }
 }

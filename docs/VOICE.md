@@ -221,8 +221,8 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `Voice:Pipelines:P2:Stt`, `Voice:Pipelines:P2:Tts` | empty | `deepgram` and `elevenlabs`; name both or neither (start-up refuses half a pair and any other pair: "no adapter yet") |
-| `Voice:Pipelines:Llm:Model` | none | the OpenAI text model of the chained options; required when any option is configured |
+| `Voice:Pipelines:P2:Stt`, `Voice:Pipelines:P2:Tts` | empty | `deepgram` and `elevenlabs`; name both or neither (with `Voice:PipelineMenu:Enabled`, start-up refuses half a pair and any other pair: "no adapter yet") |
+| `Voice:Pipelines:Llm:Model` | none | the OpenAI text model of the chained options; without it the options are unavailable |
 | `Voice:Pipelines:Llm:TimeoutSeconds` | 30 | longest wait for the model's answer to start (1 to 120) |
 | `Voice:Deepgram:ApiKey` | none | **secret** |
 | `Voice:Deepgram:Model`, `:Language` | `nova-3`, `en` | recogniser model and language |
@@ -231,4 +231,4 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | `Voice:ElevenLabs:Region` | empty | empty (default host), `us`, `eu`, `in` or `sg`: a fixed list, never a free host |
 | `Voice:ElevenLabs:EnableLogging` | `false` | the vendor's own request logging; leave off unless the plan cannot turn it off |
 
-The hosts are fixed in code and no setting names a host. Keys travel in request headers only and are never logged. Options p3 to p5 are not built yet (`Voice:Pipelines:P3` to `P5` are refused at start-up until their adapter exists); the other names in the design note are reserved. Until an adapter exists, its option stays "not available on this line".
+The hosts are fixed in code and no setting names a host. Keys travel in request headers only and are never logged. A setting that is only MISSING (a key, a voice id, a model) never stops the start: the option is "not available on this line" and one start-up warning names the setting (decision V-26). Invalid values (out of range, odd characters, an unknown pair) are refused at start-up, only when `Voice:PipelineMenu:Enabled` is true. Options p3 to p5 are not built yet (`Voice:Pipelines:P3` to `P5` are refused at start-up until their adapter exists); the other names in the design note are reserved. Until an adapter exists, its option stays "not available on this line".
