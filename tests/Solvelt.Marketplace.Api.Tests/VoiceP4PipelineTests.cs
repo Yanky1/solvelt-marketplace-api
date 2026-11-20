@@ -108,6 +108,17 @@ public sealed class VoiceP4PipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task Even_when_another_option_is_available_the_consent_answer_can_only_choose_an_option_that_asked_for_consent()
+    {
+        var more = VoiceP2PipelineTests.P2Settings(); foreach (var kv in P4Settings()) more[kv.Key] = kv.Value;
+        await Start(more);                                                                        // p2 (no consent step) AND p4 are available
+        Assert.True(S.F.Services.GetRequiredService<VoicePipelineRegistry>().IsAvailable("p2"));
+        var x = await Xml(await Answer("p2", "1"));                                               // someone presses 1 against a forged or edited address naming p2
+        Assert.Equal("p1", (await S.Row()).Tier);
+        Assert.Contains(PipelineScripts.ConsentDeclined, x.Descendants("Say").Select(e => e.Value));
+    }
+
+    [Fact]
     public async Task A_number_that_is_not_on_the_test_list_is_never_offered_the_consent_either()
     {
         await Start();
