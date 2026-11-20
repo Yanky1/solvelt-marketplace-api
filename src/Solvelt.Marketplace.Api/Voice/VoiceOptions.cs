@@ -129,6 +129,7 @@ public static class VoiceConfig
         VoicePipelineVendors.Problems(v, p);
         var m = v.PipelineMenu;
         if (m.Enabled && m.TestNumbers.Any(n => Infrastructure.PhoneNumbers.ToE164(n) is null)) p.Add("Voice:PipelineMenu:TestNumbers must all be phone numbers (E.164, like +15551234567).");
+        if (m.Enabled) foreach (var key in m.Descriptions.TooLong()) p.Add($"{key} must be at most {PipelineDescriptions.MaxLength} characters (one plain sentence a caller can listen to).");
         if (m.MenuTimeoutSeconds is < 1 or > 30) p.Add("Voice:PipelineMenu:MenuTimeoutSeconds must be between 1 and 30.");
         if (m.EndpointMs is < 200 or > 5000) p.Add("Voice:PipelineMenu:EndpointMs must be between 200 and 5000.");
         if (m.ParallelWaitMs is < 0 or > 5000 || m.ParallelBudgetMs is < 100 or > 10000 || m.ParallelWaitMs > m.ParallelBudgetMs) p.Add("Voice:PipelineMenu:ParallelWaitMs (0-5000) must not exceed ParallelBudgetMs (100-10000).");

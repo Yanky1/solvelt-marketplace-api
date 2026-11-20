@@ -47,7 +47,7 @@ public static class VoiceEndpoints
         return [new XElement("Connect", new XElement("Stream", new XAttribute("url", wss.Uri.ToString()), new XAttribute("authBearerToken", token))), new XElement("Redirect", afterUrl)];
     }
 
-    private static async Task<IResult> Inbound(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, CancellationToken ct)
+    private static async Task<IResult> Inbound(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -59,13 +59,14 @@ public static class VoiceEndpoints
         var call = await store.StartAsync(sid, from, ct);
         states.GetOrCreate(call.Id).SetCaller(PhoneNumbers.ToE164(from));   // the full number lives only in this call's memory
         // the test-line menu (decision V-19): off by default and offered only to the listed test numbers; everyone else gets the line exactly as before
-        if (PipelineMenu.Offered(v, from, to)) return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Disclosure), GatherPipeline(v)));
+        if (PipelineMenu.Offered(v, from, to)) return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Disclosure), GatherPipeline(v, registry)));
         return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Disclosure), StreamParts(v, tokens, call.Id)));
     }
 
-    private static XElement GatherPipeline(VoiceOptions v)
+    /// <summary>The menu: the available options read out with their descriptions (decision V-32). A digit during the reading selects at once; star reads it again.</summary>
+    private static XElement GatherPipeline(VoiceOptions v, VoicePipelineRegistry registry)
         => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", 1), new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds),
-            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Menu));
+            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Compose(v.PipelineMenu, VoicePipelineIds.All.Where(registry.IsAvailable).ToList())));
 
     /// <summary>The caller's choice on the test-line menu: unknown or empty is option 1, an option whose pipeline is not configured says so and is option 1. The choice is recorded in the call's tier column and fixed for the call.</summary>
     private static async Task<IResult> PipelineChoice(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)
@@ -81,6 +82,8 @@ public static class VoiceEndpoints
         if (!PipelineMenu.Offered(v, from, to) || states.GetOrCreate(call.Id).Connections > 0)
             return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
         form.TryGetValue("Digits", out var digits);
+        // star: read the list again (nothing is chosen)
+        if (digits?.Trim() == "*") return Cxml(new XElement("Response", GatherPipeline(v, registry)));
         var option = VoicePipelineIds.FromDigits(digits);
         XElement say;
         if (!registry.IsAvailable(option)) { say = new XElement("Say", PipelineScripts.Unavailable); option = VoicePipelineIds.Realtime; }

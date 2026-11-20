@@ -216,6 +216,18 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | `Voice:PipelineMenu:EndpointMs` | 700 | silence that ends a caller's turn in a chained option (200 to 5000) |
 | `Voice:PipelineMenu:ParallelWaitMs` / `ParallelBudgetMs` | 500 / 1200 | option 5: how long to wait for the slower engines, and the hard budget counted from the first transcript (wait must not exceed budget) |
 | `Voice:PipelineMenu:Prices:SttPerMinute` / `TtsPerMillionChars` / `LlmInPerMillionTokens` / `LlmOutPerMillionTokens` | 0 | cost estimate inputs (published vendor prices, entered by the owner) |
+| `Voice:PipelineMenu:Descriptions:P1` to `:P5` | the wording below | what the menu says about each option after "Press N for"; an empty entry means the default; at most 300 characters (checked when the menu is on). The only place the wording is set |
+
+**What the menu says (decision V-32).** After the AI disclosure: "Test line." then, for each option that is AVAILABLE on this line, in order, "Press N for" and its description (about 6 to 8 seconds each); options that are not available are not mentioned at all. With more than one option it ends "Press star to hear this again." The list is read inside the one-digit Gather, so a digit pressed at any time during it selects at once; star reads it again and chooses nothing; no key, or an unknown key, is option 1 after the usual timeout. Option 6 is not part of the menu yet.
+
+| Option | Default wording (spoken after "Press N for") |
+|---|---|
+| 1 | OpenAI live voice. One model hears and speaks directly. The fastest and most natural, English first. |
+| 2 | Deepgram and ElevenLabs. Separate speech recognition and voice, with an AI deciding. The English comparison. |
+| 3 | Gladia and ElevenLabs. Live speech recognition that understands Yiddish, with an English voice. |
+| 4 | Yiddish Labs. Yiddish speech recognition and a Yiddish voice. |
+| 5 | Two engines and a judge. Gladia and Yiddish Labs listen together, and an AI picks what you most likely said. |
+
 
 **Settings of the vendor adapters.** The vendors, runtime hosts and setting names are in `docs/VOICE-PIPELINE-OPTIONS.md` (decision V-22). **Option p2 is built and read now (decision V-23), off by default:**
 

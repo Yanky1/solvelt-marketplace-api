@@ -29,6 +29,40 @@ public sealed class VoicePipelineMenuOptions
     /// <summary>Option 5: the HARD budget from the first engine's final text to the text handed on, judge included. When it runs out the fallback is used.</summary>
     public int ParallelBudgetMs { get; set; } = 1200;
     public PipelinePrices Prices { get; set; } = new();
+    /// <summary>What the menu says about each option (<c>Voice:PipelineMenu:Descriptions:P1</c> to <c>P5</c>); an empty entry means the built-in wording. The only place the wording is set.</summary>
+    public PipelineDescriptions Descriptions { get; set; } = new();
+}
+
+/// <summary>
+/// The spoken description of each option on the test-line menu: a short name and one plain sentence, read after "Press N for". Edited in configuration (decision V-32); an empty entry means the default below, so
+/// nothing has to be set. Plain text only: it is spoken as it is written, and what a description says is the owner's, never a model's.
+/// </summary>
+public sealed class PipelineDescriptions
+{
+    public string P1 { get; set; } = "";
+    public string P2 { get; set; } = "";
+    public string P3 { get; set; } = "";
+    public string P4 { get; set; } = "";
+    public string P5 { get; set; } = "";
+
+    public const int MaxLength = 300;
+
+    public static readonly IReadOnlyDictionary<string, string> Defaults = new Dictionary<string, string>
+    {
+        ["p1"] = "OpenAI live voice. One model hears and speaks directly. The fastest and most natural, English first.",
+        ["p2"] = "Deepgram and ElevenLabs. Separate speech recognition and voice, with an AI deciding. The English comparison.",
+        ["p3"] = "Gladia and ElevenLabs. Live speech recognition that understands Yiddish, with an English voice.",
+        ["p4"] = "Yiddish Labs. Yiddish speech recognition and a Yiddish voice.",
+        ["p5"] = "Two engines and a judge. Gladia and Yiddish Labs listen together, and an AI picks what you most likely said.",
+    };
+
+    private string? Configured(string option) => option switch { "p1" => P1, "p2" => P2, "p3" => P3, "p4" => P4, "p5" => P5, _ => null };
+
+    /// <summary>The words for the option: the configured text, else the default.</summary>
+    public string For(string option) => Configured(option) is { } c && !string.IsNullOrWhiteSpace(c) ? c.Trim() : Defaults.GetValueOrDefault(option, "");
+
+    /// <summary>The entries that are too long to be one plain sentence on a phone (a start-up problem when the menu is on).</summary>
+    public IEnumerable<string> TooLong() => VoicePipelineIds.All.Where(o => Configured(o)?.Trim().Length > MaxLength).Select(o => "Voice:PipelineMenu:Descriptions:" + o.ToUpperInvariant());
 }
 
 /// <summary>The five options of the menu (<c>p1</c> to <c>p5</c>), recorded in the call's tier column. p1 is the current Realtime line.</summary>
@@ -67,7 +101,22 @@ public static class PipelineScripts
     /// <summary>What the PLATFORM says (never the model, and not through the failing vendor) when a chained option's vendor fails during the call (decision V-25).</summary>
     public const string VendorLost = "Sorry, we are having trouble with the line right now. Please call back in a moment.";
 
-    public const string Menu = "Test line. Press 1 for the standard assistant, 2 for pipeline two, 3 for pipeline three, 4 for pipeline four, or 5 for pipeline five.";
+    /// <summary>The menu as it is spoken when only option 1 exists and the wording is the default (what a test line with no pipeline configured says).</summary>
+    public static string Menu { get; } = Compose(new VoicePipelineMenuOptions(), ["p1"]);
+
+    /// <summary>
+    /// The spoken menu: "Test line." then, for each AVAILABLE option in order, "Press N for" and its description; options that are not available are not mentioned at all. With more than one option the caller is also told
+    /// that star repeats the list. The digit can be pressed at any time during it (the Gather takes it while the text plays).
+    /// </summary>
+    public static string Compose(VoicePipelineMenuOptions m, IReadOnlyList<string> available)
+    {
+        var parts = new List<string> { "Test line." };
+        foreach (var o in available) parts.Add($"Press {o[1..]} for {EndWithStop(m.Descriptions.For(o))}");
+        if (available.Count > 1) parts.Add("Press star to hear this again.");
+        return string.Join(" ", parts);
+    }
+
+    private static string EndWithStop(string text) => text.Length == 0 || text[^1] is '.' or '!' or '?' ? text : text + ".";
     public const string ConsentDeclined = "Okay. Using the standard assistant.";
     public const string Unavailable = "That option is not available on this line. Using option one.";
     public static string Chosen(string option) => "Option " + option[1..] + ".";
