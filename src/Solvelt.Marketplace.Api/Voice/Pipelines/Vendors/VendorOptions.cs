@@ -17,6 +17,8 @@ public sealed class P5Options : PipelineProviders
 {
     /// <summary>The OpenAI text model that judges the candidate transcripts of one turn. Required when <see cref="YiddishLabsInJudge"/> is true (without a second transcript there is nothing to judge).</summary>
     public string JudgeModel { get; set; } = "";
+    /// <summary>The provider of the judge: <c>anthropic</c> or <c>openai</c>; empty follows <c>Voice:Pipelines:Llm:Provider</c>.</summary>
+    public string JudgeProvider { get; set; } = "";
     /// <summary>
     /// The Yiddish Labs Terms section 6 switch (their output may not be used to evaluate other models). FALSE (the default): Flash is never contacted and its text never reaches the judge or the model: p5 is Gladia for the
     /// words and Yiddish Labs for the voice only. TRUE: Flash's text is a second candidate and the judge picks. Only the owner turns it on, after reading the terms.
@@ -39,9 +41,28 @@ public sealed class VoicePipelinesOptions
     public bool UsesYiddishLabs(string option) { var p = For(option); return p.Configured && (p.Stt.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase) || p.Tts.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase)); }
 }
 
+/// <summary>The text-model providers of the chained options (decision V-33).</summary>
+public static class LlmProviders
+{
+    public const string Anthropic = "anthropic", OpenAi = "openai";
+    public static bool IsKnown(string? p) => string.Equals(p, Anthropic, StringComparison.OrdinalIgnoreCase) || string.Equals(p, OpenAi, StringComparison.OrdinalIgnoreCase);
+    public static bool IsAnthropic(string? p) => string.Equals(p, Anthropic, StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary><c>Voice:Anthropic</c>: the Claude key for the chained options and the judge. Secret: environment only (<c>Voice__Anthropic__ApiKey</c>). Never logged; the only host it is sent to is api.anthropic.com.</summary>
+public sealed class AnthropicVoiceOptions
+{
+    public string ApiKey { get; set; } = "";     // secret
+}
+
 public sealed class VoiceLlmOptions
 {
+    /// <summary><c>anthropic</c> (the default) or <c>openai</c>: which provider answers the chained options p2 to p5.</summary>
+    public string Provider { get; set; } = LlmProviders.Anthropic;
+    /// <summary>The conversation model. Empty with Claude means the built-in default (<see cref="AnthropicDefaults.ConversationModel"/>); with OpenAI it must be set.</summary>
     public string Model { get; set; } = "";
+    /// <summary>The most tokens one spoken answer may have (a phone answer is short).</summary>
+    public int MaxTokens { get; set; } = 1024;
     /// <summary>Longest wait for the first token or the next one, in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 30;
 }
@@ -96,6 +117,13 @@ public sealed class YiddishLabsOptions
     public int MaxConcurrentTtsSessions { get; set; } = 5;
     /// <summary>The consent line (the vendor's terms ask for consent before third-party personal data is sent): the OWNER's approved wording, never written in code. It is played with a keypad press before the pipeline starts; required for the options that use this vendor.</summary>
     public string ConsentLine { get; set; } = "";
+}
+
+/// <summary>Built-in Claude model ids (decision V-33). The ids are configuration; these are only the defaults.</summary>
+public static class AnthropicDefaults
+{
+    public const string ConversationModel = "claude-sonnet-5-5";
+    public const string JudgeModel = "claude-haiku-5-5";
 }
 
 public static class VendorNames

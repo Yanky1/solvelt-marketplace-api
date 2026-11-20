@@ -38,11 +38,15 @@ public sealed class OpenAiTranscriptJudge(HttpClient http, string apiKey, string
         using var resp = await http.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!resp.IsSuccessStatusCode) throw new HttpRequestException($"The judge model answered {(int)resp.StatusCode}.", null, resp.StatusCode);   // the body is not read: it can echo the request
         var body = await resp.Content.ReadAsStringAsync(ct);
-        var text = Extract(body);
-        if (string.IsNullOrWhiteSpace(text)) return null;
-        text = text.Trim();
-        var longest = candidates.Max(c => c.Text.Length);
-        if (text.Length > longest * 2 + 40) return null;                  // a judge that writes an essay is not judging
+        return Accept(Extract(body), candidates);
+    }
+
+    /// <summary>The words of a judge's answer, or null when there are none or when the answer is far longer than any candidate (a judge that writes an essay is not judging). Shared by every judge provider.</summary>
+    internal static JudgeResult? Accept(string? answer, IReadOnlyList<SttCandidate> candidates)
+    {
+        if (string.IsNullOrWhiteSpace(answer)) return null;
+        var text = answer.Trim();
+        if (text.Length > candidates.Max(c => c.Text.Length) * 2 + 40) return null;
         return new JudgeResult(text);
     }
 

@@ -24,7 +24,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
 
     internal static Dictionary<string, string?> P2Settings() => new()
     {
-        ["Voice:Pipelines:P2:Stt"] = "deepgram", ["Voice:Pipelines:P2:Tts"] = "elevenlabs", ["Voice:Pipelines:Llm:Model"] = "model-x",
+        ["Voice:Pipelines:P2:Stt"] = "deepgram", ["Voice:Pipelines:P2:Tts"] = "elevenlabs", ["Voice:Pipelines:Llm:Model"] = "model-x", ["Voice:Pipelines:Llm:Provider"] = "openai",
         ["Voice:Deepgram:ApiKey"] = "dg-key-not-real", ["Voice:ElevenLabs:ApiKey"] = "el-key-not-real", ["Voice:ElevenLabs:VoiceId"] = "voice_ABC", ["Voice:ElevenLabs:TtsModel"] = "model-t",
     };
 
@@ -151,7 +151,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
     private static IReadOnlyList<string> Problems(Action<VoiceOptions>? f = null) => VoiceConfig.Problems(V(f), new SignalWireOptions { SigningKey = "sw" }, true);
     private static void Full(VoiceOptions o)
     {
-        o.Pipelines.P2 = new PipelineProviders { Stt = "deepgram", Tts = "elevenlabs" }; o.Pipelines.Llm.Model = "m";
+        o.Pipelines.P2 = new PipelineProviders { Stt = "deepgram", Tts = "elevenlabs" }; o.Pipelines.Llm.Model = "m"; o.Pipelines.Llm.Provider = "openai";
         o.Deepgram.ApiKey = "k"; o.ElevenLabs.ApiKey = "k"; o.ElevenLabs.VoiceId = "voice_1"; o.ElevenLabs.TtsModel = "t";
     }
 
@@ -252,7 +252,7 @@ public sealed class VoiceP3PipelineTests : IDisposable
 
     internal static Dictionary<string, string?> P3Settings() => new()
     {
-        ["Voice:Pipelines:P3:Stt"] = "gladia", ["Voice:Pipelines:P3:Tts"] = "elevenlabs", ["Voice:Pipelines:Llm:Model"] = "model-x",
+        ["Voice:Pipelines:P3:Stt"] = "gladia", ["Voice:Pipelines:P3:Tts"] = "elevenlabs", ["Voice:Pipelines:Llm:Model"] = "model-x", ["Voice:Pipelines:Llm:Provider"] = "openai",
         ["Voice:Gladia:ApiKey"] = "gl-key-not-real", ["Voice:ElevenLabs:ApiKey"] = "el-key-not-real", ["Voice:ElevenLabs:VoiceId"] = "voice_ABC", ["Voice:ElevenLabs:TtsModel"] = "model-t",
     };
 
@@ -316,7 +316,7 @@ public sealed class VoiceP3PipelineTests : IDisposable
     public void A_p3_without_the_Gladia_key_or_with_an_empty_model_or_language_is_unavailable_not_a_start_up_failure()
     {
         VoiceOptions V(Action<VoiceOptions> f) { var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://v.test" }; o.PipelineMenu.Enabled = true; f(o); return o; }
-        void Ok(VoiceOptions o) { o.Pipelines.P3 = new PipelineProviders { Stt = "gladia", Tts = "elevenlabs" }; o.Pipelines.Llm.Model = "m"; o.Gladia.ApiKey = "k"; o.ElevenLabs.ApiKey = "k"; o.ElevenLabs.VoiceId = "v1"; o.ElevenLabs.TtsModel = "t"; }
+        void Ok(VoiceOptions o) { o.Pipelines.P3 = new PipelineProviders { Stt = "gladia", Tts = "elevenlabs" }; o.Pipelines.Llm.Model = "m"; o.Pipelines.Llm.Provider = "openai"; o.Gladia.ApiKey = "k"; o.ElevenLabs.ApiKey = "k"; o.ElevenLabs.VoiceId = "v1"; o.ElevenLabs.TtsModel = "t"; }
         var sw = new SignalWireOptions { SigningKey = "sw" };
         Assert.Empty(VoiceConfig.Problems(V(Ok), sw, true));
         Assert.Empty(VoiceConfig.Problems(V(o => { Ok(o); o.Gladia.ApiKey = ""; }), sw, true));

@@ -72,4 +72,7 @@ public static class PipelineScripts
     public const string Unavailable = "That option is not available on this line. Using option one.";
     public static string Chosen(string option) => "Option " + option[1..] + ".";
     public const string Filler = "One moment, please.";
+    /// <summary>The platform's own words (never the model's, never raw) when the text model refuses to answer, or when its answer was cut by the token limit (decision V-33).</summary>
+    public const string ModelRefused = "Sorry, I can't help with that.";
+    public const string ModelRanOut = "Sorry, I lost my train of thought. Could you say that again?";
 }

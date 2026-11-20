@@ -276,7 +276,7 @@ public sealed class VoiceP5PipelineTests : IDisposable
             var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k" };
             o.PipelineMenu.Enabled = true;
             o.Pipelines.P5 = new P5Options { Stt = "gladia+yiddishlabs", Tts = "yiddishlabs", JudgeModel = "j", YiddishLabsInJudge = inJudge };
-            o.Pipelines.Llm.Model = "m"; o.Gladia.ApiKey = "g"; o.YiddishLabs.FlashApiKey = "y"; o.YiddishLabs.TtsVoiceId = "v1"; o.YiddishLabs.ConsentLine = "c";
+            o.Pipelines.Llm.Model = "m"; o.Pipelines.Llm.Provider = "openai"; o.Gladia.ApiKey = "g"; o.YiddishLabs.FlashApiKey = "y"; o.YiddishLabs.TtsVoiceId = "v1"; o.YiddishLabs.ConsentLine = "c";
             f?.Invoke(o); return o;
         }
         Assert.Empty(VoicePipelineVendors.Missing(V(false), "p5")); Assert.Empty(VoicePipelineVendors.Missing(V(true), "p5"));

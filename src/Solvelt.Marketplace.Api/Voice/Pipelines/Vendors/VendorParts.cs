@@ -57,6 +57,9 @@ public static class VoicePipelineVendors
         }
         if (configured.Count == 0) return;
         if (v.Pipelines.Llm.TimeoutSeconds is < 1 or > 120) p.Add("Voice:Pipelines:Llm:TimeoutSeconds must be between 1 and 120.");
+        if (v.Pipelines.Llm.MaxTokens is < 50 or > 4096) p.Add("Voice:Pipelines:Llm:MaxTokens must be between 50 and 4096.");
+        if (!LlmProviders.IsKnown(v.Pipelines.Llm.Provider)) p.Add("Voice:Pipelines:Llm:Provider must be anthropic or openai.");
+        if (configured.Contains("p5") && v.Pipelines.P5.JudgeProvider.Length > 0 && !LlmProviders.IsKnown(v.Pipelines.P5.JudgeProvider)) p.Add("Voice:Pipelines:P5:JudgeProvider must be empty, anthropic or openai.");
         if (configured.Contains("p4") || configured.Contains("p5"))
         {
             var y = v.YiddishLabs;
@@ -81,8 +84,7 @@ public static class VoicePipelineVendors
     internal static IReadOnlyList<string> Missing(VoiceOptions v, string option)
     {
         var m = new List<string>();
-        if (string.IsNullOrWhiteSpace(v.OpenAiApiKey)) m.Add("Voice:OpenAiApiKey");
-        if (string.IsNullOrWhiteSpace(v.Pipelines.Llm.Model)) m.Add("Voice:Pipelines:Llm:Model");
+        MissingLlm(v, m);
         switch (option)
         {
             case "p2":
@@ -102,13 +104,35 @@ public static class VoicePipelineVendors
                 if (string.IsNullOrWhiteSpace(v.Gladia.Model)) m.Add("Voice:Gladia:Model");
                 if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
                 MissingYiddishLabs(v, m);
-                if (v.Pipelines.P5.YiddishLabsInJudge && string.IsNullOrWhiteSpace(v.Pipelines.P5.JudgeModel)) m.Add("Voice:Pipelines:P5:JudgeModel");
+                if (v.Pipelines.P5.YiddishLabsInJudge) MissingJudge(v, m);
                 break;
             case "p4":
                 MissingYiddishLabs(v, m);
                 break;
         }
         return m;
+    }
+
+    /// <summary>The settings of the text model: with Claude (the default) its key; with OpenAI its key and the model id. An unknown provider is a missing setting too (and an invalid value when the menu is on).</summary>
+    private static void MissingLlm(VoiceOptions v, List<string> m)
+    {
+        var l = v.Pipelines.Llm;
+        if (!LlmProviders.IsKnown(l.Provider)) { m.Add("Voice:Pipelines:Llm:Provider"); return; }
+        if (LlmProviders.IsAnthropic(l.Provider)) { if (string.IsNullOrWhiteSpace(v.Anthropic.ApiKey)) m.Add("Voice:Anthropic:ApiKey"); return; }
+        if (string.IsNullOrWhiteSpace(v.OpenAiApiKey)) m.Add("Voice:OpenAiApiKey");
+        if (string.IsNullOrWhiteSpace(l.Model)) m.Add("Voice:Pipelines:Llm:Model");
+    }
+
+    /// <summary>The provider that judges option p5: its own setting, else the conversation's.</summary>
+    internal static string JudgeProvider(VoiceOptions v) => v.Pipelines.P5.JudgeProvider.Length > 0 ? v.Pipelines.P5.JudgeProvider : v.Pipelines.Llm.Provider;
+
+    private static void MissingJudge(VoiceOptions v, List<string> m)
+    {
+        var jp = JudgeProvider(v);
+        if (!LlmProviders.IsKnown(jp)) { m.Add("Voice:Pipelines:P5:JudgeProvider"); return; }
+        if (LlmProviders.IsAnthropic(jp)) { if (string.IsNullOrWhiteSpace(v.Anthropic.ApiKey) && !m.Contains("Voice:Anthropic:ApiKey")) m.Add("Voice:Anthropic:ApiKey"); return; }
+        if (string.IsNullOrWhiteSpace(v.OpenAiApiKey) && !m.Contains("Voice:OpenAiApiKey")) m.Add("Voice:OpenAiApiKey");
+        if (string.IsNullOrWhiteSpace(v.Pipelines.P5.JudgeModel)) m.Add("Voice:Pipelines:P5:JudgeModel");
     }
 
     private static void MissingYiddishLabs(VoiceOptions v, List<string> m)
@@ -156,7 +180,12 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         if (!p2 && !p3 && !p4 && !p5) yield break;
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
         var http = sp.GetRequiredService<IHttpClientFactory>();
-        var llm = new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
+        // the chained options' text model: Claude by default (decision V-33), OpenAI when configured. Claude's client is the SDK's, which only ever talks to api.anthropic.com
+        var claude = LlmProviders.IsAnthropic(v.Pipelines.Llm.Provider) || LlmProviders.IsAnthropic(VoicePipelineVendors.JudgeProvider(v))
+            ? sp.GetService<Anthropic.AnthropicClient>() ?? AnthropicVoiceLlm.NewClient(v.Anthropic.ApiKey) : null;
+        IVoiceLlm llm = LlmProviders.IsAnthropic(v.Pipelines.Llm.Provider)
+            ? new AnthropicVoiceLlm(claude!, string.IsNullOrWhiteSpace(v.Pipelines.Llm.Model) ? AnthropicDefaults.ConversationModel : v.Pipelines.Llm.Model.Trim(), v.Pipelines.Llm.MaxTokens, v.Pipelines.Llm.TimeoutSeconds)
+            : new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
         Func<ITurnDetector> silence = () => new SilenceTurnDetector(v.PipelineMenu.EndpointMs);
         if (p2 || p3)
         {
@@ -176,7 +205,9 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
             if (v.Pipelines.P5.YiddishLabsInJudge)
             {
                 var flash = new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"));
-                var judge = new OpenAiTranscriptJudge(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.P5.JudgeModel);
+                ITranscriptJudge judge = LlmProviders.IsAnthropic(VoicePipelineVendors.JudgeProvider(v))
+                    ? new AnthropicTranscriptJudge(claude!, string.IsNullOrWhiteSpace(v.Pipelines.P5.JudgeModel) ? AnthropicDefaults.JudgeModel : v.Pipelines.P5.JudgeModel.Trim())
+                    : new OpenAiTranscriptJudge(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.P5.JudgeModel);
                 stt = new ParallelStt([("gladia", gladia), ("yiddishlabs", flash)], [judge], v.PipelineMenu.ParallelWaitMs, v.PipelineMenu.ParallelBudgetMs, TimeProvider.System, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Parallel"));
             }
             yield return new VendorChainedParts("p5", stt, new YiddishLabsTts(v.YiddishLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")), llm, silence);

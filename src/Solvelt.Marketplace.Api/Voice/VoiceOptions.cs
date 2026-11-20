@@ -66,6 +66,8 @@ public sealed class VoiceOptions
     public VoicePipelineMenuOptions PipelineMenu { get; set; } = new();
     /// <summary>Which vendors run options p2 to p5 and the text model they share (decision V-22). Nothing is on by default.</summary>
     public VoicePipelinesOptions Pipelines { get; set; } = new();
+    /// <summary>The Claude key for the chained options and the judge (decision V-33).</summary>
+    public AnthropicVoiceOptions Anthropic { get; set; } = new();
     public DeepgramOptions Deepgram { get; set; } = new();
     public ElevenLabsOptions ElevenLabs { get; set; } = new();
     public GladiaOptions Gladia { get; set; } = new();

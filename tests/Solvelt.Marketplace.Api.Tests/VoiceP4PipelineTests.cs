@@ -30,7 +30,7 @@ public sealed class VoiceP4PipelineTests : IDisposable
     {
         var d = new Dictionary<string, string?>
         {
-            ["Voice:Pipelines:P4:Stt"] = "yiddishlabs", ["Voice:Pipelines:P4:Tts"] = "yiddishlabs", ["Voice:Pipelines:Llm:Model"] = "model-x",
+            ["Voice:Pipelines:P4:Stt"] = "yiddishlabs", ["Voice:Pipelines:P4:Tts"] = "yiddishlabs", ["Voice:Pipelines:Llm:Model"] = "model-x", ["Voice:Pipelines:Llm:Provider"] = "openai",
             ["Voice:YiddishLabs:FlashApiKey"] = "yl_flash_not_real", ["Voice:YiddishLabs:TtsVoiceId"] = "voice1", ["Voice:YiddishLabs:ConsentLine"] = Consent,
         };
         f?.Invoke(d); return d;
@@ -156,7 +156,7 @@ public sealed class VoiceP4PipelineTests : IDisposable
     private static VoiceOptions V(Action<VoiceOptions>? f = null)
     {
         var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://v.test" };
-        o.Pipelines.P4 = new PipelineProviders { Stt = "yiddishlabs", Tts = "yiddishlabs" }; o.Pipelines.Llm.Model = "m";
+        o.Pipelines.P4 = new PipelineProviders { Stt = "yiddishlabs", Tts = "yiddishlabs" }; o.Pipelines.Llm.Model = "m"; o.Pipelines.Llm.Provider = "openai";
         o.YiddishLabs.FlashApiKey = "k"; o.YiddishLabs.TtsVoiceId = "v1"; o.YiddishLabs.ConsentLine = "consent";
         o.PipelineMenu.Enabled = true;                                           // invalid values are only validated when the menu is on
         f?.Invoke(o); return o;
