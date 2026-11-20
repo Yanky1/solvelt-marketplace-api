@@ -131,10 +131,15 @@ public class YiddishLabsFlashSttTests
     }
 
     [Fact]
-    public async Task A_rate_limit_that_asks_for_a_long_wait_is_not_waited_for()
+    public async Task A_rate_limit_that_asks_for_a_long_wait_ends_the_recogniser_at_once_it_is_not_waited_for()
     {
-        var (_, http, _) = await Run(Audio(5, 25, 25), new FakeFlashHandler(new FlashAnswer(HttpStatusCode.TooManyRequests, "x", 60)));
+        var http = new FakeFlashHandler(new FlashAnswer(HttpStatusCode.TooManyRequests, "x", 60));
+        var session = await new YiddishLabsFlashStt(Opts(), new HttpClient(http), new ListLogger()).OpenAsync(CancellationToken.None);
+        await session.SendAudioAsync(Audio(5, 25, 25), CancellationToken.None);
+        var drained = Task.Run(async () => { await foreach (var _ in session.Events(CancellationToken.None)) { } });
+        await drained.WaitAsync(TimeSpan.FromSeconds(3));                                      // the event stream ENDS (the pipeline then apologises) without anyone disposing the session or waiting a minute
         Assert.Single(http.Requests);
+        await session.DisposeAsync();
     }
 
     [Fact]
