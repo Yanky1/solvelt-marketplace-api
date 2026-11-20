@@ -24,6 +24,11 @@ jobs:
       # a test that runs longer than 5 minutes is a hang: the run stops there and names it (a PostgreSQL-only deadlock once held a job for 20+ minutes)
       # the tests that need a PostgreSQL server (trait Db=Postgres, decision M8-15) are left out here and run in the PostgreSQL job below: this job reports 0 skipped
       - run: dotnet test --no-build -c Release --filter "Db!=Postgres" --blame-hang --blame-hang-timeout 5m --logger "trx;LogFileName=results.trx"
+      # when the tests above failed: name the failed tests and their messages (from the .trx) in this step's log, as annotations of the run and in the job summary, because the log of the job ends with the
+      # service container's output (the failing test is otherwise hard to find). It changes no test and no filter, and runs only after a failure.
+      - name: Name the failed tests
+        if: failure()
+        run: python3 tools/ci/print-failed-tests.py
 
   test-postgres:
     name: Test (PostgreSQL)
@@ -53,5 +58,10 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release -warnaserror
-      # same guard as above
-      - run: dotnet test --no-build -c Release --blame-hang --blame-hang-timeout 5m
+      # same guard as above; the .trx is new here so a failure can be named (see the step after)
+      - run: dotnet test --no-build -c Release --blame-hang --blame-hang-timeout 5m --logger "trx;LogFileName=results.trx"
+      # when the tests above failed: name the failed tests and their messages (from the .trx) in this step's log, as annotations of the run and in the job summary, because the log of the job ends with the
+      # service container's output (the failing test is otherwise hard to find). It changes no test and no filter, and runs only after a failure.
+      - name: Name the failed tests
+        if: failure()
+        run: python3 tools/ci/print-failed-tests.py
