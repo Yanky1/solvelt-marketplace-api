@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -157,19 +158,16 @@ public sealed class VoiceP4PipelineTests : IDisposable
         var o = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://v.test" };
         o.Pipelines.P4 = new PipelineProviders { Stt = "yiddishlabs", Tts = "yiddishlabs" }; o.Pipelines.Llm.Model = "m";
         o.YiddishLabs.FlashApiKey = "k"; o.YiddishLabs.TtsVoiceId = "v1"; o.YiddishLabs.ConsentLine = "consent";
+        o.PipelineMenu.Enabled = true;                                           // invalid values are only validated when the menu is on
         f?.Invoke(o); return o;
     }
     private static IReadOnlyList<string> Problems(Action<VoiceOptions>? f = null) => VoiceConfig.Problems(V(f), new SignalWireOptions { SigningKey = "sw" }, true);
 
     [Fact]
-    public void Start_up_refuses_p4_without_its_key_voice_or_the_owners_consent_wording_and_any_nonsense_setting()
+    public void Start_up_refuses_nonsense_settings_of_p4_but_not_missing_ones()
     {
         Assert.Empty(Problems());
-        Assert.Contains(Problems(o => o.YiddishLabs.FlashApiKey = ""), p => p.Contains("FlashApiKey"));
-        Assert.Contains(Problems(o => o.YiddishLabs.TtsVoiceId = ""), p => p.Contains("TtsVoiceId"));
         Assert.Contains(Problems(o => o.YiddishLabs.TtsVoiceId = "../x"), p => p.Contains("TtsVoiceId"));
-        Assert.Contains(Problems(o => o.YiddishLabs.ConsentLine = ""), p => p.Contains("ConsentLine"));          // no approved wording, no option
-        Assert.Contains(Problems(o => o.YiddishLabs.ConsentLine = "   "), p => p.Contains("ConsentLine"));
         Assert.Contains(Problems(o => o.YiddishLabs.ConsentLine = new string('x', 601)), p => p.Contains("ConsentLine"));
         Assert.Contains(Problems(o => o.YiddishLabs.SttLanguage = "fr"), p => p.Contains("SttLanguage"));
         Assert.Contains(Problems(o => o.YiddishLabs.UploadSampleRate = 44100), p => p.Contains("UploadSampleRate"));
@@ -178,7 +176,46 @@ public sealed class VoiceP4PipelineTests : IDisposable
         Assert.Contains(Problems(o => o.YiddishLabs.MaxConcurrentTtsSessions = 0), p => p.Contains("MaxConcurrentTtsSessions"));
         Assert.Contains(Problems(o => o.YiddishLabs.SttPrompt = new string('x', 501)), p => p.Contains("SttPrompt"));
         Assert.Contains(Problems(o => o.Pipelines.P4 = new PipelineProviders { Stt = "yiddishlabs", Tts = "elevenlabs" }), p => p.Contains("no adapter"));
-        Assert.DoesNotContain("yl_flash", string.Join("", Problems(o => { o.YiddishLabs.FlashApiKey = "yl_flash_secret"; o.YiddishLabs.ConsentLine = ""; })));
+        Assert.Empty(Problems(o => { o.PipelineMenu.Enabled = false; o.YiddishLabs.SttLanguage = "fr"; }));          // the menu off: nothing here stops the start
+        // missing settings (key, voice, model, consent wording): start-up goes on, the option is just unavailable
+        foreach (var blank in new Action<VoiceOptions>[] { o => o.YiddishLabs.FlashApiKey = "", o => o.YiddishLabs.TtsVoiceId = "", o => o.YiddishLabs.ConsentLine = "", o => o.YiddishLabs.ConsentLine = "   ", o => o.YiddishLabs.SttModel = "" })
+            Assert.Empty(Problems(blank));
+        Assert.DoesNotContain("yl_flash", string.Join("", Problems(o => { o.YiddishLabs.FlashApiKey = "yl_flash_secret"; o.YiddishLabs.SttLanguage = "fr"; })));
+    }
+
+    [Fact]
+    public void Without_the_consent_wording_p4_is_unavailable_with_ONE_warning_that_names_only_the_setting()
+    {
+        var lines = new ListLogger();
+        var sp = new ServiceCollection().AddSingleton<ILoggerFactory>(new OneLoggerFactory(lines)).BuildServiceProvider();
+        var source = new VendorPartsSource(sp);
+        var secret = V(o => { o.YiddishLabs.ConsentLine = ""; o.YiddishLabs.FlashApiKey = "yl_flash_secret"; });
+        Assert.Empty(source.Create(secret));                                                          // no parts, so the registry answers "not available on this line"
+        var warnings = lines.Lines.Where(l => l.Contains("p4")).ToList();
+        Assert.Single(warnings);
+        Assert.Contains("Voice:YiddishLabs:ConsentLine", warnings[0]);
+        Assert.DoesNotContain("yl_flash", warnings[0]);
+        Assert.Contains(VoicePipelineVendors.Missing(V(o => o.YiddishLabs.ConsentLine = " "), "p4"), m => m == "Voice:YiddishLabs:ConsentLine");
+        Assert.Empty(VoicePipelineVendors.Missing(V(), "p4"));
+    }
+
+    private sealed class OneLoggerFactory(ILogger logger) : ILoggerFactory
+    {
+        public void AddProvider(ILoggerProvider provider) { }
+        public ILogger CreateLogger(string categoryName) => logger;
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public async Task A_host_started_without_the_consent_wording_runs_and_sends_the_menu_choice_to_p1()
+    {
+        await Start(P4Settings(d => d.Remove("Voice:YiddishLabs:ConsentLine")));                       // the whole API starts
+        Assert.False(S.F.Services.GetRequiredService<VoicePipelineRegistry>().IsAvailable("p4"));
+        var x = await Xml(await Menu("4"));
+        Assert.Equal(PipelineScripts.Unavailable, x.Element("Say")!.Value);                              // "not available on this line", and no consent question
+        Assert.Null(x.Element("Gather"));
+        var row = await S.Row();
+        Assert.Equal(("p1", "model-full"), (row.Tier, row.Model));                                         // the call stays on the Realtime line
     }
 
     [Fact]
