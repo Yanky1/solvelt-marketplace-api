@@ -231,7 +231,7 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | `Voice:ElevenLabs:Region` | empty | empty (default host), `us`, `eu`, `in` or `sg`: a fixed list, never a free host |
 | `Voice:ElevenLabs:EnableLogging` | `false` | the vendor's own request logging; leave off unless the plan cannot turn it off |
 
-**Options p3 and p4 (decisions V-24, V-25, V-28), off by default, built against fakes only (no vendor key exists yet):**
+**Options p3 and p4 (decisions V-24, V-25, V-28, V-29), off by default, built against fakes only (no vendor key exists yet):**
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -244,7 +244,11 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | `Voice:YiddishLabs:VadSilenceMs`, `:VadEnergy` | 450, 400 | the adapter's own end-of-speech detector (200 to 2000 ms; 50 to 5000) |
 | `Voice:YiddishLabs:TtsVoiceId`, `:TtsHd`, `:MaxConcurrentTtsSessions` | none, false, 5 | the voice (letters, digits, `-`, `_`), HD, the session gate (1 to 50) |
 | `Voice:YiddishLabs:ConsentLine` | none | the OWNER's approved consent wording, played before p4 starts (at most 600 characters); key 1 continues, anything else gives p1; without it p4 is unavailable (decision V-26 rule: a missing setting makes an option unavailable, one warning) |
+| `Voice:Pipelines:P5:Stt`, `:Tts` | empty | `gladia+yiddishlabs` and `yiddishlabs` (the parallel option; consent step like p4) |
+| `Voice:Pipelines:P5:YiddishLabsInJudge` | `false` | the Terms section 6 switch (owner only): false = Flash is never contacted, p5 is Gladia words and Yiddish Labs voice; true = Flash's text is a second candidate for the judge |
+| `Voice:Pipelines:P5:JudgeModel` | none | the OpenAI text model of the judge; required only with the switch on |
+| `Voice:PipelineMenu:ParallelWaitMs`, `:ParallelBudgetMs` | see the menu table | how long the slower engine is waited for, and the hard limit for the whole judging; the fallback is the primary engine's text |
 
 **Failures:** a vendor that cannot start hands the call to option 1; one that dies mid-call ends it with an apology (`VendorLost`); the columns `BaseTier`, `BaseModel` and `FallbackFrom` record it.
 
-The hosts are fixed in code and no setting names a host. Keys travel in request headers only and are never logged. A setting that is only MISSING (a key, a voice id, a model, the consent wording) never stops the start: the option is "not available on this line" and one start-up warning names the setting (decision V-26). Invalid values (out of range, odd characters, an unknown pair) are refused at start-up, only when `Voice:PipelineMenu:Enabled` is true. Option p5 is not built yet (`Voice:Pipelines:P5` is refused at start-up with the menu on until its adapter exists); the other names in the design note are reserved. Until an adapter exists, its option stays "not available on this line".
+The hosts are fixed in code and no setting names a host. Keys travel in request headers only and are never logged. A setting that is only MISSING (a key, a voice id, a model, the consent wording) never stops the start: the option is "not available on this line" and one start-up warning names the setting (decision V-26). Invalid values (out of range, odd characters, an unknown pair) are refused at start-up, only when `Voice:PipelineMenu:Enabled` is true. Option p5 is built (decision V-29); all of p2 to p5 follow the same rule; the other names in the design note are reserved. Until an adapter exists, its option stays "not available on this line".

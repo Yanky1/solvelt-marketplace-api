@@ -4,7 +4,7 @@ namespace Solvelt.Marketplace.Api.Voice;
 // not both named, or whose keys are missing, is "not available on this line" and the call runs on option 1.
 
 /// <summary>Which providers an option uses. <c>Stt</c> and <c>Tts</c> are provider names (<see cref="VendorNames"/>); empty means the option is not configured.</summary>
-public sealed class PipelineProviders
+public class PipelineProviders
 {
     public string Stt { get; set; } = "";
     public string Tts { get; set; } = "";
@@ -12,12 +12,24 @@ public sealed class PipelineProviders
 }
 
 /// <summary><c>Voice:Pipelines</c>: the provider choice per option and the shared text model.</summary>
+/// <summary>Option p5: Gladia and Yiddish Labs Flash in parallel, a judge, the Yiddish Labs voice (<c>Stt</c> is <c>gladia+yiddishlabs</c>, <c>Tts</c> is <c>yiddishlabs</c>).</summary>
+public sealed class P5Options : PipelineProviders
+{
+    /// <summary>The OpenAI text model that judges the candidate transcripts of one turn. Required when <see cref="YiddishLabsInJudge"/> is true (without a second transcript there is nothing to judge).</summary>
+    public string JudgeModel { get; set; } = "";
+    /// <summary>
+    /// The Yiddish Labs Terms section 6 switch (their output may not be used to evaluate other models). FALSE (the default): Flash is never contacted and its text never reaches the judge or the model: p5 is Gladia for the
+    /// words and Yiddish Labs for the voice only. TRUE: Flash's text is a second candidate and the judge picks. Only the owner turns it on, after reading the terms.
+    /// </summary>
+    public bool YiddishLabsInJudge { get; set; }
+}
+
 public sealed class VoicePipelinesOptions
 {
     public PipelineProviders P2 { get; set; } = new();
     public PipelineProviders P3 { get; set; } = new();
     public PipelineProviders P4 { get; set; } = new();
-    public PipelineProviders P5 { get; set; } = new();
+    public P5Options P5 { get; set; } = new();
     /// <summary>The OpenAI text model of every chained option (the same instructions and tools as the Realtime line). Required as soon as any option is configured; no default is assumed.</summary>
     public VoiceLlmOptions Llm { get; set; } = new();
 

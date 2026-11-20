@@ -167,7 +167,7 @@ public sealed class VoiceP2PipelineTests : IDisposable
     {
         Assert.Contains(Problems(o => o.Pipelines.P2.Stt = "deepgram"), p => p.Contains("both Stt and Tts"));
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.P2.Tts = "somewhere"; }), p => p.Contains("no adapter"));
-        Assert.Contains(Problems(o => { Full(o); o.Pipelines.P5 = new PipelineProviders { Stt = "gladia", Tts = "yiddishlabs" }; }), p => p.Contains("P5") && p.Contains("no adapter"));   // later slices
+        Assert.Contains(Problems(o => { Full(o); o.Pipelines.P5 = new P5Options { Stt = "gladia", Tts = "yiddishlabs" }; }), p => p.Contains("P5") && p.Contains("no adapter"));   // later slices
         Assert.Contains(Problems(o => { Full(o); o.Pipelines.Llm.TimeoutSeconds = 0; }), p => p.Contains("TimeoutSeconds"));
         Assert.Contains(Problems(o => { Full(o); o.ElevenLabs.VoiceId = "../evil"; }), p => p.Contains("VoiceId"));
         Assert.Contains(Problems(o => { Full(o); o.ElevenLabs.Region = "evil.example.com"; }), p => p.Contains("Region"));
