@@ -138,7 +138,8 @@ async function main() {
     await write.first().click();
     await hydrated(page);
     await page.getByLabel("5 stars").check();
-    const reviewText = `Sturdy, nicely finished and it arrived on time ${run}.`;
+    // letters only: a run id of 7+ digits reads as a phone number to the review filter (ContactDetails) and the review is refused; digits 0-9 map to a-j, so the text stays unique per run
+    const reviewText = `Sturdy, nicely finished and it arrived on time ${[...run].map((c) => (/[0-9]/.test(c) ? String.fromCharCode(97 + Number(c)) : c)).join("")}.`;
     await page.getByLabel("Your review").fill(reviewText);
     await page.getByRole("button", { name: "Publish review" }).click();
     await page.getByText("Your review is published").waitFor({ timeout: 20_000 });
