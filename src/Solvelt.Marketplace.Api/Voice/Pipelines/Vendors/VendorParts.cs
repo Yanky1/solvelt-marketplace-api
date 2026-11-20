@@ -35,9 +35,13 @@ public static class VoicePipelineVendors
         return services;
     }
 
-    /// <summary>Start-up problems of the configured options (only checked when the module is enabled).</summary>
+    /// <summary>
+    /// Start-up problems: only real INVALID values (half a provider pair, a pair with no adapter, an out-of-range number, a voice id with odd characters, a region outside the list), and only when the pipeline menu is on.
+    /// A setting that is merely MISSING never lands here: it makes the option unavailable (see <see cref="Missing"/>), because a test-line setting must not take the whole API down.
+    /// </summary>
     internal static void Problems(VoiceOptions v, List<string> p)
     {
+        if (!v.PipelineMenu.Enabled) return;
         var configured = new List<string>();
         foreach (var o in new[] { "p2", "p3", "p4", "p5" })
         {
@@ -49,25 +53,43 @@ public static class VoicePipelineVendors
             configured.Add(o);
         }
         if (configured.Count == 0) return;
-        if (string.IsNullOrWhiteSpace(v.Pipelines.Llm.Model)) p.Add("Voice:Pipelines:Llm:Model is required when a pipeline option is configured.");
         if (v.Pipelines.Llm.TimeoutSeconds is < 1 or > 120) p.Add("Voice:Pipelines:Llm:TimeoutSeconds must be between 1 and 120.");
-        if (configured.Contains("p2"))
-        {
-            if (string.IsNullOrWhiteSpace(v.Deepgram.ApiKey)) p.Add("Voice:Deepgram:ApiKey is required for option p2.");
-            if (string.IsNullOrWhiteSpace(v.Deepgram.Model) || string.IsNullOrWhiteSpace(v.Deepgram.Language)) p.Add("Voice:Deepgram:Model and Language must not be empty.");
-        }
-        if (configured.Contains("p3"))
-        {
-            if (string.IsNullOrWhiteSpace(v.Gladia.ApiKey)) p.Add("Voice:Gladia:ApiKey is required for option p3.");
-            if (string.IsNullOrWhiteSpace(v.Gladia.Model) || string.IsNullOrWhiteSpace(v.Gladia.Language)) p.Add("Voice:Gladia:Model and Language must not be empty.");
-        }
         if (configured.Contains("p2") || configured.Contains("p3"))
         {
-            if (string.IsNullOrWhiteSpace(v.ElevenLabs.ApiKey)) p.Add("Voice:ElevenLabs:ApiKey is required for options p2 and p3.");
-            if (string.IsNullOrWhiteSpace(v.ElevenLabs.VoiceId) || v.ElevenLabs.VoiceId.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-')) p.Add("Voice:ElevenLabs:VoiceId is required (letters, digits, - and _ only).");
-            if (string.IsNullOrWhiteSpace(v.ElevenLabs.TtsModel)) p.Add("Voice:ElevenLabs:TtsModel is required.");
+            if (v.ElevenLabs.VoiceId.Length > 0 && v.ElevenLabs.VoiceId.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-')) p.Add("Voice:ElevenLabs:VoiceId may only hold letters, digits, - and _.");
             if (VendorHosts.ElevenLabs(v.ElevenLabs.Region) is null) p.Add("Voice:ElevenLabs:Region must be empty, us, eu, in or sg.");
         }
+    }
+
+    /// <summary>What an option still lacks before it can run (empty = usable). Names settings only, never values.</summary>
+    internal static IReadOnlyList<string> Missing(VoiceOptions v, string option)
+    {
+        var m = new List<string>();
+        if (string.IsNullOrWhiteSpace(v.OpenAiApiKey)) m.Add("Voice:OpenAiApiKey");
+        if (string.IsNullOrWhiteSpace(v.Pipelines.Llm.Model)) m.Add("Voice:Pipelines:Llm:Model");
+        switch (option)
+        {
+            case "p2":
+                if (string.IsNullOrWhiteSpace(v.Deepgram.ApiKey)) m.Add("Voice:Deepgram:ApiKey");
+                if (string.IsNullOrWhiteSpace(v.Deepgram.Model)) m.Add("Voice:Deepgram:Model");
+                if (string.IsNullOrWhiteSpace(v.Deepgram.Language)) m.Add("Voice:Deepgram:Language");
+                MissingEleven(v, m);
+                break;
+            case "p3":
+                if (string.IsNullOrWhiteSpace(v.Gladia.ApiKey)) m.Add("Voice:Gladia:ApiKey");
+                if (string.IsNullOrWhiteSpace(v.Gladia.Model)) m.Add("Voice:Gladia:Model");
+                if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
+                MissingEleven(v, m);
+                break;
+        }
+        return m;
+    }
+
+    private static void MissingEleven(VoiceOptions v, List<string> m)
+    {
+        if (string.IsNullOrWhiteSpace(v.ElevenLabs.ApiKey)) m.Add("Voice:ElevenLabs:ApiKey");
+        if (string.IsNullOrWhiteSpace(v.ElevenLabs.VoiceId)) m.Add("Voice:ElevenLabs:VoiceId");
+        if (string.IsNullOrWhiteSpace(v.ElevenLabs.TtsModel)) m.Add("Voice:ElevenLabs:TtsModel");
     }
 }
 
@@ -81,10 +103,19 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
 {
     public IEnumerable<IChainedPipelineParts> Create(VoiceOptions v)
     {
-        var p2 = VoicePipelineVendors.Supported("p2", v.Pipelines.P2);
-        var p3 = VoicePipelineVendors.Supported("p3", v.Pipelines.P3);
-        if (!p2 && !p3) yield break;
         var logs = sp.GetRequiredService<ILoggerFactory>();
+        // an option that names its providers but lacks settings is "not available on this line" (calls get p1), with ONE warning that names the missing settings: never a start-up failure
+        bool Ready(string o)
+        {
+            if (!VoicePipelineVendors.Supported(o, v.Pipelines.For(o))) return false;
+            var missing = VoicePipelineVendors.Missing(v, o);
+            if (missing.Count == 0) return true;
+            logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Pipelines").LogWarning("Voice pipeline option {Option} is not available on this line: missing setting(s) {Settings}", o, string.Join(", ", missing));
+            return false;
+        }
+        var p2 = Ready("p2");
+        var p3 = Ready("p3");
+        if (!p2 && !p3) yield break;
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
         var http = sp.GetRequiredService<IHttpClientFactory>();
         var llm = new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
