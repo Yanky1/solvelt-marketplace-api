@@ -3465,6 +3465,66 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.ToTable("voice_calls", (string)null);
                 });
 
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.VoiceDiagnosticTurn", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("At")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("CallId")
+                        .HasColumnType("uuid");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("EndpointingReason")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<string>("Engines")
+                        .HasMaxLength(6000)
+                        .HasColumnType("character varying(6000)");
+
+                    b.Property<string>("Language")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Option")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("Recogniser")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<long?>("SpeechEndToFirstAudioMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("SpeechEndToTextMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<int>("Turn")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("At");
+
+                    b.HasIndex("CallId", "Turn");
+
+                    b.ToTable("voice_diagnostic_turns", (string)null);
+                });
+
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.VoicePaymentAttempt", b =>
                 {
                     b.Property<Guid>("Id")

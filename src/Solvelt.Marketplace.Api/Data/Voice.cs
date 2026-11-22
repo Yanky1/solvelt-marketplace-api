@@ -113,3 +113,50 @@ internal sealed class VoicePaymentAttemptConfiguration : IEntityTypeConfiguratio
         b.HasIndex(a => a.CreatedAt);
     }
 }
+
+/// <summary>
+/// One recognised caller turn, kept ONLY for calls from the owner's own test numbers and only while <c>Voice:Diagnostics:Enabled</c> is on (decision V-39, a narrow exception to V-01's "no transcripts"). It holds the
+/// recognised words (digit runs and email addresses masked), which option and recogniser heard them, each engine's text and the judge's pick for option 5, the language and confidence the recogniser reported, two
+/// timings and why the turn was considered finished. It never holds audio, keypad digits, anything said during a payment or a verification code. Deleted after <c>Voice:Diagnostics:RetentionHours</c> (default 72,
+/// at most 168). Read only by staff with <c>voice.view</c>, and every read is audited.
+/// </summary>
+public sealed class VoiceDiagnosticTurn
+{
+    public Guid Id { get; set; }
+    public Guid CallId { get; set; }
+    public DateTimeOffset At { get; set; }
+    /// <summary>1, 2, ... in the order the turns were recognised on the call.</summary>
+    public int Turn { get; set; }
+    /// <summary><c>p2</c> to <c>p6</c> (option 1 has no recogniser text of ours).</summary>
+    public string Option { get; set; } = "";
+    public string Recogniser { get; set; } = "";
+    public string Text { get; set; } = "";
+    /// <summary>Option 5: a JSON array of <c>{engine, text}</c> (masked like <see cref="Text"/>) and the judge's pick; null otherwise.</summary>
+    public string? Engines { get; set; }
+    public string? Language { get; set; }
+    public double? Confidence { get; set; }
+    /// <summary>Milliseconds from the end of the caller's speech to the recognised text; null when the option does not know.</summary>
+    public long? SpeechEndToTextMs { get; set; }
+    /// <summary>Milliseconds from the end of the caller's speech to the first audio of the reply; null until/unless known.</summary>
+    public long? SpeechEndToFirstAudioMs { get; set; }
+    /// <summary>Why the turn was finished: <c>silence</c>, <c>vendor_final</c>, <c>signalwire_speech_timeout</c>, ...</summary>
+    public string EndpointingReason { get; set; } = "";
+}
+
+internal sealed class VoiceDiagnosticTurnConfiguration : IEntityTypeConfiguration<VoiceDiagnosticTurn>
+{
+    public void Configure(EntityTypeBuilder<VoiceDiagnosticTurn> b)
+    {
+        b.ToTable("voice_diagnostic_turns");
+        b.HasKey(t => t.Id);
+        b.Property(t => t.Id).ValueGeneratedNever();
+        b.Property(t => t.Option).HasMaxLength(3).IsRequired();
+        b.Property(t => t.Recogniser).HasMaxLength(60).IsRequired();
+        b.Property(t => t.Text).HasMaxLength(2000).IsRequired();
+        b.Property(t => t.Engines).HasMaxLength(6000);
+        b.Property(t => t.Language).HasMaxLength(16);
+        b.Property(t => t.EndpointingReason).HasMaxLength(40).IsRequired();
+        b.HasIndex(t => new { t.CallId, t.Turn });
+        b.HasIndex(t => t.At);
+    }
+}

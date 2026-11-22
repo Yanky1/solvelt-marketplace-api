@@ -8,7 +8,7 @@ namespace Solvelt.Marketplace.Api.Voice;
 public enum SttEventKind { SpeechStarted, Partial, Final, SpeechEnded }
 
 /// <summary>One thing the recogniser reports. <see cref="Text"/> is the words so far (<c>Partial</c>) or the finished words (<c>Final</c>); it is held in memory for the turn and is never stored or logged.</summary>
-public sealed record SttEvent(SttEventKind Kind, string Text = "", string? Language = null, double? Confidence = null);
+public sealed record SttEvent(SttEventKind Kind, string Text = "", string? Language = null, double? Confidence = null, IReadOnlyList<SttCandidate>? Candidates = null, string? JudgePick = null);
 
 public interface IStreamingStt
 {
@@ -37,6 +37,8 @@ public interface ITurnDetector
 {
     TurnSignal OnEvent(SttEvent e, DateTimeOffset now);
     TurnSignal OnTick(DateTimeOffset now);
+    /// <summary>Why this engine finishes a caller's turn, for the owner's test-call diagnostics (V-39): a short plain label.</summary>
+    string EndReason => "other";
 }
 
 public interface ITts
@@ -77,6 +79,7 @@ public interface IChainedPipelineParts
 /// <summary>The default end-of-turn engine, vendor neutral: the caller's turn ends when they have words and have been silent for <c>EndpointMs</c>.</summary>
 public sealed class SilenceTurnDetector(int endpointMs) : ITurnDetector
 {
+    public string EndReason => "silence";
     private readonly List<string> _finals = [];
     private DateTimeOffset _lastActivity;
 
@@ -110,6 +113,7 @@ public sealed class SilenceTurnDetector(int endpointMs) : ITurnDetector
 /// </summary>
 public sealed class FinalTurnDetector : ITurnDetector
 {
+    public string EndReason => "vendor_final";
     public TurnSignal OnEvent(SttEvent e, DateTimeOffset now)
         => e.Kind switch
         {

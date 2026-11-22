@@ -80,6 +80,8 @@ public sealed class VoiceOptions
     public SignalWireSpeechOptions SignalWireSpeech { get; set; } = new();
     /// <summary>The catalog words every recogniser is told to listen for (decision V-36).</summary>
     public VocabularyOptions Vocabulary { get; set; } = new();
+    /// <summary>Recognised words of the owner's own test calls (decision V-39). Off by default.</summary>
+    public DiagnosticsOptions Diagnostics { get; set; } = new();
 }
 
 public sealed class SignalWireOptions
@@ -139,6 +141,7 @@ public static class VoiceConfig
         if (!new[] { "low", "medium", "high", "auto" }.Contains(v.Eagerness)) p.Add("Voice:Eagerness must be low, medium, high or auto.");
         if (!new[] { "near_field", "far_field", "none" }.Contains(v.NoiseReduction)) p.Add("Voice:NoiseReduction must be near_field, far_field or none.");
         VoicePipelineVendors.Problems(v, p);
+        if (v.PipelineMenu.Enabled && v.Diagnostics.Enabled && v.Diagnostics.RetentionHours is < 1 or > DiagnosticsOptions.MaxRetentionHours) p.Add("Voice:Diagnostics:RetentionHours must be between 1 and 168.");   // only when the menu is on (V-26: a test-line setting never takes the API down)
         var m = v.PipelineMenu;
         if (m.Enabled && m.TestNumbers.Any(n => Infrastructure.PhoneNumbers.ToE164(n) is null)) p.Add("Voice:PipelineMenu:TestNumbers must all be phone numbers (E.164, like +15551234567).");
         if (m.Enabled) foreach (var key in m.Descriptions.TooLong()) p.Add($"{key} must be at most {PipelineDescriptions.MaxLength} characters (one plain sentence a caller can listen to).");

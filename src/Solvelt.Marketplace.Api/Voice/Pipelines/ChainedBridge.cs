@@ -17,8 +17,12 @@ namespace Solvelt.Marketplace.Api.Voice;
 /// stored and not logged (log lines carry counts and timings only).
 /// </summary>
 public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallState state, IChainedPipelineParts parts, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools,
-    TimeProvider time, ILogger logger, ISttSession? opened = null)
+    TimeProvider time, ILogger logger, ISttSession? opened = null, IVoiceDiagnostics? diagnostics = null)
 {
+    private SttEvent? _lastFinal;
+    private long _speechEndedAt;
+    private Task<Guid?> _diagRow = Task.FromResult<Guid?>(null);
+    private long _diagSpeechEnd;
     private bool _vendorLost;
     private const int BytesPerMs = 8;   // mu-law, 8000 samples per second, one byte each
     private readonly VoiceOptions _o = options.Value;
@@ -153,17 +157,19 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
         await foreach (var e in stt.Events(ct))
         {
             _lastUserEvent = time.GetTimestamp();
-            Handle(detector.OnEvent(e, time.GetUtcNow()));
+            if (e.Kind == SttEventKind.SpeechEnded) _speechEndedAt = _lastUserEvent;
+            if (e.Kind == SttEventKind.Final && !string.IsNullOrWhiteSpace(e.Text)) _lastFinal = e;
+            Handle(detector.OnEvent(e, time.GetUtcNow()), detector);
         }
     }
 
     private async Task TickAsync(ITurnDetector detector, CancellationToken ct)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(50), time);
-        while (await timer.WaitForNextTickAsync(ct)) Handle(detector.OnTick(time.GetUtcNow()));
+        while (await timer.WaitForNextTickAsync(ct)) Handle(detector.OnTick(time.GetUtcNow()), detector);
     }
 
-    private void Handle(TurnSignal signal)
+    private void Handle(TurnSignal signal, ITurnDetector detector)
     {
         switch (signal.Kind)
         {
@@ -172,9 +178,27 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
                 break;
             case TurnSignalKind.TurnEnded when !string.IsNullOrWhiteSpace(signal.Text):
                 lock (_history) _history.Add(new LlmMessage("user", signal.Text));
+                NoteDiagnostics(signal.Text, detector);
                 StartTurn(null);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Owner's test calls only (V-39): hands the recognised turn to the diagnostics recorder, which checks the number, the setting and the step itself. The row is written in the background; the time to the first audio is added
+    /// when the reply starts. Nothing here can slow or break the call.
+    /// </summary>
+    private void NoteDiagnostics(string text, ITurnDetector detector)
+    {
+        if (diagnostics is null || !diagnostics.Active(state)) return;
+        var final = _lastFinal; _lastFinal = null;
+        var now = time.GetTimestamp();
+        _diagSpeechEnd = _speechEndedAt != 0 ? _speechEndedAt : _lastUserEvent;
+        long? toText = _diagSpeechEnd != 0 ? (long)time.GetElapsedTime(_diagSpeechEnd, now).TotalMilliseconds : null;
+        var stt = _o.Pipelines.For(parts.OptionId).Stt;
+        var turn = new DiagnosticTurn(parts.OptionId, stt.Length > 0 ? stt : parts.OptionId, text, final?.Candidates, final?.JudgePick, final?.Language, final?.Confidence, toText, null, detector.EndReason);
+        _diagRow = diagnostics.RecordAsync(call, state, turn, CancellationToken.None);
+        _speechEndedAt = 0;
     }
 
     /// <summary>The caller talks while the PHONE still has audio queued: clear it, remember how much was played, and stop the answer (V-12, the same marks).</summary>
@@ -317,7 +341,12 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
             var chunk = speech.Current;
             ct.ThrowIfCancellationRequested();
             if (chunk.Length == 0) continue;
-            if (isFirstAudio() && _lastUserEvent != 0) { await store.AddLatencyAsync(call.Id, (long)time.GetElapsedTime(_lastUserEvent).TotalMilliseconds, ct); _lastUserEvent = 0; }
+            if (isFirstAudio() && _lastUserEvent != 0)
+            {
+                await store.AddLatencyAsync(call.Id, (long)time.GetElapsedTime(_lastUserEvent).TotalMilliseconds, ct);
+                _lastUserEvent = 0;
+                if (diagnostics is not null && _diagSpeechEnd != 0 && await _diagRow is { } diagId) { await diagnostics.SetFirstAudioAsync(diagId, (long)time.GetElapsedTime(_diagSpeechEnd).TotalMilliseconds, ct); _diagSpeechEnd = 0; }
+            }
             var markName = _playback.NoteSent(chunk.Length, itemId);
             await SendPhoneAsync(new JsonObject { ["event"] = "media", ["streamSid"] = _streamSid, ["media"] = new JsonObject { ["payload"] = Convert.ToBase64String(chunk) } }, ct);
             await SendPhoneAsync(new JsonObject { ["event"] = "mark", ["streamSid"] = _streamSid, ["mark"] = new JsonObject { ["name"] = markName } }, ct);
@@ -399,7 +428,7 @@ public sealed class SpokenSentence(string text) { public string Text { get; } = 
 internal sealed class VendorFailure(string kind) : Exception("A speech vendor failed.") { public string Kind { get; } = kind; }
 
 /// <summary>Option p2 to p5 at run time: the stages of one option behind the pipeline seam.</summary>
-public sealed class ChainedPipeline(IChainedPipelineParts parts, RealtimePipeline realtime, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs) : IVoicePipeline
+public sealed class ChainedPipeline(IChainedPipelineParts parts, RealtimePipeline realtime, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs, IVoiceDiagnostics? diagnostics = null) : IVoicePipeline
 {
     public string Id => parts.OptionId;
 
@@ -419,17 +448,17 @@ public sealed class ChainedPipeline(IChainedPipelineParts parts, RealtimePipelin
             if (fallback is null) { await store.EndAsync(call.Id, VoiceOutcome.Abandoned, CancellationToken.None); return null; }     // nothing to fall back to: the call ends like a failing Realtime connector (503)
             return await realtime.OpenAsync(fallback, ct);
         }
-        return new Session(call, parts, stt, options, store, tools, time, log);
+        return new Session(call, parts, stt, options, store, tools, time, log, diagnostics);
     }
 
-    private sealed class Session(VoiceCall call, IChainedPipelineParts parts, ISttSession stt, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILogger log) : IVoicePipelineSession
+    private sealed class Session(VoiceCall call, IChainedPipelineParts parts, ISttSession stt, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILogger log, IVoiceDiagnostics? diagnostics) : IVoicePipelineSession
     {
         private bool _handedOver;
 
         public async Task<VoicePipelineResult> RunAsync(WebSocket phone, VoiceCallState state, CancellationToken ct)
         {
             _handedOver = true;        // the bridge owns the recogniser from here and disposes it when the stream ends
-            var bridge = new ChainedBridge(phone, call, state, parts, options, store, tools, time, log, stt);
+            var bridge = new ChainedBridge(phone, call, state, parts, options, store, tools, time, log, stt, diagnostics);
             await bridge.RunAsync(ct);
             return new VoicePipelineResult(bridge.KeypadPause);
         }

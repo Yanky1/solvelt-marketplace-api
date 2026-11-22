@@ -98,6 +98,12 @@ public sealed class VoiceCallState
     public bool OffTopicEnded { get; private set; }
     /// <summary>Option 6 (decision V-35): the call is turn by turn (cXML Gather speech), not a stream. Set once, when the caller picks it.</summary>
     public bool SpeechMode { get; private set; }
+    /// <summary>Set for a turn that must never reach the diagnostics (a spoken verification code, anything sensitive). Cleared by <see cref="AllowDiagnostics"/>.</summary>
+    public bool SuppressDiagnostics { get; private set; }
+    public void SuppressDiagnosticsNow() { lock (_gate) SuppressDiagnostics = true; }
+    public void AllowDiagnostics() { lock (_gate) SuppressDiagnostics = false; }
+    private int _diagnosticTurns;
+    public int NextDiagnosticTurn() { lock (_gate) return ++_diagnosticTurns; }
     public void EnterSpeechMode() { lock (_gate) SpeechMode = true; }
     public void LeaveSpeechMode() { lock (_gate) SpeechMode = false; }
     /// <summary>The conversation of an option 6 call, in memory only (what the caller said as the recogniser wrote it, and the replies). Never stored or logged; it goes with the call's state.</summary>

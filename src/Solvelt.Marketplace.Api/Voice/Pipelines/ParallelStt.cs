@@ -153,7 +153,7 @@ public sealed class ParallelStt : IStreamingStt
             if (candidates.Count == 0) return null;
             // the fallback, ready before any judge is asked: the primary engine's text, else the first one that arrived
             var fallback = candidates.FirstOrDefault(c => c.Engine == _o.engines[0].Name) ?? candidates[0];
-            var chosen = new SttEvent(SttEventKind.Final, fallback.Text, fallback.Language, fallback.Confidence);
+            var chosen = new SttEvent(SttEventKind.Final, fallback.Text, fallback.Language, fallback.Confidence, candidates);   // the candidates travel with the final (diagnostics, V-39)
             if (candidates.Count == 1 && _o.judges.Count == 0) return chosen;
             if (remaining <= TimeSpan.Zero || _o.judges.Count == 0) return chosen;
             using var budget = new CancellationTokenSource(remaining, _o.time);
@@ -169,7 +169,7 @@ public sealed class ParallelStt : IStreamingStt
             catch (TimeoutException) { /* the budget is spent: whoever has answered counts, the rest is dropped */ }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
             foreach (var ask in asks)   // judges in priority order; the first real answer wins
-                if (ask.IsCompletedSuccessfully && ask.Result is { } r && !string.IsNullOrWhiteSpace(r.Text)) return new SttEvent(SttEventKind.Final, r.Text.Trim(), r.Language ?? fallback.Language, fallback.Confidence);
+                if (ask.IsCompletedSuccessfully && ask.Result is { } r && !string.IsNullOrWhiteSpace(r.Text)) return new SttEvent(SttEventKind.Final, r.Text.Trim(), r.Language ?? fallback.Language, fallback.Confidence, candidates, r.Text.Trim());
             return chosen;
         }
 
