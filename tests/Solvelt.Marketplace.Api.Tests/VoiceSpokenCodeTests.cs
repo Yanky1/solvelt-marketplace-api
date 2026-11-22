@@ -32,10 +32,33 @@ public sealed class VoiceSpokenCodeTests
     {
         Assert.Equal(32, SpokenDigits.Parse(string.Join(' ', Enumerable.Repeat("seven", 100))).Length);
         Assert.Equal("2", SpokenDigits.Choice("two")); Assert.Equal("2", SpokenDigits.Choice("option 2 please")); Assert.Equal("5", SpokenDigits.Choice("Number five."));
-        Assert.Equal("*", SpokenDigits.Choice("again")); Assert.Equal("*", SpokenDigits.Choice("say that again")); Assert.Equal("*", SpokenDigits.Choice("star"));
+        Assert.Equal("*", SpokenDigits.Choice("again")); Assert.Equal("*", SpokenDigits.Choice("say that again")); Assert.Equal("*", SpokenDigits.Choice("repeat that"));
         Assert.Null(SpokenDigits.Choice("")); Assert.Null(SpokenDigits.Choice("hmm")); Assert.Null(SpokenDigits.Choice(null));
         Assert.Equal("4, 7, 2", SpokenDigits.ReadOut("472")); Assert.Equal("", SpokenDigits.ReadOut("")); Assert.Equal(12, SpokenDigits.ReadOut(new string('7', 40)).Split(", ").Length);
     }
+
+    [Theory]
+    [InlineData("go for two", "2")]                                                                  // "for" is a sound-alike of four on the CODE step, never on the menu
+    [InlineData("I want to try three", "3")]                                                         // "to" is not two here
+    [InlineData("option five", "5")]
+    [InlineData("number two", "2")]
+    [InlineData("option 6", "6")]
+    [InlineData("one", "1")]
+    [InlineData("I would like three please, no wait, two", "2")]                                     // the LAST number wins
+    [InlineData("two, I mean again", "*")]
+    [InlineData("go for it", null)]                                                                  // sound-alikes alone are no choice: option 1
+    [InlineData("won", null)]
+    [InlineData("oh", null)]
+    [InlineData("tree", null)]
+    [InlineData("niner", null)]
+    [InlineData("ate", null)]
+    [InlineData("zero", null)]
+    [InlineData("star", null)]                                                                       // no keys on the menu any more: "star" is not a word to say
+    public void The_menu_takes_exact_number_words_and_digits_the_last_one_wins_and_sound_alikes_never_choose(string said, string? expected)
+        => Assert.Equal(expected, SpokenDigits.Choice(said));
+
+    [Fact]
+    public void The_code_step_still_takes_the_sound_alikes_that_the_menu_refuses() => Assert.Equal("4281", SpokenDigits.Parse("for to ate won"));
 
     // ---------- the verification code ----------
 
@@ -173,21 +196,23 @@ public sealed class VoiceSpokenCodeTests
     }
 
     [Fact]
-    public async Task The_menu_listens_for_a_key_or_a_spoken_number_and_a_spoken_choice_is_the_same_as_the_key()
+    public async Task The_menu_listens_for_a_spoken_number_only_and_the_options_are_read_as_say_one_say_two()
     {
         using var s = new VoiceScenario(Number, Menu(), services: sv => sv.AddSingleton<IChainedPipelineParts>(new FakeParts("p2")));
         var inbound = await Xml(await VoiceFactory.Hook(s.C, VoiceEndpoints.InboundPath, s.Sid, s.From));
         var g = inbound.Element("Gather")!;
-        Assert.Equal("dtmf speech", g.Attribute("input")!.Value);
+        Assert.Equal("speech", g.Attribute("input")!.Value);                                           // keypad only for the PIN and the card (Ronald): no keys on the menu
+        Assert.Null(g.Attribute("numDigits"));
+        Assert.DoesNotContain("press", g.Element("Say")!.Value, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("one", g.Attribute("hints")!.Value); Assert.Contains("again", g.Attribute("hints")!.Value);
-        Assert.Contains("Say or press 2 for", g.Element("Say")!.Value);
-        Assert.Contains("Say again or press star to hear this again.", g.Element("Say")!.Value);
+        Assert.Contains("Say two for", g.Element("Say")!.Value);
+        Assert.Contains("Say again to hear this again.", g.Element("Say")!.Value);
         Assert.NotNull((await Choose(s, "two")).Descendants("Stream").SingleOrDefault());
         Assert.Equal("p2", (await s.Row()).Tier);                                                      // "two" chose option 2
     }
 
     [Fact]
-    public async Task A_spoken_again_repeats_the_menu_and_unclear_speech_is_option_one_and_a_key_wins_over_speech()
+    public async Task A_spoken_again_repeats_the_menu_and_unclear_speech_is_option_one()
     {
         using var s = new VoiceScenario(Number, Menu(), services: sv => sv.AddSingleton<IChainedPipelineParts>(new FakeParts("p2")));
         await VoiceFactory.Hook(s.C, VoiceEndpoints.InboundPath, s.Sid, s.From);
@@ -196,10 +221,6 @@ public sealed class VoiceSpokenCodeTests
         Assert.NotEqual("p2", (await s.Row()).Tier);
         var unclear = await Choose(s, "hmm what");
         Assert.NotNull(unclear.Descendants("Stream").SingleOrDefault());
-        Assert.Equal("p1", (await s.Row()).Tier);                                                      // unknown is option 1, as for an unknown key
-        using var s2 = new VoiceScenario(Number, Menu(), services: sv => sv.AddSingleton<IChainedPipelineParts>(new FakeParts("p2")));
-        await VoiceFactory.Hook(s2.C, VoiceEndpoints.InboundPath, s2.Sid, s2.From);
-        await Choose(s2, "three", digits: "2");
-        Assert.Equal("p2", (await s2.Row()).Tier);                                                     // the key, when there is one, is what counts
+        Assert.Equal("p1", (await s.Row()).Tier);                                                      // unknown is option 1, as before
     }
 }
