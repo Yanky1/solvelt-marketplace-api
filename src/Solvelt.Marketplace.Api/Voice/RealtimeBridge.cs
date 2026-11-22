@@ -36,6 +36,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     private const int BytesPerMs = 8;   // mu-law, 8000 samples per second, one byte each
     private readonly SemaphoreSlim _phoneSend = new(1, 1), _upSend = new(1, 1);
     private string? _streamSid, _itemId;
+    private bool _formatNoted;
     private long _speechStopped;
     private bool _endAfterResponse, _dtmfTransfer, _responseActive;
     /// <summary>What the PHONE is playing (marks SignalWire echoes), not what the model has generated: the model is "done" seconds before the phone is (V-12).</summary>
@@ -122,6 +123,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
         {
             case "start":
                 _streamSid = m.TryGetProperty("start", out var s) ? Str(s, "streamSid") : null;
+                if (m.TryGetProperty("start", out var startEl)) StreamFormat.Note(startEl, logger, call.Id, ref _formatNoted);   // V-38: one warning if the stream is not mu-law 8 kHz
                 _streamSid ??= Str(m, "streamSid");
                 _started.TrySetResult();
                 break;

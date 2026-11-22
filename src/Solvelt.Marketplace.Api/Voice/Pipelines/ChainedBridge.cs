@@ -31,6 +31,7 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
     private CancellationTokenSource? _turnCts;
     private Task _turn = Task.CompletedTask;
     private string? _streamSid;
+    private bool _formatNoted;
     private long _turnSeq, _audioBytesIn, _ttsChars, _llmIn, _llmOut, _lastUserEvent;
     private long? _cutPlayedMs;
     private LlmMessage? _lastAssistant;                      // the last answer added to the history, and what was spoken of it: a barge-in right after it was added still cuts it to what was heard
@@ -117,6 +118,7 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
         {
             case "start":
                 _streamSid = m.TryGetProperty("start", out var s) ? Str(s, "streamSid") : null;
+                if (m.TryGetProperty("start", out var startEl)) StreamFormat.Note(startEl, logger, call.Id, ref _formatNoted);   // V-38: one warning if the stream is not mu-law 8 kHz
                 _streamSid ??= Str(m, "streamSid");
                 _started.TrySetResult();
                 break;
