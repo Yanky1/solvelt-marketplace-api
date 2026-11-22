@@ -15,7 +15,7 @@ using Solvelt.Marketplace.Api.Voice;
 
 namespace Solvelt.Marketplace.Api.Tests;
 
-/// <summary>Caller identification (slice 2, decision V-03): a code texted to the number, typed on the keypad, never spoken and never near the model; caller ID alone authenticates nobody.</summary>
+/// <summary>Caller identification (slice 2, decision V-03): a code texted to the number, SPOKEN to the platform's own prompt (V-41: not typed, no keypad fallback), never near the model; caller ID alone authenticates nobody.</summary>
 public class VoiceIdentifyTests
 {
     private const string Email = "jane@example.com", Number = "+15551234567";
@@ -61,7 +61,9 @@ public class VoiceIdentifyTests
         Assert.Equal(6, code.Length);
         // SignalWire's next instruction collects the digits itself (not the model)
         var g = gather.Element("Gather")!;
-        Assert.Equal(("dtmf", "6"), (g.Attribute("input")!.Value, g.Attribute("numDigits")!.Value));
+        Assert.Equal(("speech", "en-US"), (g.Attribute("input")!.Value, g.Attribute("language")!.Value));       // said, not typed (V-41): no keypad fallback
+        Assert.Null(g.Attribute("numDigits")); Assert.Null(g.Attribute("finishOnKey"));
+        Assert.Equal(SpokenDigits.Hints, g.Attribute("hints")!.Value);                                           // digit words only: never the code
         Assert.Equal(VoiceFactory.BaseUrl + VoiceEndpoints.KeypadPath, g.Attribute("action")!.Value);
         Assert.Equal("true", g.Attribute("actionOnEmptyResult")!.Value);
         Assert.Equal(VoiceScripts.AskCode, g.Element("Say")!.Value);
@@ -107,7 +109,8 @@ public class VoiceIdentifyTests
         var code = s.LastCode();
         var wrong = code == "000000" ? "111111" : "000000";
         var (again, _) = await s.Type(wrong);
-        Assert.Equal(VoiceScripts.WrongCode, again.Element("Gather")!.Element("Say")!.Value);
+        Assert.Equal(VoiceScripts.WrongCodeHeard(wrong), again.Element("Gather")!.Element("Say")!.Value);        // the platform reads back what it HEARD (the caller's own attempt)
+        Assert.StartsWith("I heard " + SpokenDigits.ReadOut(wrong), again.Element("Gather")!.Element("Say")!.Value);
         Assert.False(s.State().VerifiedInThisCall);
         var (ok, token) = await s.Type(code);
         Assert.Equal(VoiceScripts.CodeOk, ok.Element("Say")!.Value);

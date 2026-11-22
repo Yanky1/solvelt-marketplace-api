@@ -3,7 +3,7 @@
 //   - SignalWire: this script signs the webhooks like SignalWire does (X-SignalWire-Signature) and acts as the bidirectional audio stream (a WebSocket client sending "start", "mark", "stop").
 //   - OpenAI Realtime: a tiny WebSocket server on Voice__OpenAiRealtimeUrl plays the model: it asks for the same tool calls a real call would (search, cart, identify, address, read-back, pay).
 //   - SMS: a tiny HTTP sink on SignalWire__ApiBaseUrl catches the texts (the code, the confirmation).
-//   - the keypad: the signed keypad webhook carries the SMS code, the read-back "yes" and the fake payment's "1".
+//   - the keypad webhook: the SMS code is SAID (the Gather is speech only, V-41), so the signed webhook carries it as a SpeechResult in words; the read-back "yes" and the fake payment's "1" are typed.
 // What is real: the API's voice module, its tools (catalog, cart, quote, checkout), the order, and the seller portal that must receive it (the same check as the product journey).
 // This is not a browser journey: no page is involved.
 import http from "node:http";
@@ -16,6 +16,8 @@ const run = L.uniq();
 const MUG = `Voicemug ${run}`;
 const FROM = "+15551230" + String(Math.floor(Math.random() * 900) + 100);   // a number nobody proved: the caller is a guest
 const SID = `CA${run}`;
+const DIGIT_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+const said = (digits) => [...digits].map((c) => DIGIT_WORDS[Number(c)]).join(" ");   // what the caller says for a code
 const PATHS = { inbound: "/api/v1/voice/signalwire/inbound", afterStream: "/api/v1/voice/signalwire/after-stream", keypad: "/api/v1/voice/signalwire/keypad" };
 
 // ---- a minimal WebSocket server (RFC 6455: text frames, ping, close) for the scripted upstream ----------------------------------------------------------------------------
@@ -168,7 +170,7 @@ async function main() {
     check(!added.error, `adding to the cart works (${JSON.stringify(added).slice(0, 120)})`);
     ok("one mug is in the guest's cart");
 
-    step("the code is texted and typed on the keypad (the model never hears it)");
+    step("the code is texted and SAID to the platform's own prompt (the model never hears it)");
     const ident = await tool("identify_caller");
     check(ident.status === "code_sent", "a code is sent");
     await endStreamAfterGoodbye();
@@ -176,9 +178,9 @@ async function main() {
     check(after.status === 200 && /<Gather/.test(after.text), "after the stream the platform asks for the code");
     const code = await until("the code text", () => sms.sent.filter((m) => m.to === FROM).map((m) => /\b(\d{6})\b/.exec(m.body)?.[1]).find(Boolean) ?? null, { timeout: 10_000, every: 50 });
     check(sms.sent[0].auth?.startsWith("Basic "), "the SMS provider is called with basic auth");
-    let kp = await hook(PATHS.keypad, { Digits: "000000" });
+    let kp = await hook(PATHS.keypad, { SpeechResult: said("000000") });
     check(/<Gather/.test(kp.text) && !streamUrlOf(kp.text), "a wrong code asks again and does not resume the call");
-    kp = await hook(PATHS.keypad, { Digits: code });
+    kp = await hook(PATHS.keypad, { SpeechResult: said(code) });
     check(streamUrlOf(kp.text), "the right code resumes the call with a fresh stream");
     await attach(streamUrlOf(kp.text));
     ok("verified as a guest by SMS code");
@@ -224,7 +226,7 @@ async function main() {
 
     step("what the model never saw");
     const everything = JSON.stringify(upstream.connections.flatMap((c) => c.received));
-    for (const secret of ["11201", email, code, "\"digit\""]) check(!everything.includes(secret), `the model session never contained ${secret === code ? "the SMS code" : secret}`);
+    for (const secret of ["11201", email, code, said(code), "\"digit\""]) check(!everything.includes(secret), `the model session never contained ${secret === code ? "the SMS code" : secret}`);
     ok("no address, no email, no code and no keypad digit went upstream");
 
     step("the order is in the seller portal (the same check as the product journey)");

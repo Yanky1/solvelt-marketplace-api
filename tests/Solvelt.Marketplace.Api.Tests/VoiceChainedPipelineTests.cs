@@ -197,7 +197,7 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         Assert.True(await _phone.WaitClosed());
         // SignalWire's next instruction collects the digits ITSELF; the chained pipeline paused the call, it did not end it
         var gather = (await S.AfterStream()).Element("Gather")!;
-        Assert.Equal("dtmf", gather.Attribute("input")!.Value);
+        Assert.Equal("speech", gather.Attribute("input")!.Value);                                                   // the code is SAID to SignalWire's recogniser (V-41), no keypad
         Assert.Null((await S.Row()).EndedAt);
         var (resume, _) = await S.Type(code);
         Assert.Equal(VoiceScripts.CodeOk, resume.Element("Say")!.Value);

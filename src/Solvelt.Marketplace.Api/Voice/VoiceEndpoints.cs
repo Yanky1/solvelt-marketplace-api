@@ -159,8 +159,8 @@ public static class VoiceEndpoints
 
     /// <summary>The menu: the available options read out with their descriptions (decision V-32). A digit during the reading selects at once; star reads it again.</summary>
     private static XElement GatherPipeline(VoiceOptions v, VoicePipelineRegistry registry)
-        => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", 1), new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds),
-            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Compose(v.PipelineMenu, VoicePipelineIds.All.Where(registry.IsAvailable).ToList())));
+        => new("Gather", new XAttribute("input", "dtmf speech"), new XAttribute("numDigits", 1), new XAttribute("language", v.SignalWireSpeech.Language), new XAttribute("speechTimeout", "auto"), new XAttribute("hints", SpokenDigits.Hints + ", again"),
+            new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Compose(v.PipelineMenu, VoicePipelineIds.All.Where(registry.IsAvailable).ToList())));
 
     /// <summary>The caller's choice on the test-line menu: unknown or empty is option 1, an option whose pipeline is not configured says so and is option 1. The choice is recorded in the call's tier column and fixed for the call.</summary>
     private static async Task<IResult> PipelineChoice(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)
@@ -176,6 +176,7 @@ public static class VoiceEndpoints
         if (!PipelineMenu.Offered(v, from, to) || states.GetOrCreate(call.Id).Connections > 0)
             return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
         form.TryGetValue("Digits", out var digits);
+        if (string.IsNullOrWhiteSpace(digits) && form.TryGetValue("SpeechResult", out var saidChoice)) digits = SpokenDigits.Choice(saidChoice);   // V-41: a spoken number ("two", "option two") is the same as the key
         // star: read the list again (nothing is chosen)
         if (digits?.Trim() == "*") return Cxml(new XElement("Response", GatherPipeline(v, registry)));
         var option = VoicePipelineIds.FromDigits(digits);
@@ -256,8 +257,16 @@ public static class VoiceEndpoints
 
     /// <summary>The caller types the six-digit code on the keypad; SignalWire, not the model, collects the digits and posts them to us.</summary>
     private static XElement GatherCode(VoiceOptions v, string prompt)
-        => new("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", PhoneCodeService.Digits), new XAttribute("timeout", 20), new XAttribute("finishOnKey", "#"),
-            new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", prompt));
+    {
+        // decision V-41: the code is SAID to SignalWire's own recogniser (not typed, and no keypad fallback by Ronald's choice); the stream is not running, so no model and no other vendor hears it
+        var s = v.SignalWireSpeech;
+        var g = new XElement("Gather", new XAttribute("input", "speech"), new XAttribute("language", s.Language), new XAttribute("speechTimeout", s.SpeechTimeout.ToLowerInvariant()), new XAttribute("timeout", 20),
+            new XAttribute("hints", SpokenDigits.Hints), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath));
+        if (s.Enhanced) g.Add(new XAttribute("enhanced", "true"));
+        if (s.SpeechModel.Length > 0) g.Add(new XAttribute("speechModel", s.SpeechModel));
+        g.Add(new XElement("Say", prompt));
+        return g;
+    }
 
     /// <summary>A PIN typed on the keypad, any length, ended with pound. The digits go to the keypad endpoint only: never to the model, never to a log.</summary>
     private static XElement GatherPin(VoiceOptions v, string prompt)
@@ -475,8 +484,11 @@ public static class VoiceEndpoints
             state.SetTask(yes ? "confirmed" : "order");
             return Cxml(new XElement("Response", new XElement("Say", yes ? VoiceScripts.ConfirmThanks : VoiceScripts.ConfirmChange), Resume(v, tokens, call.Id, state)));
         }
-        var result = codes.Verify(state, typed);
-        if (result == CodeResult.Wrong) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.WrongCode)));
+        // the verification code is spoken (V-41): the digits come ONLY from what was said; a "Digits" field is ignored (no keypad fallback). They are checked here and never logged, stored or given to a model.
+        form.TryGetValue("SpeechResult", out var saidCode);
+        var heardDigits = SpokenDigits.Parse(saidCode);
+        var result = codes.Verify(state, heardDigits);
+        if (result == CodeResult.Wrong) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.WrongCodeHeard(heardDigits))));
         var challenge = state.Challenge;
         if (state.LastChallengePurpose == "phone_change")
         {
