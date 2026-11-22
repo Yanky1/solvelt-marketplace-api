@@ -101,6 +101,12 @@ public sealed class DeepgramOptions
     public string ApiKey { get; set; } = "";     // secret
     public string Model { get; set; } = "nova-3";
     public string Language { get; set; } = "en";
+    /// <summary>Most catalog terms sent as <c>keyterm</c> (V-37). Deepgram suggests staying well under its 500-token limit: "focus on the most important 20-50 terms". 0 sends none.</summary>
+    public int KeytermMax { get; set; } = 40;
+    /// <summary>Send <c>redact_usage=true</c> with keyterms: otherwise Deepgram stores them in usage records (its docs).</summary>
+    public bool RedactUsage { get; set; } = true;
+    /// <summary><c>endpointing</c> in milliseconds (Deepgram's guidance: 300-500 for speakers who pause mid-thought). 0: not sent, Deepgram's default (10 ms).</summary>
+    public int EndpointingMs { get; set; }
 }
 
 /// <summary><c>Voice:ElevenLabs</c>: streaming text to speech (options p2 and p3).</summary>
@@ -122,6 +128,14 @@ public sealed class GladiaOptions
     public string ApiKey { get; set; } = "";     // secret
     public string Model { get; set; } = "solaria-1";     // the only model live transcription supports
     public string Language { get; set; } = "yi";
+    /// <summary>Most catalog terms sent as custom vocabulary (V-37). Gladia compares every word with every entry, so long lists add false positives: keep it short. 0 sends none.</summary>
+    public int VocabularyMax { get; set; } = 30;
+    /// <summary><c>default_intensity</c> of the vocabulary (0 to 1; Gladia suggests starting at 0.4, range 0.4-0.6).</summary>
+    public double VocabularyIntensity { get; set; } = 0.4;
+    /// <summary>Gladia's call-centre preset (its recommended-parameters page): <c>endpointing</c> 0.2-0.4 s. 0: not sent (default 0.05 s).</summary>
+    public double EndpointingSeconds { get; set; }
+    /// <summary><c>maximum_duration_without_endpointing</c> in seconds (preset: 15; range 5-60). 0: not sent (default 5).</summary>
+    public int MaxSecondsWithoutEndpointing { get; set; }
 }
 
 /// <summary><c>Voice:YiddishLabs</c>: Yiddish speech to text (Flash, one request per caller turn) and realtime text to speech (options p4 and p5). The vendor has no streaming recogniser and its voice is a preview.</summary>
@@ -133,6 +147,8 @@ public sealed class YiddishLabsOptions
     public string SttLanguage { get; set; } = "yi";
     /// <summary>Optional words that bias the start of the transcription (product names).</summary>
     public string SttPrompt { get; set; } = "";
+    /// <summary>Append the catalog vocabulary to the Flash <c>prompt</c> (V-37), after <see cref="SttPrompt"/>, within 500 characters in all. Unmeasured for Yiddish: switch off if it hurts.</summary>
+    public bool CatalogInPrompt { get; set; } = true;
     /// <summary>The rate of the WAV that is uploaded: 8000 (as the telephone sends it) or 16000 (up-sampled). Whether 8 kHz is accepted is OPEN until a key exists.</summary>
     public int UploadSampleRate { get; set; } = 8000;
     /// <summary>Silence that ends a caller's turn: the recogniser only takes whole recordings, so the adapter listens for the end of speech itself.</summary>

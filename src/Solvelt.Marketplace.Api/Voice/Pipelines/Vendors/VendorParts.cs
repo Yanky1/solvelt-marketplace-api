@@ -195,6 +195,7 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         var p6 = Ready("p6");
         if (!p2 && !p3 && !p4 && !p5 && !p6) yield break;
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
+        var vocab = sp.GetService<IVoiceVocabulary>();   // the shared catalog words (V-37); none when the provider is not registered
         var http = sp.GetRequiredService<IHttpClientFactory>();
         // the chained options' text model: Claude by default (decision V-33), OpenAI when configured. Claude's client is the SDK's, which only ever talks to api.anthropic.com
         var claude = LlmProviders.IsAnthropic(v.Pipelines.Llm.Provider) || LlmProviders.IsAnthropic(VoicePipelineVendors.JudgeProvider(v))
@@ -208,21 +209,21 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         if (p2 || p3)
         {
             var tts = new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs"));
-            if (p2) yield return new VendorChainedParts("p2", new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram")), tts, llm, silence);
-            if (p3) yield return new VendorChainedParts("p3", new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia")), tts, llm, silence);
+            if (p2) yield return new VendorChainedParts("p2", new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram"), vocab), tts, llm, silence);
+            if (p3) yield return new VendorChainedParts("p3", new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"), vocab), tts, llm, silence);
         }
         if (p4)
-            yield return new VendorChainedParts("p4", new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")),
+            yield return new VendorChainedParts("p4", new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"), vocab),
                 new YiddishLabsTts(v.YiddishLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")), llm, () => new FinalTurnDetector());   // the recogniser already waited for the end of speech
         if (p5)
         {
             // Gladia is the primary engine (it alone reports speech start, partials and speech end). Flash is only contacted when the owner has switched YiddishLabsInJudge on (Terms section 6): until then p5 is
             // Gladia for the words and Yiddish Labs for the voice only, and no audio or text of the caller goes to the Flash recogniser.
-            var gladia = new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"));
+            var gladia = new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"), vocab);
             IStreamingStt stt = gladia;
             if (v.Pipelines.P5.YiddishLabsInJudge)
             {
-                var flash = new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"));
+                var flash = new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"), vocab);
                 ITranscriptJudge judge = LlmProviders.IsAnthropic(VoicePipelineVendors.JudgeProvider(v))
                     ? new AnthropicTranscriptJudge(claude!, string.IsNullOrWhiteSpace(v.Pipelines.P5.JudgeModel) ? AnthropicDefaults.JudgeModel : v.Pipelines.P5.JudgeModel.Trim())
                     : new OpenAiTranscriptJudge(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.P5.JudgeModel);

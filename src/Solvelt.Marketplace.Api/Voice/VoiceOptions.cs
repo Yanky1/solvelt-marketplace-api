@@ -28,6 +28,10 @@ public sealed class VoiceOptions
     public string OpenAiVoice { get; set; } = "cedar";
     /// <summary><c>server_vad</c> or <c>semantic_vad</c>.</summary>
     public string TurnDetection { get; set; } = "semantic_vad";
+    /// <summary><c>eagerness</c> of <c>semantic_vad</c>: <c>low</c>, <c>medium</c>, <c>high</c> or <c>auto</c> (= medium). OpenAI: "low will wait longer for the user to continue speaking"; max timeouts 8 s, 4 s, 2 s for low, medium, high. Low by default (V-37): callers pause mid-thought. Ignored with server_vad.</summary>
+    public string Eagerness { get; set; } = "low";
+    /// <summary>Input noise reduction of the Realtime line: <c>near_field</c>, <c>far_field</c> or <c>none</c>. OpenAI says near_field is "for close-talking microphones such as headphones" and does not say which suits a phone call: near_field is OUR INFERENCE (a handset sits close to the mouth), so it is a setting (V-37).</summary>
+    public string NoiseReduction { get; set; } = "near_field";
     /// <summary>A tool slower than this many milliseconds makes the agent say a short natural filler first: never silence.</summary>
     public int ToolFillerMs { get; set; } = 700;
     public string OpenAiRealtimeUrl { get; set; } = "wss://api.openai.com/v1/realtime";
@@ -132,6 +136,8 @@ public static class VoiceConfig
         if (!new[] { "full", "mini", "split" }.Contains(v.ModelMode)) p.Add("Voice:ModelMode must be full, mini or split.");
         if (v.MiniPercent is < 0 or > 100) p.Add("Voice:MiniPercent must be between 0 and 100.");
         if (!new[] { "server_vad", "semantic_vad" }.Contains(v.TurnDetection)) p.Add("Voice:TurnDetection must be server_vad or semantic_vad.");
+        if (!new[] { "low", "medium", "high", "auto" }.Contains(v.Eagerness)) p.Add("Voice:Eagerness must be low, medium, high or auto.");
+        if (!new[] { "near_field", "far_field", "none" }.Contains(v.NoiseReduction)) p.Add("Voice:NoiseReduction must be near_field, far_field or none.");
         VoicePipelineVendors.Problems(v, p);
         var m = v.PipelineMenu;
         if (m.Enabled && m.TestNumbers.Any(n => Infrastructure.PhoneNumbers.ToE164(n) is null)) p.Add("Voice:PipelineMenu:TestNumbers must all be phone numbers (E.164, like +15551234567).");

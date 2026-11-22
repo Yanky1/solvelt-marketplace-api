@@ -13,11 +13,28 @@ namespace Solvelt.Marketplace.Api.Voice;
 /// answers a one-time WebSocket address, which is only followed when it is <c>wss</c> on <c>api.gladia.io</c>. The telephone's mu-law 8 kHz goes in as it comes (<c>wav/ulaw</c>, 8000 Hz, 8 bit): no conversion.
 /// What the caller says is held in memory for the turn; this class logs counts and exception types, never text.
 /// </summary>
-public sealed class GladiaStt(GladiaOptions options, HttpClient http, IVendorSocketConnector connector, ILogger log) : IStreamingStt
+public sealed class GladiaStt(GladiaOptions options, HttpClient http, IVendorSocketConnector connector, ILogger log, IVoiceVocabulary? vocabulary = null) : IStreamingStt
 {
     internal static readonly Uri InitAddress = new("https://api.gladia.io/v2/live");
 
-    internal static JsonObject InitBody(GladiaOptions o) => new()
+    internal static JsonObject InitBody(GladiaOptions o, IReadOnlyList<string>? terms = null)
+    {
+        var body = InitBodyBase(o);
+        if (terms is { Count: > 0 } && o.VocabularyMax > 0)
+        {
+            // BOTH the flag and the config are needed (Gladia: "Always provide both"); it is post-processing matched after transcription, and long lists add false positives, so the list is short
+            body["realtime_processing"] = new JsonObject
+            {
+                ["custom_vocabulary"] = true,
+                ["custom_vocabulary_config"] = new JsonObject { ["vocabulary"] = new JsonArray(terms.Take(o.VocabularyMax).Select(t => (JsonNode?)JsonValue.Create(t)).ToArray()), ["default_intensity"] = Math.Clamp(o.VocabularyIntensity, 0, 1) },
+            };
+        }
+        if (o.EndpointingSeconds > 0) body["endpointing"] = Math.Clamp(o.EndpointingSeconds, 0.01, 10);
+        if (o.MaxSecondsWithoutEndpointing > 0) body["maximum_duration_without_endpointing"] = Math.Clamp(o.MaxSecondsWithoutEndpointing, 5, 60);
+        return body;
+    }
+
+    private static JsonObject InitBodyBase(GladiaOptions o) => new()
     {
         ["model"] = o.Model, ["encoding"] = "wav/ulaw", ["bit_depth"] = 8, ["sample_rate"] = 8000, ["channels"] = 1,
         ["language_config"] = new JsonObject { ["languages"] = new JsonArray(o.Language), ["code_switching"] = false },
@@ -38,7 +55,7 @@ public sealed class GladiaStt(GladiaOptions options, HttpClient http, IVendorSoc
 
     public async Task<ISttSession> OpenAsync(CancellationToken ct)
     {
-        using var msg = new HttpRequestMessage(HttpMethod.Post, InitAddress) { Content = new StringContent(InitBody(options).ToJsonString(), Encoding.UTF8, "application/json") };
+        using var msg = new HttpRequestMessage(HttpMethod.Post, InitAddress) { Content = new StringContent(InitBody(options, vocabulary?.Terms).ToJsonString(), Encoding.UTF8, "application/json") };
         msg.Headers.Add("x-gladia-key", options.ApiKey);
         using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
         wait.CancelAfter(TimeSpan.FromSeconds(10));

@@ -54,6 +54,24 @@ public sealed class CatalogVocabulary(IServiceScopeFactory scopes, IOptions<Voic
         return sb.ToString();
     }
 
+    /// <summary>A free-text recogniser prompt: the configured prompt as written, then (when there are terms) the catalog terms after it, whole terms only, within <paramref name="maxChars"/>. A prompt already longer than the limit is cut, never the terms.</summary>
+    internal static string Prompt(string? configured, IReadOnlyList<string>? terms, int maxChars)
+    {
+        var sb = new StringBuilder((configured ?? "").Trim());
+        if (sb.Length > maxChars) sb.Length = maxChars;
+        if (terms is null || terms.Count == 0) return sb.ToString();
+        var first = true;
+        foreach (var raw in terms)
+        {
+            var t = Clean(raw);
+            if (t.Length == 0) continue;
+            var lead = first ? (sb.Length == 0 ? "" : " Words: ") : ", ";
+            if (sb.Length + lead.Length + t.Length > maxChars) continue;
+            sb.Append(lead).Append(t); first = false;
+        }
+        return sb.ToString();
+    }
+
     /// <summary>Plain text only: letters, digits, spaces, hyphen, apostrophe and ampersand; at most 40 characters.</summary>
     internal static string Clean(string s)
     {

@@ -12,12 +12,12 @@ namespace Solvelt.Marketplace.Api.Voice;
 /// back as one <c>Final</c>. What is said is held in memory for the turn only: nothing is written, logged or kept, and the vendor's own statement is that audio is processed in memory (relayed, V-22).
 /// The site's other transcription endpoints (which bill a minute and store transcripts) are never called.
 /// </summary>
-public sealed class YiddishLabsFlashStt(YiddishLabsOptions options, HttpClient http, ILogger log) : IStreamingStt
+public sealed class YiddishLabsFlashStt(YiddishLabsOptions options, HttpClient http, ILogger log, IVoiceVocabulary? vocabulary = null) : IStreamingStt
 {
     internal static readonly Uri Endpoint = new($"https://{VendorHosts.YiddishLabsFlash}/v1/audio/transcriptions");
     private const int FrameBytes = 160, FrameMs = 20, LoudFramesToStart = 3, PreRollFrames = 15, MaxUtteranceMs = 15_000, MinSpeechMs = 200;
 
-    public Task<ISttSession> OpenAsync(CancellationToken ct) => Task.FromResult<ISttSession>(new Session(options, http, log));
+    public Task<ISttSession> OpenAsync(CancellationToken ct) => Task.FromResult<ISttSession>(new Session(options, http, log, vocabulary));
 
     private sealed class Session : ISttSession
     {
@@ -31,7 +31,8 @@ public sealed class YiddishLabsFlashStt(YiddishLabsOptions options, HttpClient h
         private readonly List<short> _utterance = [];
         private bool _inSpeech, _failed; private int _loudRun, _silenceMs, _utteranceMs, _speechMs, _uploadsDone;
 
-        public Session(YiddishLabsOptions o, HttpClient http, ILogger log) { _o = o; _http = http; _log = log; _worker = Task.Run(UploadLoopAsync); }
+        private readonly IVoiceVocabulary? _vocab;
+        public Session(YiddishLabsOptions o, HttpClient http, ILogger log, IVoiceVocabulary? vocabulary = null) { _o = o; _http = http; _log = log; _vocab = vocabulary; _worker = Task.Run(UploadLoopAsync); }
 
         public ValueTask SendAudioAsync(ReadOnlyMemory<byte> mulaw8k, CancellationToken ct)
         {
@@ -105,7 +106,8 @@ public sealed class YiddishLabsFlashStt(YiddishLabsOptions options, HttpClient h
                 var file = new ByteArrayContent(wav); file.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
                 form.Add(file, "file", "turn.wav");
                 form.Add(new StringContent(_o.SttModel), "model"); form.Add(new StringContent(_o.SttLanguage), "language"); form.Add(new StringContent("json"), "response_format");
-                if (!string.IsNullOrWhiteSpace(_o.SttPrompt)) form.Add(new StringContent(_o.SttPrompt), "prompt");
+                var prompt = CatalogVocabulary.Prompt(_o.SttPrompt, _o.CatalogInPrompt ? _vocab?.Terms : null, 500);
+                if (prompt.Length > 0) form.Add(new StringContent(prompt), "prompt");
                 using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint) { Content = form };
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _o.FlashApiKey);
                 using var resp = await _http.SendAsync(req, ct);

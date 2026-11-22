@@ -9,14 +9,36 @@ namespace Solvelt.Marketplace.Api.Voice;
 /// Deepgram streaming speech to text (option p2). One WebSocket per call to <c>wss://api.deepgram.com/v1/listen</c>; the telephone's G.711 mu-law 8 kHz goes in as it comes (<c>encoding=mulaw</c>, <c>sample_rate=8000</c>),
 /// so nothing is converted. The key travels in the <c>Authorization</c> header only, never in the address. What the caller says is held in memory for the turn: this class logs counts and exception types, never text.
 /// </summary>
-public sealed class DeepgramStt(DeepgramOptions options, IVendorSocketConnector connector, ILogger log) : IStreamingStt
+public sealed class DeepgramStt(DeepgramOptions options, IVendorSocketConnector connector, ILogger log, IVoiceVocabulary? vocabulary = null) : IStreamingStt
 {
-    internal static Uri Address(DeepgramOptions o) => new($"wss://{VendorHosts.Deepgram}/v1/listen?model={Uri.EscapeDataString(o.Model)}&language={Uri.EscapeDataString(o.Language)}"
-        + "&encoding=mulaw&sample_rate=8000&channels=1&interim_results=true&vad_events=true&utterance_end_ms=1000");
+    /// <summary>Total characters of keyterms we send. Deepgram limits keyterms to 500 TOKENS and does not say how it counts them; at roughly four characters a token this stays far under it.</summary>
+    internal const int KeytermCharBudget = 1200;
+
+    /// <summary>Keyterms exist only for Nova-3 and Flux (Deepgram's keyterm page); other models would need the legacy <c>keywords</c>, which we do not send.</summary>
+    internal static bool SupportsKeyterms(string model) => model.StartsWith("nova-3", StringComparison.OrdinalIgnoreCase) || model.StartsWith("flux", StringComparison.OrdinalIgnoreCase);
+
+    internal static Uri Address(DeepgramOptions o, IReadOnlyList<string>? terms = null)
+    {
+        var url = $"wss://{VendorHosts.Deepgram}/v1/listen?model={Uri.EscapeDataString(o.Model)}&language={Uri.EscapeDataString(o.Language)}"
+            + "&encoding=mulaw&sample_rate=8000&channels=1&interim_results=true&vad_events=true&utterance_end_ms=1000";
+        if (o.EndpointingMs > 0) url += "&endpointing=" + Math.Clamp(o.EndpointingMs, 10, 2000);
+        if (terms is { Count: > 0 } && SupportsKeyterms(o.Model))
+        {
+            // one parameter per term, never joined by commas or semicolons (those silently boost nothing); a phrase is one term, escaped with %20
+            var used = 0; var n = 0;
+            foreach (var t in terms)
+            {
+                if (n >= Math.Max(0, o.KeytermMax) || used + t.Length > KeytermCharBudget) break;
+                url += "&keyterm=" + Uri.EscapeDataString(t); used += t.Length; n++;
+            }
+            if (n > 0 && o.RedactUsage) url += "&redact_usage=true";   // otherwise the keyterms land in Deepgram's usage records
+        }
+        return new Uri(url);
+    }
 
     public async Task<ISttSession> OpenAsync(CancellationToken ct)
     {
-        var ws = await connector.ConnectAsync(Address(options), new Dictionary<string, string> { ["Authorization"] = "Token " + options.ApiKey }, ct);
+        var ws = await connector.ConnectAsync(Address(options, vocabulary?.Terms), new Dictionary<string, string> { ["Authorization"] = "Token " + options.ApiKey }, ct);
         return new Session(ws, log);
     }
 
