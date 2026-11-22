@@ -74,6 +74,8 @@ public sealed class VoiceOptions
     public YiddishLabsOptions YiddishLabs { get; set; } = new();
     /// <summary>Option 6: SignalWire's own speech recognition, one <c>Gather</c> per turn (decision V-35).</summary>
     public SignalWireSpeechOptions SignalWireSpeech { get; set; } = new();
+    /// <summary>The catalog words every recogniser is told to listen for (decision V-36).</summary>
+    public VocabularyOptions Vocabulary { get; set; } = new();
 }
 
 public sealed class SignalWireOptions

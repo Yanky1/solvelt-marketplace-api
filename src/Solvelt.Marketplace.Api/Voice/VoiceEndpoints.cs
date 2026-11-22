@@ -53,14 +53,15 @@ public static class VoiceEndpoints
         => state.SpeechMode ? [new XElement("Redirect", new XAttribute("method", "POST"), v.PublicBaseUrl!.TrimEnd('/') + SpeechPath + "?r=1")] : StreamParts(v, tokens, callId);
 
     /// <summary>The listening part of an option 6 turn (decision V-35): SignalWire's own recogniser hears the caller, and the reply is spoken inside the Gather so speech or a key ends it (barge-in).</summary>
-    private static XElement GatherSpeech(VoiceOptions v, string? say)
+    private static XElement GatherSpeech(VoiceOptions v, IVoiceVocabulary vocabulary, string? say)
     {
         var s = v.SignalWireSpeech;
         var g = new XElement("Gather", new XAttribute("input", "speech dtmf"), new XAttribute("numDigits", 1), new XAttribute("language", s.Language), new XAttribute("speechTimeout", s.SpeechTimeout.ToLowerInvariant()),
             new XAttribute("timeout", s.NoInputSeconds), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + SpeechPath));
         if (s.Enhanced) g.Add(new XAttribute("enhanced", "true"));
         if (s.SpeechModel.Length > 0) g.Add(new XAttribute("speechModel", s.SpeechModel));
-        if (s.Hints.Length > 0) g.Add(new XAttribute("hints", s.Hints));
+        var hints = vocabulary.Hints(s.Hints, SignalWireSpeechOptions.MaxHintsChars);   // the static words first, then the catalog's (V-36); bounded
+        if (hints.Length > 0) g.Add(new XAttribute("hints", hints));
         if (!string.IsNullOrWhiteSpace(say)) g.Add(SaySpeech(v, say));
         return g;
     }
@@ -78,7 +79,7 @@ public static class VoiceEndpoints
     /// <see cref="AfterStreamPath"/>, which already knows how to run each. No words are stored or logged. The first turn (<c>?first=1</c>) is the greeting; if the text model cannot answer it the call is handed to
     /// the Realtime line, as for any other option (V-25); a later failure ends the call with the platform's apology.
     /// </summary>
-    private static async Task<IResult> SpeechTurn(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, SpeechTurns turns, TimeProvider time, CancellationToken ct)
+    private static async Task<IResult> SpeechTurn(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, SpeechTurns turns, IVoiceVocabulary vocabulary, TimeProvider time, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -106,7 +107,7 @@ public static class VoiceEndpoints
                 // nothing was said (or only a key): ask again twice, then end politely
                 var empties = state.NoteSpeechTurn(true);
                 if (empties >= 3) { await store.EndAsync(call.Id, Data.VoiceOutcome.Abandoned, CancellationToken.None); return Cxml(new XElement("Response", SaySpeech(v, SpeechScripts.Goodbye), new XElement("Hangup"))); }
-                return Cxml(new XElement("Response", GatherSpeech(v, empties == 1 ? SpeechScripts.Reprompt : SpeechScripts.StillThere)));
+                return Cxml(new XElement("Response", GatherSpeech(v, vocabulary, empties == 1 ? SpeechScripts.Reprompt : SpeechScripts.StillThere)));
             }
             state.NoteSpeechTurn(false);
         }
@@ -130,7 +131,7 @@ public static class VoiceEndpoints
             if (state.KeypadStep is null) await store.EndAsync(call.Id, Data.VoiceOutcome.Abandoned, CancellationToken.None);   // (a transfer or an off-topic end keeps the outcome the tool set)
             return Cxml(new XElement("Response", result.Reply.Length > 0 && !result.EndNow ? SaySpeech(v, result.Reply) : null, afterStream));
         }
-        return Cxml(new XElement("Response", GatherSpeech(v, result.Reply.Length > 0 ? result.Reply : SpeechScripts.Reprompt)));
+        return Cxml(new XElement("Response", GatherSpeech(v, vocabulary, result.Reply.Length > 0 ? result.Reply : SpeechScripts.Reprompt)));
     }
 
     private static async Task<IResult> Inbound(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)

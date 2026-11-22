@@ -47,19 +47,21 @@ public sealed class P6Options { public bool Enabled { get; set; } }
 
 /// <summary>
 /// Option 6 settings (<c>Voice:SignalWireSpeech</c>, decision V-35): what the cXML <c>Gather input="speech"</c> asks SignalWire for. No secret: it uses the SignalWire project the line already has.
-/// Defaults are SignalWire's own (language en-US, speechTimeout auto); <see cref="Enhanced"/> costs extra and is off.
+/// Defaults (decision V-36): language en-US, speechTimeout auto, <see cref="Enhanced"/> on and <see cref="SpeechModel"/> phone_call (the 8 kHz model), as the orchestrator's research recommended for telephone audio; enhanced costs extra.
 /// </summary>
 public sealed class SignalWireSpeechOptions
 {
     public string Language { get; set; } = "en-US";
-    public bool Enhanced { get; set; }
+    public bool Enhanced { get; set; } = true;
     /// <summary>The <c>speechModel</c> attribute (for example phone_call, the 8 kHz model). Empty: SignalWire's default.</summary>
-    public string SpeechModel { get; set; } = "";
+    public string SpeechModel { get; set; } = "phone_call";
     /// <summary>Seconds of silence that end the caller's turn, or <c>auto</c>.</summary>
     public string SpeechTimeout { get; set; } = "auto";
     /// <summary>The <c>voice</c> of the spoken reply (a SignalWire Say voice string). Empty: the default voice.</summary>
     public string Voice { get; set; } = "";
-    /// <summary>Words SignalWire should favour, comma separated (the <c>hints</c> attribute). Static: nothing is looked up per turn.</summary>
+    /// <summary>The longest <c>hints</c> attribute we send (static words plus catalog words, V-36).</summary>
+    public const int MaxHintsChars = 500;
+    /// <summary>Words SignalWire should always favour, comma separated; the catalog's words (<see cref="IVoiceVocabulary"/>) are added after them, up to <see cref="MaxHintsChars"/>.</summary>
     public string Hints { get; set; } = "";
     /// <summary>Seconds to wait for the caller to start speaking before the line asks again.</summary>
     public int NoInputSeconds { get; set; } = 8;
