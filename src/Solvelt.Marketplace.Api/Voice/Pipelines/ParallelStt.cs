@@ -23,7 +23,12 @@ public interface ITranscriptJudge
 public sealed class ParallelStt : IStreamingStt
 {
     /// <summary>A test seam: how many finals the coordinator has taken from the engines so far (opening a round, joining one, or dropping a late one). A test that moves the fake clock must first wait until the coordinator has consumed what it emitted, or the clock outruns the thread pool and the test measures the speed of the machine.</summary>
-    internal interface IProbe { int FinalsSeen { get; } }
+    internal interface IProbe
+    {
+        int FinalsSeen { get; }
+        /// <summary>A test seam: how many rounds have asked their judges AND armed the budget wait (every judge has been entered, so any fake-clock delay of a judge is registered, and the budget timers exist). A test that moves the fake clock after a round was completed must first wait for this, or the clock can outrun the thread pool and a judge's delay is measured from a later time than the budget.</summary>
+        int DecisionsArmed { get; }
+    }
 
     private readonly IReadOnlyList<(string Name, IStreamingStt Stt)> engines;
     private readonly IReadOnlyList<ITranscriptJudge> judges;
@@ -52,6 +57,8 @@ public sealed class ParallelStt : IStreamingStt
     {
         private int _finalsSeen;
         public int FinalsSeen => Volatile.Read(ref _finalsSeen);
+        private int _decisionsArmed;
+        public int DecisionsArmed => Volatile.Read(ref _decisionsArmed);
         private readonly ParallelStt _o;
         private readonly List<ISttSession?> _engines;
         private readonly Channel<(int Engine, SttEvent Event)> _merged = Channel.CreateUnbounded<(int, SttEvent)>();
@@ -156,7 +163,9 @@ public sealed class ParallelStt : IStreamingStt
                 try { return await j.JudgeAsync(candidates, link.Token); }
                 catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested) { _o.log?.LogWarning("A transcript judge failed or ran out of time ({Type}); the fallback text is used.", ex.GetType().Name); return null; }
             }).ToList();
-            try { await Task.WhenAll(asks).WaitAsync(remaining, _o.time, ct); }
+            var answered = Task.WhenAll(asks).WaitAsync(remaining, _o.time, ct);
+            Interlocked.Increment(ref _decisionsArmed);   // the judges have been entered and both budget timers exist: see IProbe
+            try { await answered; }
             catch (TimeoutException) { /* the budget is spent: whoever has answered counts, the rest is dropped */ }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
             foreach (var ask in asks)   // judges in priority order; the first real answer wins

@@ -82,6 +82,17 @@ public class VoicePipelineUnitTests
             return r;
         }
 
+        /// <summary>
+        /// Waits (real time) until <paramref name="rounds"/> rounds have asked their judges and armed the budget. Call it after the final that completes a round and BEFORE moving the fake clock: the judges run on the thread
+        /// pool, and a judge that enters after the clock has moved registers its fake-clock delay at a later time than the budget (the test then measures the speed of the build agent).
+        /// </summary>
+        public async Task Armed(int rounds = 1)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (((ParallelStt.IProbe)Session).DecisionsArmed < rounds && DateTime.UtcNow < deadline) await Task.Delay(2);
+            Assert.True(((ParallelStt.IProbe)Session).DecisionsArmed >= rounds, "the judges were not asked within 10 s");
+        }
+
         public async Task Pump(int ms) { for (var i = 0; i < ms / 10; i++) { Time.Advance(TimeSpan.FromMilliseconds(10)); await Task.Delay(1); } await Task.Delay(20); }
         public List<SttEvent> Finals() { lock (Out) return Out.Where(e => e.Kind == SttEventKind.Final).ToList(); }
 
@@ -160,6 +171,7 @@ public class VoicePipelineUnitTests
         var slow = new FakeJudge(async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return new JudgeResult("never"); });
         await using var r = await Rig.Open([slow], waitMs: 500, budgetMs: 1200);
         await r.Final(r.A, "alpha text"); await r.Final(r.B, "beta text");
+        await r.Armed();
         await r.Pump(1100);
         Assert.Empty(r.Finals());                                                                                // the judge still has time
         await r.Pump(200);
@@ -174,6 +186,7 @@ public class VoicePipelineUnitTests
         var stubborn = new FakeJudge((_, _) => gate.Task);                                                      // never looks at the token
         await using var r = await Rig.Open([stubborn], waitMs: 500, budgetMs: 1200);
         await r.Final(r.A, "alpha text"); await r.Final(r.B, "beta text");
+        await r.Armed();
         await r.Pump(1300);
         Assert.Equal("alpha text", Assert.Single(await r.WaitForFinals(1)).Text);
         gate.SetResult(new JudgeResult("far too late"));
@@ -195,6 +208,7 @@ public class VoicePipelineUnitTests
             await r.Final(r.A, "alpha");
             await r.Pump(400);
             await r.Final(r.B, "beta");
+            await r.Armed();                                                                                     // the judge is entered and its delay registered before time moves
             await r.Pump(1400);
         }
     }
