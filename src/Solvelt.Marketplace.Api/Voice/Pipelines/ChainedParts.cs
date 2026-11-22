@@ -8,7 +8,10 @@ namespace Solvelt.Marketplace.Api.Voice;
 public enum SttEventKind { SpeechStarted, Partial, Final, SpeechEnded }
 
 /// <summary>One thing the recogniser reports. <see cref="Text"/> is the words so far (<c>Partial</c>) or the finished words (<c>Final</c>); it is held in memory for the turn and is never stored or logged.</summary>
-public sealed record SttEvent(SttEventKind Kind, string Text = "", string? Language = null, double? Confidence = null, IReadOnlyList<SttCandidate>? Candidates = null, string? JudgePick = null);
+public sealed record SttEvent(SttEventKind Kind, string Text = "", string? Language = null, double? Confidence = null, IReadOnlyList<SttCandidate>? Candidates = null, string? JudgePick = null, IReadOnlyList<WordConfidence>? Words = null);
+
+/// <summary>One word the recogniser wrote and how sure it was (0 to 1): only the least sure few are carried (decision V-43).</summary>
+public sealed record WordConfidence(string Word, double Confidence);
 
 public interface IStreamingStt
 {

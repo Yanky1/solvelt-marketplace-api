@@ -20,7 +20,7 @@ public sealed class SpeechTurns(VoicePipelineRegistry registry, VoiceToolRunner 
     /// Runs one turn. <paramref name="said"/> is the caller's words (null for an opening or resumed turn, which carries <paramref name="instruction"/> instead). Any failure of the text model or the clock is
     /// <see cref="SpeechTurnResult.Failed"/>: the caller of this method decides what the platform says; the model never does.
     /// </summary>
-    public async Task<SpeechTurnResult> RunAsync(VoiceCall call, VoiceCallState state, string? said, string? instruction, CancellationToken ct)
+    public async Task<SpeechTurnResult> RunAsync(VoiceCall call, VoiceCallState state, string? said, string? instruction, CancellationToken ct, string? turnNote = null)
     {
         var llm = registry.SpeechLlm;
         if (llm is null) return new("", false, false, true);
@@ -42,6 +42,7 @@ public sealed class SpeechTurns(VoicePipelineRegistry registry, VoiceToolRunner 
                 List<LlmMessage> messages;
                 lock (state.SpeechHistory) messages = [.. state.SpeechHistory];
                 if (round == 0 && instruction is not null) messages.Add(new LlmMessage("system", instruction));
+                if (turnNote is not null) messages.Add(new LlmMessage("system", turnNote));   // V-43: this turn's doubt, not kept in the history
                 var text = new StringBuilder();
                 var calls = new List<LlmToolCall>();
                 await foreach (var ev in llm.StreamAsync(new LlmRequest(VoiceScripts.Instructions, messages, tools.Definitions()), budget.Token))

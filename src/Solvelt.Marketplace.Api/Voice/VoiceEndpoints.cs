@@ -116,7 +116,10 @@ public static class VoiceEndpoints
         if (instruction is null && !string.IsNullOrEmpty(heard))
             await diagnostics.RecordAsync(call, state, new DiagnosticTurn(VoicePipelineIds.SignalWireSpeech, "signalwire", heard, null, null, v.SignalWireSpeech.Language,
                 form.TryGetValue("Confidence", out var conf) && double.TryParse(conf, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cf) ? cf : null, null, null, "signalwire_speech_timeout"), ct);
-        var result = await turns.RunAsync(call, state, instruction is null ? heard : null, instruction, ct);
+        string? doubt = null;
+        if (instruction is null && v.NBest.Enabled && !state.SensitiveTurn && state.KeypadStep is null && form.TryGetValue("Confidence", out var confText) && double.TryParse(confText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var confValue))
+            doubt = NBest.ConfidenceNote(confValue, v.NBest.LowConfidence);   // V-43: SignalWire's own Confidence for the turn
+        var result = await turns.RunAsync(call, state, instruction is null ? heard : null, instruction, ct, doubt);
         if (result.Failed)
         {
             if (first)

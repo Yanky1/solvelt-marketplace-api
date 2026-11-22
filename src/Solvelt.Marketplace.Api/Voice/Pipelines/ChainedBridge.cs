@@ -196,7 +196,7 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
         List<SttEvent> finals;
         lock (_turnFinals) { finals = [.. _turnFinals]; _turnFinals.Clear(); }
         string? note = null;
-        if (_o.NBest.Enabled && !state.SensitiveTurn && state.KeypadStep is null) note = NBest.Note(finals, vocabulary?.Terms);
+        if (_o.NBest.Enabled && !state.SensitiveTurn && state.KeypadStep is null) note = NBest.TurnNote(finals, vocabulary?.Terms, _o.NBest.LowConfidence);
         lock (_history) _turnNote = note;
     }
 
