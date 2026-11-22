@@ -87,7 +87,7 @@ public sealed class PhoneCodeService(ISmsSender sms, IOptions<VoiceOptions> opti
         if (!limiter.TryAcquire("voice-sms-all", "all", Math.Max(1, o.MaxSmsPerHour), TimeSpan.FromHours(1))) return SendResult.TooMany;
         var code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
         var challenge = new PhoneChallenge { Phone = phone, Hash = Hash(state.CallId, phone, code), ExpiresAt = time.GetUtcNow().Add(Lifetime), Purpose = purpose, AccountId = accountId };
-        if (!await sms.SendAsync(phone, $"Solvelt code: {code}. It expires in 10 minutes. We never ask you to say it aloud.", ct)) return SendResult.Failed;
+        if (!await sms.SendAsync(phone, $"Solvelt code: {code}. It expires in 10 minutes. Say it only when the automated line asks, and never read it to anyone else.", ct)) return SendResult.Failed;
         state.SetChallenge(challenge);
         return SendResult.Sent;
     }

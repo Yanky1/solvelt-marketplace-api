@@ -170,11 +170,14 @@ public class VoicePhoneTests
     }
 
     [Fact]
-    public void The_message_never_asks_to_say_the_code_and_no_code_is_ever_spoken_by_a_script()
+    public void The_code_is_said_to_the_platforms_own_prompt_never_to_the_model_and_no_script_speaks_the_real_code()
     {
-        Assert.DoesNotContain("say", VoiceScripts.AskCode, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("type", VoiceScripts.AskCode);
-        Assert.Contains("keypad", VoiceScripts.Instructions);
+        // decision V-41 (Ronald's choice): the verification code is SPOKEN, to the platform's prompt, not typed and not said to the assistant
+        Assert.Contains("say", VoiceScripts.AskCode, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("type", VoiceScripts.AskCode, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("pound", VoiceScripts.AskCode, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("keypad", VoiceScripts.Instructions);                                                      // the PIN is still typed
+        Assert.Contains("never ask for it, never repeat it, never accept it", VoiceScripts.Instructions, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("never ask for, repeat or accept", VoiceScripts.Instructions, StringComparison.OrdinalIgnoreCase);
     }
 }

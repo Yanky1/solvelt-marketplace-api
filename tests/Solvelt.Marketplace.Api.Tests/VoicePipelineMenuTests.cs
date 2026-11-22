@@ -65,7 +65,7 @@ public class VoicePipelineMenuTests
         var xml = await Inbound(s);
         Assert.Equal(VoiceScripts.Disclosure, xml.Elements("Say").Single().Value);                          // the AI disclosure is the platform's and comes first
         var g = xml.Element("Gather")!;
-        Assert.Equal(("dtmf", "1", "6", "true"), (g.Attribute("input")!.Value, g.Attribute("numDigits")!.Value, g.Attribute("timeout")!.Value, g.Attribute("actionOnEmptyResult")!.Value));
+        Assert.Equal(("dtmf speech", "1", "6", "true"), (g.Attribute("input")!.Value, g.Attribute("numDigits")!.Value, g.Attribute("timeout")!.Value, g.Attribute("actionOnEmptyResult")!.Value));
         Assert.Equal(VoiceFactory.BaseUrl + VoiceEndpoints.PipelinePath, g.Attribute("action")!.Value);
         Assert.Equal(PipelineScripts.Menu, g.Element("Say")!.Value);
         Assert.Null(xml.Descendants("Stream").SingleOrDefault());                                          // no AI until a choice is made
