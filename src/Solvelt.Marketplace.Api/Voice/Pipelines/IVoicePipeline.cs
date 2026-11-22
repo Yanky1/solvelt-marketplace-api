@@ -69,13 +69,13 @@ public sealed class VoicePipelineRegistry
     private readonly Dictionary<string, IVoicePipeline> _byId;
     private readonly IVoiceLlm? _speechLlm;
 
-    public VoicePipelineRegistry(RealtimePipeline realtime, IEnumerable<IChainedPipelineParts> parts, IEnumerable<IChainedPartsSource> sources, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs, IVoiceDiagnostics? diagnostics = null)
+    public VoicePipelineRegistry(RealtimePipeline realtime, IEnumerable<IChainedPipelineParts> parts, IEnumerable<IChainedPartsSource> sources, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs, IVoiceDiagnostics? diagnostics = null, IVoiceVocabulary? vocabulary = null)
     {
         _realtime = realtime;
         var all = parts.Concat(sources.SelectMany(s => s.Create(options.Value))).ToList();
         _speechLlm = all.FirstOrDefault(p => p.OptionId == VoicePipelineIds.SignalWireSpeech)?.Llm;
         _byId = all.Where(p => p.OptionId != VoicePipelineIds.Realtime && p.OptionId != VoicePipelineIds.SignalWireSpeech && VoicePipelineIds.IsOption(p.OptionId)).GroupBy(p => p.OptionId)
-            .ToDictionary(g => g.Key, g => (IVoicePipeline)new ChainedPipeline(g.First(), realtime, options, store, tools, time, logs, diagnostics));
+            .ToDictionary(g => g.Key, g => (IVoicePipeline)new ChainedPipeline(g.First(), realtime, options, store, tools, time, logs, diagnostics, vocabulary));
     }
 
     /// <summary>Option p1 is always available; the others only when their parts are configured.</summary>

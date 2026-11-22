@@ -298,3 +298,7 @@ V-01 says no transcripts are stored. This is the one narrow exception, approved 
 **Reading it:** staff with `voice.view` (finance, admin) call `POST /api/v1/staff/voice/diagnostics/calls/{callId}` or `POST /api/v1/staff/voice/diagnostics/export` (CSV) with a reason; every read is audited. It is not on the public API. Rows are deleted by the maintenance worker after the retention.
 
 **Owner actions:** add the settings in Azure (`Voice__Diagnostics__Enabled=true`, optionally `Voice__Diagnostics__RetentionHours`), keep `Voice__PipelineMenu__TestNumbers__0..` to your own numbers only, and switch it off when you are done listening.
+
+## 15. The recogniser's alternatives go to Claude (decision V-42)
+
+When a recogniser has more than one reading of a turn, Claude is told, for that turn only, what the other readings were, together with a few of the shop's own words, and chooses; if the difference matters and is unclear it asks the caller to confirm. Today only option 5 has several readings (each engine's text). The vendors' own n-best lists are not used (none is documented for the streaming endpoints we use), so options 2, 3, 4 and 6 add nothing. The readings are quoted as untrusted text and bounded (4 readings, 300 characters each, 1200 in all, 20 shop words). They are never given for a sensitive turn (a spoken verification code) or during a keypad step. `Voice:NBest:Enabled` (default true) switches it off.

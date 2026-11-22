@@ -82,6 +82,8 @@ public sealed class VoiceOptions
     public VocabularyOptions Vocabulary { get; set; } = new();
     /// <summary>Recognised words of the owner's own test calls (decision V-39). Off by default.</summary>
     public DiagnosticsOptions Diagnostics { get; set; } = new();
+    /// <summary>The recogniser's alternatives for a turn, given to the text model (decision V-42).</summary>
+    public NBestOptions NBest { get; set; } = new();
 }
 
 public sealed class SignalWireOptions

@@ -99,9 +99,16 @@ public sealed class VoiceCallState
     /// <summary>Option 6 (decision V-35): the call is turn by turn (cXML Gather speech), not a stream. Set once, when the caller picks it.</summary>
     public bool SpeechMode { get; private set; }
     /// <summary>Set for a turn that must never reach the diagnostics (a spoken verification code, anything sensitive). Cleared by <see cref="AllowDiagnostics"/>.</summary>
-    public bool SuppressDiagnostics { get; private set; }
-    public void SuppressDiagnosticsNow() { lock (_gate) SuppressDiagnostics = true; }
-    public void AllowDiagnostics() { lock (_gate) SuppressDiagnostics = false; }
+    public bool SuppressDiagnostics => SensitiveTurn;
+    public void SuppressDiagnosticsNow() => MarkSensitiveTurn();
+    public void AllowDiagnostics() => ClearSensitiveTurn();
+    /// <summary>
+    /// The caller is saying something that must not be kept or passed on beyond what the step needs (a spoken verification code, decision V-41): the diagnostics store nothing for it and the recogniser's alternatives
+    /// are NOT given to the text model (V-42). One flag for every such rule, set by the step that asks and cleared when it is over.
+    /// </summary>
+    public bool SensitiveTurn { get; private set; }
+    public void MarkSensitiveTurn() { lock (_gate) SensitiveTurn = true; }
+    public void ClearSensitiveTurn() { lock (_gate) SensitiveTurn = false; }
     private int _diagnosticTurns;
     public int NextDiagnosticTurn() { lock (_gate) return ++_diagnosticTurns; }
     public void EnterSpeechMode() { lock (_gate) SpeechMode = true; }
