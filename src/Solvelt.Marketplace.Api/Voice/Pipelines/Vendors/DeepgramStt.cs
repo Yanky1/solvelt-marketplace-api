@@ -106,10 +106,32 @@ public sealed class DeepgramStt(DeepgramOptions options, IVendorSocketConnector 
                         if (string.IsNullOrWhiteSpace(text)) yield break;
                         double? conf = alt.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetDouble() : null;
                         var final = root.TryGetProperty("is_final", out var f) && f.ValueKind == JsonValueKind.True;
-                        yield return new SttEvent(final ? SttEventKind.Final : SttEventKind.Partial, text.Trim(), null, conf);
+                        if (!final) { yield return new SttEvent(SttEventKind.Partial, text.Trim(), null, conf); break; }
+                        // decision V-43: Deepgram gives a confidence per alternative and per word (no request parameter asks for more alternatives; if it ever returns more than one, the extras are readings)
+                        IReadOnlyList<SttCandidate>? readings = null;
+                        if (alts.GetArrayLength() > 1)
+                        {
+                            var list = new List<SttCandidate>();
+                            foreach (var a in alts.EnumerateArray())
+                                if (a.TryGetProperty("transcript", out var at) && at.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(at.GetString()))
+                                    list.Add(new SttCandidate("deepgram", at.GetString()!.Trim(), null, a.TryGetProperty("confidence", out var ac) && ac.ValueKind == JsonValueKind.Number ? ac.GetDouble() : null));
+                            if (list.Count > 1) readings = list;
+                        }
+                        yield return new SttEvent(SttEventKind.Final, text.Trim(), null, conf, readings, null, LeastSure(alt));
                         break;
                 }
             }
+        }
+
+        /// <summary>The (at most five) words of the first alternative with the lowest confidence, least sure first; null when the message has no word confidences.</summary>
+        internal static IReadOnlyList<WordConfidence>? LeastSure(JsonElement alt)
+        {
+            if (!alt.TryGetProperty("words", out var words) || words.ValueKind != JsonValueKind.Array) return null;
+            var list = new List<WordConfidence>();
+            foreach (var w in words.EnumerateArray())
+                if (w.TryGetProperty("word", out var ww) && ww.ValueKind == JsonValueKind.String && w.TryGetProperty("confidence", out var wc) && wc.ValueKind == JsonValueKind.Number)
+                    list.Add(new WordConfidence(ww.GetString() ?? "", wc.GetDouble()));
+            return list.Count == 0 ? null : list.OrderBy(x => x.Confidence).Take(5).ToList();
         }
 
         public async ValueTask DisposeAsync()

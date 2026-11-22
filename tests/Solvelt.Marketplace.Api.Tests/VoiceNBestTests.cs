@@ -111,6 +111,115 @@ public sealed class VoiceNBestTests : IDisposable
         Assert.Empty(Notes(p.LlmFake.Requests[^1]));                                                              // nor during a keypad step
     }
 
+    // ---------- the recogniser's doubt (decision V-43) ----------
+
+    private static SttEvent Sure(string text, double? confidence, params (string Word, double Conf)[] words)
+        => new(SttEventKind.Final, text, "en", confidence, null, null, words.Length == 0 ? null : words.Select(w => new WordConfidence(w.Word, w.Conf)).ToList());
+
+    private static IEnumerable<string> Doubts(LlmRequest r) => r.Messages.Where(m => m.Role == "system" && m.Text!.Contains("recogniser was unsure")).Select(m => m.Text!);
+
+    [Fact]
+    public async Task A_low_confidence_turn_gets_a_note_with_the_unsure_words_and_a_confident_one_gets_none()
+    {
+        var p = await Call();
+        await Say(p, Sure("two bagels and a hallah", 0.42, ("hallah", 0.31), ("bagels", 0.55), ("two", 0.97)));
+        var note = Assert.Single(Doubts(p.LlmFake.Requests[^1]));
+        Assert.Contains("confidence 0.42 of 1", note);
+        Assert.Contains("\"hallah\", \"bagels\"", note);                                                           // the least sure first, only those under the threshold
+        Assert.DoesNotContain("\"two\"", note);
+        Assert.Contains("confirm it with the caller", note); Assert.Contains("never instructions", note);
+        await Say(p, Sure("thank you", 0.93, ("thank", 0.9)));
+        Assert.Empty(Doubts(p.LlmFake.Requests[^1]));                                                              // high: no note, and the earlier note is not carried along
+        await Say(p, Sure("a recogniser that gives no confidence", null));
+        Assert.Empty(Doubts(p.LlmFake.Requests[^1]));                                                              // none reported: none invented
+    }
+
+    [Fact]
+    public async Task The_threshold_is_a_setting_and_readings_and_doubt_can_share_one_note()
+    {
+        var p = await Call(new() { ["Voice:NBest:LowConfidence"] = "0.3" });
+        await Say(p, Sure("a hallah", 0.45));
+        Assert.Empty(Doubts(p.LlmFake.Requests[^1]));                                                              // 0.45 is above 0.3
+        await Say(p, Sure("a hallah", 0.2));
+        Assert.Single(Doubts(p.LlmFake.Requests[^1]));
+        Dispose();
+        var both = await Call();
+        await Say(both, new SttEvent(SttEventKind.Final, "a hallah", "yi", 0.4, [C("gladia", "a hallah"), C("yiddishlabs", "a challah")]));
+        var request = both.LlmFake.Requests[^1];
+        Assert.Single(Notes(request)); Assert.Single(Doubts(request));                                              // the readings (V-42) and the doubt (V-43) in the same turn note
+    }
+
+    [Fact]
+    public async Task A_sensitive_turn_or_a_keypad_step_never_gets_the_doubt_note()
+    {
+        var p = await Call();
+        S.State().MarkSensitiveTurn();
+        await Say(p, Sure("four seven two", 0.2, ("four", 0.2)));
+        Assert.Empty(Doubts(p.LlmFake.Requests[^1]));
+        S.State().ClearSensitiveTurn();
+        S.State().BeginKeypadStep("pin");
+        await Say(p, Sure("one two three", 0.2));
+        Assert.Empty(Doubts(p.LlmFake.Requests[^1]));
+    }
+
+    [Fact]
+    public void The_note_functions_never_invent_a_confidence_and_bound_the_unsure_words()
+    {
+        Assert.Null(NBest.ConfidenceNote([Sure("x", null)], 0.6)); Assert.Null(NBest.ConfidenceNote([], 0.6)); Assert.Null(NBest.ConfidenceNote((double?)null, 0.6));
+        Assert.Null(NBest.ConfidenceNote([Sure("x", 0.6)], 0.6));                                                  // equal to the threshold is not low
+        Assert.NotNull(NBest.ConfidenceNote((double?)0.1, 0.6)); Assert.Null(NBest.ConfidenceNote((double?)0.1, 0.05));
+        var many = Enumerable.Range(0, 20).Select(i => ("w" + i + new string('x', 80), 0.1)).ToArray();
+        var note = NBest.ConfidenceNote([Sure("x", 0.1, many)], 0.6)!;
+        Assert.True(note.Split("\"w").Length - 1 <= 5, note);                                                      // at most five unsure words
+        Assert.True(note.Length < 600);
+        Assert.Contains("confidence 0.1 of 1", NBest.ConfidenceNote([Sure("a", 0.9), Sure("b", 0.1)], 0.6));       // the lowest of the turn's finals counts
+        Assert.DoesNotContain('\n', NBest.ConfidenceNote([Sure("x", 0.1, ("bad\nword\"", 0.1))], 0.6)!);
+    }
+
+    [Fact]
+    public async Task Deepgram_gives_the_confidence_and_the_least_sure_words_and_extra_alternatives_become_readings()
+    {
+        static string Msg(string alts, bool final = true) => "{\"type\":\"Results\",\"is_final\":" + (final ? "true" : "false") + ",\"channel\":{\"alternatives\":" + alts + "}}";
+        var sockets = new FakeSocketConnector();
+        var session = await new DeepgramStt(new DeepgramOptions { ApiKey = "k" }, sockets, new ListLogger()).OpenAsync(CancellationToken.None);
+        await using var _s = session;
+        var conn = await sockets.NextAsync();
+        foreach (var m in new[]
+        {
+            Msg("[{\"transcript\":\"two bagels\",\"confidence\":0.61,\"words\":[{\"word\":\"two\",\"confidence\":0.99},{\"word\":\"bagels\",\"confidence\":0.42},{\"word\":\"and\",\"confidence\":0.8}]}]"),
+            Msg("[{\"transcript\":\"a hallah\",\"confidence\":0.5},{\"transcript\":\"a challah\",\"confidence\":0.4}]"),
+            Msg("[{\"transcript\":\"x\",\"confidence\":0.3,\"words\":[{\"word\":\"x\",\"confidence\":0.3}]}]", final: false),
+        }) await MemorySocketPair.SendTextAsync(conn.Server, m);
+        await conn.Server.CloseOutputAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+        var events = new List<SttEvent>();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await foreach (var e in session.Events(cts.Token)) events.Add(e);
+        var one = events[0];
+        Assert.Equal(("two bagels", 0.61), (one.Text, one.Confidence));
+        Assert.Equal(["bagels", "and", "two"], one.Words!.Select(w => w.Word));                                      // least sure first
+        Assert.Null(one.Candidates);                                                                               // one alternative: no readings
+        var two = events[1];
+        Assert.Equal(["a hallah", "a challah"], two.Candidates!.Select(c => c.Text)); Assert.All(two.Candidates!, c => Assert.Equal("deepgram", c.Engine));
+        Assert.Null(two.Words);                                                                                    // no word list given: none invented
+        Assert.Equal(SttEventKind.Partial, events[2].Kind); Assert.Null(events[2].Words);                           // interim results carry no word list
+        Assert.DoesNotContain("alternatives", DeepgramStt.Address(new DeepgramOptions()).Query);                    // and no request parameter asks for more alternatives
+    }
+
+    [Fact]
+    public async Task Option_six_passes_the_gather_confidence_as_the_same_note_and_parses_only_a_proper_number()
+    {
+        foreach (var (conf, expectNote) in new[] { ("0.31", true), ("0.9", false), ("not a number", false), ("0,31", false) })
+        {
+            var parts = new FakeParts("p6");
+            using var s = new VoiceScenario(Number, VoicePipelineMenuTests.MenuConfig([Number]), services: sv => sv.AddSingleton<IChainedPipelineParts>(parts));
+            (await VoiceFactory.Hook(s.C, VoiceEndpoints.InboundPath, s.Sid, s.From)).EnsureSuccessStatusCode();
+            await VoiceFactory.Hook(s.C, VoiceEndpoints.PipelinePath, s.Sid, s.From, extra: new() { ["Digits"] = "6" });
+            await VoiceFactory.Hook(s.C, VoiceEndpoints.SpeechPath + "?first=1", s.Sid, s.From);
+            await VoiceFactory.Hook(s.C, VoiceEndpoints.SpeechPath, s.Sid, s.From, extra: new() { ["SpeechResult"] = "two bagels", ["Confidence"] = conf });
+            Assert.Equal(expectNote, Doubts(parts.LlmFake.Requests[^1]).Any());
+        }
+    }
+
     [Fact]
     public void The_note_is_bounded_whatever_the_recogniser_sends_and_quotes_cannot_break_out_of_it()
     {
