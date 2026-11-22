@@ -72,6 +72,8 @@ public sealed class VoiceOptions
     public ElevenLabsOptions ElevenLabs { get; set; } = new();
     public GladiaOptions Gladia { get; set; } = new();
     public YiddishLabsOptions YiddishLabs { get; set; } = new();
+    /// <summary>Option 6: SignalWire's own speech recognition, one <c>Gather</c> per turn (decision V-35).</summary>
+    public SignalWireSpeechOptions SignalWireSpeech { get; set; } = new();
 }
 
 public sealed class SignalWireOptions

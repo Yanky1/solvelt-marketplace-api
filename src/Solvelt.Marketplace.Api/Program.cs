@@ -111,6 +111,7 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceStateStore>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IRealtimeConnector, Solvelt.Marketplace.Api.Voice.OpenAiRealtimeConnector>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.RealtimePipeline>();   // option p1 of the test-line menu: the current Realtime line (decision V-19); chained pipelines register IChainedPipelineParts
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoicePipelineRegistry>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.SpeechTurns>();
 Solvelt.Marketplace.Api.Voice.VoicePipelineVendors.AddVoicePipelineVendors(builder.Services);   // the vendor adapters of options p2 to p5: none unless named in configuration (decision V-22)
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhoneCodeService>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PhoneIdentity>();

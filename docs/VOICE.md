@@ -227,7 +227,10 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | 3 | Gladia and ElevenLabs. Live speech recognition that understands Yiddish, with an English voice. |
 | 4 | Yiddish Labs. Yiddish speech recognition and a Yiddish voice. |
 | 5 | Two engines and a judge. Gladia and Yiddish Labs listen together, and Claude picks what you most likely said. |
+| 6 | SignalWire built-in. The phone company's own speech recognition, with Claude. |
 
+
+**Option 6: SignalWire's own speech recognition (decision V-35).** Off by default (`Voice:Pipelines:P6:Enabled`); it needs only the text model's key (Claude by default). The call has no stream: each turn is a cXML `Gather input="speech dtmf"` whose result (`SpeechResult`) is posted to `/api/v1/voice/signalwire/speech`; our assistant (the same instructions and tools) answers and SignalWire speaks the reply inside the next Gather. Keypad steps, transfer and the off-topic end use the same paths as every other option. Settings: `Voice:SignalWireSpeech:Language` (en-US), `Enhanced` (false), `SpeechModel` (empty), `SpeechTimeout` (auto), `Voice` (empty), `Hints` (empty), `NoInputSeconds` (8), `TurnSeconds` (12). Not measured or not known: latency, how fast the reply stops when the caller talks, Yiddish recognition (none listed by SignalWire), and SignalWire's retention and training use of speech (owner item). Nothing the caller says is stored or logged.
 
 **Settings of the vendor adapters.** The vendors, runtime hosts and setting names are in `docs/VOICE-PIPELINE-OPTIONS.md` (decision V-22). **Option p2 is built and read now (decision V-23), off by default:**
 

@@ -1,4 +1,4 @@
-# Voice pipeline options 2 to 5: which vendor, why, and what must be true first
+# Voice pipeline options 2 to 6: which vendor, why, and what must be true first
 
 Status: **design note, nothing here is built.** Options 2 to 5 exist only as the vendor-neutral skeleton merged in V-P1 (`IVoicePipeline`, `ChainedBridge`, `ParallelStt`, all tested against fakes); an option without a configured adapter answers "not available on this line" and the call runs on option 1. This note chooses ONE vendor per option, says why from the vendors' own documentation, lists the final runtime hosts and the Azure setting names, and lists what is still OPEN. Decision record: V-22 in `DECISIONS.md`. Facts were read on 2026-11-19 from the pages named in section 9; a figure that could not be confirmed is marked **OPEN**.
 
@@ -149,3 +149,21 @@ Already built and unchanged: `Voice:PipelineMenu:Enabled`, `:TestNumbers`, `:Men
 1. This note merges (docs only).
 2. Adapters behind the settings above, **off by default**, one slice per vendor, each tested against fakes only (no key exists): Deepgram and ElevenLabs (p2), Gladia (p3), Yiddish Labs (p4), the parallel option (p5); p4 and p5 wait for the approved consent line.
 3. With keys in Azure, a manual listening and measuring session on the test line (VOICE.md section 9), reading the per-option cost and latency the menu records.
+
+## 12. Option 6: SignalWire's own speech recognition (decision V-35)
+
+Ronald asked for "SignalWire's speech recognition" as a sixth option ("Approved, both"; "you do the research"). The research below was done by the orchestrator (read 2026-11-22); this session read none of these pages itself and states them as reported. The built option is **A**; **B** and **C** were considered and not built.
+
+**A. cXML `<Gather input="speech">`, one turn per webhook (BUILT).** Page: `https://signalwire.com/docs/compatibility-api/cxml/reference/voice/gather`. Attributes: `language` (default en-US), `hints`, `speechTimeout` (seconds or `auto`), `timeout`, `partialResultCallback`, `enhanced` (extra cost) and `speechModel` (`phone_call` is the 8 kHz model). The result is posted to the `action` URL as `SpeechResult` and `Confidence`. **No Yiddish is listed for recognition: OPEN, probably unsupported**, so option 6 is an English (or listed-language) comparison, not a Yiddish one. Price (`https://signalwire.com/pricing/voice`): speech-to-text $0.015 per 15 seconds per use; premium $0.03 per 15 seconds. The Gather works with the cXML we already use, needs no new product and no new secret.
+
+**B. SWML `live_transcribe` (not built).** Page: `https://signalwire.com/docs/swml/methods/live_transcribe`. Deepgram (default) or Google, `lang`, `hints`, `vad`, events by webhook; $0.065 a minute per direction. It is SWML, not cXML: it does not fit our cXML `Connect`/`Stream` and keypad paths without moving the call to SWML.
+
+**C. SWML AI agent (not built).** Pages: `https://signalwire.com/docs/swml/methods/ai`, `https://signalwire.com/docs/swml/reference/calling/ai/params`, `https://signalwire.com/docs/swml/reference/calling/ai/languages`, `https://signalwire.com/docs/platform/ai`. Hosted recognition, model and voice; tools by SWAIG webhooks; default `ai_model` gpt-4o-mini and **no Claude or Anthropic model documented**; recogniser Deepgram Nova-3 by default (falls back to Google); barge-in parameters (`enable_barge`, `transparent_barge`, `barge_min_words`, `interrupt_on_noise`); $0.16 a minute runtime, premium voices extra. It would REPLACE our assistant (our instructions, tools, off-topic rule and keypad flow), so it cannot be "with Claude" and our tools.
+
+**D. Voices.** Page: `https://signalwire.com/docs/platform/voice/tts`. ElevenLabs and OpenAI voices are multilingual; Inworld lists Hebrew; no Yiddish-specific engine is listed. Option 6 speaks with `Say`, whose `voice` is the `Voice:SignalWireSpeech:Voice` setting.
+
+**E. Data retention and training: NOT ESTABLISHED. OPEN owner item.** Before real callers: ask SignalWire what it keeps of the audio and the transcript of a `Gather`, and whether either is used to train anything. Until answered, option 6 stays on the test line only.
+
+**What was built (A).** Turn flow: Gather speech (language, `speechTimeout` auto, optional `enhanced` and `speechModel`, static `hints`) -> `POST .../speech` with `SpeechResult` -> the shared tool loop with our Claude assistant -> `<Gather input="speech dtmf"><Say>reply</Say></Gather>`. Keypad steps and the endings reuse `AfterStream`. See decision V-35 for the settings, failures and tests.
+
+**Honest limits.** Latency is one webhook round trip per turn with no streaming: slower than options 1 to 5, **unmeasured**. Barge-in: the reply plays inside the Gather, so the page says speech or a key ends it; how quickly and how completely is **OPEN** until a real call is listened to. The recogniser's own price is not metered by us (the per-call cost counts the model's tokens only). Hints are a fixed setting, not looked up from the catalog per turn.

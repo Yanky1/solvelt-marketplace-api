@@ -158,3 +158,16 @@ public sealed class SentenceChunker
         return rest.Length == 0 ? null : rest;
     }
 }
+
+/// <summary>
+/// Option 6 (decision V-35): only the text model. The caller is heard and the reply is spoken by SignalWire itself inside cXML <c>Gather</c> / <c>Say</c>, so there is no recogniser, no end-of-turn engine and no
+/// speech synthesis of ours, and no stream. The registry keeps it apart from the chained options.
+/// </summary>
+public sealed class SignalWireSpeechParts(IVoiceLlm llm) : IChainedPipelineParts
+{
+    public string OptionId => VoicePipelineIds.SignalWireSpeech;
+    public IStreamingStt Stt => throw new NotSupportedException("Option 6 has no stream.");
+    public ITurnDetector NewTurnDetector() => throw new NotSupportedException("Option 6 has no stream.");
+    public ITts Tts => throw new NotSupportedException("Option 6 has no stream.");
+    public IVoiceLlm Llm => llm;
+}

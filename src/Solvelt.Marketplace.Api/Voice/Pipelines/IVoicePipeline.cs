@@ -67,16 +67,22 @@ public sealed class VoicePipelineRegistry
 {
     private readonly RealtimePipeline _realtime;
     private readonly Dictionary<string, IVoicePipeline> _byId;
+    private readonly IVoiceLlm? _speechLlm;
 
     public VoicePipelineRegistry(RealtimePipeline realtime, IEnumerable<IChainedPipelineParts> parts, IEnumerable<IChainedPartsSource> sources, IOptions<VoiceOptions> options, VoiceCallStore store, VoiceToolRunner tools, TimeProvider time, ILoggerFactory logs)
     {
         _realtime = realtime;
-        _byId = parts.Concat(sources.SelectMany(s => s.Create(options.Value))).Where(p => p.OptionId != VoicePipelineIds.Realtime && VoicePipelineIds.IsOption(p.OptionId)).GroupBy(p => p.OptionId)
+        var all = parts.Concat(sources.SelectMany(s => s.Create(options.Value))).ToList();
+        _speechLlm = all.FirstOrDefault(p => p.OptionId == VoicePipelineIds.SignalWireSpeech)?.Llm;
+        _byId = all.Where(p => p.OptionId != VoicePipelineIds.Realtime && p.OptionId != VoicePipelineIds.SignalWireSpeech && VoicePipelineIds.IsOption(p.OptionId)).GroupBy(p => p.OptionId)
             .ToDictionary(g => g.Key, g => (IVoicePipeline)new ChainedPipeline(g.First(), realtime, options, store, tools, time, logs));
     }
 
     /// <summary>Option p1 is always available; the others only when their parts are configured.</summary>
-    public bool IsAvailable(string option) => option == VoicePipelineIds.Realtime || _byId.ContainsKey(option);
+    public bool IsAvailable(string option) => option == VoicePipelineIds.Realtime || _byId.ContainsKey(option) || (option == VoicePipelineIds.SignalWireSpeech && _speechLlm is not null);
+
+    /// <summary>The text model of option 6 (null when option 6 is not configured). Option 6 has no stream: its turns are webhooks (<see cref="SpeechTurns"/>).</summary>
+    public IVoiceLlm? SpeechLlm => _speechLlm;
 
     public IVoicePipeline For(VoiceCall call)
     {

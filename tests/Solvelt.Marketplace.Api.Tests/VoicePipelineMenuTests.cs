@@ -166,10 +166,10 @@ public class VoicePipelineMenuTests
     [Fact]
     public void The_choice_and_the_options_are_read_strictly()
     {
-        Assert.Equal(["p1", "p2", "p3", "p4", "p5"], VoicePipelineIds.All);
+        Assert.Equal(["p1", "p2", "p3", "p4", "p5", "p6"], VoicePipelineIds.All);
         Assert.Equal("p4", VoicePipelineIds.FromDigits("4")); Assert.Equal("p4", VoicePipelineIds.FromDigits(" 4 "));
-        foreach (var bad in new string?[] { null, "", "6", "0", "44", "a" }) Assert.Equal("p1", VoicePipelineIds.FromDigits(bad));
-        Assert.True(VoicePipelineIds.IsOption("p5")); Assert.False(VoicePipelineIds.IsOption("full")); Assert.False(VoicePipelineIds.IsOption("p6"));
+        foreach (var bad in new string?[] { null, "", "7", "0", "44", "a" }) Assert.Equal("p1", VoicePipelineIds.FromDigits(bad));
+        Assert.True(VoicePipelineIds.IsOption("p5")); Assert.False(VoicePipelineIds.IsOption("full")); Assert.False(VoicePipelineIds.IsOption("p7"));
         Assert.Equal("p1", VoicePipelineIds.OptionOf("mini")); Assert.Equal("p3", VoicePipelineIds.OptionOf("p3"));
     }
 

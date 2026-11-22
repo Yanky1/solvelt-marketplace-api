@@ -8,7 +8,7 @@ namespace Solvelt.Marketplace.Api.Voice;
 
 public static class VoiceEndpoints
 {
-    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", PipelinePath = "/api/v1/voice/signalwire/pipeline", PipelineConsentPath = "/api/v1/voice/signalwire/pipeline-consent", KeypadPath = "/api/v1/voice/signalwire/keypad", SolaWebhookPath = "/api/v1/voice/sola/webhook", StreamPath = "/api/v1/voice/stream";
+    public const string InboundPath = "/api/v1/voice/signalwire/inbound", AfterStreamPath = "/api/v1/voice/signalwire/after-stream", PipelinePath = "/api/v1/voice/signalwire/pipeline", PipelineConsentPath = "/api/v1/voice/signalwire/pipeline-consent", KeypadPath = "/api/v1/voice/signalwire/keypad", SpeechPath = "/api/v1/voice/signalwire/speech", SolaWebhookPath = "/api/v1/voice/sola/webhook", StreamPath = "/api/v1/voice/stream";
 
     public static IEndpointRouteBuilder MapVoice(this IEndpointRouteBuilder app)
     {
@@ -17,6 +17,7 @@ public static class VoiceEndpoints
         app.MapPost(PipelinePath, PipelineChoice);
         app.MapPost(PipelineConsentPath, PipelineConsent);
         app.MapPost(KeypadPath, Keypad);
+        app.MapPost(SpeechPath, SpeechTurn);
         app.MapPost(SolaWebhookPath, SolaWebhook);
         app.MapPhoneEmail();
         app.MapPayConnector();
@@ -45,6 +46,91 @@ public static class VoiceEndpoints
         // authBearerToken: SignalWire sends it as "Authorization: Bearer" on the upgrade (documented); the same token is also in the URL. The Connect page documents no "action"
         // attribute (V-01), so the Redirect after the stream ends is what moves the call on.
         return [new XElement("Connect", new XElement("Stream", new XAttribute("url", wss.Uri.ToString()), new XAttribute("authBearerToken", token))), new XElement("Redirect", afterUrl)];
+    }
+
+    /// <summary>After a keypad step: a stream again, or, on an option 6 call, the next turn (the speech endpoint says where things stand).</summary>
+    private static XElement[] Resume(VoiceOptions v, StreamTokens tokens, Guid callId, VoiceCallState state)
+        => state.SpeechMode ? [new XElement("Redirect", new XAttribute("method", "POST"), v.PublicBaseUrl!.TrimEnd('/') + SpeechPath + "?r=1")] : StreamParts(v, tokens, callId);
+
+    /// <summary>The listening part of an option 6 turn (decision V-35): SignalWire's own recogniser hears the caller, and the reply is spoken inside the Gather so speech or a key ends it (barge-in).</summary>
+    private static XElement GatherSpeech(VoiceOptions v, string? say)
+    {
+        var s = v.SignalWireSpeech;
+        var g = new XElement("Gather", new XAttribute("input", "speech dtmf"), new XAttribute("numDigits", 1), new XAttribute("language", s.Language), new XAttribute("speechTimeout", s.SpeechTimeout.ToLowerInvariant()),
+            new XAttribute("timeout", s.NoInputSeconds), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + SpeechPath));
+        if (s.Enhanced) g.Add(new XAttribute("enhanced", "true"));
+        if (s.SpeechModel.Length > 0) g.Add(new XAttribute("speechModel", s.SpeechModel));
+        if (s.Hints.Length > 0) g.Add(new XAttribute("hints", s.Hints));
+        if (!string.IsNullOrWhiteSpace(say)) g.Add(SaySpeech(v, say));
+        return g;
+    }
+
+    private static XElement SaySpeech(VoiceOptions v, string text)
+    {
+        var say = new XElement("Say", text);
+        if (v.SignalWireSpeech.Voice.Length > 0) say.Add(new XAttribute("voice", v.SignalWireSpeech.Voice));
+        if (v.SignalWireSpeech.Language.Length > 0) say.Add(new XAttribute("language", v.SignalWireSpeech.Language));
+        return say;
+    }
+
+    /// <summary>
+    /// One turn of an option 6 call (decision V-35). The caller's words arrive as <c>SpeechResult</c>; the reply is spoken inside the next Gather. A keypad step, a transfer, an end or a failure goes through
+    /// <see cref="AfterStreamPath"/>, which already knows how to run each. No words are stored or logged. The first turn (<c>?first=1</c>) is the greeting; if the text model cannot answer it the call is handed to
+    /// the Realtime line, as for any other option (V-25); a later failure ends the call with the platform's apology.
+    /// </summary>
+    private static async Task<IResult> SpeechTurn(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, SpeechTurns turns, TimeProvider time, CancellationToken ct)
+    {
+        var v = vo.Value;
+        if (!v.Enabled) return Results.NotFound();
+        var (ok, form) = await VerifyAsync(ctx, v, so.Value);
+        if (!ok) return Results.StatusCode(403);
+        var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
+        if (call is null || call.EndedAt is not null) return Results.NotFound();
+        var state = states.Find(call.Id);
+        if (state is not { SpeechMode: true } || VoicePipelineIds.OptionOf(call.Tier) != VoicePipelineIds.SignalWireSpeech) return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
+        var afterStream = new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath);
+        if (time.GetUtcNow() - call.StartedAt > TimeSpan.FromSeconds(Math.Max(1, v.MaxCallSeconds)))
+        {
+            await store.EndAsync(call.Id, Data.VoiceOutcome.Abandoned, CancellationToken.None);   // the call is too long (the same limit as a stream)
+            return Cxml(new XElement("Response", new XElement("Hangup")));
+        }
+        var first = ctx.Request.Query["first"] == "1";
+        var resumed = ctx.Request.Query["r"] == "1";
+        form.TryGetValue("SpeechResult", out var heard);
+        heard = heard?.Trim();
+        string? instruction = first ? VoiceScripts.Greeting : resumed ? VoiceScripts.Resume : null;
+        if (instruction is null)
+        {
+            if (string.IsNullOrEmpty(heard))
+            {
+                // nothing was said (or only a key): ask again twice, then end politely
+                var empties = state.NoteSpeechTurn(true);
+                if (empties >= 3) { await store.EndAsync(call.Id, Data.VoiceOutcome.Abandoned, CancellationToken.None); return Cxml(new XElement("Response", SaySpeech(v, SpeechScripts.Goodbye), new XElement("Hangup"))); }
+                return Cxml(new XElement("Response", GatherSpeech(v, empties == 1 ? SpeechScripts.Reprompt : SpeechScripts.StillThere)));
+            }
+            state.NoteSpeechTurn(false);
+        }
+        else state.NoteSpeechTurn(false);
+        var result = await turns.RunAsync(call, state, instruction is null ? heard : null, instruction, ct);
+        if (result.Failed)
+        {
+            if (first)
+            {
+                var fallback = await store.FallBackToRealtimeAsync(call.Id, CancellationToken.None);   // the text model could not answer at all: the call is handed to the Realtime line (V-25)
+                if (fallback is not null) { state.LeaveSpeechMode(); return Cxml(new XElement("Response", StreamParts(v, tokens, call.Id))); }
+            }
+            await store.EndAsync(call.Id, Data.VoiceOutcome.VendorLost, CancellationToken.None);
+            return Cxml(new XElement("Response", afterStream));   // AfterStream says the platform's apology and hangs up
+        }
+        var ending = result.End || result.EndNow;
+        var fresh = await store.FindBySidAsync(sid!, ct);
+        var transfer = fresh?.TransferRequestedAt is not null;
+        if (state.KeypadStep is not null || ending || transfer)
+        {
+            if (state.KeypadStep is null) await store.EndAsync(call.Id, Data.VoiceOutcome.Abandoned, CancellationToken.None);   // (a transfer or an off-topic end keeps the outcome the tool set)
+            return Cxml(new XElement("Response", result.Reply.Length > 0 && !result.EndNow ? SaySpeech(v, result.Reply) : null, afterStream));
+        }
+        return Cxml(new XElement("Response", GatherSpeech(v, result.Reply.Length > 0 ? result.Reply : SpeechScripts.Reprompt)));
     }
 
     private static async Task<IResult> Inbound(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)
@@ -96,6 +182,12 @@ public static class VoiceEndpoints
         }
         else say = new XElement("Say", PipelineScripts.Chosen(option));
         await store.SetPipelineAsync(call.Id, option, ct);
+        if (option == VoicePipelineIds.SignalWireSpeech)
+        {
+            // option 6 (V-35): no stream. The next request is the greeting turn; the caller's words come from SignalWire's recogniser one turn at a time
+            states.GetOrCreate(call.Id).EnterSpeechMode();
+            return Cxml(new XElement("Response", say, new XElement("Redirect", new XAttribute("method", "POST"), v.PublicBaseUrl!.TrimEnd('/') + SpeechPath + "?first=1")));
+        }
         return Cxml(new XElement("Response", say, StreamParts(v, tokens, call.Id)));
     }
 
@@ -226,13 +318,13 @@ public static class VoiceEndpoints
                 if (checkedPin is PinResult.Locked or PinResult.LockedNow) state.SetPin(null);   // PinFor stays until the end of this response: the unlock path is set_my_pin, which reads it
                 if (checkedPin is not (PinResult.Locked or PinResult.LockedNow)) state.SetPinFor(null);
                 state.ResetPinTries(); state.EndKeypadStep();
-                return Cxml(new XElement("Response", new XElement("Say", pinLine), StreamParts(v, tokens, call.Id)));
+                return Cxml(new XElement("Response", new XElement("Say", pinLine), Resume(v, tokens, call.Id, state)));
             }
             if (state.KeypadStep == "set_pin" && state.Pin is { Action: "set" } setting && (setting.Unlock ?? (OrderAccess.IsAccount(state) ? state.AccountId : null)) is { } setAccount)
             {
                 if (PhonePinService.Problem(digits, state.VerifiedPhone) is { } problem)
                 {
-                    if (state.CountPinTry() >= 3) { state.SetPin(null); state.ResetPinTries(); state.SetKeypadOutcome("pin_failed"); state.EndKeypadStep(); return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.PinFailed), StreamParts(v, tokens, call.Id))); }
+                    if (state.CountPinTry() >= 3) { state.SetPin(null); state.ResetPinTries(); state.SetKeypadOutcome("pin_failed"); state.EndKeypadStep(); return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.PinFailed), Resume(v, tokens, call.Id, state))); }
                     return Cxml(new XElement("Response", GatherPin(v, problem + " " + VoiceScripts.PinChoose)));
                 }
                 state.SetPin(setting with { Hash = pins.Prepare(setAccount, digits) });
@@ -251,7 +343,7 @@ public static class VoiceEndpoints
                 state.SetPin(null); state.ResetPinTries();
                 state.SetKeypadOutcome(same ? "pin_set" : "pin_failed");
                 state.EndKeypadStep();
-                return Cxml(new XElement("Response", new XElement("Say", same ? VoiceScripts.PinSaved : VoiceScripts.PinMismatch), StreamParts(v, tokens, call.Id)));
+                return Cxml(new XElement("Response", new XElement("Say", same ? VoiceScripts.PinSaved : VoiceScripts.PinMismatch), Resume(v, tokens, call.Id, state)));
             }
             state.SetPin(null); state.SetPinFor(null); state.EndKeypadStep();
             return Cxml(new XElement("Response", new XElement("Hangup")));
@@ -275,7 +367,7 @@ public static class VoiceEndpoints
             state.SetCancel(null);
             state.SetKeypadOutcome(outcome);
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", say), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", say), Resume(v, tokens, call.Id, state)));
         }
         if (state.KeypadStep == "confirm_account")
         {
@@ -300,7 +392,7 @@ public static class VoiceEndpoints
             state.SetAccountChange(null);
             state.SetKeypadOutcome(accountResult);
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", line), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", line), Resume(v, tokens, call.Id, state)));
         }
         if (state.KeypadStep == "confirm_card_pay")
         {
@@ -319,7 +411,7 @@ public static class VoiceEndpoints
             state.SetCardPay(null);
             state.SetKeypadOutcome(cardOutcome);
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", cardSay), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", cardSay), Resume(v, tokens, call.Id, state)));
         }
         if (state.KeypadStep == "save_card")
         {
@@ -336,7 +428,7 @@ public static class VoiceEndpoints
             state.SetCardSave(null);
             state.SetKeypadOutcome(savedStatus == "saved" ? "card_saved" : savedStatus == "pending" ? "card_pending" : "card_failed");
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", savedStatus == "saved" ? VoiceScripts.CardSaved : savedStatus == "pending" ? VoiceScripts.CardPending : VoiceScripts.CardFailed), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", savedStatus == "saved" ? VoiceScripts.CardSaved : savedStatus == "pending" ? VoiceScripts.CardPending : VoiceScripts.CardFailed), Resume(v, tokens, call.Id, state)));
         }
         if (state.KeypadStep == "pay")
         {
@@ -362,7 +454,7 @@ public static class VoiceEndpoints
             }
             state.SetKeypadOutcome(paid ? "paid" : pending ? "pay_pending" : "pay_failed");
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", paid ? VoiceScripts.PayThanks : pending ? VoiceScripts.PayPending : VoiceScripts.PayFailed), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", paid ? VoiceScripts.PayThanks : pending ? VoiceScripts.PayPending : VoiceScripts.PayFailed), Resume(v, tokens, call.Id, state)));
         }
         if (state.KeypadStep == "confirm")
         {
@@ -373,7 +465,7 @@ public static class VoiceEndpoints
             state.SetKeypadOutcome(yes ? "confirmed" : answer == ConfirmChoice.Unclear ? "unclear" : "change_requested");
             state.EndKeypadStep();
             state.SetTask(yes ? "confirmed" : "order");
-            return Cxml(new XElement("Response", new XElement("Say", yes ? VoiceScripts.ConfirmThanks : VoiceScripts.ConfirmChange), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", yes ? VoiceScripts.ConfirmThanks : VoiceScripts.ConfirmChange), Resume(v, tokens, call.Id, state)));
         }
         var result = codes.Verify(state, typed);
         if (result == CodeResult.Wrong) return Cxml(new XElement("Response", GatherCode(v, VoiceScripts.WrongCode)));
@@ -391,7 +483,7 @@ public static class VoiceEndpoints
             state.SetKeypadOutcome("account_refused");
             state.SetChallenge(null);
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.CodeFailed), Resume(v, tokens, call.Id, state)));
         }
         if (state.LastChallengePurpose == "pin_change")
         {
@@ -410,7 +502,7 @@ public static class VoiceEndpoints
                 return Cxml(new XElement("Response", GatherPin(v, VoiceScripts.PinChoose)));
             }
             state.SetPin(null); state.SetKeypadOutcome("account_refused"); state.SetChallenge(null); state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
+            return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.CodeFailed), Resume(v, tokens, call.Id, state)));
         }
         if (result == CodeResult.Ok)
         {
@@ -423,7 +515,7 @@ public static class VoiceEndpoints
         }
         else { state.SetKeypadOutcome("failed"); state.SetChallenge(null); }
         state.EndKeypadStep();
-        return Cxml(new XElement("Response", new XElement("Say", result == CodeResult.Ok ? VoiceScripts.CodeOk : VoiceScripts.CodeFailed), StreamParts(v, tokens, call.Id)));
+        return Cxml(new XElement("Response", new XElement("Say", result == CodeResult.Ok ? VoiceScripts.CodeOk : VoiceScripts.CodeFailed), Resume(v, tokens, call.Id, state)));
     }
 
     /// <summary>A right code proves the caller holds the number: the matching account (if exactly one) is now theirs for this call, otherwise they are a guest with a verified phone. A guest cart moves into the account.</summary>

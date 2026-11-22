@@ -29,7 +29,7 @@ public sealed class VoicePipelineMenuOptions
     /// <summary>Option 5: the HARD budget from the first engine's final text to the text handed on, judge included. When it runs out the fallback is used.</summary>
     public int ParallelBudgetMs { get; set; } = 1200;
     public PipelinePrices Prices { get; set; } = new();
-    /// <summary>What the menu says about each option (<c>Voice:PipelineMenu:Descriptions:P1</c> to <c>P5</c>); an empty entry means the built-in wording. The only place the wording is set.</summary>
+    /// <summary>What the menu says about each option (<c>Voice:PipelineMenu:Descriptions:P1</c> to <c>P6</c>); an empty entry means the built-in wording. The only place the wording is set.</summary>
     public PipelineDescriptions Descriptions { get; set; } = new();
 }
 
@@ -44,6 +44,7 @@ public sealed class PipelineDescriptions
     public string P3 { get; set; } = "";
     public string P4 { get; set; } = "";
     public string P5 { get; set; } = "";
+    public string P6 { get; set; } = "";
 
     public const int MaxLength = 300;
 
@@ -54,9 +55,10 @@ public sealed class PipelineDescriptions
         ["p3"] = "Gladia and ElevenLabs. Live speech recognition that understands Yiddish, with an English voice.",
         ["p4"] = "Yiddish Labs. Yiddish speech recognition and a Yiddish voice.",
         ["p5"] = "Two engines and a judge. Gladia and Yiddish Labs listen together, and Claude picks what you most likely said.",
+        ["p6"] = "SignalWire built-in. The phone company's own speech recognition, with Claude.",
     };
 
-    private string? Configured(string option) => option switch { "p1" => P1, "p2" => P2, "p3" => P3, "p4" => P4, "p5" => P5, _ => null };
+    private string? Configured(string option) => option switch { "p1" => P1, "p2" => P2, "p3" => P3, "p4" => P4, "p5" => P5, "p6" => P6, _ => null };
 
     /// <summary>The words for the option: the configured text, else the default.</summary>
     public string For(string option) => Configured(option) is { } c && !string.IsNullOrWhiteSpace(c) ? c.Trim() : Defaults.GetValueOrDefault(option, "");
@@ -65,14 +67,14 @@ public sealed class PipelineDescriptions
     public IEnumerable<string> TooLong() => VoicePipelineIds.All.Where(o => Configured(o)?.Trim().Length > MaxLength).Select(o => "Voice:PipelineMenu:Descriptions:" + o.ToUpperInvariant());
 }
 
-/// <summary>The five options of the menu (<c>p1</c> to <c>p5</c>), recorded in the call's tier column. p1 is the current Realtime line.</summary>
+/// <summary>The six options of the menu (<c>p1</c> to <c>p6</c>), recorded in the call's tier column. p1 is the current Realtime line.</summary>
 public static class VoicePipelineIds
 {
-    public const string Realtime = "p1";
-    public static readonly IReadOnlyList<string> All = ["p1", "p2", "p3", "p4", "p5"];
+    public const string Realtime = "p1", SignalWireSpeech = "p6";
+    public static readonly IReadOnlyList<string> All = ["p1", "p2", "p3", "p4", "p5", "p6"];
 
-    /// <summary>The option for the digits typed: "1" to "5"; anything else (empty, other digits, several) is option 1.</summary>
-    public static string FromDigits(string? digits) => digits?.Trim() is { Length: 1 } d && d[0] is >= '1' and <= '5' ? "p" + d : Realtime;
+    /// <summary>The option for the digits typed: "1" to "6"; anything else (empty, other digits, several) is option 1.</summary>
+    public static string FromDigits(string? digits) => digits?.Trim() is { Length: 1 } d && d[0] is >= '1' and <= '6' ? "p" + d : Realtime;
 
     public static bool IsOption(string? tier) => tier is not null && All.Contains(tier);
 
@@ -124,4 +126,12 @@ public static class PipelineScripts
     /// <summary>The platform's own words (never the model's, never raw) when the text model refuses to answer, or when its answer was cut by the token limit (decision V-33).</summary>
     public const string ModelRefused = "Sorry, I can't help with that.";
     public const string ModelRanOut = "Sorry, I lost my train of thought. Could you say that again?";
+}
+
+/// <summary>What the PLATFORM says on an option 6 call when no words came back (decision V-35). Plain fixed lines: the model never says these.</summary>
+public static class SpeechScripts
+{
+    public const string Reprompt = "Sorry, I didn't catch that. Could you say it again?";
+    public const string StillThere = "Are you still there?";
+    public const string Goodbye = "I can't hear you. Please call back when you're ready. Goodbye.";
 }

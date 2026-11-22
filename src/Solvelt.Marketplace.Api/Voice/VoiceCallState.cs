@@ -96,6 +96,15 @@ public sealed class VoiceCallState
     public int CountOffTopic() { lock (_gate) return ++OffTopicCount; }
     /// <summary>The server ended the AI part of the call at the off-topic limit; the after-stream webhook reads it (the call row keeps <c>order_placed</c> if an order was already placed).</summary>
     public bool OffTopicEnded { get; private set; }
+    /// <summary>Option 6 (decision V-35): the call is turn by turn (cXML Gather speech), not a stream. Set once, when the caller picks it.</summary>
+    public bool SpeechMode { get; private set; }
+    public void EnterSpeechMode() { lock (_gate) SpeechMode = true; }
+    public void LeaveSpeechMode() { lock (_gate) SpeechMode = false; }
+    /// <summary>The conversation of an option 6 call, in memory only (what the caller said as the recogniser wrote it, and the replies). Never stored or logged; it goes with the call's state.</summary>
+    public List<LlmMessage> SpeechHistory { get; } = [];
+    private int _speechEmpties;
+    /// <summary>Counts a turn with no words; returns how many in a row. A turn with words resets it.</summary>
+    public int NoteSpeechTurn(bool empty) { lock (_gate) return _speechEmpties = empty ? _speechEmpties + 1 : 0; }
     public void MarkOffTopicEnded() { lock (_gate) OffTopicEnded = true; }
     /// <summary>The orders last read out (numbers by position), so "the first one" means an order the server knows.</summary>
     public IReadOnlyList<string> ListedOrders { get; private set; } = [];

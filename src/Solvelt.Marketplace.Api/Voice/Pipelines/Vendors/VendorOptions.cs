@@ -32,6 +32,8 @@ public sealed class VoicePipelinesOptions
     public PipelineProviders P3 { get; set; } = new();
     public PipelineProviders P4 { get; set; } = new();
     public P5Options P5 { get; set; } = new();
+    /// <summary>Option 6 (SignalWire's speech recognition). Off by default; it needs only the text model's key, no new secret.</summary>
+    public P6Options P6 { get; set; } = new();
     /// <summary>The OpenAI text model of every chained option (the same instructions and tools as the Realtime line). Required as soon as any option is configured; no default is assumed.</summary>
     public VoiceLlmOptions Llm { get; set; } = new();
 
@@ -39,6 +41,30 @@ public sealed class VoicePipelinesOptions
 
     /// <summary>Whether the option sends the caller's speech or words to Yiddish Labs: those options need the consent step.</summary>
     public bool UsesYiddishLabs(string option) { var p = For(option); return p.Configured && (p.Stt.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase) || p.Tts.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase)); }
+}
+
+public sealed class P6Options { public bool Enabled { get; set; } }
+
+/// <summary>
+/// Option 6 settings (<c>Voice:SignalWireSpeech</c>, decision V-35): what the cXML <c>Gather input="speech"</c> asks SignalWire for. No secret: it uses the SignalWire project the line already has.
+/// Defaults are SignalWire's own (language en-US, speechTimeout auto); <see cref="Enhanced"/> costs extra and is off.
+/// </summary>
+public sealed class SignalWireSpeechOptions
+{
+    public string Language { get; set; } = "en-US";
+    public bool Enhanced { get; set; }
+    /// <summary>The <c>speechModel</c> attribute (for example phone_call, the 8 kHz model). Empty: SignalWire's default.</summary>
+    public string SpeechModel { get; set; } = "";
+    /// <summary>Seconds of silence that end the caller's turn, or <c>auto</c>.</summary>
+    public string SpeechTimeout { get; set; } = "auto";
+    /// <summary>The <c>voice</c> of the spoken reply (a SignalWire Say voice string). Empty: the default voice.</summary>
+    public string Voice { get; set; } = "";
+    /// <summary>Words SignalWire should favour, comma separated (the <c>hints</c> attribute). Static: nothing is looked up per turn.</summary>
+    public string Hints { get; set; } = "";
+    /// <summary>Seconds to wait for the caller to start speaking before the line asks again.</summary>
+    public int NoInputSeconds { get; set; } = 8;
+    /// <summary>The most time one turn (the text model and its tools) may take before the platform gives up on it; SignalWire's own webhook wait is short.</summary>
+    public int TurnSeconds { get; set; } = 12;
 }
 
 /// <summary>The text-model providers of the chained options (decision V-33).</summary>

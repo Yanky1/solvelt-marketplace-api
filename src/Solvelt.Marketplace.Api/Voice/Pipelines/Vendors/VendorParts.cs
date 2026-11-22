@@ -20,7 +20,7 @@ public static class VoicePipelineVendors
 
     /// <summary>The provider pairs that have an adapter. A pair outside this list is a start-up problem, so a typo cannot silently leave an option off.</summary>
     internal static bool Supported(string option, PipelineProviders p)
-        => (option == "p2" && Is(p.Stt, VendorNames.Deepgram) && Is(p.Tts, VendorNames.ElevenLabs))
+        => option == "p6" || (option == "p2" && Is(p.Stt, VendorNames.Deepgram) && Is(p.Tts, VendorNames.ElevenLabs))
         || (option == "p3" && Is(p.Stt, VendorNames.Gladia) && Is(p.Tts, VendorNames.ElevenLabs))
         || (option == "p4" && Is(p.Stt, VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs))
         || (option == "p5" && Is(p.Stt, VendorNames.Gladia + "+" + VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs));
@@ -54,6 +54,18 @@ public static class VoicePipelineVendors
             if (!prov.Configured) continue;
             if (!Supported(o, prov)) { p.Add($"{key}: the providers '{prov.Stt}' and '{prov.Tts}' have no adapter yet for this option."); continue; }
             configured.Add(o);
+        }
+        if (v.Pipelines.P6.Enabled)
+        {
+            var sp = v.SignalWireSpeech;
+            if (sp.Language.Length is < 2 or > 20 || sp.Language.Any(c => !char.IsLetterOrDigit(c) && c != '-')) p.Add("Voice:SignalWireSpeech:Language must be a language code such as en-US.");
+            if (!(string.Equals(sp.SpeechTimeout, "auto", StringComparison.OrdinalIgnoreCase) || (int.TryParse(sp.SpeechTimeout, out var st) && st is >= 1 and <= 30))) p.Add("Voice:SignalWireSpeech:SpeechTimeout must be auto or 1 to 30 seconds.");
+            if (sp.SpeechModel.Length > 40 || sp.SpeechModel.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-' && c != '.')) p.Add("Voice:SignalWireSpeech:SpeechModel may only hold letters, digits, . - and _ (at most 40).");
+            if (sp.Voice.Length > 80 || sp.Voice.Any(char.IsControl)) p.Add("Voice:SignalWireSpeech:Voice must be at most 80 characters of plain text.");
+            if (sp.Hints.Length > 500 || sp.Hints.Any(char.IsControl)) p.Add("Voice:SignalWireSpeech:Hints must be at most 500 characters of plain text.");
+            if (sp.NoInputSeconds is < 2 or > 30) p.Add("Voice:SignalWireSpeech:NoInputSeconds must be between 2 and 30.");
+            if (sp.TurnSeconds is < 3 or > 14) p.Add("Voice:SignalWireSpeech:TurnSeconds must be between 3 and 14 (SignalWire waits only a short time for our answer).");
+            configured.Add("p6");
         }
         if (configured.Count == 0) return;
         if (v.Pipelines.Llm.TimeoutSeconds is < 1 or > 120) p.Add("Voice:Pipelines:Llm:TimeoutSeconds must be between 1 and 120.");
@@ -108,6 +120,9 @@ public static class VoicePipelineVendors
                 break;
             case "p4":
                 MissingYiddishLabs(v, m);
+                break;
+            case "p6":
+                if (!v.Pipelines.P6.Enabled) m.Add("Voice:Pipelines:P6:Enabled");
                 break;
         }
         return m;
@@ -167,7 +182,7 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         // an option that names its providers but lacks settings is "not available on this line" (calls get p1), with ONE warning that names the missing settings: never a start-up failure
         bool Ready(string o)
         {
-            if (!VoicePipelineVendors.Supported(o, v.Pipelines.For(o))) return false;
+            if (o == "p6" ? !v.Pipelines.P6.Enabled : !VoicePipelineVendors.Supported(o, v.Pipelines.For(o))) return false;   // p6 has no vendor pair: it is on or off
             var missing = VoicePipelineVendors.Missing(v, o);
             if (missing.Count == 0) return true;
             logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Pipelines").LogWarning("Voice pipeline option {Option} is not available on this line: missing setting(s) {Settings}", o, string.Join(", ", missing));
@@ -177,7 +192,8 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         var p3 = Ready("p3");
         var p4 = Ready("p4");
         var p5 = Ready("p5");
-        if (!p2 && !p3 && !p4 && !p5) yield break;
+        var p6 = Ready("p6");
+        if (!p2 && !p3 && !p4 && !p5 && !p6) yield break;
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
         var http = sp.GetRequiredService<IHttpClientFactory>();
         // the chained options' text model: Claude by default (decision V-33), OpenAI when configured. Claude's client is the SDK's, which only ever talks to api.anthropic.com
@@ -186,7 +202,9 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         IVoiceLlm llm = LlmProviders.IsAnthropic(v.Pipelines.Llm.Provider)
             ? new AnthropicVoiceLlm(claude!, string.IsNullOrWhiteSpace(v.Pipelines.Llm.Model) ? AnthropicDefaults.ConversationModel : v.Pipelines.Llm.Model.Trim(), v.Pipelines.Llm.MaxTokens, v.Pipelines.Llm.TimeoutSeconds)
             : new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
+        if (p6) yield return new SignalWireSpeechParts(llm);
         Func<ITurnDetector> silence = () => new SilenceTurnDetector(v.PipelineMenu.EndpointMs);
+        if (!p2 && !p3 && !p4 && !p5) yield break;
         if (p2 || p3)
         {
             var tts = new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs"));
