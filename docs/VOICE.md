@@ -223,10 +223,10 @@ A test line (or a flag for named numbers) can offer five ways of running the sam
 | Option | Default wording (spoken after "Press N for") |
 |---|---|
 | 1 | OpenAI live voice. One model hears and speaks directly. The fastest and most natural, English first. |
-| 2 | Deepgram and ElevenLabs. Separate speech recognition and voice, with an AI deciding. The English comparison. |
+| 2 | Deepgram and ElevenLabs. Separate speech recognition and voice, with Claude deciding. The English comparison. |
 | 3 | Gladia and ElevenLabs. Live speech recognition that understands Yiddish, with an English voice. |
 | 4 | Yiddish Labs. Yiddish speech recognition and a Yiddish voice. |
-| 5 | Two engines and a judge. Gladia and Yiddish Labs listen together, and an AI picks what you most likely said. |
+| 5 | Two engines and a judge. Gladia and Yiddish Labs listen together, and Claude picks what you most likely said. |
 
 
 **Settings of the vendor adapters.** The vendors, runtime hosts and setting names are in `docs/VOICE-PIPELINE-OPTIONS.md` (decision V-22). **Option p2 is built and read now (decision V-23), off by default:**

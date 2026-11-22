@@ -35,7 +35,7 @@ public sealed class VoicePipelineMenuOptions
 
 /// <summary>
 /// The spoken description of each option on the test-line menu: a short name and one plain sentence, read after "Press N for". Edited in configuration (decision V-32); an empty entry means the default below, so
-/// nothing has to be set. Plain text only: it is spoken as it is written, and what a description says is the owner's, never a model's.
+/// nothing has to be set. Plain text only: it is spoken as it is written, and what a description says is the owner's, never a model's. The defaults say "Claude" because Claude is the default provider of options 2 to 5 (decision V-33); with the OpenAI provider configured, edit the wording.
 /// </summary>
 public sealed class PipelineDescriptions
 {
@@ -50,10 +50,10 @@ public sealed class PipelineDescriptions
     public static readonly IReadOnlyDictionary<string, string> Defaults = new Dictionary<string, string>
     {
         ["p1"] = "OpenAI live voice. One model hears and speaks directly. The fastest and most natural, English first.",
-        ["p2"] = "Deepgram and ElevenLabs. Separate speech recognition and voice, with an AI deciding. The English comparison.",
+        ["p2"] = "Deepgram and ElevenLabs. Separate speech recognition and voice, with Claude deciding. The English comparison.",
         ["p3"] = "Gladia and ElevenLabs. Live speech recognition that understands Yiddish, with an English voice.",
         ["p4"] = "Yiddish Labs. Yiddish speech recognition and a Yiddish voice.",
-        ["p5"] = "Two engines and a judge. Gladia and Yiddish Labs listen together, and an AI picks what you most likely said.",
+        ["p5"] = "Two engines and a judge. Gladia and Yiddish Labs listen together, and Claude picks what you most likely said.",
     };
 
     private string? Configured(string option) => option switch { "p1" => P1, "p2" => P2, "p3" => P3, "p4" => P4, "p5" => P5, _ => null };
