@@ -79,7 +79,7 @@ public static class VoiceEndpoints
     /// <see cref="AfterStreamPath"/>, which already knows how to run each. No words are stored or logged. The first turn (<c>?first=1</c>) is the greeting; if the text model cannot answer it the call is handed to
     /// the Realtime line, as for any other option (V-25); a later failure ends the call with the platform's apology.
     /// </summary>
-    private static async Task<IResult> SpeechTurn(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, SpeechTurns turns, IVoiceVocabulary vocabulary, TimeProvider time, CancellationToken ct)
+    private static async Task<IResult> SpeechTurn(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, SpeechTurns turns, IVoiceVocabulary vocabulary, IVoiceDiagnostics diagnostics, TimeProvider time, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -112,6 +112,10 @@ public static class VoiceEndpoints
             state.NoteSpeechTurn(false);
         }
         else state.NoteSpeechTurn(false);
+        // the owner's own test calls only (V-39): the recogniser's text for this turn; the recorder checks the setting, the number and the step itself
+        if (instruction is null && !string.IsNullOrEmpty(heard))
+            await diagnostics.RecordAsync(call, state, new DiagnosticTurn(VoicePipelineIds.SignalWireSpeech, "signalwire", heard, null, null, v.SignalWireSpeech.Language,
+                form.TryGetValue("Confidence", out var conf) && double.TryParse(conf, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cf) ? cf : null, null, null, "signalwire_speech_timeout"), ct);
         var result = await turns.RunAsync(call, state, instruction is null ? heard : null, instruction, ct);
         if (result.Failed)
         {

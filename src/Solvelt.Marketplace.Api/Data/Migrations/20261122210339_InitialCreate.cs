@@ -1190,6 +1190,29 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "voice_diagnostic_turns",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    CallId = table.Column<Guid>(type: "uuid", nullable: false),
+                    At = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Turn = table.Column<int>(type: "integer", nullable: false),
+                    Option = table.Column<string>(type: "character varying(3)", maxLength: 3, nullable: false),
+                    Recogniser = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: false),
+                    Text = table.Column<string>(type: "character varying(2000)", maxLength: 2000, nullable: false),
+                    Engines = table.Column<string>(type: "character varying(6000)", maxLength: 6000, nullable: true),
+                    Language = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: true),
+                    Confidence = table.Column<double>(type: "double precision", nullable: true),
+                    SpeechEndToTextMs = table.Column<long>(type: "bigint", nullable: true),
+                    SpeechEndToFirstAudioMs = table.Column<long>(type: "bigint", nullable: true),
+                    EndpointingReason = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_voice_diagnostic_turns", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "voice_payment_attempts",
                 columns: table => new
                 {
@@ -2181,6 +2204,16 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 column: "VerifiedKey");
 
             migrationBuilder.CreateIndex(
+                name: "IX_voice_diagnostic_turns_At",
+                table: "voice_diagnostic_turns",
+                column: "At");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_diagnostic_turns_CallId_Turn",
+                table: "voice_diagnostic_turns",
+                columns: new[] { "CallId", "Turn" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_voice_payment_attempts_CreatedAt",
                 table: "voice_payment_attempts",
                 column: "CreatedAt");
@@ -2405,6 +2438,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "voice_calls");
+
+            migrationBuilder.DropTable(
+                name: "voice_diagnostic_turns");
 
             migrationBuilder.DropTable(
                 name: "voice_payment_attempts");

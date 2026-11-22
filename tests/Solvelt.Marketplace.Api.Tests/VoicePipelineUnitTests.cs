@@ -129,6 +129,25 @@ public class VoicePipelineUnitTests
     private static FakeJudge Pick(string text) => new((_, _) => Task.FromResult<JudgeResult?>(new JudgeResult(text, "yi")));
 
     [Fact]
+    public async Task The_final_carries_every_engines_text_and_the_judges_pick_for_the_diagnostics_and_a_fallback_carries_no_pick()
+    {
+        await using (var r = await Rig.Open([Pick("a challah")]))
+        {
+            await r.Final(r.A, "a hallah"); await r.Final(r.B, "a challah text"); await r.Armed();
+            var final = Assert.Single(await r.WaitForFinals(1));
+            Assert.Equal(["alpha", "beta"], final.Candidates!.Select(c => c.Engine));
+            Assert.Equal(["a hallah", "a challah text"], final.Candidates!.Select(c => c.Text));
+            Assert.Equal("a challah", final.JudgePick);
+        }
+        await using (var r = await Rig.Open([new FakeJudge((_, _) => Task.FromResult<JudgeResult?>(null))]))
+        {
+            await r.Final(r.A, "a hallah"); await r.Final(r.B, "a challah text"); await r.Armed();
+            var final = Assert.Single(await r.WaitForFinals(1));
+            Assert.Equal("a hallah", final.Text); Assert.Null(final.JudgePick); Assert.Equal(2, final.Candidates!.Count);
+        }
+    }
+
+    [Fact]
     public async Task Both_engines_answer_the_judge_chooses_and_exactly_one_text_leaves()
     {
         var judge = new FakeJudge((c, _) => Task.FromResult<JudgeResult?>(new JudgeResult(c.Single(x => x.Engine == "beta").Text + "!", "yi")));

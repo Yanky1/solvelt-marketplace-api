@@ -112,6 +112,8 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IRealtimeConnector, 
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.RealtimePipeline>();   // option p1 of the test-line menu: the current Realtime line (decision V-19); chained pipelines register IChainedPipelineParts
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoicePipelineRegistry>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.SpeechTurns>();
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceDiagnostics>();   // V-39: test-number diagnostics, off by default
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IVoiceDiagnostics>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.VoiceDiagnostics>());
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.CatalogVocabulary>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IVoiceVocabulary>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.CatalogVocabulary>());
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<Solvelt.Marketplace.Api.Voice.CatalogVocabularyWorker>();
@@ -373,6 +375,7 @@ app.MapStaff();   // M7
 app.MapStaffBuyers();
 app.MapStaffOps();
 Solvelt.Marketplace.Api.Voice.VoiceReportEndpoints.MapStaffVoice(app);   // V
+Solvelt.Marketplace.Api.Voice.VoiceDiagnosticsEndpoints.MapStaffVoiceDiagnostics(app);   // V-39: test-number diagnostics, staff only, audited
 Solvelt.Marketplace.Api.Voice.VoiceEndpoints.MapVoice(app);
 app.MapAccount();
 app.MapCart();
