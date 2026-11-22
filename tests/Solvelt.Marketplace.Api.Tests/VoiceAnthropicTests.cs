@@ -314,6 +314,38 @@ public sealed class VoiceAnthropicTests : IDisposable
     }
 
     [Fact]
+    public void Claude_is_the_agent_by_default_everywhere_and_an_OpenAI_key_alone_never_makes_an_option_available_or_becomes_its_brain()
+    {
+        // decision V-40: OpenAI is for audio; the defaults of options 2 to 6 never use an OpenAI text model
+        var d = new VoiceOptions();
+        Assert.Equal("anthropic", d.Pipelines.Llm.Provider);
+        Assert.Equal("anthropic", VoicePipelineVendors.JudgeProvider(d));                                          // the judge follows the conversation, which is Claude
+        Assert.Equal("", d.Pipelines.Llm.Model); Assert.Equal("", d.Pipelines.P5.JudgeModel); Assert.Equal("", d.Pipelines.P5.JudgeProvider);   // no OpenAI model id is a default anywhere
+        VoiceOptions OnlyOpenAi() { var o = new VoiceOptions { OpenAiApiKey = "sk-only-openai" }; o.Pipelines.P6.Enabled = true; o.Pipelines.P2 = new PipelineProviders { Stt = "deepgram", Tts = "elevenlabs" }; o.Deepgram.ApiKey = "dg"; o.ElevenLabs = new ElevenLabsOptions { ApiKey = "el", VoiceId = "v", TtsModel = "m" }; return o; }
+        foreach (var option in new[] { "p2", "p6" })
+            Assert.Contains("Voice:Anthropic:ApiKey", VoicePipelineVendors.Missing(OnlyOpenAi(), option));        // an OpenAI key does not stand in for Claude's
+        var sp = new ServiceCollection().AddSingleton<ILoggerFactory>(new OneLoggerFactory(new Infrastructure.ListLogger())).AddHttpClient().AddSingleton<IVendorSocketConnector, ClientWebSocketConnector>().BuildServiceProvider();
+        Assert.Empty(new VendorPartsSource(sp).Create(OnlyOpenAi()));                                              // so with only an OpenAI key no chained option exists at all
+        var withClaude = OnlyOpenAi(); withClaude.Anthropic.ApiKey = "ak";
+        Assert.All(new VendorPartsSource(sp).Create(withClaude), p => Assert.IsType<AnthropicVoiceLlm>(p.Llm));    // both keys: Claude, not OpenAI
+    }
+
+    [Fact]
+    public void The_OpenAI_text_model_is_an_explicit_override_and_says_so_once_in_the_log_and_Claude_does_not()
+    {
+        VoiceOptions P6(Action<VoiceOptions>? f = null) { var o = new VoiceOptions { OpenAiApiKey = "sk", Anthropic = new AnthropicVoiceOptions { ApiKey = "ak" } }; o.Pipelines.P6.Enabled = true; f?.Invoke(o); return o; }
+        string[] Warnings(VoiceOptions o)
+        {
+            var log = new Infrastructure.ListLogger();
+            var sp = new ServiceCollection().AddSingleton<ILoggerFactory>(new OneLoggerFactory(log)).AddHttpClient().AddSingleton<IVendorSocketConnector, ClientWebSocketConnector>().BuildServiceProvider();
+            _ = new VendorPartsSource(sp).Create(o).ToList();
+            return log.Lines.Where(l => l.Contains("V-40")).ToArray();
+        }
+        Assert.Empty(Warnings(P6()));
+        Assert.Single(Warnings(P6(o => { o.Pipelines.Llm.Provider = "openai"; o.Pipelines.Llm.Model = "m"; })));
+    }
+
+    [Fact]
     public void The_option_gets_the_provider_that_is_configured_and_the_models_default_to_the_documented_ids()
     {
         var sp = new ServiceCollection().AddSingleton<ILoggerFactory>(new OneLoggerFactory(new Infrastructure.ListLogger())).AddHttpClient().AddSingleton<IVendorSocketConnector, ClientWebSocketConnector>().BuildServiceProvider();
