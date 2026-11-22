@@ -34,7 +34,7 @@ public sealed class VoiceP6SpeechTests : IDisposable
     public async Task The_menu_offers_six_when_it_is_configured_and_the_choice_goes_to_the_greeting_turn_without_any_stream()
     {
         var inbound = XDocument.Parse(await (await VoiceFactory.Hook(_s.C, VoiceEndpoints.InboundPath, _s.Sid, _s.From)).Content.ReadAsStringAsync()).Root!;
-        Assert.Contains("Press 6 for SignalWire built-in. The phone company's own speech recognition, with Claude.", inbound.Element("Gather")!.Element("Say")!.Value);
+        Assert.Contains("Say or press 6 for SignalWire built-in. The phone company's own speech recognition, with Claude.", inbound.Element("Gather")!.Element("Say")!.Value);
         var xml = await Post(VoiceEndpoints.PipelinePath, new() { ["Digits"] = "6" });
         Assert.Equal("Option 6.", xml.Element("Say")!.Value);
         Assert.Equal(VoiceFactory.BaseUrl + VoiceEndpoints.SpeechPath + "?first=1", xml.Element("Redirect")!.Value);

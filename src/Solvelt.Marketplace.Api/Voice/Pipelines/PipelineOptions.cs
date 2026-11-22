@@ -113,8 +113,8 @@ public static class PipelineScripts
     public static string Compose(VoicePipelineMenuOptions m, IReadOnlyList<string> available)
     {
         var parts = new List<string> { "Test line." };
-        foreach (var o in available) parts.Add($"Press {o[1..]} for {EndWithStop(m.Descriptions.For(o))}");
-        if (available.Count > 1) parts.Add("Press star to hear this again.");
+        foreach (var o in available) parts.Add($"Say or press {o[1..]} for {EndWithStop(m.Descriptions.For(o))}");
+        if (available.Count > 1) parts.Add("Say again or press star to hear this again.");
         return string.Join(" ", parts);
     }
 

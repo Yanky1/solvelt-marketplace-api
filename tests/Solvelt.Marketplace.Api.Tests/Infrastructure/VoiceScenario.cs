@@ -92,10 +92,22 @@ public sealed class VoiceScenario : IDisposable
 
     public async Task<XElement> AfterStream() => XDocument.Parse(await (await VoiceFactory.Hook(C, VoiceEndpoints.AfterStreamPath, Sid, From)).Content.ReadAsStringAsync()).Root!;
 
-    public async Task<(XElement Xml, string Token)> Type(string digits, string? speech = null)
+    /// <summary>
+    /// What SignalWire posts for a keypad-step answer. The SMS code is SPOKEN (decision V-41: no keypad fallback), so on that step the digits are sent as the words the caller would say, as a
+    /// <c>SpeechResult</c> and no <c>Digits</c>; every other step (PIN, confirmations) is posted as typed, as before.
+    /// </summary>
+    private Dictionary<string, string> Answer(string digits, string? speech = null)
     {
+        var step = F.Services.GetRequiredService<VoiceStateStore>().Find(Row().Result.Id)?.KeypadStep;
+        if (step == "sms_code") return new() { ["SpeechResult"] = speech ?? string.Join(' ', digits.Select(c => c switch { '0' => "zero", '1' => "one", '2' => "two", '3' => "three", '4' => "four", '5' => "five", '6' => "six", '7' => "seven", '8' => "eight", _ => "nine" })) };
         var extra = new Dictionary<string, string> { ["Digits"] = digits };
         if (speech is not null) extra["SpeechResult"] = speech;
+        return extra;
+    }
+
+    public async Task<(XElement Xml, string Token)> Type(string digits, string? speech = null)
+    {
+        var extra = Answer(digits, speech);
         var r = await VoiceFactory.Hook(C, VoiceEndpoints.KeypadPath, Sid, From, extra: extra);
         var (token, xml) = await StreamFrom(r);
         return (xml, token);
@@ -104,7 +116,7 @@ public sealed class VoiceScenario : IDisposable
     /// <summary>Digits typed on the keypad where the server answers with ANOTHER prompt (a Gather) and no stream: the raw cXML.</summary>
     public async Task<XElement> Keypad(string digits)
     {
-        var r = await VoiceFactory.Hook(C, VoiceEndpoints.KeypadPath, Sid, From, extra: new Dictionary<string, string> { ["Digits"] = digits });
+        var r = await VoiceFactory.Hook(C, VoiceEndpoints.KeypadPath, Sid, From, extra: Answer(digits));
         return XDocument.Parse(await r.Content.ReadAsStringAsync()).Root!;
     }
 
