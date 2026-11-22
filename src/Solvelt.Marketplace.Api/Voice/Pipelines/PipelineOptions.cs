@@ -113,10 +113,13 @@ public static class PipelineScripts
     public static string Compose(VoicePipelineMenuOptions m, IReadOnlyList<string> available)
     {
         var parts = new List<string> { "Test line." };
-        foreach (var o in available) parts.Add($"Say or press {o[1..]} for {EndWithStop(m.Descriptions.For(o))}");
-        if (available.Count > 1) parts.Add("Say again or press star to hear this again.");
+        foreach (var o in available) parts.Add($"Say {NumberWord(o[1..])} for {EndWithStop(m.Descriptions.For(o))}");
+        if (available.Count > 1) parts.Add("Say again to hear this again.");
         return string.Join(" ", parts);
     }
+
+    /// <summary>The menu number as the word a caller says (decision V-41): "1" to "one" ... "9" to "nine".</summary>
+    internal static string NumberWord(string digit) => digit switch { "1" => "one", "2" => "two", "3" => "three", "4" => "four", "5" => "five", "6" => "six", "7" => "seven", "8" => "eight", "9" => "nine", _ => digit };
 
     private static string EndWithStop(string text) => text.Length == 0 || text[^1] is '.' or '!' or '?' ? text : text + ".";
     public const string ConsentDeclined = "Okay. Using the standard assistant.";

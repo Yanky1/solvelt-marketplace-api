@@ -31,16 +31,27 @@ public static class SpokenDigits
         return sb.ToString();
     }
 
-    /// <summary>The menu choice in what was said: the first digit or digit word (<c>1</c> to <c>9</c>), or <c>*</c> for "star", "again" or "repeat". Null when nothing was understood.</summary>
+    /// <summary>The words SignalWire is asked to favour on the test-line menu.</summary>
+    public const string MenuHints = "one, two, three, four, five, six, seven, eight, nine, again";
+
+    private static readonly Dictionary<string, char> ExactNumbers = new(StringComparer.OrdinalIgnoreCase)
+    { ["one"] = '1', ["two"] = '2', ["three"] = '3', ["four"] = '4', ["five"] = '5', ["six"] = '6', ["seven"] = '7', ["eight"] = '8', ["nine"] = '9' };
+
+    /// <summary>
+    /// The menu choice in what was said: the LAST exact number word or digit (<c>1</c> to <c>9</c>), or <c>*</c> when the last thing that counts is "again" or "repeat". Only exact number words, never the sound-alikes used
+    /// for a code ("to", "for", "won", "ate", "oh", "tree"...): on the menu they would misfire ("go for two" is 2, not 4; "I want to try three" is 3, not 2). The last one wins so "option two" and "number two" work.
+    /// Null when nothing was understood, which is option 1.
+    /// </summary>
     public static string? Choice(string? speech)
     {
+        string? chosen = null;
         foreach (var token in Tokens(speech))
         {
-            if (token.Equals("star", StringComparison.OrdinalIgnoreCase) || token.Equals("again", StringComparison.OrdinalIgnoreCase) || token.Equals("repeat", StringComparison.OrdinalIgnoreCase) || token.Equals("asterisk", StringComparison.OrdinalIgnoreCase)) return "*";
-            if (token.Length == 1 && token[0] is >= '1' and <= '9') return token;
-            if (Words.TryGetValue(token, out var d) && d != '0') return d.ToString();
+            if (token.Equals("again", StringComparison.OrdinalIgnoreCase) || token.Equals("repeat", StringComparison.OrdinalIgnoreCase)) chosen = "*";
+            else if (token.Length == 1 && token[0] is >= '1' and <= '9') chosen = token;
+            else if (ExactNumbers.TryGetValue(token, out var d)) chosen = d.ToString();
         }
-        return null;
+        return chosen;
     }
 
     /// <summary>Digits as something to read out: "4, 7, 2" (each digit a word-sized beat for the voice).</summary>

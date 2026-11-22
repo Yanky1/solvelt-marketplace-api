@@ -157,9 +157,9 @@ public static class VoiceEndpoints
         return Cxml(new XElement("Response", new XElement("Say", VoiceScripts.Disclosure), StreamParts(v, tokens, call.Id)));
     }
 
-    /// <summary>The menu: the available options read out with their descriptions (decision V-32). A digit during the reading selects at once; star reads it again.</summary>
+    /// <summary>The menu: the available options read out with their descriptions (decision V-32). The caller SAYS the number (decision V-41: speech only, the keypad is for the PIN and the card); saying it during the reading selects at once; "again" reads it again.</summary>
     private static XElement GatherPipeline(VoiceOptions v, VoicePipelineRegistry registry)
-        => new("Gather", new XAttribute("input", "dtmf speech"), new XAttribute("numDigits", 1), new XAttribute("language", v.SignalWireSpeech.Language), new XAttribute("speechTimeout", "auto"), new XAttribute("hints", SpokenDigits.Hints + ", again"),
+        => new("Gather", new XAttribute("input", "speech"), new XAttribute("language", v.SignalWireSpeech.Language), new XAttribute("speechTimeout", "auto"), new XAttribute("hints", SpokenDigits.MenuHints),
             new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Compose(v.PipelineMenu, VoicePipelineIds.All.Where(registry.IsAvailable).ToList())));
 
     /// <summary>The caller's choice on the test-line menu: unknown or empty is option 1, an option whose pipeline is not configured says so and is option 1. The choice is recorded in the call's tier column and fixed for the call.</summary>
@@ -176,7 +176,7 @@ public static class VoiceEndpoints
         if (!PipelineMenu.Offered(v, from, to) || states.GetOrCreate(call.Id).Connections > 0)
             return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
         form.TryGetValue("Digits", out var digits);
-        if (string.IsNullOrWhiteSpace(digits) && form.TryGetValue("SpeechResult", out var saidChoice)) digits = SpokenDigits.Choice(saidChoice);   // V-41: a spoken number ("two", "option two") is the same as the key
+        if (string.IsNullOrWhiteSpace(digits) && form.TryGetValue("SpeechResult", out var saidChoice)) digits = SpokenDigits.Choice(saidChoice);   // V-41: the choice is SPOKEN ("two", "option two"); the Gather takes no keys, so a Digits field only comes from a test or a replay
         // star: read the list again (nothing is chosen)
         if (digits?.Trim() == "*") return Cxml(new XElement("Response", GatherPipeline(v, registry)));
         var option = VoicePipelineIds.FromDigits(digits);
