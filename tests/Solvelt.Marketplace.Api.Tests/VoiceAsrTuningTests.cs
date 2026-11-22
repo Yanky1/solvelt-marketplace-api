@@ -139,13 +139,20 @@ public sealed class VoiceAsrTuningTests
     }
 
     [Fact]
-    public async Task The_realtime_line_defaults_to_near_field_noise_reduction_and_a_patient_semantic_turn_detector()
+    public async Task The_default_realtime_input_block_is_exactly_todays_the_benchmark_line_is_unchanged()
     {
         var input = await SessionOf(null);
+        Assert.Equal("""{"format":{"type":"audio/pcmu"},"turn_detection":{"type":"semantic_vad","create_response":true,"interrupt_response":true}}""", input.ToJsonString());   // no noise_reduction, no eagerness
+    }
+
+    [Fact]
+    public async Task Low_eagerness_and_near_field_are_the_things_to_try_and_auto_is_not_sent()
+    {
+        var input = await SessionOf(new() { ["Voice:NoiseReduction"] = "near_field", ["Voice:Eagerness"] = "low" });
         Assert.Equal("near_field", input["noise_reduction"]!["type"]!.GetValue<string>());
         Assert.Equal(("semantic_vad", "low"), (input["turn_detection"]!["type"]!.GetValue<string>(), input["turn_detection"]!["eagerness"]!.GetValue<string>()));
         Assert.Equal("audio/pcmu", input["format"]!["type"]!.GetValue<string>());                          // the audio format is untouched
-        Assert.True(input["turn_detection"]!["create_response"]!.GetValue<bool>());
+        Assert.Null((await SessionOf(new() { ["Voice:Eagerness"] = "auto" }))["turn_detection"]!["eagerness"]);
     }
 
     [Fact]
@@ -154,7 +161,7 @@ public sealed class VoiceAsrTuningTests
         var far = await SessionOf(new() { ["Voice:NoiseReduction"] = "far_field", ["Voice:Eagerness"] = "high" });
         Assert.Equal("far_field", far["noise_reduction"]!["type"]!.GetValue<string>());
         Assert.Equal("high", far["turn_detection"]!["eagerness"]!.GetValue<string>());
-        var none = await SessionOf(new() { ["Voice:NoiseReduction"] = "none", ["Voice:TurnDetection"] = "server_vad" });
+        var none = await SessionOf(new() { ["Voice:NoiseReduction"] = "none", ["Voice:TurnDetection"] = "server_vad", ["Voice:Eagerness"] = "low" });
         Assert.Null(none["noise_reduction"]);                                                             // "none" sends no filter at all
         Assert.Null(none["turn_detection"]!["eagerness"]);                                                // eagerness belongs to semantic_vad only
     }

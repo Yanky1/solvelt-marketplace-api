@@ -93,7 +93,7 @@ public sealed class RealtimeBridge(WebSocket phone, WebSocket upstream, VoiceCal
     private JsonObject SessionUpdate()
     {
         var turn = new JsonObject { ["type"] = _o.TurnDetection, ["create_response"] = true, ["interrupt_response"] = true };
-        if (_o.TurnDetection == "semantic_vad") turn["eagerness"] = _o.Eagerness;   // V-37: low waits longer for a caller who pauses mid-thought
+        if (_o.TurnDetection == "semantic_vad" && _o.Eagerness != "auto") turn["eagerness"] = _o.Eagerness;   // V-37: "auto" is the API default and is not sent (today's line); low waits longer for a caller who pauses mid-thought
         var input = new JsonObject { ["format"] = new JsonObject { ["type"] = "audio/pcmu" }, ["turn_detection"] = turn };
         if (_o.NoiseReduction != "none") input["noise_reduction"] = new JsonObject { ["type"] = _o.NoiseReduction };   // filters the audio before the VAD and the model (OpenAI)
         return new JsonObject

@@ -28,10 +28,10 @@ public sealed class VoiceOptions
     public string OpenAiVoice { get; set; } = "cedar";
     /// <summary><c>server_vad</c> or <c>semantic_vad</c>.</summary>
     public string TurnDetection { get; set; } = "semantic_vad";
-    /// <summary><c>eagerness</c> of <c>semantic_vad</c>: <c>low</c>, <c>medium</c>, <c>high</c> or <c>auto</c> (= medium). OpenAI: "low will wait longer for the user to continue speaking"; max timeouts 8 s, 4 s, 2 s for low, medium, high. Low by default (V-37): callers pause mid-thought. Ignored with server_vad.</summary>
-    public string Eagerness { get; set; } = "low";
-    /// <summary>Input noise reduction of the Realtime line: <c>near_field</c>, <c>far_field</c> or <c>none</c>. OpenAI says near_field is "for close-talking microphones such as headphones" and does not say which suits a phone call: near_field is OUR INFERENCE (a handset sits close to the mouth), so it is a setting (V-37).</summary>
-    public string NoiseReduction { get; set; } = "near_field";
+    /// <summary><c>eagerness</c> of <c>semantic_vad</c>: <c>low</c>, <c>medium</c>, <c>high</c> or <c>auto</c> (= medium). OpenAI: "low will wait longer for the user to continue speaking"; max timeouts 8 s, 4 s, 2 s for low, medium, high. <c>auto</c> by default and then NOT SENT: that is today's line exactly (the API default, equal to medium), because option 1 is the unchanged benchmark (V-37). Try <c>low</c> if callers are cut off mid-thought. Ignored with server_vad.</summary>
+    public string Eagerness { get; set; } = "auto";
+    /// <summary>Input noise reduction of the Realtime line: <c>near_field</c>, <c>far_field</c> or <c>none</c>. OpenAI says near_field is "for close-talking microphones such as headphones" and does not say which suits a phone call: near_field would be OUR INFERENCE (a handset sits close to the mouth). <c>none</c> by default and then NOT SENT: option 1 is the unchanged benchmark (V-37). Try near_field if noise triggers turns.</summary>
+    public string NoiseReduction { get; set; } = "none";
     /// <summary>A tool slower than this many milliseconds makes the agent say a short natural filler first: never silence.</summary>
     public int ToolFillerMs { get; set; } = 700;
     public string OpenAiRealtimeUrl { get; set; } = "wss://api.openai.com/v1/realtime";
