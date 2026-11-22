@@ -197,7 +197,10 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
         var vocab = sp.GetService<IVoiceVocabulary>();   // the shared catalog words (V-37); none when the provider is not registered
         var http = sp.GetRequiredService<IHttpClientFactory>();
-        // the chained options' text model: Claude by default (decision V-33), OpenAI when configured. Claude's client is the SDK's, which only ever talks to api.anthropic.com
+        // the chained options' agent is Claude (decisions V-33 and V-40): OpenAI is for audio, not for the conversation. The OpenAI text model stays only as an explicit opt-in (never a default, never chosen because an OpenAI key
+        // exists) and says so in the log. Claude's client is the SDK's, which only ever talks to api.anthropic.com
+        if (!LlmProviders.IsAnthropic(v.Pipelines.Llm.Provider) || (p5 && !LlmProviders.IsAnthropic(VoicePipelineVendors.JudgeProvider(v))))
+            logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Pipelines").LogWarning("Voice: an OpenAI text model is configured for the conversation or the judge of options 2 to 6 (Voice:Pipelines:Llm:Provider / P5:JudgeProvider). Claude is the agent by decision; this is an explicit override (V-40).");
         var claude = LlmProviders.IsAnthropic(v.Pipelines.Llm.Provider) || LlmProviders.IsAnthropic(VoicePipelineVendors.JudgeProvider(v))
             ? sp.GetService<Anthropic.AnthropicClient>() ?? AnthropicVoiceLlm.NewClient(v.Anthropic.ApiKey) : null;
         IVoiceLlm llm = LlmProviders.IsAnthropic(v.Pipelines.Llm.Provider)

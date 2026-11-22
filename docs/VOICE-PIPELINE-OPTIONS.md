@@ -9,7 +9,7 @@ The test line only (V-19): the menu is off by default and limited to `Voice:Pipe
 | Option | What the caller gets | Speech to text (STT) | Text to speech (TTS) | Our model |
 |---|---|---|---|---|
 | p1 | today's line | OpenAI Realtime (speech to speech) | OpenAI Realtime | OpenAI Realtime |
-| p2 | a mainstream English-first chain, to compare cost and latency | **Deepgram** streaming | **ElevenLabs** streaming | OpenAI text model, same tools and instructions |
+| p2 | a mainstream English-first chain, to compare cost and latency | **Deepgram** streaming | **ElevenLabs** streaming | **Claude** (decisions V-33 and V-40; this note first named an OpenAI text model), same tools and instructions |
 | p3 | the caller may speak Yiddish and is understood live; the assistant answers in English | **Gladia** live (Solaria-1) | **ElevenLabs** streaming | same |
 | p4 | Yiddish both ways, one vendor | **Yiddish Labs** Flash (one request per caller turn) | **Yiddish Labs** realtime TTS | same |
 | p5 | Yiddish both ways with a second opinion on what was said | **Gladia** live + **Yiddish Labs** Flash in parallel, a judge picks the text (`ParallelStt`) | **Yiddish Labs** realtime TTS | same, plus the judge |
@@ -75,7 +75,7 @@ Sources: their public developer documentation (`https://app.yiddishlabs.com/deve
 
 ## 5. Option 5 and the judge (Terms §6) — a question for Ronald
 
-The judge is an OpenAI text model that reads the candidate transcripts of one turn (Gladia's and Yiddish Labs') and returns the one to use. Whether choosing between a competitor's output and another engine's output counts as "evaluating other models" under Terms §6 is a legal reading this note cannot make. **Flagged for Ronald.** Until he answers, p5 is designed so Yiddish Labs output can be kept out of the judge by one setting: `Voice:Pipelines:P5:YiddishLabsInJudge` (default **false**). With it false, p5 uses Gladia for the text the model sees and Yiddish Labs only for the voice; with it true, Flash's text is a candidate as designed. Either way the judge's choice is never logged or stored. *(Built in decision V-29: with the switch false Flash is never contacted at all.)*
+The judge is a text model (Claude by default since V-33; this note first named an OpenAI one) that reads the candidate transcripts of one turn (Gladia's and Yiddish Labs') and returns the one to use. Whether choosing between a competitor's output and another engine's output counts as "evaluating other models" under Terms §6 is a legal reading this note cannot make. **Flagged for Ronald.** Until he answers, p5 is designed so Yiddish Labs output can be kept out of the judge by one setting: `Voice:Pipelines:P5:YiddishLabsInJudge` (default **false**). With it false, p5 uses Gladia for the text the model sees and Yiddish Labs only for the voice; with it true, Flash's text is a candidate as designed. Either way the judge's choice is never logged or stored. *(Built in decision V-29: with the switch false Flash is never contacted at all.)*
 
 ## 6. Consent line for p4 and p5 (draft; the wording is Ronald's decision)
 
@@ -132,7 +132,7 @@ Prices seen (pay as you go, list prices; ours will differ with volume and plan):
 | Setting | Meaning |
 |---|---|
 | `Voice:Pipelines:P2:Stt`, `Voice:Pipelines:P2:Tts` | provider per option and part: `deepgram` / `elevenlabs` (p2), `gladia` / `elevenlabs` (p3), `yiddishlabs` / `yiddishlabs` (p4), `gladia+yiddishlabs` / `yiddishlabs` (p5); the same two keys exist for `P3`, `P4`, `P5` |
-| `Voice:Pipelines:Llm:Model` | the OpenAI text model of the chained options (reuses `Voice:OpenAiApiKey`) |
+| `Voice:Pipelines:Llm:Model` | the text model id of the chained options: empty means the Claude default; an OpenAI id only with the explicit `Voice:Pipelines:Llm:Provider=openai` override (V-40; it then reuses `Voice:OpenAiApiKey`) |
 | `Voice:Pipelines:P5:JudgeModel`, `Voice:Pipelines:P5:YiddishLabsInJudge` | option 5's judge and the Terms §6 switch (default false) |
 | `Voice:Deepgram:ApiKey` (**secret**), `:Model`, `:Language` | p2 |
 | `Voice:ElevenLabs:ApiKey` (**secret**), `:VoiceId`, `:TtsModel`, `:Region` | p2, p3 |
