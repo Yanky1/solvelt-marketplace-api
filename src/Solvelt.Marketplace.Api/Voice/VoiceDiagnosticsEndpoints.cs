@@ -48,7 +48,15 @@ public static class VoiceDiagnosticsEndpoints
         return Results.Text(sb.ToString(), "text/csv; charset=utf-8");
     }
 
-    private static object Shape(VoiceDiagnosticTurn t) => new { t.Turn, t.At, t.Option, t.Recogniser, t.Text, engines = t.Engines is null ? (object?)null : System.Text.Json.JsonDocument.Parse(t.Engines).RootElement, t.Language, t.Confidence, t.SpeechEndToTextMs, t.SpeechEndToFirstAudioMs, t.EndpointingReason };
+    private static object Shape(VoiceDiagnosticTurn t) => new { t.Turn, t.At, t.Option, t.Recogniser, t.Text, engines = EnginesOf(t.Engines), t.Language, t.Confidence, t.SpeechEndToTextMs, t.SpeechEndToFirstAudioMs, t.EndpointingReason };
+
+    /// <summary>The stored engines cell as JSON; a cell that does not parse (it should never happen) is returned as text, never as an error.</summary>
+    private static object? EnginesOf(string? engines)
+    {
+        if (engines is null) return null;
+        try { return System.Text.Json.JsonDocument.Parse(engines).RootElement.Clone(); }
+        catch (System.Text.Json.JsonException) { return engines; }
+    }
 
     /// <summary>A CSV cell: quoted, quotes doubled, and a leading = + - @ tab or CR made harmless (a spreadsheet would run it as a formula).</summary>
     internal static string Csv(string? s)

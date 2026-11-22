@@ -70,13 +70,11 @@ public sealed class VoiceDiagnostics(IServiceScopeFactory scopes, IOptions<Voice
         if (!Active(state)) return null;
         try
         {
-            string? engines = null;
-            if (t.Candidates is { Count: > 0 })
-                engines = JsonSerializer.Serialize(new { engines = t.Candidates.Select(c => new { engine = c.Engine, text = DiagnosticText.Mask(c.Text) }), judge = t.JudgePick is null ? null : DiagnosticText.Mask(t.JudgePick) });
+            var engines = EnginesJson(t.Candidates, t.JudgePick);
             var row = new VoiceDiagnosticTurn
             {
                 Id = Guid.NewGuid(), CallId = call.Id, At = time.GetUtcNow(), Turn = state.NextDiagnosticTurn(), Option = t.Option, Recogniser = Clip(t.Recogniser, 60), Text = DiagnosticText.Mask(t.Text),
-                Engines = engines is { Length: > 6000 } ? engines[..6000] : engines, Language = t.Language is { Length: > 0 } l ? Clip(l, 16) : null, Confidence = t.Confidence,
+                Engines = engines, Language = t.Language is { Length: > 0 } l ? Clip(l, 16) : null, Confidence = t.Confidence,
                 SpeechEndToTextMs = t.SpeechEndToTextMs, SpeechEndToFirstAudioMs = t.SpeechEndToFirstAudioMs, EndpointingReason = Clip(t.EndpointingReason, 40),
             };
             using var scope = scopes.CreateScope();
@@ -101,6 +99,28 @@ public sealed class VoiceDiagnostics(IServiceScopeFactory scopes, IOptions<Voice
                 .ExecuteUpdateAsync(s => s.SetProperty(t => t.SpeechEndToFirstAudioMs, ms), ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { log.LogWarning("A diagnostics timing could not be stored ({Type}).", ex.GetType().Name); }
+    }
+
+    internal const int EnginesColumn = 6000, MaxCandidates = 4;
+    private static readonly JsonSerializerOptions Raw = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };   // Hebrew letters stay one character (the default escapes each as six)
+
+    /// <summary>
+    /// The option 5 cell: each engine's masked text and the judge's pick as ONE valid JSON value that always fits the column. The texts are capped BEFORE serialising (never the serialised JSON, which would cut a string
+    /// in the middle): the cap starts at 1000 characters and is halved until the whole value fits, and at most four candidates are kept. Null when nothing fits or there are no candidates.
+    /// </summary>
+    internal static string? EnginesJson(IReadOnlyList<SttCandidate>? candidates, string? judge)
+    {
+        if (candidates is not { Count: > 0 }) return null;
+        for (var cap = 1000; cap >= 40; cap /= 2)
+        {
+            var json = JsonSerializer.Serialize(new
+            {
+                engines = candidates.Take(MaxCandidates).Select(c => new { engine = Clip(c.Engine, 40), text = Clip(DiagnosticText.Mask(c.Text), cap) }),
+                judge = judge is null ? null : Clip(DiagnosticText.Mask(judge), cap),
+            }, Raw);
+            if (json.Length <= EnginesColumn) return json;
+        }
+        return null;
     }
 
     private static string Clip(string s, int n) => s.Length <= n ? s : s[..n];

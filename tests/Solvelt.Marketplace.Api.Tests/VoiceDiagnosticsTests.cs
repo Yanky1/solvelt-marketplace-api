@@ -130,6 +130,45 @@ public sealed class VoiceDiagnosticsTests : IDisposable
     }
 
     [Fact]
+    public async Task Long_candidate_texts_always_make_valid_json_that_fits_the_column_and_the_staff_view_returns_it()
+    {
+        var yiddish = string.Concat(Enumerable.Repeat("איך וויל א חלה ", 200))[..2000];                                  // 2000 characters of Hebrew letters
+        var three = new SttCandidate[] { new("gladia", yiddish, "yi", null), new("yiddishlabs", yiddish, "yi", 0.8), new("openai", yiddish, "yi", null) };
+        var json = VoiceDiagnostics.EnginesJson(three, yiddish)!;
+        Assert.True(json.Length <= VoiceDiagnostics.EnginesColumn);
+        var doc = JsonNode.Parse(json)!;                                                                                // valid JSON: it parses
+        Assert.Equal(3, doc["engines"]!.AsArray().Count);
+        Assert.All(doc["engines"]!.AsArray(), e => Assert.True(e!["text"]!.GetValue<string>().Length >= 40));
+        Assert.StartsWith("איך וויל", doc["judge"]!.GetValue<string>());
+        Assert.True(VoiceDiagnostics.EnginesJson(Enumerable.Range(0, 9).Select(i => new SttCandidate("e" + i, "x", null, null)).ToList(), null) is { } many && JsonNode.Parse(many)!["engines"]!.AsArray().Count == VoiceDiagnostics.MaxCandidates);
+        Assert.Null(VoiceDiagnostics.EnginesJson(null, "judge")); Assert.Null(VoiceDiagnostics.EnginesJson([], "judge"));
+        var nasty = string.Concat(Enumerable.Repeat("\"\n\t", 1500));                                                // quotes and newlines double in size when escaped
+        var nastyJson = VoiceDiagnostics.EnginesJson([new("a", nasty, null, null), new("b", nasty, null, null), new("c", nasty, null, null)], nasty)!;
+        Assert.True(nastyJson.Length <= VoiceDiagnostics.EnginesColumn);                                                // the cap was halved until the escaped value fits
+        Assert.NotNull(JsonNode.Parse(nastyJson));
+
+        using var s = new StaffKit(VoiceFactory.Config());
+        var call = Guid.NewGuid();
+        await s.Db(async db => { db.VoiceDiagnosticTurns.Add(new VoiceDiagnosticTurn { Id = Guid.NewGuid(), CallId = call, At = s.F.Clock.GetUtcNow(), Turn = 1, Option = "p5", Recogniser = "x", Text = "t", Engines = json, EndpointingReason = "silence" }); await db.SaveChangesAsync(); return 0; });
+        var (admin, _, _) = await s.Admin();
+        var r = await s.Post($"/api/v1/staff/voice/diagnostics/calls/{call}", new { reason = "checking a long call" }, admin);
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal(3, JsonNode.Parse(await r.Content.ReadAsStringAsync())!["turns"]![0]!["engines"]!["engines"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public async Task A_stored_engines_cell_that_does_not_parse_is_shown_as_text_not_as_a_500()
+    {
+        using var s = new StaffKit(VoiceFactory.Config());
+        var call = Guid.NewGuid();
+        await s.Db(async db => { db.VoiceDiagnosticTurns.Add(new VoiceDiagnosticTurn { Id = Guid.NewGuid(), CallId = call, At = s.F.Clock.GetUtcNow(), Turn = 1, Option = "p5", Recogniser = "x", Text = "t", Engines = "{\"engines\":[{\"engine\":\"a\",\"te", EndpointingReason = "silence" }); await db.SaveChangesAsync(); return 0; });
+        var (admin, _, _) = await s.Admin();
+        var r = await s.Post($"/api/v1/staff/voice/diagnostics/calls/{call}", new { reason = "checking a broken row" }, admin);
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal("{\"engines\":[{\"engine\":\"a\",\"te", JsonNode.Parse(await r.Content.ReadAsStringAsync())!["turns"]![0]!["engines"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task A_flag_on_with_no_usable_test_number_stores_nothing_and_warns_once()
     {
         using var s = new VoiceScenario(Number, On());
