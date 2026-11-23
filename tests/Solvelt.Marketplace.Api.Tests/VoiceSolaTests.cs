@@ -196,6 +196,32 @@ public class VoiceSolaTests
     }
 
     [Fact]
+    public async Task A_sola_payment_records_sola_and_its_reference_on_the_order_so_the_portal_capture_names_sola_V49()
+    {
+        using var s = await Confirmed();
+        var (number, total) = await StartLink(s);
+        Assert.Equal(PaymentProviders.Stripe, Assert.Single(await Orders(s)).PaymentProvider);                          // before the payment: the default
+        Assert.Equal(HttpStatusCode.OK, (await Hook(s, Approved(number, total, "10984432761"))).StatusCode);
+        var paid = Assert.Single(await Orders(s));
+        Assert.Equal((OrderStatus.Paid, PaymentProviders.Sola, "10984432761"), (paid.Status, paid.PaymentProvider, paid.PaymentRef));
+        var again = (await Hook(s, Approved(number, total, "10984432761"))).StatusCode;                                  // a repeated notification changes nothing
+        Assert.Equal(HttpStatusCode.OK, again);
+        Assert.Equal((PaymentProviders.Sola, "10984432761"), (Assert.Single(await Orders(s)).PaymentProvider, Assert.Single(await Orders(s)).PaymentRef));
+    }
+
+    [Fact]
+    public async Task A_sola_approval_without_a_usable_reference_is_not_applied_and_is_logged_for_a_person_V49()
+    {
+        using var s = await Confirmed();
+        var (number, total) = await StartLink(s);
+        Assert.Equal(HttpStatusCode.OK, (await Hook(s, Approved(number, total, new string('9', 101)))).StatusCode);     // 101 characters: the portal would refuse the capture
+        var order = Assert.Single(await Orders(s));
+        Assert.Equal((OrderStatus.PendingPayment, PaymentProviders.Stripe), (order.Status, order.PaymentProvider));      // nothing applied, nothing mislabelled as Stripe money
+        Assert.Equal("mismatch", Assert.Single(await Attempts(s)).Status);
+        Assert.Contains(s.F.Logs.Lines, l => l.Contains(number) && l.Contains("no usable transaction reference"));
+    }
+
+    [Fact]
     public async Task Unsigned_wrongly_signed_or_tampered_notifications_do_nothing()
     {
         using var s = await Confirmed();

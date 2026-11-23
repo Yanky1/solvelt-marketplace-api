@@ -28,6 +28,12 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         var order = await db.Orders.Include(o => o.Groups).Include(o => o.Lines).AsSplitQuery().FirstOrDefaultAsync(o => o.Id == p.OrderId, ct);
         if (order is null) return OutboxResult.Dead("order_missing");
         if (order.Status != OrderStatus.Paid) return OutboxResult.Delivered();   // already placed, or failed and refunded: nothing left to do
+        // a Sola order needs Sola's reference for the capture event (portal contract C19): without a valid one the portal would refuse the capture (422 invalid_payment_ref), so nothing is sent and a person looks (decision V-49)
+        if (order.PaymentProvider == PaymentProviders.Sola && !SolaMoneyEvents.IsValidSolaRef(order.PaymentRef))
+        {
+            log.LogError("Order {Number} is a Sola order without a valid Sola reference (1 to 100 characters); it is not sent to the portal.", order.Number);
+            return OutboxResult.Dead("invalid_payment_ref");
+        }
 
         PortalResult<CreateOrderResponse> result;
         CreateOrderRequest request;
@@ -107,8 +113,7 @@ public sealed class OrderIngestHandler(MarketplaceDb db, ISignedPortalClient por
         {
             await db.OrderGroups.Where(x => x.Id == g[0].Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.SellerOrderId, (Guid?)r.SellerOrderId).SetProperty(x => x.SellerOrderNumber, r.Number).SetProperty(x => x.Oversold, r.Oversold).SetProperty(x => x.GiftUnavailable, r.GiftUnavailable), ct);
             // payment.captured goes only after the portal returned the seller order (the portal would answer 404 order_not_found otherwise).
-            outbox.EnqueuePaymentEvent($"captured:{order.Number}:{r.Number}", PaymentEventTypes.Captured,
-                new PaymentCapturedData(PaymentKinds.Order, order.Number, null, r.Number, order.PaymentIntentId!, order.Currency, g[0].TotalCents, order.PaidAt));
+            outbox.EnqueuePaymentEvent(SolaMoneyEvents.CaptureEventId(order.Number, r.Number), PaymentEventTypes.Captured, SolaMoneyEvents.Capture(order, g[0].TotalCents, r.Number)!);
         }
         await db.SaveChangesAsync(ct);
         await EnqueueBuyerMailAsync(order, "Your Solvelt order " + order.Number,

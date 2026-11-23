@@ -46,6 +46,10 @@ public sealed class MarketplaceOrder : Solvelt.Marketplace.Api.Demo.IDemoMarked
     public long TaxCents { get; set; }
     public long TotalCents { get; set; }
     public string? PaymentIntentId { get; set; }
+    /// <summary>Who holds the buyer's money (portal contract C19, decision V-49): <c>stripe</c> (every web order, and every row made before C19: the column default) or <c>sola</c> (a phone order paid through Sola). Set once, when the payment is settled.</summary>
+    public string PaymentProvider { get; set; } = PaymentProviders.Stripe;
+    /// <summary>The provider's reference of the sale, for a Sola order: Sola's <c>xRefNum</c> (at most 100 characters). Null for a Stripe order, whose reference is <see cref="PaymentIntentId"/>.</summary>
+    public string? PaymentRef { get; set; }
     // Buyer as the portal and sellers see them (CONTRACT.md §3, §8).
     public string BuyerName { get; set; } = "";
     public string RelayEmail { get; set; } = "";
@@ -255,6 +259,8 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceO
         b.Property(o => o.ActiveKey).HasMaxLength(64);
         b.Property(o => o.Currency).HasMaxLength(3).IsRequired();
         b.Property(o => o.PaymentIntentId).HasMaxLength(100);
+        b.Property(o => o.PaymentProvider).HasMaxLength(10).IsRequired().HasDefaultValue(PaymentProviders.Stripe);   // existing rows are Stripe orders
+        b.Property(o => o.PaymentRef).HasMaxLength(100);
         b.Property(o => o.BuyerName).HasMaxLength(60);
         b.Property(o => o.RelayEmail).HasMaxLength(120);
         b.Property(o => o.Phone).HasMaxLength(40);
@@ -308,4 +314,12 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<MarketplaceO
         b.Property(l => l.IsGift).HasDefaultValue(false);
         b.HasIndex(l => l.MarketplaceLineId).IsUnique();
     }
+}
+
+/// <summary>The money providers the portal knows (contract C19): Stripe for the website and for payouts, Sola for phone orders only.</summary>
+public static class PaymentProviders
+{
+    public const string Stripe = "stripe", Sola = "sola";
+    /// <summary>The longest Sola reference (<c>xRefNum</c> or chargeback reference) the portal accepts.</summary>
+    public const int MaxSolaRefLength = 100;
 }
