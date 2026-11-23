@@ -68,6 +68,27 @@ public sealed class VoiceTestSetPhoneTests : IDisposable
     }
 
     [Fact]
+    public async Task A_caller_who_is_not_a_test_number_never_hears_the_test_set_and_nine_is_the_standard_line()
+    {
+        await Start(from: Other, numbers: [Number]);                                                                         // switched on, but this caller is not listed
+        var inbound = (await Post(VoiceEndpoints.InboundPath, from: Other)).Xml;
+        Assert.Null(inbound.Element("Gather"));                                                                              // no menu at all
+        Assert.DoesNotContain(TestSetFlow.MenuLine, inbound.ToString());
+        Assert.NotNull(inbound.Descendants("Stream").SingleOrDefault());                                                     // straight to the standard line
+        var nine = (await Menu("9", from: Other)).Xml;                                                                       // a replayed or forged request: the same answer
+        Assert.DoesNotContain(TestSetFlow.Path, nine.ToString());
+        Assert.NotNull(nine.Descendants("Redirect").SingleOrDefault(r => r.Value.EndsWith(VoiceEndpoints.AfterStreamPath)));
+        // a listed caller with the test set off: no line, and nine is an unknown key (option 1)
+        _s!.Dispose();
+        await Start(testSet: false);
+        var menu = (await Post(VoiceEndpoints.InboundPath)).Xml;
+        Assert.DoesNotContain(TestSetFlow.MenuLine, menu.ToString());
+        var off = (await Menu("9")).Xml;
+        Assert.DoesNotContain(TestSetFlow.Path, off.ToString());
+        Assert.Equal("p1", (await S.Row()).Tier);
+    }
+
+    [Fact]
     public async Task The_speaker_is_an_anonymous_label_and_never_the_number()
     {
         await Start();
@@ -92,7 +113,7 @@ public sealed class VoiceTestSetPhoneTests : IDisposable
         var rec = x.Element("Record")!;
         Assert.Equal(("true", "trim-silence", "3", "15", "false"), (rec.Attribute("playBeep")!.Value, rec.Attribute("trim")!.Value, rec.Attribute("timeout")!.Value, rec.Attribute("maxLength")!.Value, rec.Attribute("transcribe")!.Value));
         Assert.Null(rec.Attribute("finishOnKey"));                                                                          // speech driven: no key
-        Assert.Equal("completed", rec.Attribute("recordingStatusCallbackEvent")!.Value);
+        Assert.Equal(("completed", "POST"), (rec.Attribute("recordingStatusCallbackEvent")!.Value, rec.Attribute("recordingStatusCallbackMethod")!.Value));
         Assert.Contains("step=done&i=1&t=1&b=" + Speaker, rec.Attribute("action")!.Value);
         Assert.Contains("step=recorded&i=1&t=1&b=" + Speaker, rec.Attribute("recordingStatusCallback")!.Value);
         Assert.Equal(1, x.Elements().Count(e => e.Name == "Record"));
@@ -181,7 +202,11 @@ public sealed class VoiceTestSetPhoneTests : IDisposable
     public async Task Every_step_is_signed_for_test_numbers_only_and_off_when_switched_off()
     {
         await Start();
-        Assert.Equal(HttpStatusCode.Forbidden, (await Step($"step=phrase&i=0&t=1&b={Speaker}", signature: "forged")).Res.StatusCode);
+        foreach (var step in new[] { "phrase", "done", "next", "recorded" })                                                  // every step verifies the SignalWire signature like the other webhooks
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, (await Step($"step={step}&i=0&t=1&b={Speaker}", signature: "forged")).Res.StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, (await Step($"step={step}&i=0&t=1&b={Speaker}", signature: "")).Res.StatusCode);
+        }
         Assert.Equal(HttpStatusCode.NotFound, (await Step($"step=phrase&i=0&t=1&b={Speaker}", from: Other)).Res.StatusCode);              // not a test number
         foreach (var bad in new[] { "step=phrase&i=40&t=1&b=" + Speaker, "step=phrase&i=-1&t=1&b=" + Speaker, "step=phrase&i=0&t=0&b=" + Speaker, "step=phrase&i=0&t=1&b=../x", "step=phrase&i=0&t=1&b=", "step=nonsense&i=0&t=1&b=" + Speaker })
             Assert.Equal(HttpStatusCode.BadRequest, (await Step(bad)).Res.StatusCode);

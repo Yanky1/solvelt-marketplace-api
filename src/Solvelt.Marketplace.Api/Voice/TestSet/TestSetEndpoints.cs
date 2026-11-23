@@ -66,7 +66,7 @@ public static class TestSetFlow
         return new XElement("Response", new XElement("Say", say),
             new XElement("Record", new XAttribute("action", Url(v, "done", i, t, b, silent)), new XAttribute("method", "POST"), new XAttribute("playBeep", "true"), new XAttribute("trim", "trim-silence"),
                 new XAttribute("timeout", 3), new XAttribute("maxLength", v.TestSet.MaxRecordSeconds), new XAttribute("transcribe", "false"),
-                new XAttribute("recordingStatusCallback", Url(v, "recorded", i, t, b)), new XAttribute("recordingStatusCallbackEvent", "completed")));
+                new XAttribute("recordingStatusCallback", Url(v, "recorded", i, t, b)), new XAttribute("recordingStatusCallbackMethod", "POST"), new XAttribute("recordingStatusCallbackEvent", "completed")));
     }
 
     private static XElement AskNextGather(VoiceOptions v, int i, int t, string b, int unclear, string say)
