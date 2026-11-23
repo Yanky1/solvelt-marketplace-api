@@ -12,6 +12,8 @@ public static class AccountEndpoints
     public sealed record ProfileBody(string? DisplayName, string? Phone);
     public sealed record ChangePasswordBody(string? CurrentPassword, string? NewPassword, bool? RemovePasskeys = null);
     public sealed record DeleteBody(string? Password);
+    public sealed record EmailBody(string? Email);
+    public sealed record SetPasswordBody(string? NewPassword);
     public sealed record PasskeyRegisterBody(Guid? ChallengeId, string? Name, System.Text.Json.JsonElement? Credential);
     public sealed record PasskeyRenameBody(string? Name);
 
@@ -28,6 +30,9 @@ public static class AccountEndpoints
         g.MapPost("/addresses/{id:guid}/default", SetDefault);
         // sensitive: the strict per-client limit, a recent sign-in and the password
         g.MapPost("/password", ChangePassword).RequireRateLimiting(RateLimitPolicies.Auth);
+        g.MapGet("/sign-in-methods", SignInMethods);                                                   // W3-02
+        g.MapPost("/email", AddEmail).RequireRateLimiting(RateLimitPolicies.Auth);                     // W3-02: an account without an email
+        g.MapPost("/password/set", SetPassword).RequireRateLimiting(RateLimitPolicies.Auth);           // W3-02: the first password of an account without one
         g.MapPost("/delete", Delete).RequireRateLimiting(RateLimitPolicies.Auth);
         // passkeys (M1-80): adding and removing one needs a recent sign-in like the password change
         g.MapGet("/passkeys", ListPasskeys);
@@ -157,6 +162,39 @@ public static class AccountEndpoints
         if (body!.CurrentPassword!.Length > 128) return Problems.Json(401, "invalid_credentials", "The password is not correct.");
         var result = await a.ChangePasswordAsync(ctx.Buyer(), body.CurrentPassword, body.NewPassword!, ips.Resolve(ctx), ct, body.RemovePasskeys == true);
         return result is { Outcome: AccountOutcome.Ok, Token: { } token } ? Results.Json(new { token }) : Map(result, ctx, "newPassword");
+    }
+
+    private static async Task<IResult> SignInMethods(HttpContext ctx, AccountService a, CancellationToken ct)
+        => await a.GetSignInMethodsAsync(ctx.Buyer().AccountId, ct) is { } m ? Results.Json(m) : Problems.NotFound();
+
+    /// <summary><c>202</c>: a link was mailed to the address (or, for an address another account holds, its owner was told; the answer is the same). <c>409 email_already_set</c> when the account has an email.</summary>
+    private static async Task<IResult> AddEmail(EmailBody? body, HttpContext ctx, AccountService a, CancellationToken ct)
+    {
+        if (AuthValidation.EmailProblem(body?.Email) is { } problem) return Problems.Validation(new Dictionary<string, string> { ["email"] = problem });
+        var r = await a.AddEmailAsync(ctx.Buyer(), body!.Email, ct);
+        return r.Outcome switch
+        {
+            AccountOutcome.Ok => Results.Accepted(),
+            AccountOutcome.AlreadySet => Problems.Json(409, "email_already_set", "This account already has an email address."),
+            AccountOutcome.InvalidEmail => Problems.Validation(new Dictionary<string, string> { ["email"] = "Enter a valid email address." }),
+            AccountOutcome.ReauthenticationRequired => Problems.Json(403, "reauthentication_required", "Confirm it is you first."),
+            _ => Map(r, ctx, "email"),
+        };
+    }
+
+    /// <summary><c>200 { token }</c>: the first password is set, every session ended and this is the new token. <c>409 email_required</c> without a verified email; <c>409 password_already_set</c> when there is one.</summary>
+    private static async Task<IResult> SetPassword(SetPasswordBody? body, HttpContext ctx, AccountService a, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(body?.NewPassword)) return Problems.Validation(new Dictionary<string, string> { ["newPassword"] = "Enter a new password." });
+        var r = await a.SetFirstPasswordAsync(ctx.Buyer(), body.NewPassword, ct);
+        return r switch
+        {
+            { Outcome: AccountOutcome.Ok, Token: { } token } => Results.Json(new { token }),
+            { Outcome: AccountOutcome.EmailRequired } => Problems.Json(409, "email_required", "Add and confirm an email address first: you will sign in with it and your password."),
+            { Outcome: AccountOutcome.AlreadySet } => Problems.Json(409, "password_already_set", "This account already has a password. Use change password instead."),
+            { Outcome: AccountOutcome.ReauthenticationRequired } => Problems.Json(403, "reauthentication_required", "Confirm it is you first."),
+            _ => Map(r, ctx, "newPassword"),
+        };
     }
 
     /// <summary>Deletes the account (soft delete now, erasure by the redaction job). Needs a recent sign-in and the password.</summary>

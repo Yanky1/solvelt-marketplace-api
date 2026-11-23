@@ -9,7 +9,9 @@ namespace Solvelt.Marketplace.Api.Account;
 
 public sealed record ProfileView(Guid Id, string DisplayName, string Email, string? Phone);
 public sealed record AddressView(Guid Id, string FullName, string Line1, string? Line2, string City, string? Region, string PostalCode, string Country, string? Phone, double? Lat, double? Lng, bool IsDefault);
-public enum AccountOutcome { Ok, NotFound, TooMany, ReauthenticationRequired, InvalidCredentials, RateLimited, WeakPassword, Conflict }
+public enum AccountOutcome { Ok, NotFound, TooMany, ReauthenticationRequired, InvalidCredentials, RateLimited, WeakPassword, Conflict, EmailRequired, AlreadySet, InvalidEmail }
+/// <summary>How the signed-in buyer can sign in (W3-02): what the account page offers to add. <see cref="PhoneLast4"/> only, never the whole number.</summary>
+public sealed record SignInMethods(string? Email, bool EmailVerified, string? PendingEmail, bool HasPassword, int Passkeys, string? PhoneLast4);
 public sealed record AccountResult(AccountOutcome Outcome, string? Problem = null, int RetryAfterSeconds = 0, string? Token = null);
 
 /// <summary>
@@ -247,6 +249,62 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         return new AccountResult(AccountOutcome.Ok, Token: token);
     }
 
+    // ---------- the web path for an account made by phone (decision W3-02) ----------
+
+    public async Task<SignInMethods?> GetSignInMethodsAsync(Guid accountId, CancellationToken ct)
+    {
+        var a = await db.BuyerAccounts.AsNoTracking().Where(x => x.Id == accountId && x.DeletedAt == null)
+            .Select(x => new { x.Email, x.EmailVerifiedAt, x.PendingEmail, HasPassword = x.PasswordHash != null, x.PhoneVerifiedE164 }).FirstOrDefaultAsync(ct);
+        if (a is null) return null;
+        var passkeys = await db.BuyerPasskeys.CountAsync(p => p.AccountId == accountId, ct);
+        return new SignInMethods(a.Email, a.EmailVerifiedAt is not null, a.PendingEmail, a.HasPassword, passkeys, a.PhoneVerifiedE164 is { Length: >= 4 } p ? p[^4..] : null);
+    }
+
+    /// <summary>
+    /// Adds an email to an account that has NONE (an account made by phone). It is the phone line's rule (V-13b), not a second one: the address is saved as PENDING and a link is mailed to it; it becomes the
+    /// account's verified email only when the link is confirmed, and an address another account holds is never attached (that owner gets the usual notice; the answer is the same). Needs a recent
+    /// sign-in (O-11): a verified email is a way to recover the account, so a borrowed session must not add one.
+    /// </summary>
+    public async Task<AccountResult> AddEmailAsync(BuyerPrincipal who, string? rawEmail, CancellationToken ct)
+    {
+        if (!Recent(who)) return new AccountResult(AccountOutcome.ReauthenticationRequired);
+        if (await db.BuyerAccounts.AsNoTracking().AnyAsync(a => a.Id == who.AccountId && a.Email != null, ct)) return new AccountResult(AccountOutcome.AlreadySet);
+        return await auth.RequestPhoneEmailAsync(who.AccountId, rawEmail ?? "", ct) switch
+        {
+            PhoneEmailResult.Sent => new AccountResult(AccountOutcome.Ok),
+            PhoneEmailResult.RateLimited => new AccountResult(AccountOutcome.RateLimited, RetryAfterSeconds: 3600),
+            _ => new AccountResult(AccountOutcome.InvalidEmail),
+        };
+    }
+
+    /// <summary>
+    /// The FIRST password of an account that has none (made by phone). Needs a recent sign-in (O-11; the phone step-up stamps it) and a VERIFIED email: the password signs in with the email, and a
+    /// forgotten one is recovered through it. Like a password change, every session ends and a fresh token is returned (M1-87); the account then signs in with its password, and no longer by SMS code.
+    /// </summary>
+    public async Task<AccountResult> SetFirstPasswordAsync(BuyerPrincipal who, string newPassword, CancellationToken ct)
+    {
+        if (!Recent(who)) return new AccountResult(AccountOutcome.ReauthenticationRequired);
+        var row = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null).Select(a => new { a.Email, a.EmailVerifiedAt, a.PasswordHash, a.SessionEpoch }).FirstOrDefaultAsync(ct);
+        if (row is null) return new AccountResult(AccountOutcome.NotFound);
+        if (row.PasswordHash is not null) return new AccountResult(AccountOutcome.AlreadySet);
+        if (row.Email is null || row.EmailVerifiedAt is null) return new AccountResult(AccountOutcome.EmailRequired);
+        if (AuthValidation.PasswordProblem(newPassword, row.Email, authOptions.Value.PasswordMinLength) is { } problem) return new AccountResult(AccountOutcome.WeakPassword, problem);
+        var hash = passwords.Hash(newPassword);
+        var now = Now;
+        var epoch = row.SessionEpoch;
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // only while the account still has no password and the same epoch: two parallel requests set it once, and a sign-out-all in between is not undone
+        var changed = await db.BuyerAccounts.Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == null && a.SessionEpoch == epoch)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, hash).SetProperty(a => a.UpdatedAt, now).SetProperty(a => a.SessionEpoch, epoch + 1), ct);
+        if (changed != 1) return new AccountResult(AccountOutcome.Conflict);
+        await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
+        var token = await auth.CreateSessionAsync(who.AccountId, ct, epoch + 1);
+        outbox.Enqueue(AuthMailHandler.Type, new AuthMailPayload(AuthMailKinds.PasswordChanged, who.AccountId));
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return new AccountResult(AccountOutcome.Ok, Token: token);
+    }
+
     // ---------- account deletion ----------
 
     /// <summary>
@@ -304,6 +362,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         await db.BuyerSessions.Where(s => s.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.BuyerPasskeys.Where(p => p.AccountId == accountId).ExecuteDeleteAsync(ct);
         await db.WebAuthnChallenges.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);
+        await db.PhoneSignInChallenges.Where(c => c.AccountId == accountId).ExecuteDeleteAsync(ct);   // web SMS codes sent for the account (W3-02)
         await db.BuyerAccounts.Where(a => a.Id == accountId && a.RedactedAt == null).ExecuteUpdateAsync(s => s
             .SetProperty(a => a.Email, (string?)null).SetProperty(a => a.PendingEmail, (string?)null).SetProperty(a => a.PinHash, (string?)null).SetProperty(a => a.RelayEmail, tombstone).SetProperty(a => a.DisplayName, "Deleted buyer").SetProperty(a => a.Phone, (string?)null).SetProperty(a => a.PhoneVerifiedE164, (string?)null).SetProperty(a => a.PhoneVerifiedAt, (DateTimeOffset?)null)
             .SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.StaffLockedAt, (DateTimeOffset?)null).SetProperty(a => a.RedactedAt, (DateTimeOffset?)now).SetProperty(a => a.UpdatedAt, now), ct);

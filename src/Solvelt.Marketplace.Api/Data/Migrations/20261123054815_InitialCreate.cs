@@ -716,6 +716,24 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "phone_sign_in_challenges",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    Purpose = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: true),
+                    CodeHash = table.Column<byte[]>(type: "bytea", maxLength: 32, nullable: false),
+                    Attempts = table.Column<int>(type: "integer", nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    UsedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_phone_sign_in_challenges", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "portal_inbound_events",
                 columns: table => new
                 {
@@ -1980,6 +1998,11 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "Status", "NextAttemptAt" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_phone_sign_in_challenges_ExpiresAt",
+                table: "phone_sign_in_challenges",
+                column: "ExpiresAt");
+
+            migrationBuilder.CreateIndex(
                 name: "IX_portal_inbound_events_AccountId",
                 table: "portal_inbound_events",
                 column: "AccountId");
@@ -2373,6 +2396,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "outbox_messages");
+
+            migrationBuilder.DropTable(
+                name: "phone_sign_in_challenges");
 
             migrationBuilder.DropTable(
                 name: "portal_inbound_events");

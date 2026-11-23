@@ -129,7 +129,7 @@ public sealed class PasskeyService(MarketplaceDb db, TimeProvider time, IOptions
         if (existing.Count >= Math.Max(1, O.MaxPasskeys)) return (PasskeyOutcome.TooMany, default, null);
         var options = fido2.RequestNewCredential(new RequestNewCredentialParams
         {
-            User = new Fido2User { Id = who.AccountId.ToByteArray(), Name = who.Email, DisplayName = who.DisplayName },
+            User = new Fido2User { Id = who.AccountId.ToByteArray(), Name = who.Email.Length > 0 ? who.Email : who.DisplayName, DisplayName = who.DisplayName },   // an account made by phone has no email (W3-02): the authenticator shows its name
             ExcludeCredentials = existing.Select(id => new PublicKeyCredentialDescriptor(id)).ToList(),
             AuthenticatorSelection = new AuthenticatorSelection { ResidentKey = ResidentKeyRequirement.Required, UserVerification = UserVerificationRequirement.Required },
             AttestationPreference = AttestationConveyancePreference.None,

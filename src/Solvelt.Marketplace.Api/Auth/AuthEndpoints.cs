@@ -28,6 +28,10 @@ public static class AuthEndpoints
         auth.MapPost("/reauthenticate/passkey/options", PasskeyReauthOptions).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/reauthenticate/passkey", PasskeyReauth).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/forgot-password", ForgotPassword).RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/phone/start", PhoneStart).RequireRateLimiting(RateLimitPolicies.Auth);                 // W3-02: sign in by SMS code
+        auth.MapPost("/phone/verify", PhoneVerify).RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/reauthenticate/phone/start", PhoneStepUpStart).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
+        auth.MapPost("/reauthenticate/phone", PhoneStepUp).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/reset-password", ResetPassword).RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/reauthenticate", Reauthenticate).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
         auth.MapPost("/session/rotate", Rotate).AddEndpointFilter<RequireBuyerFilter>().RequireRateLimiting(RateLimitPolicies.Auth);
@@ -130,6 +134,63 @@ public static class AuthEndpoints
         var r = await auth.ResetPasswordAsync(body.Token, body.Password!, ct);   // also refuses a password equal to the address, without using the link up
         if (r.PasswordProblem is { } problem) return Problems.Validation(new Dictionary<string, string> { ["password"] = problem });
         return r.Ok ? Results.NoContent() : Problems.BadRequest("invalid_token", "This link is invalid or has expired.");
+    }
+
+    public sealed record PhoneStartBody(string? Phone);
+    public sealed record PhoneCodeBody(Guid? ChallengeId, string? Code);
+
+    private static IResult StartAnswer(PhoneStartResult r, HttpContext ctx) => r.Status switch
+    {
+        PhoneStartStatus.Sent => Results.Json(new { challengeId = r.ChallengeId, expiresInSeconds = (int)PhoneSignInService.Lifetime.TotalSeconds }, statusCode: 202),
+        PhoneStartStatus.Invalid => Problems.Validation(new Dictionary<string, string> { ["phone"] = "Enter a phone number, for example 718 555 0123." }),
+        PhoneStartStatus.NoPhone => Problems.Json(409, "no_phone", "This account has no confirmed phone number."),
+        PhoneStartStatus.RateLimited => RateLimited(ctx),
+        PhoneStartStatus.Unavailable => Problems.Json(503, "phone_sign_in_unavailable", "Signing in by text message is not available right now."),
+        _ => Problems.Json(503, "sms_failed", "We could not send the text message. Please try again in a moment."),
+    };
+
+    private static IResult RateLimited(HttpContext ctx) { ctx.Response.Headers.RetryAfter = "3600"; return Problems.Json(429, "rate_limited", "Too many codes were asked for. Try again later."); }
+
+    /// <summary><c>202 { challengeId }</c> for any valid number: a code is texted whether or not an account signs in with it, so the answer never tells (W3-02).</summary>
+    private static async Task<IResult> PhoneStart(PhoneStartBody? body, PhoneSignInService phone, HttpContext ctx, ClientIpResolver ips, CancellationToken ct)
+    {
+        if (body?.Phone is { Length: > 40 }) return Problems.Validation(new Dictionary<string, string> { ["phone"] = "Enter a phone number, for example 718 555 0123." });
+        ctx.Response.Headers.CacheControl = "no-store";
+        return StartAnswer(await phone.StartSignInAsync(body?.Phone, ips.Resolve(ctx), ct), ctx);
+    }
+
+    /// <summary><c>200 { token, user }</c>; <c>401 invalid_code</c> for wrong digits; <c>400 code_expired</c> for an ended, used or locked code; <c>404 no_account</c> when the (proven) number signs in to no account.</summary>
+    private static async Task<IResult> PhoneVerify(PhoneCodeBody? body, PhoneSignInService phone, HttpContext ctx, CancellationToken ct)
+    {
+        ctx.Response.Headers.CacheControl = "no-store";
+        if (body?.ChallengeId is not { } id || body.Code is not { Length: > 0 and <= 20 }) return Problems.Json(401, "invalid_code", "That code is not correct.");
+        var r = await phone.VerifyAsync(id, body.Code, Data.PhoneSignInPurposes.SignIn, null, ct);
+        return r.Status switch
+        {
+            PhoneVerifyStatus.Ok => Results.Json(new { token = r.Token, user = new { id = r.AccountId, displayName = r.DisplayName } }),
+            PhoneVerifyStatus.NoAccount => Problems.Json(404, "no_account", "No account signs in with this number on the website. If you have an account with a password, sign in with your email."),
+            PhoneVerifyStatus.Expired => Problems.BadRequest("code_expired", "This code has expired or was used too many times. Ask for a new one."),
+            PhoneVerifyStatus.Unavailable => Problems.Json(503, "phone_sign_in_unavailable", "Signing in by text message is not available right now."),
+            _ => Problems.Json(401, "invalid_code", "That code is not correct."),
+        };
+    }
+
+    /// <summary>Step-up for an account without a password: a code to the account's own proven number (the body names none). <c>409 no_phone</c> when there is none or the account has a password.</summary>
+    private static async Task<IResult> PhoneStepUpStart(PhoneSignInService phone, HttpContext ctx, ClientIpResolver ips, CancellationToken ct)
+        => StartAnswer(await phone.StartStepUpAsync(ctx.Buyer(), ips.Resolve(ctx), ct), ctx);
+
+    /// <summary><c>204</c>: this session counts as just signed in (decision O-11).</summary>
+    private static async Task<IResult> PhoneStepUp(PhoneCodeBody? body, PhoneSignInService phone, HttpContext ctx, CancellationToken ct)
+    {
+        if (body?.ChallengeId is not { } id || body.Code is not { Length: > 0 and <= 20 }) return Problems.Json(401, "invalid_code", "That code is not correct.");
+        var r = await phone.VerifyAsync(id, body.Code, Data.PhoneSignInPurposes.StepUp, ctx.Buyer(), ct);
+        return r.Status switch
+        {
+            PhoneVerifyStatus.Ok => Results.NoContent(),
+            PhoneVerifyStatus.Expired => Problems.BadRequest("code_expired", "This code has expired or was used too many times. Ask for a new one."),
+            PhoneVerifyStatus.Unavailable => Problems.Json(503, "phone_sign_in_unavailable", "Signing in by text message is not available right now."),
+            _ => Problems.Json(401, "invalid_code", "That code is not correct."),
+        };
     }
 
     /// <summary>Step-up: <c>204</c> when the password is right (the session's authenticated_at moves to now), <c>401 invalid_credentials</c> when it is not, <c>429</c> with Retry-After when the gate says wait.</summary>

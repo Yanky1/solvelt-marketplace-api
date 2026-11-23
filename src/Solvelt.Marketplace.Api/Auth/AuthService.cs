@@ -252,7 +252,10 @@ public sealed class AuthService(MarketplaceDb db, TimeProvider time, IOptions<Au
         var row = await (from s in db.BuyerSessions.AsNoTracking()
                          join a in db.BuyerAccounts.AsNoTracking() on s.AccountId equals a.Id
                          where s.TokenHash == hash && s.RevokedAt == null && s.ExpiresAt > now && s.AbsoluteExpiresAt > now && s.Epoch == a.SessionEpoch
-                               && a.DeletedAt == null && a.EmailVerifiedAt != null && a.StaffLockedAt == null
+                               && a.DeletedAt == null && a.StaffLockedAt == null
+                               // a verified email, or (W3-02) no email at all and a PROVEN phone: the account made by phone, signed in with an SMS code. An account whose email is
+                               // unverified still has no session (whoever typed an address nobody proved must not get in through it)
+                               && (a.EmailVerifiedAt != null || (a.Email == null && a.PhoneVerifiedE164 != null && a.DemoVerifiedAt == null))
                          select new { s.Id, s.LastSeenAt, s.AuthenticatedAt, s.AbsoluteExpiresAt, AccountId = a.Id, a.DisplayName, a.Email }).FirstOrDefaultAsync(ct);
         if (row is null) return null;
         if (now - row.LastSeenAt > TimeSpan.FromMinutes(5))

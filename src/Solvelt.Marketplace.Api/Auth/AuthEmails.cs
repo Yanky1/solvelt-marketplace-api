@@ -9,7 +9,7 @@ public static class AuthEmails
         $"Hello {name},\n\nConfirm your email address to finish creating your Solvelt account:\n\n{baseUrl}/verify-email?token={token}\n\nTo confirm, open the link and enter the password you chose when you signed up. If you do not remember it, use \"Forgot password\" on the sign-in page instead: that also confirms your address.\n\nThe link works once and expires in {hours} hours. If you did not sign up, ignore this message.\n");
 
     public static EmailMessage PhoneEmail(string to, string confirmUrl, int hours) => new(to, "Confirm this email address for your Solvelt account",
-        $"Hello,\n\nSomeone on a phone call with Solvelt asked to add this email address to a Solvelt account. To confirm that it is yours, open this link and press the button:\n\n{confirmUrl}\n\nThe link works once and expires in {hours} hours. If you did not ask for this, ignore this message: nothing is added until the link is confirmed.");
+        $"Hello,\n\nSomeone asked to add this email address to a Solvelt account (on a phone call with Solvelt or on the Solvelt website). To confirm that it is yours, open this link and press the button:\n\n{confirmUrl}\n\nThe link works once and expires in {hours} hours. If you did not ask for this, ignore this message: nothing is added until the link is confirmed.");
 
     public static EmailMessage PasswordReset(string to, string baseUrl, string token, int minutes) => new(to, "Reset your password",
         $"We received a request to reset your Solvelt password:\n\n{baseUrl}/reset-password?token={token}\n\nThe link works once and expires in {minutes} minutes. If you did not ask for this, ignore this message: your password has not changed.\n");

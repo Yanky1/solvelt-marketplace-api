@@ -29,6 +29,7 @@ public sealed class AuthMaintenance(MarketplaceDb db, TimeProvider time, Outbox.
             if (await outbox.TryEnqueueAsync(Account.AccountRedactionHandler.Type, new Account.AccountRedactionPayload(id), $"redact-sweep:{id:N}:{now.ToUnixTimeSeconds() / 3600}", ct: ct)) queued++;
         // WebAuthn challenges are good for minutes; an hour after expiry (or use) they are gone
         var challenges = await db.WebAuthnChallenges.Where(c => c.ExpiresAt < hour).ExecuteDeleteAsync(ct);
+        challenges += await db.PhoneSignInChallenges.Where(c => c.ExpiresAt < hour).ExecuteDeleteAsync(ct);   // web SMS codes (W3-02): 10 minutes, gone an hour after
         return new Result(sessions, tokens, decoys, gate, queued, challenges);
     }
 }

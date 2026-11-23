@@ -13,6 +13,7 @@ public static class DevDefaults
     public const string WebForwardingKey = "dev-only-web-forwarding-key-not-for-production";
     public const string EmailLinkKey = "dev-only-email-link-key-not-for-production";
     public const string GuestLinkKey = "dev-only-guest-link-key-not-for-production";
+    public const string PhoneCodeKey = "dev-only-web-phone-code-key-not-for-production";
     public const string QuoteKey = "dev-only-checkout-quote-key-not-for-production";
     public const string AdminApiKey = "dev-only-admin-api-key-not-for-production";
     public const string UnsubscribeKey = "dev-only-unsubscribe-key-not-for-production";
@@ -162,11 +163,12 @@ public static class StartupValidator
             ("Staff:BootstrapToken", "Staff__BootstrapToken", config["Staff:BootstrapToken"]),
             ("Auth:EmailLinkKey", "Auth__EmailLinkKey", config["Auth:EmailLinkKey"]),
             ("Auth:GuestLinkKey", "Auth__GuestLinkKey", config["Auth:GuestLinkKey"]),
+            ("Auth:PhoneCodeKey", "Auth__PhoneCodeKey", config["Auth:PhoneCodeKey"]),
             ("Checkout:QuoteKey", "Checkout__QuoteKey", config["Checkout:QuoteKey"]),
             ("Notifications:UnsubscribeKey", "Notifications__UnsubscribeKey", config["Notifications:UnsubscribeKey"]),
             ("Stripe:WebhookSecret", "Stripe__WebhookSecret", config["Stripe:WebhookSecret"]),
         };
-        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey, DevDefaults.EmailLinkKey, DevDefaults.GuestLinkKey, DevDefaults.QuoteKey, DevDefaults.UnsubscribeKey, DevDefaults.StripeWebhookSecret };
+        var devDefaults = new[] { DevDefaults.PortalInboundSecret, DevDefaults.PortalWebhookSecret, DevDefaults.WebForwardingKey, DevDefaults.AdminApiKey, DevDefaults.EmailLinkKey, DevDefaults.GuestLinkKey, DevDefaults.PhoneCodeKey, DevDefaults.QuoteKey, DevDefaults.UnsubscribeKey, DevDefaults.StripeWebhookSecret };
         foreach (var (name, envName, value) in keys)
         {
             // The admin key is optional: unset disables /api/admin/*. The Stripe webhook secret is required only once a Stripe key is set (checked below).
@@ -174,7 +176,7 @@ public static class StartupValidator
             if (string.IsNullOrWhiteSpace(value))
             {
                 if (name == "Portal:ImageKey") { if (string.Equals(config["Portal:RequireImageKey"], "true", StringComparison.OrdinalIgnoreCase)) problems.Add($"{name} (env {envName}) is required because Portal:RequireImageKey is true (the portal no longer accepts the inbound key for image downloads)."); continue; }
-                if (name is not ("Admin:ApiKey" or "Stripe:WebhookSecret" or "Staff:BootstrapToken")) problems.Add($"{name} (env {envName}) is required.");
+                if (name is not ("Admin:ApiKey" or "Stripe:WebhookSecret" or "Staff:BootstrapToken" or "Auth:PhoneCodeKey")) problems.Add($"{name} (env {envName}) is required.");
                 continue;
             }
             if (value.Length < 32) problems.Add($"{name} must be at least 32 characters.");
@@ -185,6 +187,10 @@ public static class StartupValidator
         var present = keys.Where(k => !string.IsNullOrWhiteSpace(k.Value)).ToList();
         foreach (var (name, envName) in new[] { ("Stripe:SecretKey", "Stripe__SecretKey"), ("Stripe:PublishableKey", "Stripe__PublishableKey") })
             if (config[name] is { Length: > 0 } sv && !string.IsNullOrWhiteSpace(sv)) present.Add((name, envName, sv));
+        // the web's SMS code key is never one of the phone line's keys or a SignalWire secret either (W3-02, one key per purpose)
+        if (config["Auth:PhoneCodeKey"] is { Length: > 0 } webCode && !string.IsNullOrWhiteSpace(webCode))
+            foreach (var other in new[] { "Voice:PhoneCodeKey", "Voice:StreamTokenKey", "Voice:CallerHashKey", "SignalWire:SigningKey", "SignalWire:ApiToken" })
+                if (config[other] == webCode) problems.Add($"Auth:PhoneCodeKey and {other} must differ; one key per purpose.");
         for (var i = 0; i < present.Count; i++)
             for (var j = i + 1; j < present.Count; j++)
                 if (present[i].Value == present[j].Value)
