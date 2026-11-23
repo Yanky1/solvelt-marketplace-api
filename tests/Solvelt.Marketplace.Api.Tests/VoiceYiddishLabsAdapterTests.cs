@@ -22,6 +22,10 @@ public class YiddishLabsFlashSttTests
         if (chunk <= 0) await session.SendAudioAsync(audio, CancellationToken.None);
         else for (var i = 0; i < audio.Length; i += chunk) await session.SendAudioAsync(audio.AsMemory(i, Math.Min(chunk, audio.Length - i)), CancellationToken.None);
         await Task.Delay(300);                                                                 // the upload worker runs on its own
+        // ... and a retry waits its own back-off first (250 ms real time): disposing the session cancels the worker, so wait until every scripted answer has been given (bounded), then let the last one be read.
+        // A fixed 300 ms alone lost the second request on a loaded runner (CI run 45156539063).
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        if (http.Remaining > 0) { while (http.Remaining > 0 && DateTime.UtcNow < deadline) await Task.Delay(25); await Task.Delay(150); }
         await session.DisposeAsync();
         var events = new List<SttEvent>();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -117,6 +121,15 @@ public class YiddishLabsFlashSttTests
         Assert.Equal(2, h1.Requests.Count); Assert.Contains(e1, e => e.Text == "after retry");
         var (e2, h2, _) = await Run(Audio(5, 25, 25), new FakeFlashHandler(new FlashAnswer(HttpStatusCode.TooManyRequests, "slow down", 0), FlashAnswer.Text("after wait")));
         Assert.Equal(2, h2.Requests.Count); Assert.Contains(e2, e => e.Text == "after wait");
+    }
+
+    /// <summary>The same retry on a slow runner: each request reaches the handler 150 ms late (fault injection), so the second one is sent well after the first 300 ms of waiting.</summary>
+    [Fact]
+    public async Task The_retry_still_happens_when_every_request_reaches_the_vendor_late()
+    {
+        var slow = new FakeFlashHandler(new FlashAnswer(HttpStatusCode.ServiceUnavailable, "no_capacity"), FlashAnswer.Text("after retry")) { RequestDelay = TimeSpan.FromMilliseconds(150) };
+        var (events, http, _) = await Run(Audio(5, 25, 25), slow);
+        Assert.Equal(2, http.Requests.Count); Assert.Contains(events, e => e.Text == "after retry");
     }
 
     [Theory]
