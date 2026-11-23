@@ -37,11 +37,15 @@ public sealed class ConnectorOptions
     /// <summary>True when a platform in front terminates TLS and says so with <c>X-Forwarded-Proto: https</c> (for example Azure App Service). Off by default: then only a request that arrived over https itself is accepted.</summary>
     public bool TrustForwardedProto { get; set; }
 
-    /// <summary>Start-up problems. This release is SANDBOX ONLY: it refuses to start in Production (real money stays off until the owner decides, V-13).</summary>
+    /// <summary>Same rule as the API's (Sola documents no way to tell sandbox from live, so only a key that names itself live is recognised).</summary>
+    public static bool ConnectorKeyLooksLive(string? key) => !string.IsNullOrWhiteSpace(key) && System.Text.RegularExpressions.Regex.IsMatch(key, @"(^|[^A-Za-z0-9])live([^A-Za-z0-9]|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>Start-up problems. <paramref name="production"/> no longer refuses to start (V-50); the parameter stays for callers.</summary>
     public static IReadOnlyList<string> Problems(ConnectorOptions o, bool production)
     {
         var p = new List<string>();
-        if (production) p.Add("The pay connector is sandbox-only in this release: it refuses to start in Production (real-money phone payments are not enabled; that is a separate decision of the owner).");
+        // Allowed in Production (owner decision 2026-11-23: everything up and running; Option A and PCI SAQ D accepted). A key that names itself live is still refused (CLAUDE.md: no live keys).
+        if (ConnectorKeyLooksLive(o.SolaKey)) p.Add("Connector:SolaKey looks like a LIVE key (it names itself live). Live keys are not allowed here: use the account's test key.");
         if (!Uri.TryCreate(o.ApiBaseUrl, UriKind.Absolute, out var api) || (api.Scheme != "https" && !(o.RequireHttps == false && api.Scheme == "http")) || api.AbsolutePath != "/")
             p.Add("Connector:ApiBaseUrl must be the https origin of the marketplace API (no path).");
         if (string.IsNullOrWhiteSpace(o.SharedKey) || o.SharedKey.Length < 32) p.Add("Connector:SharedKey (env Connector__SharedKey) must be at least 32 characters.");

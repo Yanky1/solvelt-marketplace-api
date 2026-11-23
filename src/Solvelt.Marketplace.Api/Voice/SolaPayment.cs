@@ -15,6 +15,12 @@ public sealed class SolaOptions
     public string? WebhookPin { get; set; }
     /// <summary>The API key of the account (reserved for a later reconciliation call and refunds; not used by this slice). Secret.</summary>
     public string? ApiKey { get; set; }
+    /// <summary>Sola's JSON gateway for transactions (refunds), docs.solapayments.com/api/transaction.md; x2 and b1 are its listed backups, used only when the first host cannot even be connected to.</summary>
+    public string GatewayUrl { get; set; } = "https://x1.cardknox.com/gatewayjson";
+    public string[] GatewayBackupUrls { get; set; } = ["https://x2.cardknox.com/gatewayjson", "https://b1.cardknox.com/gatewayjson"];
+    public string SoftwareName { get; set; } = "Solvelt";
+    public string SoftwareVersion { get; set; } = "1.0";
+    public int TimeoutSeconds { get; set; } = 20;
     /// <summary>
     /// The keypad card connector (method A, V-13), a SEPARATE service that is the only place a card number is handled: its public https URL WITHOUT credentials (the path is <c>/connector</c>). Empty: the keypad method
     /// is not offered. Setting it needs <see cref="PayConnectorUser"/>, <see cref="PayConnectorPassword"/> and <see cref="PayConnectorKey"/>.
@@ -29,9 +35,21 @@ public sealed class SolaOptions
     public string? SavedCardKey { get; set; }
     public bool KeypadEnabled => !string.IsNullOrWhiteSpace(PayConnectorUrl);
 
+    /// <summary>
+    /// Sola documents NO way to tell a sandbox key from a live one (docs.solapayments.com/api/transaction.md and /api/authentication, read 2026-11-23), so the mode is never claimed: the start-up line says
+    /// "Sola: mode unknown". The one thing we do recognise is a key that NAMES itself live (a word "live" between separators or at its start): CLAUDE.md forbids live keys, so such a key is refused.
+    /// </summary>
+    public static bool LooksLive(string? key) => !string.IsNullOrWhiteSpace(key) && System.Text.RegularExpressions.Regex.IsMatch(key, @"(^|[^A-Za-z0-9])live([^A-Za-z0-9]|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>The start-up line and the staff health field: <c>Sola: mode unknown</c> (never "test" or "LIVE" unless the docs give a way to know), or <c>Sola: not configured</c>.</summary>
+    public string ModeText => string.IsNullOrWhiteSpace(ApiKey) ? "Sola: not configured (no API key)" : LooksLive(ApiKey) ? "Sola: LIVE mode (the key names itself live: refused)" : "Sola: mode unknown";
+
     public static IReadOnlyList<string> Problems(SolaOptions o)
     {
         var p = new List<string>();
+        if (LooksLive(o.ApiKey)) p.Add("Sola:ApiKey looks like a LIVE key (it names itself live). Live keys are not allowed here: use the account's test key.");
+        if (!Uri.TryCreate(o.GatewayUrl, UriKind.Absolute, out var gw) || gw.Scheme != Uri.UriSchemeHttps) p.Add("Sola:GatewayUrl must be an https URL.");
+        if (o.TimeoutSeconds is < 5 or > 60) p.Add("Sola:TimeoutSeconds must be between 5 and 60.");
         if (o.KeypadEnabled)
         {
             if (!Uri.TryCreate(o.PayConnectorUrl, UriKind.Absolute, out var cu) || cu.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(cu.UserInfo) || !string.IsNullOrEmpty(cu.Query) || !string.IsNullOrEmpty(cu.Fragment))

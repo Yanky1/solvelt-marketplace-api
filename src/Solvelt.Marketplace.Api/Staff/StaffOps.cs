@@ -13,7 +13,7 @@ public enum OpsOutcome { Ok, NotFound, NotRetryable, AlreadyQueued }
 /// Orders, payments and queues for staff (decisions M7-10..M7-14). Nothing here talks to Stripe or the portal: a retry only puts a DEAD outbox message back in the queue (or replays a parked
 /// inbound event), so the existing idempotent handlers do the work under the same keys they always use.
 /// </summary>
-public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOptions<StaffOptions> options, Portal.Webhooks.PortalEventProcessor replay)
+public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOptions<StaffOptions> options, Portal.Webhooks.PortalEventProcessor replay, OutboxWriter outbox, IOptions<PortalOptions> portalOptions)
 {
     private DateTimeOffset Now => time.GetUtcNow().ToUniversalTime();
 
@@ -90,6 +90,8 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
         var refund = await db.OrderRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.Id == refundId && r.OrderId == orderId, ct);
         if (refund is null) return (OpsOutcome.NotFound, null);
         if (refund.Status != RefundStatus.Reserved) return (OpsOutcome.NotRetryable, refund.Status);
+        // A Sola refund whose call may have reached Sola is never retried (no idempotency key at Sola): a person checks there and resolves it (ResolveSolaRefundAsync)
+        if (refund.StripeRefundId == StripeRefundHandler.SolaSending) return (OpsOutcome.NotRetryable, "sola_needs_reconcile");
         var current = RefundKeys(refund)[0];
         var revived = await OutboxAdmin.ReviveDeadAsync(db, m => m.DedupeKey == current, Now, ct);
         if (revived != 1)
@@ -98,6 +100,66 @@ public sealed class StaffOpsService(MarketplaceDb db, TimeProvider time, IOption
             return state == OutboxStatus.Pending ? (OpsOutcome.AlreadyQueued, state) : (OpsOutcome.NotRetryable, state ?? "no_message");
         }
         StaffAudit.Add(db, time, who, "refund.retry", "order", orderId.ToString("D"), reason, new { refundId, attempt = refund.Attempt });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (OpsOutcome.Ok, null);
+    }
+
+    /// <summary>
+    /// Settles a Sola refund whose answer was lost (<c>sola:sending</c>): the person looked at Sola. <paramref name="refunded"/> with Sola's <c>xRefNum</c> of the refund: the refund is finished with it (the portal's
+    /// <c>refund.processed</c> follows); not refunded: the marker is cleared and the refund is sent again. Audited with the reason. Needs the same permission as the refund retry.
+    /// </summary>
+    public async Task<(OpsOutcome Outcome, string? State)> ResolveSolaRefundAsync(StaffPrincipal who, Guid orderId, Guid refundId, bool refunded, long? refNum, string reason, CancellationToken ct)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var refund = await db.OrderRefunds.AsNoTracking().FirstOrDefaultAsync(r => r.Id == refundId && r.OrderId == orderId, ct);
+        if (refund is null) return (OpsOutcome.NotFound, null);
+        if (refund.Status != RefundStatus.Reserved || refund.StripeRefundId != StripeRefundHandler.SolaSending) return (OpsOutcome.NotRetryable, refund.Status == RefundStatus.Reserved ? "not_awaiting_resolution" : refund.Status);
+        var marker = refunded ? StripeRefundHandler.SolaConfirmedPrefix + refNum!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
+        var set = await db.OrderRefunds.Where(r => r.Id == refundId && r.StripeRefundId == StripeRefundHandler.SolaSending).ExecuteUpdateAsync(u => u.SetProperty(r => r.StripeRefundId, marker), ct);
+        if (set != 1) return (OpsOutcome.NotRetryable, "changed");
+        var current = RefundKeys(refund)[0];
+        var revived = await OutboxAdmin.ReviveDeadAsync(db, m => m.DedupeKey == current, Now, ct);
+        if (revived != 1) { await tx.RollbackAsync(CancellationToken.None); return (OpsOutcome.NotRetryable, "no_dead_message"); }
+        StaffAudit.Add(db, time, who, "refund.sola_resolve", "order", orderId.ToString("D"), reason, new { refundId, refunded, refNum });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (OpsOutcome.Ok, null);
+    }
+
+    public sealed record SolaChargeback(string Ref, long AmountCents, long FeeCents, string Status, string? Reason, DateTimeOffset? EvidenceDueBy);
+
+    /// <summary>
+    /// Records a chargeback Sola told a person about (Sola does not notify us) and tells the portal: <c>dispute.created</c> for the first status of a chargeback reference, <c>.updated</c> or <c>.closed</c> after it,
+    /// <c>provider: "sola"</c> and a <c>feeCents</c> that is ALWAYS sent (the portal's default of 1500 applies when it is left out). Only a paid Sola order with one seller order (a multi-seller dispute waits for
+    /// <c>Portal:PerSellerOrderDisputes</c>, as Stripe's does); one event per (reference, status), so a repeated click queues nothing new. Audited with the reason, by order id.
+    /// </summary>
+    public async Task<(OpsOutcome Outcome, string? Detail)> RecordSolaChargebackAsync(StaffPrincipal who, Guid orderId, SolaChargeback cb, string reason, CancellationToken ct)
+    {
+        var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstOrDefaultAsync(o => o.Id == orderId, ct);
+        if (order is null) return (OpsOutcome.NotFound, null);
+        if (order.PaymentProvider != PaymentProviders.Sola || order.PaidAt is null) return (OpsOutcome.NotRetryable, "not_a_paid_sola_order");
+        if (order.Groups.Count != 1 && !portalOptions.Value.PerSellerOrderDisputes) return (OpsOutcome.NotRetryable, "multi_seller_waits_for_portal");
+        if (order.Groups.Any(g => g.SellerOrderNumber is null)) return (OpsOutcome.NotRetryable, "not_ingested_yet");
+        var groups = order.Groups.OrderByDescending(g => g.TotalCents).ThenBy(g => g.Id).ToList();
+        var share = StripeEventProcessor.AllocateDispute(cb.AmountCents, groups.Select(g => g.TotalCents).ToList(), groups.Select(g => g.ItemsCents + g.ShippingCents).ToList());
+        if (share.Sum() < cb.AmountCents) return (OpsOutcome.NotRetryable, "exceeds_sale");
+        var feeShare = StripeEventProcessor.Allocate(cb.FeeCents, groups.Select(g => g.TotalCents).ToList());
+        var prefix = $"payment:sola-cb-{cb.Ref}-";
+        var first = !await db.OutboxMessages.AnyAsync(m => m.DedupeKey!.StartsWith(prefix), ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var queued = 0;
+        for (var i = 0; i < groups.Count; i++)
+        {
+            var data = SolaMoneyEvents.Dispute(cb.Ref, order.Number, groups[i].SellerOrderNumber!, share[i], feeShare[i], order.Currency, cb.Status, cb.Reason, cb.EvidenceDueBy);
+            if (data is null) return (OpsOutcome.NotRetryable, "invalid_chargeback");
+            var eventId = SolaMoneyEvents.DisputeEventId(cb.Ref, cb.Status, groups[i].SellerOrderNumber!);
+            if (await db.OutboxMessages.AnyAsync(m => m.DedupeKey == "payment:" + eventId, ct)) continue;   // this status of this chargeback was already recorded
+            outbox.EnqueuePaymentEvent(eventId, SolaMoneyEvents.DisputeType(cb.Status, first), data);
+            queued++;
+        }
+        if (queued == 0) return (OpsOutcome.AlreadyQueued, null);
+        StaffAudit.Add(db, time, who, "dispute.sola_record", "order", orderId.ToString("D"), reason, new { cb.Ref, cb.Status, cb.AmountCents, cb.FeeCents });
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return (OpsOutcome.Ok, null);
