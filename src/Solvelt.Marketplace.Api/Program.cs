@@ -252,6 +252,12 @@ builder.Services.AddSingleton<IProjectionHandler, PortalRefundHandler>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Fulfilment.FulfilmentProjector>();
 builder.Services.AddSingleton<IProjectionHandler, Solvelt.Marketplace.Api.Fulfilment.FulfilmentHandler>();
 builder.Services.AddScoped<IOutboxHandler, StripeRefundHandler>();
+// Sola's refunds (V-50): the real gateway when an API key is configured; the in-process fake only in Development/Testing without one; otherwise "unavailable" (the refund waits, nothing is sent).
+builder.Services.AddHttpClient<SolaRefundHttpGateway>();
+builder.Services.AddSingleton<FakeSolaRefundGateway>();
+builder.Services.AddScoped<ISolaRefundGateway>(sp =>
+    !string.IsNullOrWhiteSpace(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Voice.SolaOptions>>().Value.ApiKey) ? sp.GetRequiredService<SolaRefundHttpGateway>()
+    : devLike ? sp.GetRequiredService<FakeSolaRefundGateway>() : new UnavailableSolaRefundGateway());
 builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Fulfilment.ProofFetcher>((sp, c) =>
 {
     var o = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<PortalOptions>>().Value;
@@ -358,6 +364,11 @@ if (!builder.Environment.IsEnvironment("Testing"))
     SchemaCheck.LogAtStartup(scope.ServiceProvider.GetRequiredService<MarketplaceDb>(), app.Logger);
 }
 
+{
+    // Sola's mode is never guessed (the docs give no way to tell sandbox from live): one line at start-up says what we know. There is no staff health endpoint; the public /health stays free of it.
+    var solaOpts = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Voice.SolaOptions>>().Value;
+    if (!string.IsNullOrWhiteSpace(solaOpts.ApiKey) || app.Configuration["Voice:PhonePaymentProvider"] == "sola") app.Logger.LogInformation("{SolaMode}", solaOpts.ModeText);
+}
 app.MapGet("/health", (ClientIpResolver forwarding, OpsCounters ops) => Results.Json(new
 {
     status = "ok",

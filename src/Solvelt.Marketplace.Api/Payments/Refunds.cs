@@ -209,8 +209,14 @@ public sealed class RefundService(MarketplaceDb db, OutboxWriter outbox, TimePro
 /// Stripe's dashboard) as external money, and only then decides: a refund that still fits is simply refused and its counters given back; one that no longer fits is cut to what is left (and re-sent
 /// under a new idempotency attempt), or, when nothing is left, given back entirely. So the counters always follow Stripe-confirmed money, never a reservation Stripe never executed.
 /// </summary>
-public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payments, OutboxWriter outbox, TimeProvider time, ILogger<StripeRefundHandler>? log = null) : IOutboxHandler
+public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payments, OutboxWriter outbox, TimeProvider time, ISolaRefundGateway sola, ILogger<StripeRefundHandler>? log = null) : IOutboxHandler
 {
+    /// <summary>
+    /// Sola refunds keep their state in <c>StripeRefundId</c> (the column holds the PROVIDER's refund reference; no new column): <c>sola:sending</c> is written BEFORE the one call to Sola, so a crash or a timeout
+    /// leaves proof that the call may have happened and nothing ever calls again by itself; <c>sola:confirmed:{xRefNum}</c> is what a person writes (staff resolve) after checking at Sola that it DID go through.
+    /// </summary>
+    public const string SolaSending = "sola:sending", SolaConfirmedPrefix = "sola:confirmed:";
+
     public IReadOnlyCollection<string> Types { get; } = [RefundService.StripeRefundType];
 
     public async Task<OutboxResult> HandleAsync(OutboxMessage message, CancellationToken ct)
@@ -224,14 +230,9 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         if (refund.Status != RefundStatus.Reserved) return OutboxResult.Delivered();   // already done (a retry after the result was recorded)
         if (p.Attempt < refund.Attempt) return OutboxResult.Delivered();                // a message of an older send (the amount was cut and re-sent since): it must not send the new amount under the old key (review Q2)
         var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstAsync(o => o.Id == refund.OrderId, ct);
+        // A Sola-paid phone order is refunded through SOLA's API, never Stripe's (portal contract C19, decisions V-49 and V-50).
+        if (order.PaymentProvider == PaymentProviders.Sola) return await HandleSolaAsync(refund, order, p, ct);
         if (order.PaymentIntentId is null) return OutboxResult.Dead("no_payment_intent");
-        // A Sola-paid phone order is never refunded through Stripe (portal contract C19, decision V-49): there is no Sola transaction API client here, so a person refunds it at Sola and the refund.processed
-        // for it is sent only after Sola confirmed (SolaMoneyEvents.Refund). The refund stays reserved and this message dies where an alert shows it.
-        if (order.PaymentProvider == PaymentProviders.Sola)
-        {
-            log?.LogError("Refund {Key} is for Sola-paid order {Number}: it cannot be made through Stripe and needs a person at Sola.", refund.Key, order.Number);
-            return OutboxResult.Dead("sola_refund_not_automatic");
-        }
 
         RefundResult result;
         try
@@ -249,6 +250,70 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
             await tx.CommitAsync(ct);
         }
         return OutboxResult.Delivered();
+    }
+
+    private async Task<OutboxResult> HandleSolaAsync(OrderRefund refund, MarketplaceOrder order, RefundService.RefundPayload p, CancellationToken ct)
+    {
+        if (refund.StripeRefundId is { } marker && marker.StartsWith(SolaConfirmedPrefix, StringComparison.Ordinal))
+        {
+            // a person checked at Sola and confirmed this refund went through: finish it with the reference they gave, no call
+            await using var done = await db.Database.BeginTransactionAsync(ct);
+            await FinalizeSucceededAsync(refund, order, marker[SolaConfirmedPrefix.Length..], ct);
+            await db.SaveChangesAsync(ct);
+            await done.CommitAsync(ct);
+            return OutboxResult.Delivered();
+        }
+        if (refund.StripeRefundId == SolaSending)
+        {
+            log?.LogError("Refund {Key} of Sola order {Number}: an earlier call to Sola has no recorded answer, so it may have gone through. It is NOT sent again; a person checks at Sola and resolves it in the staff area.", refund.Key, order.Number);
+            return OutboxResult.Dead("sola_refund_ambiguous");
+        }
+        if (!long.TryParse(order.PaymentRef, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var original) || original <= 0)
+        {
+            log?.LogError("Refund {Key} of Sola order {Number}: the order has no usable Sola reference (xRefNum), so Sola cannot be asked. A person refunds at Sola.", refund.Key, order.Number);
+            return OutboxResult.Dead("sola_ref_invalid");
+        }
+        // the marker is written first, conditionally: only one worker ever makes the call for this refund and send
+        var claimed = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved && r.StripeRefundId == null && r.Attempt == refund.Attempt)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.StripeRefundId, SolaSending).SetProperty(r => r.UpdatedAt, time.GetUtcNow().ToUniversalTime()), ct);
+        if (claimed != 1) return OutboxResult.Delivered();   // another worker has it, or it is settled
+
+        var full = refund.AmountCents == order.PaidCents;   // everything paid goes back: void while unsettled, else a full refund; otherwise a partial refund with its amount
+        SolaRefundResult result;
+        try { result = await sola.RefundAsync(original, refund.AmountCents, full, "Refund " + order.Number, ct); }
+        catch (SolaUnavailableException ex)
+        {
+            await db.OrderRefunds.Where(r => r.Id == refund.Id && r.StripeRefundId == SolaSending).ExecuteUpdateAsync(s => s.SetProperty(r => r.StripeRefundId, (string?)null), CancellationToken.None);   // nothing was sent
+            return OutboxResult.Retry(ex.Message.Length <= 60 ? ex.Message : "sola_unavailable");
+        }
+        // any other exception (including a cancelled call) leaves the marker: the call may have reached Sola
+
+        if (result.Outcome == SolaRefundOutcome.Approved)
+        {
+            log?.LogInformation("Sola refund for {Key} of order {Number} approved: xRefNum {RefNum} ({Mode})", refund.Key, order.Number, result.RefNum, full ? "voidrefund" : "refund");
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            await FinalizeSucceededAsync(refund, order, result.RefNum!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), ct);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return OutboxResult.Delivered();
+        }
+        if (result.Outcome == SolaRefundOutcome.Ambiguous)
+        {
+            log?.LogError("Refund {Key} of Sola order {Number}: no clear answer from Sola ({Code}); the refund may have happened. It is NOT sent again; a person checks at Sola and resolves it in the staff area.", refund.Key, order.Number, result.Code);
+            return OutboxResult.Dead("sola_refund_ambiguous");
+        }
+        // Sola said no (declined, error, or a duplicate of an identical refund in the last 10 minutes): nothing moved, so everything the refund reserved is given back
+        await using (var tx = await db.Database.BeginTransactionAsync(ct))
+        {
+            await db.Orders.Where(o => o.Id == order.Id).ExecuteUpdateAsync(s => s.SetProperty(o => o.RefundedCents, o => o.RefundedCents), ct);   // the order's row lock
+            var changed = await db.OrderRefunds.Where(r => r.Id == refund.Id && r.Status == RefundStatus.Reserved && r.Attempt == refund.Attempt)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, RefundStatus.Rejected).SetProperty(r => r.StripeRefundId, (string?)null).SetProperty(r => r.UpdatedAt, time.GetUtcNow().ToUniversalTime()), ct);
+            if (changed == 1) await RefundService.ReleaseCountersAsync(db, refund, ct);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+        log?.LogError("Refund {Key} of Sola order {Number} was refused by Sola ({Code}); nothing moved and the reservation was released. A person looks.", refund.Key, order.Number, result.Code);
+        return OutboxResult.Dead("sola_" + (result.Code ?? "refused"));
     }
 
     /// <summary>A refund of ours that Stripe has executed: marks it done and queues what follows (the portal's <c>refund.processed</c>, the buyer's mail). The caller saves and commits.</summary>

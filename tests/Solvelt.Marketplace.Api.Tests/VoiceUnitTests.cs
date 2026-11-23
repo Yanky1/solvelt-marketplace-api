@@ -170,7 +170,9 @@ public class VoiceUnitTests
         Assert.Contains(Problems(new(good) { ["Voice:CallerHashKey"] = null }), x => x.Contains("CallerHashKey"));
         Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "fake" }), x => x.Contains("development and tests only"));             // no fake money in production
         Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "stripe-link" }), x => x.Contains("none, fake or sola"));
-        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }), x => x.Contains("development and tests only"));             // nothing real moves money: the Sola sandbox is for development too
+        Assert.DoesNotContain(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }), x => x.Contains("development and tests only"));          // V-50: Sola is allowed in production (it was refused before)
+        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }), x => x.Contains("Sola:ApiKey") && x.Contains("required"));    // ... but needs its API key there: refunds go through Sola
+        Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola", ["Sola:ApiKey"] = "acct_live_abc123" }), x => x.Contains("LIVE key"));   // a key that names itself live is refused
         Assert.Contains(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "sola" }, "Development"), x => x.Contains("Sola:WebhookPin"));         // and it needs its own settings
         Assert.DoesNotContain(Problems(new(good) { ["Voice:PhonePaymentProvider"] = "fake" }, "Development"), x => x.Contains("PhonePaymentProvider"));
         Assert.Contains(Problems(new(good) { ["SignalWire:ApiToken"] = null }), x => x.Contains("login codes are sent by SMS"));                   // production needs the messaging settings
