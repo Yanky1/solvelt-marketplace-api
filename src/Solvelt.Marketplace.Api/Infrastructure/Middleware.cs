@@ -37,6 +37,12 @@ public sealed class ProblemExceptionMiddleware(RequestDelegate next, ILogger<Pro
                 await (ex.StatusCode == 413 ? Write(ctx, 413, "payload_too_large", "Request body too large.") : Write(ctx, 400, "bad_request", "The request could not be understood."));
         }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { }
+        catch (Exception ex) when (Data.SqliteBusyRetry.IsBusy(ex) && ex is not TooBusyException)
+        {
+            // SQLite (development and test) still refused to open, begin or write after the bounded retries: the same answer as a write that kept conflicting, never a 500 (decision V-44).
+            log.LogWarning("Too busy on {Method} {Path}: SQLite stayed busy after the retries", ctx.Request.Method, ctx.Request.Path.Value);
+            if (!ctx.Response.HasStarted) await Write(ctx, 503, "too_busy", "The service is busy; try again in a moment.", null, r => r.Headers.RetryAfter = "1");
+        }
         catch (TooBusyException busy)
         {
             // only the types (the exception messages can carry data): enough to tell a unique violation from a lock timeout when it shows in a log
