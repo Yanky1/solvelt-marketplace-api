@@ -101,7 +101,8 @@ public sealed class PhoneOrderService(CheckoutService checkout, MarketplaceDb db
         }
         if (order.Status != OrderStatus.Paid)
         {
-            if (!StartupValidator.IsDevLike(env) || !string.IsNullOrWhiteSpace(stripe.Value.SecretKey)) { log.LogError("A phone payment for order {Number} cannot be recorded: no phone payment provider is connected to real money.", attempt.OrderNumber); return await Close("failed", SettleStatus.NotApplied); }
+            // Sola money is applied in every environment (owner decision 2026-11-23, V-50); only the in-process FAKE provider is for development without a Stripe key.
+            if (!sola && (!StartupValidator.IsDevLike(env) || !string.IsNullOrWhiteSpace(stripe.Value.SecretKey))) { log.LogError("A phone payment for order {Number} cannot be recorded: no phone payment provider is connected to real money.", attempt.OrderNumber); return await Close("failed", SettleStatus.NotApplied); }
             // who holds the money (portal contract C19): a Sola payment says so on the order, with Sola's reference, BEFORE the paid event, so the capture sent to the portal names Sola. The fake provider stays a Stripe order, as before.
             if (sola) await db.Orders.Where(x => x.Number == attempt.OrderNumber && x.Status != OrderStatus.Paid).ExecuteUpdateAsync(u => u.SetProperty(x => x.PaymentProvider, PaymentProviders.Sola).SetProperty(x => x.PaymentRef, outcome.TransactionId), ct);
             fakeStripe.TryCapture(order.PaymentIntentId);

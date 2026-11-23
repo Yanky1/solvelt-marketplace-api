@@ -470,10 +470,12 @@ public class ConnectorTests
     // ---------- start-up ----------
 
     [Fact]
-    public void The_connector_refuses_to_start_in_production_and_without_its_secrets()
+    public void The_connector_starts_in_production_refuses_a_live_key_and_refuses_to_start_without_its_secrets()
     {
         Assert.Empty(ConnectorOptions.Problems(Kit.Options(), production: false));
-        Assert.Contains(ConnectorOptions.Problems(Kit.Options(), production: true), p => p.Contains("sandbox-only") && p.Contains("Production"));
+        Assert.Empty(ConnectorOptions.Problems(Kit.Options(), production: true));                                          // V-50: allowed in production now (was refused: "sandbox-only")
+        Assert.Contains(ConnectorOptions.Problems(Kit.Options(o => o.SolaKey = "acct_live_abc123"), production: true), p => p.Contains("LIVE key"));   // a key that names itself live is still refused
+        Assert.Empty(ConnectorOptions.Problems(Kit.Options(o => o.SolaKey = "deliver_abc123"), production: true));          // "deliver" is not the word live
         foreach (var (tweak, needle) in new (Action<ConnectorOptions>, string)[]
         {
             (o => o.SharedKey = "short", "Connector:SharedKey"), (o => o.SignalWireSigningKey = null, "SignalWireSigningKey"), (o => o.SharedKey = Kit.SigningKey, "must differ"),

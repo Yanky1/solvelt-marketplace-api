@@ -126,8 +126,9 @@ public static class VoiceConfig
         if (string.IsNullOrWhiteSpace(v.CallerHashKey) || v.CallerHashKey.Length < 32) p.Add("Voice:CallerHashKey (env Voice__CallerHashKey) must be at least 32 characters when Voice:Enabled.");
         else if (v.CallerHashKey == v.PhoneCodeKey || v.CallerHashKey == v.StreamTokenKey || v.CallerHashKey == s.SigningKey || v.CallerHashKey == s.ApiToken) p.Add("Voice:CallerHashKey must differ from every other key (one key per purpose).");
         if (!new[] { "none", "fake", "sola" }.Contains(v.PhonePaymentProvider)) p.Add("Voice:PhonePaymentProvider must be none, fake or sola.");
-        // nothing real moves money by phone yet: the fake and the Sola SANDBOX are for development and tests only (the order is marked paid with the in-process fake money), until the owner decides about real money
-        if (!devLike && v.PhonePaymentProvider is "fake" or "sola") p.Add($"Voice:PhonePaymentProvider={v.PhonePaymentProvider} is for development and tests only: real-money phone orders are not enabled.");
+        // The fake is for development and tests only. Sola is allowed everywhere (owner decision, 2026-11-23: "everything up and running", the key supplied is a test key); a key that names itself live is refused (SolaOptions.Problems).
+        if (!devLike && v.PhonePaymentProvider == "fake") p.Add("Voice:PhonePaymentProvider=fake is for development and tests only.");
+        if (!devLike && v.PhonePaymentProvider == "sola" && string.IsNullOrWhiteSpace((sola ?? new SolaOptions()).ApiKey)) p.Add("Sola:ApiKey (env Sola__ApiKey) is required in production with Voice:PhonePaymentProvider=sola: refunds go through Sola's API.");
         if (v.PhonePaymentProvider == "sola") p.AddRange(SolaOptions.Problems(sola ?? new SolaOptions()));
         // the recorded recognition test set (V-46): only the owner's test numbers may record, the audio has a private container, and a storage key (the connection string) is a development fallback only
         if (v.TestSet.Enabled)

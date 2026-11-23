@@ -185,7 +185,7 @@ public sealed class SolaProviderTests : OrderFlowBase
     // ---------- a Sola order never touches Stripe ----------
 
     [Fact]
-    public async Task A_refund_of_a_sola_order_is_not_sent_to_stripe_and_no_refund_processed_goes_out_until_sola_confirms()
+    public async Task A_refund_of_a_sola_order_goes_to_sola_never_to_stripe_and_refund_processed_goes_out_with_provider_sola_and_the_refunds_xrefnum()
     {
         var o = await PaidOrder(sola: true);
         var g = o.Groups.Single(x => x.ItemsCents == 4200);
@@ -200,10 +200,13 @@ public sealed class SolaProviderTests : OrderFlowBase
         var before = Stripe.Refunds.Count;
         await Drain();
         Assert.Equal(before, Stripe.Refunds.Count);                                                          // Stripe was never called for this money
-        Assert.Empty(Sent("refund.processed"));
+        var sola = _k.F.Services.GetRequiredService<FakeSolaRefundGateway>();
+        var call = Assert.Single(sola.Calls);                                                                // Sola was (V-50: it used to die as sola_refund_not_automatic)
+        Assert.Equal((long.Parse(Ref), false), (call.OriginalRefNum, call.Full));
         var refundJob = await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.Type == RefundService.StripeRefundType));
-        Assert.Equal((OutboxStatus.Dead, "sola_refund_not_automatic"), (refundJob.Status, refundJob.LastError));
-        Assert.Contains(_k.F.Logs.Lines, l => l.Contains("Sola-paid order") && l.Contains(o.Number));
+        Assert.Equal(OutboxStatus.Delivered, refundJob.Status);
+        var processed = Sent("refund.processed").Single().GetProperty("data");
+        Assert.Equal(("sola", "900000000001"), (processed.GetProperty("provider").GetString(), processed.GetProperty("refundId").GetString()));
     }
 
     [Fact]
