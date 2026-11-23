@@ -81,6 +81,11 @@ public sealed class PhoneAccountDeleteTests : IDisposable
         Assert.Contains("\"method\":\"phone_code\"", audit.Detail);
         Assert.DoesNotContain("555", audit.Detail + audit.Reason);                                     // ids and the method only, never the number
 
+        using (var scope = _k.F.Services.CreateScope())                                                // the erasure job runs: the audit row is ids only and survives it
+            Assert.True(await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Account.AccountService>().RedactAsync(id, scope.ServiceProvider.GetServices<Solvelt.Marketplace.Api.Account.IAccountEraser>(), default));
+        Assert.NotNull((await _k.Db(db => db.BuyerAccounts.AsNoTracking().SingleAsync(a => a.Id == id))).RedactedAt);
+        Assert.Equal(audit.Id, (await _k.Db(db => db.StaffAudit.AsNoTracking().SingleAsync(a => a.Action == "buyer.self_delete" && a.TargetId == id.ToString("D")))).Id);
+
         var before = Sms.Sent.Count;
         Assert.Equal(HttpStatusCode.Accepted, (await _k.Post("/api/v1/auth/phone/start", new { phone = Number })).StatusCode);   // the same answer as for any number ...
         Assert.Equal(before, Sms.Sent.Count);                                                          // ... but a deleted account is texted no sign-in code
