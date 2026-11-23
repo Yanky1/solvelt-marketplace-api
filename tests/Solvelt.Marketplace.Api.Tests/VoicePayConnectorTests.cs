@@ -206,6 +206,23 @@ public class VoicePayConnectorTests
         public Task<SolaResult> TokenSaleAsync(SolaSale sale, string token, CancellationToken ct) => throw new NotSupportedException();
     }
 
+    /// <summary>
+    /// Does a text show the start of the test card number? The login code in the SAME text is a random six-digit number and contains "4111" about three times in ten thousand logins (CI run 45122249434 hit it
+    /// with 341115), so the code is taken out of the text first, by its exact wording; everything else is still searched, so a leaked card number is still found.
+    /// </summary>
+    internal static bool ShowsCardDigits(string body) => System.Text.RegularExpressions.Regex.Replace(body, @"Solvelt code: \d{6}\.", "Solvelt code: ______.").Contains("4111");
+
+    [Fact]
+    public void The_card_digits_check_ignores_a_random_login_code_but_still_finds_a_leaked_card_number()
+    {
+        Assert.Contains("4111", "Solvelt code: 341115. It expires in 10 minutes.");                                       // what the old assertion tripped on (a code that happens to contain 4111)
+        Assert.False(ShowsCardDigits("Solvelt code: 341115. It expires in 10 minutes."));
+        Assert.False(ShowsCardDigits("Solvelt code: 411100. It expires in 10 minutes."));
+        Assert.True(ShowsCardDigits("Solvelt: card 4111 1111 1111 1111 received"));                                              // a leak is still found
+        Assert.True(ShowsCardDigits("Solvelt code: 123456. Your card 4111111111111111"));                                        // also next to a real code
+        Assert.True(ShowsCardDigits("4111"));
+    }
+
     [Fact]
     public async Task The_connector_and_the_API_settle_a_keypad_payment_together_and_the_caller_hears_it()
     {
@@ -235,7 +252,7 @@ public class VoicePayConnectorTests
         // no card number anywhere the API or the model could see
         Assert.DoesNotContain(s.Fake.Received, m => m.Contains("4111111111111111") || m.Contains("601518451"));
         Assert.DoesNotContain(s.F.Logs.Lines, l => l.Contains("4111111111111111"));
-        Assert.DoesNotContain(s.Sms.Sent, m => m.Body.Contains("4111"));
+        Assert.DoesNotContain(s.Sms.Sent, m => ShowsCardDigits(m.Body));
         var dump = JsonSerializer.Serialize(await s.K.Db(db => db.VoicePaymentAttempts.AsNoTracking().ToListAsync()));
         Assert.DoesNotContain("4111111111111111", dump);
     }
