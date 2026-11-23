@@ -9,3 +9,17 @@ TestResults/
 *.user
 .env
 .journey/
+
+# Recorded voice is a caller's voice: it lives only in the private storage container (decision V-46), never here.
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.opus
+*.flac
+*.amr
+*.aac
+*.ulaw
+*.mulaw
+voice-scores-*.csv
+voice-scores-*.txt

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using System.Runtime.CompilerServices;
 using Solvelt.Marketplace.Api.Voice;
 using Solvelt.Marketplace.Api.Voice.TestSet;
@@ -249,5 +250,79 @@ public sealed class VoiceTestSetStartupTests
         void On(VoiceOptions v) { v.TestSet.Enabled = true; v.TestSet.ConnectionString = "UseDevelopmentStorage=true"; v.PipelineMenu.TestNumbers = ["+15551234567"]; }
         Assert.Empty(Problems(On, devLike: true));
         Assert.Contains(Problems(On, devLike: false), x => x.Contains("development only"));
+    }
+}
+
+/// <summary>Building the recognisers of the scoring tool from configuration (V-46). Nothing connects: only the adapters are built.</summary>
+public sealed class VoiceScoringSetupTests
+{
+    private static Microsoft.Extensions.Configuration.IConfiguration Config(params (string, string)[] kv)
+        => new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(kv.Select(x => new KeyValuePair<string, string?>(x.Item1, x.Item2))).Build();
+
+    private static readonly (string, string)[] Deepgram = [("Voice:Pipelines:P2:Stt", "deepgram"), ("Voice:Pipelines:P2:Tts", "elevenlabs"), ("Voice:Deepgram:ApiKey", "dg-test-key"), ("Voice:Deepgram:Model", "nova-3")];
+
+    [Fact]
+    public void Only_the_options_whose_recogniser_settings_are_complete_are_replayed_and_the_voice_settings_are_not_needed()
+    {
+        Assert.Empty(ScoringSetup.ReplayableOptions(Config()));
+        Assert.Equal(["p2"], ScoringSetup.ReplayableOptions(Config(Deepgram)));                              // no ElevenLabs key needed: nothing is spoken
+        Assert.Equal(["p2"], ScoringSetup.DefaultVariants(Config(Deepgram)).Select(v => v.Name).ToArray());
+        Assert.Empty(ScoringSetup.ReplayableOptions(Config(Deepgram.Where(x => x.Item1 != "Voice:Deepgram:ApiKey").ToArray())));
+    }
+
+    [Fact]
+    public void A_variant_is_built_with_its_overrides_and_a_missing_setting_is_named_without_its_value()
+    {
+        using var setup = new ScoringSetup();
+        var v = setup.Build(Config(Deepgram), new VariantSpec("dg-fast", "p2", new Dictionary<string, string> { ["Voice:Deepgram:EndpointingMs"] = "400" }, ["challah", "kiddush"]));
+        Assert.Equal("dg-fast", v.Name);
+        Assert.IsType<DeepgramStt>(v.Stt);
+        var ex = Assert.Throws<InvalidOperationException>(() => setup.Build(Config(("Voice:Pipelines:P3:Stt", "gladia"), ("Voice:Pipelines:P3:Tts", "elevenlabs"), ("Voice:Gladia:Model", "solaria")), new VariantSpec("g", "p3", new Dictionary<string, string>())));
+        Assert.Contains("Voice:Gladia:ApiKey", ex.Message);
+        Assert.Throws<InvalidOperationException>(() => setup.Build(Config(Deepgram), new VariantSpec("x", "p6", new Dictionary<string, string>())));      // option 6 has no audio to replay
+        Assert.Throws<InvalidOperationException>(() => setup.Build(Config(Deepgram), new VariantSpec("x", "p1", new Dictionary<string, string>())));
+    }
+
+    [Fact]
+    public void A_matrix_file_names_variants_options_and_settings_and_refuses_nonsense()
+    {
+        var m = ScoringSetup.ParseMatrix("""{"variants":[{"name":"dg-nova3","option":"p2"},{"name":"dg-400ms","option":"p2","settings":{"Voice:Deepgram:EndpointingMs":400},"vocabulary":["challah"]}]}""");
+        Assert.Equal(["dg-nova3", "dg-400ms"], m.Select(v => v.Name).ToArray());
+        Assert.Equal("400", m[1].Settings["Voice:Deepgram:EndpointingMs"]);
+        Assert.Equal(["challah"], m[1].Vocabulary);
+        foreach (var bad in new[]
+        {
+            "not json", "{}", """{"variants":[]}""",
+            """{"variants":[{"name":"a","option":"p6"}]}""",
+            """{"variants":[{"name":"a","option":"p2"},{"name":"a","option":"p3"}]}""",
+            """{"variants":[{"name":"bad,name","option":"p2"}]}""",
+            """{"variants":[{"name":"a","option":"p2","settings":{"Portal:InboundSecret":"x"}}]}""",   // only Voice:... can be changed
+        }) Assert.Throws<FormatException>(() => ScoringSetup.ParseMatrix(bad));
+    }
+}
+
+/// <summary>The recorded audio is a caller's voice: none of it may ever be in the repository (V-46).</summary>
+public sealed class VoiceTestSetRepositoryTests
+{
+    private static string? Root()
+    {
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d is not null; d = d.Parent)
+            if (File.Exists(Path.Combine(d.FullName, "Solvelt.Marketplace.slnx"))) return d.FullName;
+        return null;
+    }
+
+    [Fact]
+    public void No_audio_file_is_in_the_repository_and_git_is_told_to_ignore_them()
+    {
+        var root = Root();
+        if (root is null) return;   // not run from a checkout (a packaged test run): nothing to scan
+        var audio = new[] { ".wav", ".mp3", ".m4a", ".ogg", ".opus", ".flac", ".amr", ".aac", ".ulaw", ".mulaw" };
+        var found = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Where(f => !f.Split(Path.DirectorySeparatorChar).Any(p => p is "bin" or "obj" or "node_modules" or ".git" or "TestResults"))
+            .Where(f => audio.Contains(Path.GetExtension(f).ToLowerInvariant()))
+            .Select(f => Path.GetRelativePath(root, f)).ToList();
+        Assert.Empty(found);
+        var ignore = File.ReadAllText(Path.Combine(root, ".gitignore"));
+        foreach (var ext in audio) Assert.Contains("*" + ext, ignore);
     }
 }
