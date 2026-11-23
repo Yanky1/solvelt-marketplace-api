@@ -73,19 +73,36 @@ public sealed class PhoneWebSignInTests : IDisposable
     }
 
     [Fact]
-    public async Task A_code_is_sent_to_any_valid_number_and_the_answers_are_the_same_until_the_number_is_proven()
+    public async Task Only_a_number_an_eligible_account_holds_is_texted_and_the_answer_is_identical_either_way()
     {
         await PhoneAccount();
         var known = await _k.Post("/api/v1/auth/phone/start", new { phone = Number });
         var unknown = await _k.Post("/api/v1/auth/phone/start", new { phone = "+17185550999" });
         Assert.Equal((HttpStatusCode.Accepted, HttpStatusCode.Accepted), (known.StatusCode, unknown.StatusCode));
-        Assert.Equal((await Json(known)).EnumerateObject().Select(p => p.Name), (await Json(unknown)).EnumerateObject().Select(p => p.Name));   // the same shape
-        Assert.Equal(2, Sms.Sent.Count);                                                                   // both were texted
-        // only the holder of the unknown number, who typed its code, learns that no account signs in with it
-        var r = await Verify((await Json(unknown)).GetProperty("challengeId").GetGuid(), LastCode("+17185550999"));
-        Assert.Equal((HttpStatusCode.NotFound, "no_account"), (r.StatusCode, await Code(r)));
+        var (k, u) = (await Json(known), await Json(unknown));
+        Assert.Equal(k.EnumerateObject().Select(p => p.Name), u.EnumerateObject().Select(p => p.Name));              // the same shape ...
+        Assert.Equal(k.GetProperty("expiresInSeconds").GetInt32(), u.GetProperty("expiresInSeconds").GetInt32());   // ... and the same values but the random id
+        Assert.Equal(known.Headers.CacheControl?.ToString(), unknown.Headers.CacheControl?.ToString());
+        Assert.Equal(new[] { Number }, Sms.Sent.Select(m => m.To));                                                // only the account's number was texted (no SMS pumping)
+        // both wrote the same kind of row: an unknown number's has no account and no number, and no code that anyone holds
+        var rows = await _k.Db(db => db.PhoneSignInChallenges.AsNoTracking().ToListAsync());
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, r => Assert.Equal((32, 0, (DateTimeOffset?)null), (r.CodeHash.Length, r.Attempts, r.UsedAt)));
+        Assert.Single(rows, r => r.AccountId == null);
+        // guessing on the unknown number's challenge gets the same "wrong code" as on a real one
+        Assert.Equal("invalid_code", await Code(await Verify(u.GetProperty("challengeId").GetGuid(), "123456")));
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await _k.Post("/api/v1/auth/phone/start", new { phone = "12" })).StatusCode);
-        Assert.Equal(1, await _k.Db(db => db.PhoneSignInChallenges.CountAsync(c => c.AccountId == null)));   // the row for the unknown number holds no account and no number
+    }
+
+    [Fact]
+    public async Task An_ineligible_account_is_not_texted_either_and_the_answer_does_not_change()
+    {
+        var id = await PhoneAccount();
+        await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, "x")));   // signs in with its password
+        Assert.Equal(HttpStatusCode.Accepted, (await _k.Post("/api/v1/auth/phone/start", new { phone = Number })).StatusCode);
+        await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.StaffLockedAt, _k.F.Clock.GetUtcNow())));
+        Assert.Equal(HttpStatusCode.Accepted, (await _k.Post("/api/v1/auth/phone/start", new { phone = Number })).StatusCode);
+        Assert.Empty(Sms.Sent);
     }
 
     [Fact]
@@ -121,29 +138,46 @@ public sealed class PhoneWebSignInTests : IDisposable
     }
 
     [Fact]
-    public async Task An_account_with_a_password_or_locked_or_deleted_never_signs_in_by_sms()
+    public async Task A_lock_a_password_or_a_deletion_after_the_code_was_sent_still_stops_the_sign_in()
     {
         var id = await PhoneAccount();
-        await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, "x")));
-        Assert.Equal("no_account", await Code(await Verify(await Start(), LastCode())));               // it signs in with its password
-        await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.PasswordHash, (string?)null).SetProperty(a => a.StaffLockedAt, _k.F.Clock.GetUtcNow())));
-        Assert.Equal("no_account", await Code(await Verify(await Start(), LastCode())));
-        // a lock that lands AFTER the code was sent still stops it
-        await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.StaffLockedAt, (DateTimeOffset?)null)));
-        var pending = await Start();
-        await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.DeletedAt, _k.F.Clock.GetUtcNow())));
-        Assert.Equal("no_account", await Code(await Verify(pending, LastCode())));
+        async Task NoAccountAfter(Action<Microsoft.EntityFrameworkCore.Query.UpdateSettersBuilder<BuyerAccount>> change, Action<Microsoft.EntityFrameworkCore.Query.UpdateSettersBuilder<BuyerAccount>> undo)
+        {
+            var challenge = await Start();
+            var code = LastCode();
+            await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(change));
+            Assert.Equal("no_account", await Code(await Verify(challenge, code)));
+            await _k.Db(db => db.BuyerAccounts.Where(a => a.Id == id).ExecuteUpdateAsync(undo));
+        }
+        await NoAccountAfter(s => s.SetProperty(a => a.PasswordHash, "x"), s => s.SetProperty(a => a.PasswordHash, (string?)null));
+        await NoAccountAfter(s => s.SetProperty(a => a.StaffLockedAt, _k.F.Clock.GetUtcNow()), s => s.SetProperty(a => a.StaffLockedAt, (DateTimeOffset?)null));
+        await NoAccountAfter(s => s.SetProperty(a => a.DeletedAt, _k.F.Clock.GetUtcNow()), s => s.SetProperty(a => a.DeletedAt, (DateTimeOffset?)null));
         Assert.Equal(0, await _k.Db(db => db.BuyerSessions.CountAsync()));
     }
 
     [Fact]
-    public async Task The_phone_lines_sms_caps_apply_per_number_so_the_web_adds_no_extra_texts()
+    public async Task The_phone_lines_sms_caps_apply_per_number_and_are_counted_for_unknown_numbers_too()
     {
+        await PhoneAccount();
         for (var i = 0; i < 3; i++) await Start();
         var fourth = await _k.Post("/api/v1/auth/phone/start", new { phone = Number });
         Assert.Equal((HttpStatusCode.TooManyRequests, "rate_limited"), (fourth.StatusCode, await Code(fourth)));
         Assert.Equal(3, Sms.Sent.Count);
-        Assert.Equal(HttpStatusCode.Accepted, (await _k.Post("/api/v1/auth/phone/start", new { phone = "+17185550143" })).StatusCode);   // another number has its own budget
+
+        // an unknown number is never texted, but its starts count the same, so the cap answers alike for both
+        for (var i = 0; i < 3; i++) Assert.Equal(HttpStatusCode.Accepted, (await _k.Post("/api/v1/auth/phone/start", new { phone = "+17185550143" })).StatusCode);
+        var unknownFourth = await _k.Post("/api/v1/auth/phone/start", new { phone = "+17185550143" });
+        Assert.Equal((HttpStatusCode.TooManyRequests, "rate_limited"), (unknownFourth.StatusCode, await Code(unknownFourth)));
+        Assert.Equal(fourth.Headers.RetryAfter?.ToString(), unknownFourth.Headers.RetryAfter?.ToString());
+        Assert.Equal(3, Sms.Sent.Count);
+    }
+
+    [Fact]
+    public async Task Ten_starts_per_client_address_per_hour_whatever_the_numbers()
+    {
+        for (var i = 0; i < 10; i++) Assert.Equal(HttpStatusCode.Accepted, (await _k.PostFrom("203.0.113.9", "/api/v1/auth/phone/start", new { phone = $"+1718555{1000 + i}" })).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await _k.PostFrom("203.0.113.9", "/api/v1/auth/phone/start", new { phone = "+17185552000" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await _k.PostFrom("203.0.113.10", "/api/v1/auth/phone/start", new { phone = "+17185552000" })).StatusCode);
     }
 
     [Fact]
@@ -152,8 +186,8 @@ public sealed class PhoneWebSignInTests : IDisposable
         await PhoneAccount();
         Sms.Fail = true;
         var r = await _k.Post("/api/v1/auth/phone/start", new { phone = Number });
-        Assert.Equal((HttpStatusCode.ServiceUnavailable, "sms_failed"), (r.StatusCode, await Code(r)));
-        Assert.All(await _k.Db(db => db.PhoneSignInChallenges.AsNoTracking().ToListAsync()), c => Assert.NotNull(c.UsedAt));
+        Assert.Equal(HttpStatusCode.Accepted, r.StatusCode);   // the same answer as for a number without an account: a 503 only an account can produce would tell
+        Assert.All(await _k.Db(db => db.PhoneSignInChallenges.AsNoTracking().ToListAsync()), c => Assert.NotNull(c.UsedAt));   // and no code works
     }
 
     [Fact]
@@ -229,7 +263,9 @@ public sealed class PhoneWebSignInTests : IDisposable
         Assert.Equal(HttpStatusCode.Conflict, (await _k.Post("/api/v1/account/password/set", new { newPassword = "another long passphrase" }, fresh)).StatusCode);   // once only
 
         Assert.Equal(HttpStatusCode.OK, (await _k.Post("/api/v1/auth/sign-in", new { email = "dana@example.com", password = "a long new passphrase" })).StatusCode);
-        Assert.Equal("no_account", await Code(await Verify(await Start(), LastCode())));               // a text message is no longer a way in
+        var before = Sms.Sent.Count;
+        Assert.Equal(HttpStatusCode.Accepted, (await _k.Post("/api/v1/auth/phone/start", new { phone = Number })).StatusCode);
+        Assert.Equal(before, Sms.Sent.Count);                                                          // a text message is no longer a way in: nothing is sent
     }
 
     [Fact]

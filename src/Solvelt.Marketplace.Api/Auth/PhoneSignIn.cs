@@ -17,7 +17,8 @@ public sealed record PhoneVerifyResult(PhoneVerifyStatus Status, string? Token =
 /// The web path for an account made by phone (decision W3-02; V-05 and V-09 follow-ups): such an account has no email and no password, its proven number is its only credential, so the web signs it in
 /// with an SMS code sent to that number. The rules are the phone line's (<see cref="PhoneCodeService"/>, decision V-03), not a second set:
 /// <list type="bullet">
-/// <item>a code is ALWAYS sent to a valid number, whether or not an account can sign in with it, so the answer (and its timing) never tells who is a customer;</item>
+/// <item>a code is texted ONLY to a number an eligible account holds (no SMS pumping, no cost, no texts nobody asked for), but the answer, the caps counted, the row written and the work done are
+/// the same for any valid number, so nothing tells who is a customer: only the provider call is skipped;</item>
 /// <item>six digits, 10 minutes, 5 tries (the fifth wrong one locks the code, even for the right digits afterwards), single use, consumed atomically (two parallel right answers make one session);</item>
 /// <item>the SMS caps are the phone line's own buckets (<c>Voice:MaxSmsPerNumberPerHour</c> per number, <c>Voice:MaxSmsPerHour</c> in total), shared, so the web adds no extra texts per number;
 /// sent through the same <see cref="ISmsSender"/> (SignalWire);</item>
@@ -48,7 +49,7 @@ public sealed class PhoneSignInService(MarketplaceDb db, ISmsSender sms, Attempt
             .Where(a => a.PhoneVerifiedE164 == e164 && a.PasswordHash == null && a.DeletedAt == null && a.StaffLockedAt == null && a.DemoVerifiedAt == null)
             .Select(a => (Guid?)a.Id).FirstOrDefaultAsync(ct);
 
-    /// <summary>Sign-in: texts a code to the number given. The answer is the same whether or not an account can sign in with it.</summary>
+    /// <summary>Sign-in: texts a code to the number given when an eligible account holds it. The answer is the same whether or not one does.</summary>
     public async Task<PhoneStartResult> StartSignInAsync(string? rawPhone, string clientIp, CancellationToken ct)
     {
         if (!Enabled) return new(PhoneStartStatus.Unavailable);
@@ -82,11 +83,17 @@ public sealed class PhoneSignInService(MarketplaceDb db, ISmsSender sms, Attempt
         var body = purpose == PhoneSignInPurposes.SignIn
             ? $"Solvelt code: {code}. Use it to sign in on the Solvelt website. It expires in 10 minutes. Never give it to anyone."
             : $"Solvelt code: {code}. Use it to confirm a change to your account on the Solvelt website. It expires in 10 minutes. Never give it to anyone.";
+        // A sign-in code is texted ONLY to a number an eligible account holds (orchestrator review of W3-02): texting any number the internet types in invites SMS pumping (toll fraud), costs money
+        // and texts people who never asked. Everything else is identical for both: the caps above are counted, the code is drawn and hashed, the row is written (a null account id), and the answer
+        // is the same 202. Only the send is skipped, so the answer and its timing apart from the provider call say nothing.
+        if (accountId is null) return new(PhoneStartStatus.Sent, id);
         if (await sms.SendAsync(e164, body, ct)) return new(PhoneStartStatus.Sent, id);
         // nothing was delivered: the code must not work later (a provider that accepted it after all would otherwise leave a live code we told the buyer failed)
         await db.PhoneSignInChallenges.Where(c => c.Id == id).ExecuteUpdateAsync(s => s.SetProperty(c => c.UsedAt, (DateTimeOffset?)now), ct);
         log.LogWarning("A web phone code could not be sent.");
-        return new(PhoneStartStatus.SendFailed);
+        // for a SIGN-IN the answer stays 202: a 503 only an existing account can produce would tell that the number has one. The buyer gets no text and asks for a new code. A step-up
+        // (signed in, its own number) says the send failed.
+        return purpose == PhoneSignInPurposes.SignIn ? new(PhoneStartStatus.Sent, id) : new(PhoneStartStatus.SendFailed);
     }
 
     /// <summary>

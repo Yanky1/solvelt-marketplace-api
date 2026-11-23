@@ -151,7 +151,7 @@ public static class AuthEndpoints
 
     private static IResult RateLimited(HttpContext ctx) { ctx.Response.Headers.RetryAfter = "3600"; return Problems.Json(429, "rate_limited", "Too many codes were asked for. Try again later."); }
 
-    /// <summary><c>202 { challengeId }</c> for any valid number: a code is texted whether or not an account signs in with it, so the answer never tells (W3-02).</summary>
+    /// <summary><c>202 { challengeId }</c> for any valid number: the same for every number; a code is texted only when an eligible account holds it (W3-02, no SMS pumping).</summary>
     private static async Task<IResult> PhoneStart(PhoneStartBody? body, PhoneSignInService phone, HttpContext ctx, ClientIpResolver ips, CancellationToken ct)
     {
         if (body?.Phone is { Length: > 40 }) return Problems.Validation(new Dictionary<string, string> { ["phone"] = "Enter a phone number, for example 718 555 0123." });
