@@ -192,6 +192,9 @@ public sealed class VoiceTestSetTests
         Assert.True(withDraft.Rows.Single(r => r.PhraseId == "yi-01").Draft);
         var onlyB = await TestSetScorer.RunAsync(store, PhraseList.Embedded(), [v], new ScoringOptions("set1", ["b2"], Replay: Fast), CancellationToken.None);
         Assert.Equal(["b2"], onlyB.Rows.Select(r => r.Speaker).ToArray());
+        var phoneStore = await Store(("set1/en-02-p0a1b2cs1f2e.wav", wav), ("set1/en-02-p0a1b2cs1f2er2.wav", wav), ("set1/en-02-p999999sabcd.wav", wav));
+        var bySpeaker = await TestSetScorer.RunAsync(phoneStore, PhraseList.Embedded(), [v], new ScoringOptions("set1", ["p0a1b2c"], Replay: Fast), CancellationToken.None);
+        Assert.Equal(2, bySpeaker.Rows.Count);                                                                       // both takes of the speaker, not the other speaker
     }
 
     [Fact]
@@ -242,6 +245,16 @@ public sealed class VoiceTestSetStartupTests
         Assert.Contains(p, x => x.Contains("StorageAccountUrl"));
         Assert.Contains(p, x => x.Contains("TestNumbers"));
         Assert.Empty(Problems(v => { v.TestSet.Enabled = true; v.TestSet.StorageAccountUrl = "https://acct.blob.core.windows.net"; v.PipelineMenu.TestNumbers = ["+15551234567"]; }));
+    }
+
+    [Fact]
+    public void Recording_by_phone_needs_the_signalwire_project_and_a_token_to_fetch_and_delete_the_recording()
+    {
+        var v = new VoiceOptions { Enabled = true, OpenAiApiKey = "k", StreamTokenKey = new string('a', 40), PhoneCodeKey = new string('b', 40), CallerHashKey = new string('c', 40), PublicBaseUrl = "https://api.example.com" };
+        v.TestSet.Enabled = true; v.TestSet.StorageAccountUrl = "https://acct.blob.core.windows.net"; v.PipelineMenu.TestNumbers = ["+15551234567"];
+        var without = VoiceConfig.Problems(v, new SignalWireOptions { SigningKey = "s" }, devLike: true);
+        Assert.Contains(without, x => x.Contains("SignalWire:ApiToken") && x.Contains("Management and Voice"));
+        Assert.DoesNotContain(VoiceConfig.Problems(v, new SignalWireOptions { SigningKey = "s", Space = "acme", ProjectId = "p", ApiToken = "t" }, devLike: true), x => x.Contains("SignalWire:ApiToken"));
     }
 
     [Fact]

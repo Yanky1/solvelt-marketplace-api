@@ -1,3 +1,4 @@
+using Solvelt.Marketplace.Api.Voice.TestSet;
 using System.Net.WebSockets;
 using System.Xml.Linq;
 using Microsoft.Extensions.Options;
@@ -17,6 +18,7 @@ public static class VoiceEndpoints
         app.MapPost(PipelinePath, PipelineChoice);
         app.MapPost(PipelineConsentPath, PipelineConsent);
         app.MapPost(KeypadPath, Keypad);
+        app.MapTestSet();
         app.MapPost(SpeechPath, SpeechTurn);
         app.MapPost(SolaWebhookPath, SolaWebhook);
         app.MapPhoneEmail();
@@ -25,10 +27,10 @@ public static class VoiceEndpoints
         return app;
     }
 
-    private static IResult Cxml(XElement response) => Results.Content(new XDocument(new XDeclaration("1.0", "UTF-8", null), response).ToString(), "text/xml");
+    internal static IResult Cxml(XElement response) => Results.Content(new XDocument(new XDeclaration("1.0", "UTF-8", null), response).ToString(), "text/xml");
 
     /// <summary>The signed URL is built from configuration, never from request headers (a forwarded Host must not decide what was signed).</summary>
-    private static async Task<(bool Ok, IReadOnlyDictionary<string, string> Form)> VerifyAsync(HttpContext ctx, VoiceOptions v, SignalWireOptions s)
+    internal static async Task<(bool Ok, IReadOnlyDictionary<string, string> Form)> VerifyAsync(HttpContext ctx, VoiceOptions v, SignalWireOptions s)
     {
         if (!ctx.Request.HasFormContentType) return (false, new Dictionary<string, string>());
         var form = await ctx.Request.ReadFormAsync(ctx.RequestAborted);
@@ -160,7 +162,7 @@ public static class VoiceEndpoints
     /// <summary>The menu: the available options read out with their descriptions (decision V-32). The caller SAYS the number (decision V-41: speech only, the keypad is for the PIN and the card); saying it during the reading selects at once; "again" reads it again.</summary>
     private static XElement GatherPipeline(VoiceOptions v, VoicePipelineRegistry registry)
         => new("Gather", new XAttribute("input", "speech"), new XAttribute("language", v.SignalWireSpeech.Language), new XAttribute("speechTimeout", "auto"), new XAttribute("hints", SpokenDigits.MenuHints),
-            new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Compose(v.PipelineMenu, VoicePipelineIds.All.Where(registry.IsAvailable).ToList())));
+            new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelinePath), new XElement("Say", PipelineScripts.Compose(v.PipelineMenu, VoicePipelineIds.All.Where(registry.IsAvailable).ToList()) + (v.TestSet.Enabled ? " " + TestSetFlow.MenuLine : "")));
 
     /// <summary>The caller's choice on the test-line menu: unknown or empty is option 1, an option whose pipeline is not configured says so and is option 1. The choice is recorded in the call's tier column and fixed for the call.</summary>
     private static async Task<IResult> PipelineChoice(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, StreamTokens tokens, VoicePipelineRegistry registry, CancellationToken ct)
@@ -177,6 +179,8 @@ public static class VoiceEndpoints
             return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
         form.TryGetValue("Digits", out var digits);
         if (string.IsNullOrWhiteSpace(digits) && form.TryGetValue("SpeechResult", out var saidChoice)) digits = SpokenDigits.Choice(saidChoice);   // V-41: the choice is SPOKEN ("two", "option two"); the Gather takes no keys, so a Digits field only comes from a test or a replay
+        // nine: the owner's recording of the recognition test set (V-46), only when switched on, and only for the numbers that are offered this menu anyway
+        if (digits?.Trim() == "9" && v.TestSet.Enabled) return Cxml(TestSetFlow.Start(v, TestSetFlow.SpeakerLabel(v, from)));
         // star: read the list again (nothing is chosen)
         if (digits?.Trim() == "*") return Cxml(new XElement("Response", GatherPipeline(v, registry)));
         var option = VoicePipelineIds.FromDigits(digits);
