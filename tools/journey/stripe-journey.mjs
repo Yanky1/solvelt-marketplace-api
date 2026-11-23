@@ -6,12 +6,19 @@
 //  2. With STRIPE_PUBLISHABLE_KEY (a pk_test_ key) too: the 3DS test card in a real browser, through the REAL Stripe.js on the web's checkout page. The challenge is completed, Stripe.js returns to the
 //     confirmation page, Stripe's own event is replayed signed, and the order is placed with the seller. Without the publishable key this part is skipped with a notice.
 // The secret key is read from the environment only, never written to a file or a log (decisions M8-09, W3-05).
+//
+// UNVERIFIED, FROM MEMORY, CHECK ON THE FIRST REAL RUN: Stripe's documentation could not be read when this was written (the network blocked docs.stripe.com), and nobody could confirm these:
+//   A1. GET /v1/events?type=payment_intent.succeeded&created[gte]=… lists the event within seconds of the confirm, with data.object being the PaymentIntent, even with no dashboard endpoint.
+//   A2. 4000 0025 0000 3155 is the card that always asks for 3D Secure, and Stripe.js shows the test challenge in a Stripe frame with a button named "Complete".
+//   A3. The Payment Element keeps its card fields in Stripe frames as inputs named number, expiry, cvc (and postalCode).
+//   A4. Only the pk_test_ key in the browser and the sk_test_ key on the API are needed (no webhook endpoint in the dashboard).
+// A failure that comes from one of them says "ASSUMPTION An" so the first run shows which one to fix. This is why the job runs only by hand and weekly (stripe-journey.yml), not on push.
 import * as L from "./lib.mjs";
 
 const { step, ok, check, until, portal, api } = L;
 const KEY = process.env.STRIPE_TEST_SECRET_KEY ?? "";
 const run = L.uniq();
-/** Stripe's test card that always asks for 3D Secure authentication (W3-05). */
+/** Stripe's test card that always asks for 3D Secure authentication (W3-05; UNVERIFIED, A2). */
 const CARD_3DS = "4000002500003155";
 
 async function stripe(method, path, form) {
@@ -23,7 +30,7 @@ async function stripe(method, path, form) {
 
 /** Stripe's own payment_intent.succeeded event for this intent, as Stripe's API lists it. */
 async function realEvent(intentId, since) {
-  return until(`Stripe's payment_intent.succeeded event for ${intentId.slice(0, 12)}...`, async () => {
+  return until(`ASSUMPTION A1 (UNVERIFIED): a payment_intent.succeeded event for ${intentId.slice(0, 12)}... in GET /v1/events within 60 s`, async () => {
     const list = await stripe("GET", `/v1/events?type=payment_intent.succeeded&created[gte]=${since}&limit=20`);
     return list.data.find((e) => e?.data?.object?.id === intentId) ?? null;
   }, { timeout: 60_000, every: 2000 });
@@ -86,7 +93,7 @@ async function paidByApi() {
 
 /** The first Stripe frame on the page that has a field with this name (the Payment Element keeps its fields in its own iframes). */
 async function stripeField(page, name) {
-  return until(`Stripe's "${name}" field`, async () => {
+  return until(`ASSUMPTION A3 (UNVERIFIED): an input named "${name}" in a Stripe frame of the Payment Element within 30 s`, async () => {
     for (const f of page.frames()) {
       if (!/stripe\.com/.test(f.url())) continue;
       const input = f.locator(`input[name="${name}"]`);
@@ -127,12 +134,12 @@ async function threeDSecure({ seller, listing }) {
     await (await stripeField(page, "number")).fill(CARD_3DS);
     await (await stripeField(page, "expiry")).fill("12 / 34");
     await (await stripeField(page, "cvc")).fill("123");
-    const zip = await stripeField(page, "postalCode").catch(() => null);
+    const zip = await stripeField(page, "postalCode").catch(() => null);   // optional: not every country shows it
     if (zip) await zip.fill("11201");
     await page.getByRole("button", { name: /^Pay / }).click();
 
     // Stripe's test-mode challenge: a button in a nested Stripe frame
-    const complete = await until("Stripe's 3DS test challenge", async () => {
+    const complete = await until("ASSUMPTION A2 (UNVERIFIED): a Stripe 3DS frame with a 'Complete' button within 45 s", async () => {
       for (const f of page.frames()) {
         if (!/stripe\.com/.test(f.url())) continue;
         const b = f.getByRole("button", { name: /^Complete/i });
@@ -141,12 +148,12 @@ async function threeDSecure({ seller, listing }) {
       return null;
     }, { timeout: 45_000, every: 1000 });
     await complete.click();
-    await page.waitForURL(/\/checkout\/confirmation\/MP-/, { timeout: 45_000 });
+    await page.waitForURL(/\/checkout\/confirmation\/MP-/, { timeout: 45_000 }).catch((e) => { throw new Error(`ASSUMPTION A2 (UNVERIFIED): after "Complete" Stripe.js should return to the confirmation page within 45 s (${String(e).split("\n")[0]})`); });
     const number = decodeURIComponent(new URL(page.url()).pathname.split("/").pop());
     const intentId = String(L.sql(`select "PaymentIntentId" from marketplace_orders where "Number" = '${number.replace(/[^A-Za-z0-9-]/g, "")}'`)).trim();
     check(intentId.startsWith("pi_"), `the order has its Stripe intent (got ${intentId.slice(0, 8)})`);
     const intent = await stripe("GET", `/v1/payment_intents/${intentId}`);
-    check(intent.status === "succeeded", `the 3DS payment ended as ${intent.status}`);
+    check(intent.status === "succeeded", `ASSUMPTION A2 (UNVERIFIED): the 3DS test card, after "Complete", should leave the intent succeeded, but it is ${intent.status}`);
     await deliver(await realEvent(intentId, since));
     await until("the 3DS order placed with the seller", async () => { await L.pumpPortal(); return L.portalOrderFor(seller, number); }, { timeout: 60_000, every: 2000 });
     check(problems.length === 0, `no server error or page error on the way: ${problems.join("; ")}`);
