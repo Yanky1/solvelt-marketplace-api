@@ -129,6 +129,13 @@ export function decodeMail(raw) {
 }
 
 /** A Stripe webhook exactly as Stripe signs it, with our (test) endpoint secret. */
+/** Delivers an EXACT event body (for example one read back from Stripe's API: W3-05), signed the way Stripe signs, to the API's webhook. */
+export async function signedReplay(body) {
+  const t = Math.floor(Date.now() / 1000);
+  const sig = createHmac("sha256", env.stripeWebhookSecret).update(`${t}.${body}`).digest("hex");
+  return call(env.api, "POST", "/api/stripe/webhooks", { body, raw: true, headers: { "stripe-signature": `t=${t},v1=${sig}` } });
+}
+
 export async function stripeEvent(type, object) {
   const body = JSON.stringify({ id: `evt_journey_${uniq()}${uniq()}`, type, created: Math.floor(Date.now() / 1000), data: { object } });
   const t = Math.floor(Date.now() / 1000);
