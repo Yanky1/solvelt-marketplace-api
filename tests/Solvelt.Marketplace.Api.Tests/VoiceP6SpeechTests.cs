@@ -60,7 +60,8 @@ public sealed class VoiceP6SpeechTests : IDisposable
         await Choose();
         var xml = await Post(Speech("?first=1"));
         var g = xml.Element("Gather")!;
-        Assert.Equal(("speech dtmf", "en-US", "auto", "true"), (g.Attribute("input")!.Value, g.Attribute("language")!.Value, g.Attribute("speechTimeout")!.Value, g.Attribute("actionOnEmptyResult")!.Value));
+        Assert.Equal(("speech", "en-US", "auto", "true"), (g.Attribute("input")!.Value, g.Attribute("language")!.Value, g.Attribute("speechTimeout")!.Value, g.Attribute("actionOnEmptyResult")!.Value));
+        Assert.Null(g.Attribute("numDigits"));   // V-45: no keypad on a speech turn
         Assert.Equal(VoiceFactory.BaseUrl + VoiceEndpoints.SpeechPath, g.Attribute("action")!.Value);
         Assert.Equal("Okay.", g.Element("Say")!.Value);                                       // the reply plays INSIDE the Gather: speech or a key ends it
         Assert.Equal(("true", "phone_call"), (g.Attribute("enhanced")!.Value, g.Attribute("speechModel")!.Value));   // the telephone defaults (V-36): enhanced, the 8 kHz model

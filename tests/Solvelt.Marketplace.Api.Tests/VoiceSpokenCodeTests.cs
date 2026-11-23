@@ -92,6 +92,24 @@ public sealed class VoiceSpokenCodeTests
     private static string Words(string digits) => string.Join(' ', digits.Select(c => "zero one two three four five six seven eight nine".Split(' ')[c - '0']));
 
     [Fact]
+    public void No_confirmation_the_caller_hears_offers_a_key()
+    {
+        foreach (var line in new[] { VoiceScripts.ConfirmQuestion, VoiceScripts.ConfirmRetry, VoiceScripts.CancelRetry, VoiceScripts.AccountRetry, PipelineScripts.ConsentSayYes })
+            Assert.DoesNotContain("press", line, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("say yes", VoiceScripts.ConfirmQuestion);
+        Assert.Contains("say no", VoiceScripts.ConfirmQuestion);
+    }
+
+    [Fact]
+    public async Task The_model_is_told_the_code_is_spoken_to_the_automated_line_never_typed()
+    {
+        using var s = await Scenario();
+        var instruction = (await s.Tool("identify_caller"))["instruction"]!.GetValue<string>();
+        Assert.Contains("SAY the code", instruction);
+        foreach (var typed in new[] { "keypad", "pound", "type the code", "Do not ask them to say" }) Assert.DoesNotContain(typed, instruction, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task The_code_prompt_is_a_speech_only_gather_with_digit_hints_and_no_keypad_input_at_all()
     {
         using var s = await Scenario();

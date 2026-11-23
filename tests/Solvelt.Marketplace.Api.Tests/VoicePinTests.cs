@@ -39,6 +39,17 @@ public class VoicePinTests
         await pins.SaveAsync(account, pins.Prepare(account, pin), default);
     }
 
+    [Fact]
+    public async Task The_model_is_told_the_code_is_said_and_only_the_PIN_is_typed()
+    {
+        var (s, _) = await AccountCall();
+        using var _s = s;
+        var instruction = (await s.Tool("set_my_pin"))["instruction"]!.GetValue<string>();
+        Assert.Contains("SAY the code", instruction);
+        Assert.Contains("PIN on the keypad", instruction);                                         // the PIN stays on the keypad
+        foreach (var typed in new[] { "type the code", "then press pound", "Do not ask them to say" }) Assert.DoesNotContain(typed, instruction, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string SayOf(XElement response) => response.Descendants("Say").First().Value;
 
     /// <summary>The set-PIN dance up to the PIN prompt: the model starts it, a fresh code is typed, and the server asks for the PIN.</summary>

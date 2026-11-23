@@ -21,7 +21,7 @@ public sealed class SetMyPinTool(PhoneCodeService codes, PhonePinService pins) :
         s.SetPin(new PinSetup("set", null, unlock));
         s.SetTask("account");
         s.BeginKeypadStep("sms_code");
-        return new(new JsonObject { ["status"] = "code_sent", ["instruction"] = "Tell the caller, in one or two short sentences: you are texting a new six digit code to their number now, and after you stop talking they should type the code on the keypad, then press pound, and then they will choose their PIN on the keypad. Do not ask them to say the code or the PIN. Then stop talking." }.ToJsonString(), EndCall: true);
+        return new(new JsonObject { ["status"] = "code_sent", ["instruction"] = "Tell the caller, in one or two short sentences: you are texting a new six digit code to their number now, and after you stop talking the automated line will ask them to SAY the code, and then they will choose their PIN on the keypad. Do not ask for the code yourself, never repeat it, and do not ask for the PIN. Then stop talking." }.ToJsonString(), EndCall: true);
     }
 }
 
@@ -42,6 +42,6 @@ public sealed class RemoveMyPinTool(PhoneCodeService codes, PhonePinService pins
         s.SetPin(new PinSetup("remove", null));
         s.SetTask("account");
         s.BeginKeypadStep("sms_code");
-        return new(new JsonObject { ["status"] = "code_sent", ["instruction"] = "Tell the caller, in one or two short sentences: you are texting a new six digit code to their number now, and after you stop talking they should type the code on the keypad, then press pound. Do not ask them to say it. Then stop talking." }.ToJsonString(), EndCall: true);
+        return new(new JsonObject { ["status"] = "code_sent", ["instruction"] = "Tell the caller, in one or two short sentences: you are texting a new six digit code to their number now, and after you stop talking the automated line will ask them to SAY the code. Do not ask for the code yourself and never repeat it. Then stop talking." }.ToJsonString(), EndCall: true);
     }
 }

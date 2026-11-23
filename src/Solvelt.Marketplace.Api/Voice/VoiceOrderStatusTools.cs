@@ -225,7 +225,7 @@ public sealed class CancelOrderTool(InProcessOrders orders, TimeProvider time) :
             return ToolKit.Error("not_cancellable", $"Say that part of the order is {OrderSpeech.StatusWords(chosen.GetProperty("status").GetString())} and can no longer be cancelled; offer a return or a person.");
         var items = string.Join(", ", chosen.GetProperty("lines").EnumerateArray().Take(4).Select(l => $"{VoiceSpeech.Number(l.GetProperty("quantity").GetInt32())} {VoiceSpeech.Plain(l.GetProperty("title").GetString(), 60)}"));
         var text = $"You asked to cancel order {VoiceSpeech.Spelled(number)}, the part from {VoiceSpeech.Plain(chosen.GetProperty("sellerName").GetString(), 40)}: {items}. "
-            + "This sends a cancellation request to the seller, who decides; you will get an email with the answer. To send the request, say yes or press 1. To keep the order, say no or press 2.";
+            + "This sends a cancellation request to the seller, who decides; you will get an email with the answer. To send the request, say yes. To keep the order, say no.";
         s.SetCancel(new PendingCancel(number, chosen.TryGetProperty("sellerOrderNumber", out var so) ? so.GetString() : null, reason, text));
         s.SetTask("cancellation");
         s.BeginKeypadStep("confirm_cancel");

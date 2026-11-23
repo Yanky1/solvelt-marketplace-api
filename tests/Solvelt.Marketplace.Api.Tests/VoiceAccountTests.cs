@@ -42,7 +42,7 @@ public class VoiceAccountTests
         var gather = (await s.AfterStream()).Element("Gather")!;
         var said = gather.Element("Say")!.Value;
         Assert.True(VoiceSpeech.IsSpeakable(said), said);
-        Assert.EndsWith("To leave it as it is, say no or press 2.", said);
+        Assert.EndsWith("To leave it as it is, say no.", said);
         return said;
     }
 

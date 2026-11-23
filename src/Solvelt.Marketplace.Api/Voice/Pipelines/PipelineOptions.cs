@@ -123,6 +123,8 @@ public static class PipelineScripts
 
     private static string EndWithStop(string text) => text.Length == 0 || text[^1] is '.' or '!' or '?' ? text : text + ".";
     public const string ConsentDeclined = "Okay. Using the standard assistant.";
+    /// <summary>Said after the owner's consent line (V-45): the answer is spoken, never a key.</summary>
+    public const string ConsentSayYes = "Say yes to continue, or say no to use the standard assistant.";
     public const string Unavailable = "That option is not available on this line. Using option one.";
     public static string Chosen(string option) => "Option " + option[1..] + ".";
     public const string Filler = "One moment, please.";

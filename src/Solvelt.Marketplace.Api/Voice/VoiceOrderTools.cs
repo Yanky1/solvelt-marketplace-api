@@ -90,7 +90,7 @@ public sealed class IdentifyCallerTool(PhoneCodeService codes, PhoneIdentity ide
         return new(new JsonObject
         {
             ["status"] = "code_sent",
-            ["instruction"] = "Tell the caller, in one or two short sentences: you are texting a six digit code to their phone now, and after you stop talking they should type the code on the keypad, then press pound. Do not ask them to say it. Then stop talking.",
+            ["instruction"] = "Tell the caller, in one or two short sentences: you are texting a six digit code to their phone now, and after you stop talking the automated line will ask them to SAY the code. Do not ask for the code yourself and never repeat it. Then stop talking.",
         }.ToJsonString(), EndCall: true);
     }
 }

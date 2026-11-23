@@ -89,7 +89,7 @@ public class VoiceIdentifyTests
     {
         using var s = await Scenario();
         var r = await s.Tool("identify_caller");
-        Assert.Contains("Do not ask them to say it", r["instruction"]!.GetValue<string>());
+        Assert.Contains("Do not ask for the code yourself", r["instruction"]!.GetValue<string>());   // V-45: the model must not ask for the code (the automated line does)
         var code = s.LastCode();
         Assert.DoesNotContain(code, r.ToJsonString());
         await s.EndStreamAfterGoodbye();

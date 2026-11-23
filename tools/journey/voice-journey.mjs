@@ -197,18 +197,18 @@ async function main() {
     check(!options.error && options.groups?.length >= 1, `delivery options come from the real portal's shipping settings (${JSON.stringify(options).slice(0, 200)})`);
     ok("the cheapest delivery option is selected");
 
-    step("the SERVER reads the order back; only the keypad yes confirms it");
+    step("the SERVER reads the order back; only the spoken yes confirms it");
     const rb = await tool("read_back_order");
     check(rb.status === "reading_back", `the order is read back (${JSON.stringify(rb).slice(0, 200)})`);
     await endStreamAfterGoodbye();
     const readBack = await hook(PATHS.afterStream);
     const gathered = gatherOf(readBack.text) ?? "";
     check(/dollars/.test(gathered) && /yes/i.test(gathered), `the platform reads the order, its total and asks for a yes (${gathered.slice(0, 160)})`);
-    check(!upstream.connections.some((c) => c.received.some((m) => JSON.stringify(m).includes("To place this order, say yes or press 1"))), "the model never received the read-back text");
-    kp = await hook(PATHS.keypad, { Digits: "1" });
-    check(streamUrlOf(kp.text), "yes (1) resumes the call");
+    check(!upstream.connections.some((c) => c.received.some((m) => JSON.stringify(m).includes("To place this order, say yes"))), "the model never received the read-back text");
+    kp = await hook(PATHS.keypad, { SpeechResult: "yes" });
+    check(streamUrlOf(kp.text), "a spoken yes resumes the call");
     await attach(streamUrlOf(kp.text));
-    ok("the order was confirmed by the caller on the keypad");
+    ok("the order was confirmed by the caller saying yes");
 
     step("payment on the keypad with the AI disconnected (the fake provider: no card exists)");
     const pay = await tool("pay_for_order", { method: "keypad" });

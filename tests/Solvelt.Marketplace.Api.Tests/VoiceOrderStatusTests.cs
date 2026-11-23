@@ -167,7 +167,7 @@ public class VoiceOrderStatusTests
             var gather = await AskToCancel(s, new { order_number = "MP-20261110-AAAA1111", reason = "changed_mind" });
             var said = gather.Element("Gather")!.Element("Say")!.Value;
             Assert.Contains("cancel order", said); Assert.Contains("Mazel Bakery", said); Assert.Contains("two Classic Braided Challah", said); Assert.Contains("the seller, who decides", said);
-            Assert.EndsWith("To keep the order, say no or press 2.", said);
+            Assert.EndsWith("To keep the order, say no.", said);
             Assert.True(VoiceSpeech.IsSpeakable(said), said);
             Assert.Empty(await Cancels(s));                                                       // nothing was sent by asking
             Assert.DoesNotContain(s.Fake.Received, m => m.Contains("the seller, who decides"));    // the model never wrote or heard the read-back

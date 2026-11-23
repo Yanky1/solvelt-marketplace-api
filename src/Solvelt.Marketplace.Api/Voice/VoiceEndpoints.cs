@@ -56,7 +56,7 @@ public static class VoiceEndpoints
     private static XElement GatherSpeech(VoiceOptions v, IVoiceVocabulary vocabulary, string? say)
     {
         var s = v.SignalWireSpeech;
-        var g = new XElement("Gather", new XAttribute("input", "speech dtmf"), new XAttribute("numDigits", 1), new XAttribute("language", s.Language), new XAttribute("speechTimeout", s.SpeechTimeout.ToLowerInvariant()),
+        var g = new XElement("Gather", new XAttribute("input", "speech"), new XAttribute("language", s.Language), new XAttribute("speechTimeout", s.SpeechTimeout.ToLowerInvariant()),
             new XAttribute("timeout", s.NoInputSeconds), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + SpeechPath));
         if (s.Enhanced) g.Add(new XAttribute("enhanced", "true"));
         if (s.SpeechModel.Length > 0) g.Add(new XAttribute("speechModel", s.SpeechModel));
@@ -185,9 +185,9 @@ public static class VoiceEndpoints
         else if (v.Pipelines.UsesYiddishLabs(option))
         {
             // this option sends the caller's voice to a third party: the owner's approved consent line is played first and one key continues; nothing is chosen or recorded until then (decision V-26)
-            return Cxml(new XElement("Response", new XElement("Gather", new XAttribute("input", "dtmf"), new XAttribute("numDigits", 1), new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds),
-                new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelineConsentPath + "?o=" + option),
-                new XElement("Say", v.YiddishLabs.ConsentLine))));
+            return Cxml(new XElement("Response", new XElement("Gather", new XAttribute("input", "speech"), new XAttribute("language", v.SignalWireSpeech.Language), new XAttribute("timeout", v.PipelineMenu.MenuTimeoutSeconds),
+                new XAttribute("speechTimeout", "auto"), new XAttribute("hints", "yes, no"), new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + PipelineConsentPath + "?o=" + option),
+                new XElement("Say", v.YiddishLabs.ConsentLine), new XElement("Say", PipelineScripts.ConsentSayYes))));   // V-45: the owner's line stays as written; the server adds how to answer (by voice)
         }
         else say = new XElement("Say", PipelineScripts.Chosen(option));
         await store.SetPipelineAsync(call.Id, option, ct);
@@ -213,9 +213,9 @@ public static class VoiceEndpoints
         if (!PipelineMenu.Offered(v, from, to) || states.GetOrCreate(call.Id).Connections > 0)
             return Cxml(new XElement("Response", new XElement("Redirect", v.PublicBaseUrl!.TrimEnd('/') + AfterStreamPath)));
         var option = ctx.Request.Query["o"].ToString();
-        form.TryGetValue("Digits", out var digits);
+        form.TryGetValue("Digits", out var digits); form.TryGetValue("SpeechResult", out var consentSaid);
         // only an option that really asks for consent and is available can be continued with; the option comes from the signed address, and anything else is option 1
-        var agreed = digits?.Trim() == "1" && VoicePipelineIds.IsOption(option) && option != VoicePipelineIds.Realtime && v.Pipelines.UsesYiddishLabs(option) && registry.IsAvailable(option);
+        var agreed = ReadBackAnswer.Parse(digits, consentSaid) == ConfirmChoice.Yes && VoicePipelineIds.IsOption(option) && option != VoicePipelineIds.Realtime && v.Pipelines.UsesYiddishLabs(option) && registry.IsAvailable(option);
         if (!agreed) option = VoicePipelineIds.Realtime;
         await store.SetPipelineAsync(call.Id, option, ct);
         return Cxml(new XElement("Response", new XElement("Say", agreed ? PipelineScripts.Chosen(option) : PipelineScripts.ConsentDeclined), StreamParts(v, tokens, call.Id)));
@@ -274,7 +274,7 @@ public static class VoiceEndpoints
             new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", prompt));
 
     private static XElement GatherConfirm(VoiceOptions v, string say)
-        => new("Gather", new XAttribute("input", "dtmf speech"), new XAttribute("numDigits", 1), new XAttribute("timeout", 8), new XAttribute("speechTimeout", "auto"), new XAttribute("hints", "yes, no"),
+        => new("Gather", new XAttribute("input", "speech"), new XAttribute("language", v.SignalWireSpeech.Language), new XAttribute("timeout", 8), new XAttribute("speechTimeout", "auto"), new XAttribute("hints", "yes, no"),
             new XAttribute("actionOnEmptyResult", "true"), new XAttribute("method", "POST"), new XAttribute("action", v.PublicBaseUrl!.TrimEnd('/') + KeypadPath), new XElement("Say", say));
 
     /// <summary>The digits typed for an SMS code. Checked against the hash held for THIS call; never stored, logged or given to the model.</summary>

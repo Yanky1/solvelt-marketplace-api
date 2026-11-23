@@ -93,7 +93,8 @@ public class VoiceDeliveryTests
 
         var gather = await ReadBack(s);
         var g = gather.Element("Gather")!;
-        Assert.Equal(("dtmf speech", "1"), (g.Attribute("input")!.Value, g.Attribute("numDigits")!.Value));
+        Assert.Equal("speech", g.Attribute("input")!.Value);   // V-45: the confirmation is spoken, no key
+        Assert.Null(g.Attribute("numDigits"));
         Assert.Equal(VoiceFactory.BaseUrl + VoiceEndpoints.KeypadPath, g.Attribute("action")!.Value);
         var spoken = g.Element("Say")!.Value;
         var total = await TotalNow(s);

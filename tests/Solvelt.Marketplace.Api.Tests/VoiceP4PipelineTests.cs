@@ -56,8 +56,10 @@ public sealed class VoiceP4PipelineTests : IDisposable
         await Start();
         var x = await Xml(await Menu("4"));
         var gather = x.Element("Gather")!;
-        Assert.Equal(Consent, gather.Element("Say")!.Value);                                       // the owner's wording, word for word
-        Assert.Equal("1", gather.Attribute("numDigits")!.Value);
+        Assert.Equal(Consent, gather.Elements("Say").First().Value);                               // the owner's wording, word for word
+        Assert.Equal(PipelineScripts.ConsentSayYes, gather.Elements("Say").Last().Value);          // V-45: then how to answer, by voice
+        Assert.Equal("speech", gather.Attribute("input")!.Value);                                  // no key
+        Assert.Null(gather.Attribute("numDigits"));
         Assert.Contains(VoiceEndpoints.PipelineConsentPath + "?o=p4", gather.Attribute("action")!.Value);
         Assert.Null(x.Descendants("Stream").FirstOrDefault());                                      // no stream, no pipeline before the answer
         var row = await S.Row();
@@ -83,6 +85,28 @@ public sealed class VoiceP4PipelineTests : IDisposable
             Assert.Equal("p1", (await S.Row()).Tier);
             _s!.Dispose();
         }
+    }
+
+    private Task<HttpResponseMessage> Said(string option, string? words)
+        => VoiceFactory.Hook(S.C, VoiceEndpoints.PipelineConsentPath + "?o=" + option, S.Sid, Number, extra: words is null ? null : new() { ["SpeechResult"] = words });
+
+    [Theory]
+    [InlineData("yes", true)]
+    [InlineData("Yes, please.", true)]
+    [InlineData("yeah", true)]
+    [InlineData("no", false)]
+    [InlineData("no thanks", false)]
+    [InlineData("yes no", false)]        // a "no" of any kind beats a "yes" in the same breath
+    [InlineData("maybe", false)]         // anything unclear is not consent
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public async Task The_consent_is_a_spoken_yes_and_anything_else_gives_the_standard_assistant(string? words, bool agreed)
+    {
+        await Start();
+        var x = await Xml(await Said("p4", words));
+        Assert.NotNull(x.Descendants("Stream").SingleOrDefault());
+        Assert.Equal(agreed ? "p4" : "p1", (await S.Row()).Tier);
+        Assert.Contains(agreed ? PipelineScripts.Chosen("p4") : PipelineScripts.ConsentDeclined, x.Descendants("Say").Select(e => e.Value));
     }
 
     [Fact]
