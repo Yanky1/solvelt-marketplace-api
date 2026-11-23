@@ -128,11 +128,16 @@ public sealed class FakeFlashHandler : HttpMessageHandler
     private FlashAnswer _last = FlashAnswer.Text("");
     public FakeFlashHandler(params FlashAnswer[] answers) { _answers = new(answers); }
     public List<FlashRequest> Requests { get; } = [];
+    /// <summary>Scripted answers not yet given: zero once the last one has gone out.</summary>
+    public int Remaining { get { lock (Requests) return _answers.Count; } }
+    /// <summary>Fault injection: every request reaches the handler this much (real) time late, like on a slow, loaded runner. Zero (the default): none.</summary>
+    public TimeSpan RequestDelay { get; set; }
 
     public sealed record FlashRequest(Uri? Uri, string? Auth, Dictionary<string, string> Fields, byte[]? File);
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
+        if (RequestDelay > TimeSpan.Zero) await Task.Delay(RequestDelay, ct);
         var fields = new Dictionary<string, string>(); byte[]? file = null;
         if (request.Content is MultipartFormDataContent)
         {
@@ -146,7 +151,7 @@ public sealed class FakeFlashHandler : HttpMessageHandler
             }
         }
         lock (Requests) Requests.Add(new FlashRequest(request.RequestUri, request.Headers.Authorization?.ToString(), fields, file));
-        var a = _answers.Count > 0 ? (_last = _answers.Dequeue()) : _last;
+        FlashAnswer a; lock (Requests) a = _answers.Count > 0 ? (_last = _answers.Dequeue()) : _last;
         var resp = new HttpResponseMessage(a.Status) { Content = new StringContent(a.Body, Encoding.UTF8, "application/json") };
         if (a.RetryAfterSeconds is { } s) resp.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(s));
         return resp;
