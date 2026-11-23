@@ -22,6 +22,7 @@ public static class VoicePipelineVendors
     internal static bool Supported(string option, PipelineProviders p)
         => option == "p6" || (option == "p2" && (Is(p.Stt, VendorNames.Deepgram) || Is(p.Stt, VendorNames.OpenAi)) && Is(p.Tts, VendorNames.ElevenLabs))
         || (option == "p3" && (Is(p.Stt, VendorNames.Gladia) || Is(p.Stt, VendorNames.OpenAi)) && Is(p.Tts, VendorNames.ElevenLabs))
+        || (option == "p7" && Is(p.Stt, VendorNames.OpenAi) && Is(p.Tts, VendorNames.ElevenLabs))
         || (option == "p4" && (Is(p.Stt, VendorNames.YiddishLabs) || Is(p.Stt, VendorNames.OpenAi)) && Is(p.Tts, VendorNames.YiddishLabs))
         || (option == "p5" && Is(p.Stt, VendorNames.Gladia + "+" + VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs));
 
@@ -46,7 +47,7 @@ public static class VoicePipelineVendors
     {
         if (!v.PipelineMenu.Enabled) return;
         var configured = new List<string>();
-        foreach (var o in new[] { "p2", "p3", "p4", "p5" })
+        foreach (var o in new[] { "p2", "p3", "p4", "p5", "p7" })
         {
             var prov = v.Pipelines.For(o);
             var key = "Voice:Pipelines:" + o.ToUpperInvariant();
@@ -95,7 +96,7 @@ public static class VoicePipelineVendors
             if (t.MaxTurnSeconds is < 5 or > 60) p.Add("Voice:OpenAiTranscribe:MaxTurnSeconds must be between 5 and 60.");
         }
         if (configured.Contains("p5") && v.Pipelines.P5.JudgeModel.Length > 100) p.Add("Voice:Pipelines:P5:JudgeModel must be at most 100 characters.");
-        if (configured.Contains("p2") || configured.Contains("p3"))
+        if (configured.Contains("p2") || configured.Contains("p3") || configured.Contains("p7"))
         {
             if (v.ElevenLabs.VoiceId.Length > 0 && v.ElevenLabs.VoiceId.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-')) p.Add("Voice:ElevenLabs:VoiceId may only hold letters, digits, - and _.");
             if (VendorHosts.ElevenLabs(v.ElevenLabs.Region) is null) p.Add("Voice:ElevenLabs:Region must be empty, us, eu, in or sg.");
@@ -143,6 +144,11 @@ public static class VoicePipelineVendors
                 break;
             case "p6":
                 if (!v.Pipelines.P6.Enabled) m.Add("Voice:Pipelines:P6:Enabled");
+                break;
+            case "p7":
+                if (!v.Pipelines.P7.Enabled) m.Add("Voice:Pipelines:P7:Enabled");
+                MissingOpenAi(v, m);
+                MissingEleven(v, m);
                 break;
         }
         return m;
@@ -223,7 +229,8 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         var p4 = Ready("p4");
         var p5 = Ready("p5");
         var p6 = Ready("p6");
-        if (!p2 && !p3 && !p4 && !p5 && !p6) yield break;
+        var p7 = Ready("p7");
+        if (!p2 && !p3 && !p4 && !p5 && !p6 && !p7) yield break;
         var sockets = sp.GetRequiredService<IVendorSocketConnector>();
         var vocab = sp.GetService<IVoiceVocabulary>();   // the shared catalog words (V-37); none when the provider is not registered
         var http = sp.GetRequiredService<IHttpClientFactory>();
@@ -240,11 +247,12 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         Func<ITurnDetector> silence = () => new SilenceTurnDetector(v.PipelineMenu.EndpointMs);
         // OpenAI transcription (V-47): our own end-of-speech detector already waited and sent the commit, so its final words end the caller's turn, as Flash's do
         OpenAiTranscribeStt OpenAiStt() => new(v.OpenAiTranscribe, v.OpenAiApiKey ?? "", v.OpenAiRealtimeUrl, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.OpenAiTranscribe"), vocab);
-        if (!p2 && !p3 && !p4 && !p5) yield break;
-        if (p2 || p3)
+        if (!p2 && !p3 && !p4 && !p5 && !p7) yield break;
+        if (p2 || p3 || p7)
         {
             var tts = new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs"));
             if (p2) yield return new VendorChainedParts("p2", VoicePipelineVendors.UsesOpenAi(v, "p2") ? OpenAiStt() : new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram"), vocab), tts, llm, VoicePipelineVendors.UsesOpenAi(v, "p2") ? () => new FinalTurnDetector() : silence);
+            if (p7) yield return new VendorChainedParts("p7", OpenAiStt(), tts, llm, () => new FinalTurnDetector());   // V-48: OpenAI listening, Claude (llm above), ElevenLabs speaking
             if (p3) yield return new VendorChainedParts("p3", VoicePipelineVendors.UsesOpenAi(v, "p3") ? OpenAiStt() : new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"), vocab), tts, llm, VoicePipelineVendors.UsesOpenAi(v, "p3") ? () => new FinalTurnDetector() : silence);
         }
         if (p4)

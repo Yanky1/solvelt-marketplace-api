@@ -23,7 +23,7 @@ public sealed class ScoringSetup : IDisposable
     public static IReadOnlyList<string> ReplayableOptions(IConfiguration baseConfig)
     {
         var v = Bind(baseConfig, new Dictionary<string, string>());
-        return new[] { "p2", "p3", "p4", "p5" }.Where(o => VoicePipelineVendors.Supported(o, v.Pipelines.For(o)) && VoicePipelineVendors.Missing(v, o).Count == 0).ToList();
+        return new[] { "p2", "p3", "p4", "p5", "p7" }.Where(o => VoicePipelineVendors.Supported(o, v.Pipelines.For(o)) && VoicePipelineVendors.Missing(v, o).Count == 0).ToList();
     }
 
     public static IReadOnlyList<VariantSpec> DefaultVariants(IConfiguration baseConfig)
@@ -48,7 +48,7 @@ public sealed class ScoringSetup : IDisposable
     /// <summary>The recogniser of one variant. Throws <see cref="InvalidOperationException"/> naming the settings that are missing (never their values).</summary>
     public ScoringVariant Build(IConfiguration baseConfig, VariantSpec spec)
     {
-        if (spec.Option is not ("p2" or "p3" or "p4" or "p5")) throw new InvalidOperationException($"Variant {spec.Name}: option {spec.Option} cannot be replayed from audio (use p2, p3, p4 or p5).");
+        if (spec.Option is not ("p2" or "p3" or "p4" or "p5" or "p7")) throw new InvalidOperationException($"Variant {spec.Name}: option {spec.Option} cannot be replayed from audio (use p2, p3, p4, p5 or p7).");
         var v = Bind(baseConfig, spec.Settings);
         if (!VoicePipelineVendors.Supported(spec.Option, v.Pipelines.For(spec.Option))) throw new InvalidOperationException($"Variant {spec.Name}: option {spec.Option} has no recogniser configured (Voice:Pipelines).");
         var missing = VoicePipelineVendors.Missing(v, spec.Option);
@@ -82,7 +82,7 @@ public sealed class ScoringSetup : IDisposable
                 var name = Get("name"); var option = Get("option");
                 if (!System.Text.RegularExpressions.Regex.IsMatch(name, "^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,27}$")) throw new FormatException($"Variant name \"{name}\" must be 1 to 28 plain characters.");
                 if (list.Any(x => x.Name == name)) throw new FormatException($"Variant name {name} appears twice.");
-                if (option is not ("p2" or "p3" or "p4" or "p5")) throw new FormatException($"Variant {name}: option must be p2, p3, p4 or p5.");
+                if (option is not ("p2" or "p3" or "p4" or "p5" or "p7")) throw new FormatException($"Variant {name}: option must be p2, p3, p4, p5 or p7.");
                 var settings = new Dictionary<string, string>();
                 if (e.TryGetProperty("settings", out var st) && st.ValueKind == JsonValueKind.Object)
                     foreach (var kv in st.EnumerateObject())

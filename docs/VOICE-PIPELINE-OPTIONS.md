@@ -13,6 +13,7 @@ The test line only (V-19): the menu is off by default and limited to `Voice:Pipe
 | p3 | the caller may speak Yiddish and is understood live; the assistant answers in English | **Gladia** live (Solaria-1) | **ElevenLabs** streaming | same |
 | p4 | Yiddish both ways, one vendor | **Yiddish Labs** Flash (one request per caller turn) | **Yiddish Labs** realtime TTS | same |
 | p5 | Yiddish both ways with a second opinion on what was said | **Gladia** live + **Yiddish Labs** Flash in parallel, a judge picks the text (`ParallelStt`) | **Yiddish Labs** realtime TTS | same, plus the judge |
+| p7 | Ronald's choice of 2026-11-23: OpenAI listening, Claude, ElevenLabs voice (decision V-48) | **OpenAI** Realtime transcription (`gpt-live-transcribe`, decision V-47) | **ElevenLabs** streaming | **Claude**, same instructions and tools |
 
 p3 answering in English is a deliberate choice, not a gap: it keeps Yiddish Labs out of p3, so the consent line in section 6 is needed only for p4 and p5, as instructed. If Ronald wants a Yiddish voice in p3 it must use Yiddish Labs TTS and then p3 needs the consent line too (his decision).
 
@@ -167,3 +168,16 @@ Ronald asked for "SignalWire's speech recognition" as a sixth option ("Approved,
 **What was built (A).** Turn flow: Gather speech (language, `speechTimeout` auto, `enhanced` and `speechModel` phone_call (the defaults since V-36), `hints` = static words then the catalog's) -> `POST .../speech` with `SpeechResult` -> the shared tool loop with our Claude assistant -> `<Gather input="speech dtmf"><Say>reply</Say></Gather>`. Keypad steps and the endings reuse `AfterStream`. See decision V-35 for the settings, failures and tests.
 
 **Honest limits.** Latency is one webhook round trip per turn with no streaming: slower than options 1 to 5, **unmeasured**. Barge-in: the reply plays inside the Gather, so the page says speech or a key ends it; how quickly and how completely is **OPEN** until a real call is listened to. The recogniser's own price is not metered by us (the per-call cost counts the model's tokens only). Hints are the static words plus the shared catalog vocabulary (V-36), rebuilt on a timer, not looked up per turn.
+
+## 13. Option 7 and OpenAI transcription (decisions V-47 and V-48)
+
+**What it is.** OpenAI's Realtime transcription session (`wss://api.openai.com/v1/realtime?intent=transcription`, no model in the address) as a streaming recogniser, usable as the `Stt` of options 2 to 4 and as a third candidate of option 5's judge, and fixed in option 7 together with Claude and the ElevenLabs voice. Built against `docs/agent-briefs/asr-vendor-facts.md` (OpenAI's docs as read on 2026-11-22).
+
+**Why this recogniser.** OpenAI recommends `gpt-live-transcribe` to start with; `whisper-1` and the `gpt-4o-transcribe` models shut down on 2027-02-26. It takes `languages` and `keywords` (the catalog words) and needs turn detection off, so this server detects the end of the caller's turn and sends `input_audio_buffer.commit`.
+
+**Why ElevenLabs is the voice of option 7.** OpenAI's text-to-speech models (`/v1/audio/speech`: `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`) shut down on 2027-01-06 and offer no mu-law output; Ronald chose ElevenLabs.
+
+**Limits, plainly.** One reading per turn, no confidence and no alternatives (so no other-readings or doubt note for Claude); the end-of-turn detector and its numbers are ours and untuned on real calls; Yiddish coverage is not stated by OpenAI; the Realtime `audio/pcmu` rate is not stated in the Realtime reference. Measure all of it with the recorded test set (`docs/VOICE.md` section 17).
+
+**Settings (names only).** `Voice:Pipelines:P7:Enabled`; `Voice:Pipelines:Pn:Stt=openai`; `Voice:Pipelines:P5:OpenAiInJudge`; `Voice:OpenAiTranscribe:Model`, `:Languages`, `:KeywordMax`, `:EndpointSilenceMs`, `:MinEnergy`, `:MaxTurnSeconds`. The key is the existing `Voice:OpenAiApiKey` and the host is the one of `Voice:OpenAiRealtimeUrl`.
+

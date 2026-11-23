@@ -39,16 +39,24 @@ public sealed class VoicePipelinesOptions
     public P5Options P5 { get; set; } = new();
     /// <summary>Option 6 (SignalWire's speech recognition). Off by default; it needs only the text model's key, no new secret.</summary>
     public P6Options P6 { get; set; } = new();
+    /// <summary>Option 7: OpenAI listening, Claude, ElevenLabs voice (decision V-48).</summary>
+    public P7Options P7 { get; set; } = new();
     /// <summary>The OpenAI text model of every chained option (the same instructions and tools as the Realtime line). Required as soon as any option is configured; no default is assumed.</summary>
     public VoiceLlmOptions Llm { get; set; } = new();
 
-    public PipelineProviders For(string option) => option switch { "p2" => P2, "p3" => P3, "p4" => P4, "p5" => P5, _ => new() };
+    public PipelineProviders For(string option) => option switch { "p2" => P2, "p3" => P3, "p4" => P4, "p5" => P5, "p7" => P7.Enabled ? new PipelineProviders { Stt = VendorNames.OpenAi, Tts = VendorNames.ElevenLabs } : new(), _ => new() };
 
     /// <summary>Whether the option sends the caller's speech or words to Yiddish Labs: those options need the consent step.</summary>
     public bool UsesYiddishLabs(string option) { var p = For(option); return p.Configured && (p.Stt.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase) || p.Tts.Contains("yiddishlabs", StringComparison.OrdinalIgnoreCase)); }
 }
 
 public sealed class P6Options { public bool Enabled { get; set; } }
+
+/// <summary>
+/// Option 7 (decision V-48): OpenAI live transcription listens (<c>Voice:OpenAiTranscribe</c>), Claude is the agent (the text model of every chained option, with the same instructions and tools) and ElevenLabs speaks
+/// (<c>Voice:ElevenLabs</c>). Its providers are fixed, so there is only a switch. Off by default; a missing OpenAI, Anthropic or ElevenLabs setting makes it unavailable with one warning (V-26).
+/// </summary>
+public sealed class P7Options { public bool Enabled { get; set; } }
 
 /// <summary>
 /// Option 6 settings (<c>Voice:SignalWireSpeech</c>, decision V-35): what the cXML <c>Gather input="speech"</c> asks SignalWire for. No secret: it uses the SignalWire project the line already has.

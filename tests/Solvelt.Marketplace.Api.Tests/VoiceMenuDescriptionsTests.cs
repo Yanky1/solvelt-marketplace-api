@@ -110,7 +110,8 @@ public sealed class VoiceMenuDescriptionsTests
         foreach (var o in VoicePipelineIds.All) Assert.False(string.IsNullOrWhiteSpace(m.Descriptions.For(o)), o);
         foreach (var o in new[] { "p2", "p5" }) { Assert.Contains("Claude", m.Descriptions.For(o)); Assert.DoesNotContain("an AI", m.Descriptions.For(o)); }   // Claude is the default provider of the chained options (V-33)
         Assert.Equal("SignalWire built-in. The phone company's own speech recognition, with Claude.", m.Descriptions.For("p6"));   // option 6 (V-35)
-        Assert.Equal("", m.Descriptions.For("p7"));                                                      // there is no option 7
+        Assert.Equal("OpenAI listening, Claude, ElevenLabs voice.", m.Descriptions.For("p7"));           // option 7 (V-48)
+        Assert.Equal("", m.Descriptions.For("p8"));                                                      // and there is no option 8
         Assert.Equal("Ends already!", PipelineScripts.Compose(new VoicePipelineMenuOptions { Descriptions = new PipelineDescriptions { P1 = "Ends already!" } }, ["p1"])["Test line. Say one for ".Length..]);
         Assert.Equal("Needs a stop.", PipelineScripts.Compose(new VoicePipelineMenuOptions { Descriptions = new PipelineDescriptions { P1 = "Needs a stop" } }, ["p1"])["Test line. Say one for ".Length..]);
 
