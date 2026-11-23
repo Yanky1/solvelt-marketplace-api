@@ -27,7 +27,7 @@ public sealed record PhoneVerifyResult(PhoneVerifyStatus Status, string? Token =
 /// Who can sign in this way: an account whose number is PROVEN (<c>PhoneVerifiedE164</c>, V-05) and which has NO password, not deleted, not staff-locked, not demo-verified. An account with a password signs
 /// in with it (and recovers it by email): a text message is not made a second way into it.
 /// </summary>
-public sealed class PhoneSignInService(MarketplaceDb db, ISmsSender sms, AttemptLimiter limiter, AuthService auth, IOptions<AuthOptions> authOptions, IOptions<VoiceOptions> voice, TimeProvider time, ILogger<PhoneSignInService> log)
+public sealed class PhoneSignInService(MarketplaceDb db, PhoneSmsDispatcher dispatcher, AttemptLimiter limiter, AuthService auth, IOptions<AuthOptions> authOptions, IOptions<VoiceOptions> voice, TimeProvider time)
 {
     public const int Digits = PhoneCodeService.Digits, MaxAttempts = PhoneCodeService.MaxAttempts;
     public static readonly TimeSpan Lifetime = PhoneCodeService.Lifetime;
@@ -86,14 +86,10 @@ public sealed class PhoneSignInService(MarketplaceDb db, ISmsSender sms, Attempt
         // A sign-in code is texted ONLY to a number an eligible account holds (orchestrator review of W3-02): texting any number the internet types in invites SMS pumping (toll fraud), costs money
         // and texts people who never asked. Everything else is identical for both: the caps above are counted, the code is drawn and hashed, the row is written (a null account id), and the answer
         // is the same 202. Only the send is skipped, so the answer and its timing apart from the provider call say nothing.
-        if (accountId is null) return new(PhoneStartStatus.Sent, id);
-        if (await sms.SendAsync(e164, body, ct)) return new(PhoneStartStatus.Sent, id);
-        // nothing was delivered: the code must not work later (a provider that accepted it after all would otherwise leave a live code we told the buyer failed)
-        await db.PhoneSignInChallenges.Where(c => c.Id == id).ExecuteUpdateAsync(s => s.SetProperty(c => c.UsedAt, (DateTimeOffset?)now), ct);
-        log.LogWarning("A web phone code could not be sent.");
-        // for a SIGN-IN the answer stays 202: a 503 only an existing account can produce would tell that the number has one. The buyer gets no text and asks for a new code. A step-up
-        // (signed in, its own number) says the send failed.
-        return purpose == PhoneSignInPurposes.SignIn ? new(PhoneStartStatus.Sent, id) : new(PhoneStartStatus.SendFailed);
+        // The send itself never runs in the request (orchestrator review of f4363ad): waiting for the provider would make a real account answer measurably slower than an unknown number.
+        // It is handed to the dispatcher, which sends after the answer and records a failure on the row (marked used: no code works; the buyer asks for a new one).
+        if (accountId is not null) dispatcher.Enqueue(id, e164, body);
+        return new(PhoneStartStatus.Sent, id);
     }
 
     /// <summary>
@@ -129,4 +125,45 @@ public sealed class PhoneSignInService(MarketplaceDb db, ISmsSender sms, Attempt
         var token = await auth.CreateSessionAsync(account.Id, ct, account.SessionEpoch);
         return new(PhoneVerifyStatus.Ok, token, account.Id, account.DisplayName);
     }
+}
+
+/// <summary>
+/// Sends the web's SMS codes AFTER the request has answered (W3-02), so a start does the same work and takes the same time whether or not a text goes out. Each send runs on its own scope; a
+/// provider that refuses, fails or takes longer than <see cref="SendTimeout"/> leaves the challenge marked used (no code works, nothing half-live). The code lives only in this closure's memory
+/// for the few seconds of the send, never in a queue table. Per instance and in memory: a process that stops in that window loses the text, and the buyer asks for a new code.
+/// </summary>
+public sealed class PhoneSmsDispatcher(IServiceScopeFactory scopes, TimeProvider time, ILogger<PhoneSmsDispatcher> log)
+{
+    public static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(20);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, Task> _pending = new();
+
+    public void Enqueue(Guid challengeId, string e164, string body)
+    {
+        var task = Task.Run(async () =>
+        {
+            var sent = false;
+            try
+            {
+                using var scope = scopes.CreateScope();
+                using var timeout = new CancellationTokenSource(SendTimeout);
+                sent = await scope.ServiceProvider.GetRequiredService<ISmsSender>().SendAsync(e164, body, timeout.Token);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException or InvalidOperationException) { sent = false; }
+            if (sent) return;
+            log.LogWarning("A web phone code could not be sent.");
+            try
+            {
+                using var scope = scopes.CreateScope();
+                var now = time.GetUtcNow().ToUniversalTime();
+                await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().PhoneSignInChallenges.Where(c => c.Id == challengeId && c.UsedAt == null)
+                    .ExecuteUpdateAsync(s => s.SetProperty(c => c.UsedAt, (DateTimeOffset?)now));
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { log.LogWarning("A failed web phone code could not be marked used ({Type}).", ex.GetType().Name); }   // it still expires in 10 minutes
+        });
+        _pending[challengeId] = task;
+        _ = task.ContinueWith(_ => _pending.TryRemove(challengeId, out var _), TaskScheduler.Default);
+    }
+
+    /// <summary>Waits for the sends in flight (tests, and a graceful stop).</summary>
+    public Task DrainAsync() => Task.WhenAll(_pending.Values);
 }

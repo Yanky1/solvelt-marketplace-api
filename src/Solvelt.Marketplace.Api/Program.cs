@@ -93,7 +93,8 @@ builder.Services.AddSingleton<Fido2NetLib.IFido2>(sp =>
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Auth.PasskeyService>();
 builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Account.AccountRedactionHandler>();
 builder.Services.AddScoped<AuthService>();
-builder.Services.AddScoped<PhoneSignInService>();   // W3-02: web sign-in and step-up by SMS code
+builder.Services.AddScoped<PhoneSignInService>();
+builder.Services.AddSingleton<PhoneSmsDispatcher>();   // sends those codes after the answer (W3-02)   // W3-02: web sign-in and step-up by SMS code
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection("Outbox"));
 builder.Services.Configure<DemoOptions>(o => o.Enabled = DemoOptions.Parse(builder.Configuration["Demo:Enabled"]));
 builder.Services.AddScoped<DemoService>();

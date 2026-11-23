@@ -23,7 +23,15 @@ public sealed class PhoneWebSignInTests : IDisposable
     private const string Number = "+17185550142";
     public void Dispose() => _k.Dispose();
 
-    private InMemorySmsSender Sms => (InMemorySmsSender)_k.F.Services.GetRequiredService<ISmsSender>();
+    /// <summary>The texts sent so far, after the sends in flight have finished (they run after the answer: W3-02).</summary>
+    private InMemorySmsSender Sms
+    {
+        get
+        {
+            _k.F.Services.GetRequiredService<Solvelt.Marketplace.Api.Auth.PhoneSmsDispatcher>().DrainAsync().GetAwaiter().GetResult();
+            return (InMemorySmsSender)_k.F.Services.GetRequiredService<ISmsSender>();
+        }
+    }
     private string LastCode(string to = Number) => Regex.Match(Sms.Sent.Last(s => s.To == to).Body, @"\b(\d{6})\b").Groups[1].Value;
     private static async Task<JsonElement> Json(HttpResponseMessage r) => JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
     private static async Task<string> Code(HttpResponseMessage r) => (await Json(r)).GetProperty("code").GetString()!;
@@ -186,6 +194,7 @@ public sealed class PhoneWebSignInTests : IDisposable
         await PhoneAccount();
         Sms.Fail = true;
         var r = await _k.Post("/api/v1/auth/phone/start", new { phone = Number });
+        _ = Sms;   // let the send finish
         Assert.Equal(HttpStatusCode.Accepted, r.StatusCode);   // the same answer as for a number without an account: a 503 only an account can produce would tell
         Assert.All(await _k.Db(db => db.PhoneSignInChallenges.AsNoTracking().ToListAsync()), c => Assert.NotNull(c.UsedAt));   // and no code works
     }
@@ -342,6 +351,37 @@ public sealed class PhoneWebSignInTests : IDisposable
         using (var scope = _k.F.Services.CreateScope())
             Assert.True(await scope.ServiceProvider.GetRequiredService<Solvelt.Marketplace.Api.Account.AccountService>().RedactAsync(id, scope.ServiceProvider.GetServices<Solvelt.Marketplace.Api.Account.IAccountEraser>(), default));
         Assert.Equal(0, await _k.Db(db => db.PhoneSignInChallenges.CountAsync(c => c.AccountId == id)));
+    }
+}
+
+/// <summary>The SMS is sent after the answer (orchestrator review of f4363ad): a start never waits for the provider, so a real account answers as fast as an unknown number.</summary>
+public sealed class PhoneSmsAfterTheAnswerTests : IDisposable
+{
+    private sealed class BlockingSms : ISmsSender
+    {
+        public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Calls;
+        public async Task<bool> SendAsync(string toE164, string body, CancellationToken ct) { Interlocked.Increment(ref Calls); await Release.Task.WaitAsync(ct); return true; }
+    }
+    private readonly BlockingSms _sms = new();
+    private readonly AuthKit _k;
+    public PhoneSmsAfterTheAnswerTests() => _k = new AuthKit(services: s => s.AddSingleton<ISmsSender>(_sms));
+    public void Dispose() { _sms.Release.TrySetResult(); _k.Dispose(); }
+
+    [Fact]
+    public async Task A_start_answers_while_the_provider_is_still_sending_and_the_code_works_once_sent()
+    {
+        using (var scope = _k.F.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<PhoneAccountService>().CreateAsync("Dana Levi", "+17185550142", default);
+        var start = _k.Post("/api/v1/auth/phone/start", new { phone = "+17185550142" });
+        var done = await Task.WhenAny(start, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert.Same(start, done);                                       // answered although the sender is still blocked
+        Assert.Equal(HttpStatusCode.Accepted, (await start).StatusCode);
+        for (var i = 0; i < 50 && Volatile.Read(ref _sms.Calls) == 0; i++) await Task.Delay(20);
+        Assert.Equal(1, Volatile.Read(ref _sms.Calls));                 // the send did start, after the answer
+        _sms.Release.SetResult();
+        await _k.F.Services.GetRequiredService<Solvelt.Marketplace.Api.Auth.PhoneSmsDispatcher>().DrainAsync();
+        Assert.All(await _k.Db(db => db.PhoneSignInChallenges.AsNoTracking().ToListAsync()), c => Assert.Null(c.UsedAt));   // delivered: the code is live
     }
 }
 
