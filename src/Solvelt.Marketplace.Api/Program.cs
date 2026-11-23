@@ -391,6 +391,7 @@ app.MapStaff();   // M7
 app.MapStaffBuyers();
 app.MapStaffOps();
 Solvelt.Marketplace.Api.Voice.VoiceReportEndpoints.MapStaffVoice(app);   // V
+Solvelt.Marketplace.Api.Voice.VoiceReadinessEndpoint.MapStaffVoiceReadiness(app);   // V-51: the readiness view, staff only, audited
 Solvelt.Marketplace.Api.Voice.VoiceDiagnosticsEndpoints.MapStaffVoiceDiagnostics(app);   // V-39: test-number diagnostics, staff only, audited
 Solvelt.Marketplace.Api.Voice.VoiceEndpoints.MapVoice(app);
 app.MapAccount();

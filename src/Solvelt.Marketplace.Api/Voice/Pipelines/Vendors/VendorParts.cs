@@ -103,6 +103,18 @@ public static class VoicePipelineVendors
         }
     }
 
+    /// <summary>
+    /// The ONE evaluation of an option, used by start-up (<see cref="VendorPartsSource"/>) and by the staff readiness view (V-51), so the two can never disagree: is it switched on (providers named, or P6 enabled), does it
+    /// have an adapter, and which settings are still missing (names only).
+    /// </summary>
+    internal static (bool Configured, bool Supported, IReadOnlyList<string> Missing) Evaluate(VoiceOptions v, string option)
+    {
+        if (option == "p6") return (v.Pipelines.P6.Enabled, v.Pipelines.P6.Enabled, v.Pipelines.P6.Enabled ? Missing(v, option) : []);   // p6 has no vendor pair: it is on or off
+        var prov = v.Pipelines.For(option);
+        var supported = Supported(option, prov);
+        return (prov.Configured, supported, supported ? Missing(v, option) : []);
+    }
+
     /// <summary>What an option still lacks before it can run (empty = usable). Names settings only, never values.</summary>
     internal static IReadOnlyList<string> Missing(VoiceOptions v, string option)
     {
@@ -218,10 +230,10 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
         // an option that names its providers but lacks settings is "not available on this line" (calls get p1), with ONE warning that names the missing settings: never a start-up failure
         bool Ready(string o)
         {
-            if (o == "p6" ? !v.Pipelines.P6.Enabled : !VoicePipelineVendors.Supported(o, v.Pipelines.For(o))) return false;   // p6 has no vendor pair: it is on or off
-            var missing = VoicePipelineVendors.Missing(v, o);
-            if (missing.Count == 0) return true;
-            logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Pipelines").LogWarning("Voice pipeline option {Option} is not available on this line: missing setting(s) {Settings}", o, string.Join(", ", missing));
+            var e = VoicePipelineVendors.Evaluate(v, o);
+            if (!e.Supported) return false;
+            if (e.Missing.Count == 0) return true;
+            logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Pipelines").LogWarning("Voice pipeline option {Option} is not available on this line: missing setting(s) {Settings}", o, string.Join(", ", e.Missing));
             return false;
         }
         var p2 = Ready("p2");
