@@ -11,6 +11,8 @@ public interface ITestSetStore
 {
     IAsyncEnumerable<string> ListAsync(string set, CancellationToken ct);
     Task<byte[]> ReadAsync(string name, CancellationToken ct);
+    /// <summary>The size in bytes of a stored recording, or null when there is none (used to verify a copy before anything is deleted elsewhere).</summary>
+    Task<long?> SizeAsync(string name, CancellationToken ct);
     /// <summary>Stores a new recording; an existing name is never replaced (a second take gets another speaker label or set name).</summary>
     Task WriteAsync(string name, byte[] wav, CancellationToken ct);
 }
@@ -44,6 +46,12 @@ public sealed class AzureTestSetStore : ITestSetStore
         return r.Value.Content.ToArray();
     }
 
+    public async Task<long?> SizeAsync(string name, CancellationToken ct)
+    {
+        try { return (await _container.GetBlobClient(name).GetPropertiesAsync(cancellationToken: ct)).Value.ContentLength; }
+        catch (RequestFailedException ex) when (ex.Status == 404) { return null; }
+    }
+
     public async Task WriteAsync(string name, byte[] wav, CancellationToken ct)
     {
         try { await _container.GetBlobClient(name).UploadAsync(new BinaryData(wav), overwrite: false, ct); }
@@ -61,6 +69,7 @@ public sealed class MemoryTestSetStore : ITestSetStore
     {
         foreach (var k in _blobs.Keys.Where(k => k.StartsWith(set + "/", StringComparison.Ordinal)).ToList()) { await Task.Yield(); yield return k; }
     }
+    public Task<long?> SizeAsync(string name, CancellationToken ct) => Task.FromResult<long?>(_blobs.TryGetValue(name, out var b) ? b.Length : null);
     public Task<byte[]> ReadAsync(string name, CancellationToken ct) => _blobs.TryGetValue(name, out var b) ? Task.FromResult(b) : throw new FileNotFoundException(name);
     public Task WriteAsync(string name, byte[] wav, CancellationToken ct)
     {
@@ -68,4 +77,14 @@ public sealed class MemoryTestSetStore : ITestSetStore
         _blobs[name] = wav;
         return Task.CompletedTask;
     }
+}
+
+/// <summary>Creates the real store on first use, so an API with the test set switched off (no storage settings) starts and runs the outbox as before.</summary>
+public sealed class LazyTestSetStore(Func<ITestSetStore> create) : ITestSetStore
+{
+    private readonly Lazy<ITestSetStore> _inner = new(create);
+    public IAsyncEnumerable<string> ListAsync(string set, CancellationToken ct) => _inner.Value.ListAsync(set, ct);
+    public Task<byte[]> ReadAsync(string name, CancellationToken ct) => _inner.Value.ReadAsync(name, ct);
+    public Task<long?> SizeAsync(string name, CancellationToken ct) => _inner.Value.SizeAsync(name, ct);
+    public Task WriteAsync(string name, byte[] wav, CancellationToken ct) => _inner.Value.WriteAsync(name, wav, ct);
 }

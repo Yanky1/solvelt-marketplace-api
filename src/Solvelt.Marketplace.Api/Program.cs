@@ -114,6 +114,10 @@ builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoicePipelineRegistr
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.SpeechTurns>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.VoiceDiagnostics>();   // V-39: test-number diagnostics, off by default
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IVoiceDiagnostics>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.VoiceDiagnostics>());
+// the recorded recognition test set (V-46): the private container is opened only when something needs it; the copy job runs in the outbox
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.TestSet.ITestSetStore>(sp => new Solvelt.Marketplace.Api.Voice.TestSet.LazyTestSetStore(() => new Solvelt.Marketplace.Api.Voice.TestSet.AzureTestSetStore(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Voice.VoiceOptions>>().Value.TestSet)));
+builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.TestSet.SignalWireRecordings>(c => c.Timeout = TimeSpan.FromSeconds(60));
+builder.Services.AddScoped<IOutboxHandler, Solvelt.Marketplace.Api.Voice.TestSet.TestSetCopyHandler>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.CatalogVocabulary>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IVoiceVocabulary>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.CatalogVocabulary>());
 if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<Solvelt.Marketplace.Api.Voice.CatalogVocabularyWorker>();

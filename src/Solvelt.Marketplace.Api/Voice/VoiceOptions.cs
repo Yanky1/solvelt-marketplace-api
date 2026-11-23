@@ -132,6 +132,8 @@ public static class VoiceConfig
         {
             p.AddRange(v.TestSet.Problems());
             if (!devLike && !string.IsNullOrWhiteSpace(v.TestSet.ConnectionString)) p.Add("Voice:TestSet:ConnectionString is for development only: use Voice:TestSet:StorageAccountUrl with the managed identity.");
+            if (string.IsNullOrWhiteSpace(s.Space) || string.IsNullOrWhiteSpace(s.ProjectId) || string.IsNullOrWhiteSpace(s.ApiToken))
+                p.Add("Voice:TestSet:Enabled needs SignalWire:Space, SignalWire:ProjectId and SignalWire:ApiToken (the token with the Management and Voice scopes): the recording is fetched from SignalWire and then deleted there.");
             if (v.PipelineMenu.TestNumbers.Count == 0) p.Add("Voice:TestSet:Enabled needs Voice:PipelineMenu:TestNumbers: only those numbers can record the test set.");
         }
         if (!devLike && (string.IsNullOrWhiteSpace(s.ProjectId) || string.IsNullOrWhiteSpace(s.ApiToken) || string.IsNullOrWhiteSpace(s.Space) || string.IsNullOrWhiteSpace(s.FromNumber)))

@@ -28,7 +28,7 @@ public static class TestSetScorer
             var phrase = phrases.Find(name.PhraseId);
             if (phrase is null) { skipped.Add($"{blob}: no such phrase"); continue; }
             if (phrase.IsDraft && !o.IncludeDraft) { skipped.Add($"{blob}: draft phrase (use --include-draft)"); continue; }
-            if (o.Speakers is { Count: > 0 } && !o.Speakers.Contains(name.Speaker)) continue;
+            if (o.Speakers is { Count: > 0 } && !o.Speakers.Any(sp => name.Speaker == sp || name.Speaker.StartsWith(sp, StringComparison.Ordinal))) continue;   // a label, or its start: a speaker label plus the session and take suffixes of the phone recording
             recordings.Add((name, phrase));
         }
         var rows = new List<ScoreRow>();
