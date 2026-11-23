@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261123035213_InitialCreate")]
+    [Migration("20261123060659_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -1527,6 +1527,17 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasColumnType("bigint");
 
                     b.Property<string>("PaymentIntentId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("PaymentProvider")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasDefaultValue("stripe");
+
+                    b.Property<string>("PaymentRef")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
