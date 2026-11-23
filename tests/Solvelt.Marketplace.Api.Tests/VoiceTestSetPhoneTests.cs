@@ -41,6 +41,8 @@ public sealed class VoiceTestSetPhoneTests : IDisposable
     private Task<(HttpResponseMessage Res, XElement Xml)> Step(string query, string from = Number, Dictionary<string, string>? extra = null, string? signature = null)
         => Post(TestSetFlow.Path + "?" + query, from, extra, signature);
     private Task<(HttpResponseMessage Res, XElement Xml)> Menu(string digits, string from = Number) => Post(VoiceEndpoints.PipelinePath, from, new() { ["Digits"] = digits });
+    /// <summary>What the menu receives now: the caller's SPOKEN answer (SpeechResult), no key (decision V-41).</summary>
+    private Task<(HttpResponseMessage Res, XElement Xml)> Say(string words, string from = Number) => Post(VoiceEndpoints.PipelinePath, from, new() { ["SpeechResult"] = words });
 
     private static string Speaker => "p" + "0a1b2c";
 
@@ -65,6 +67,40 @@ public sealed class VoiceTestSetPhoneTests : IDisposable
         var nineOff = (await Menu("9")).Xml;
         Assert.Null(nineOff.Descendants("Redirect").FirstOrDefault(r => r.Value.Contains(TestSetFlow.Path)));          // nine is an unknown key again: the standard line
         Assert.NotNull(nineOff.Descendants("Stream").SingleOrDefault());
+    }
+
+    [Theory]
+    [InlineData("nine")]
+    [InlineData("Nine.")]
+    [InlineData("number nine")]
+    [InlineData("option nine please")]
+    public async Task A_test_number_SAYING_nine_starts_the_recording_flow_when_the_test_set_is_on(string words)
+    {
+        await Start();
+        var x = (await Say(words)).Xml;
+        Assert.Contains(TestSetFlow.Path + "?step=phrase&i=0&t=1&b=p", x.Element("Redirect")!.Value);
+        Assert.Null(x.Descendants("Stream").FirstOrDefault());
+        Assert.Null(x.Element("Gather"));
+    }
+
+    [Fact]
+    public async Task Saying_nine_does_nothing_for_the_test_set_when_it_is_off_for_a_non_test_caller_or_for_a_near_miss()
+    {
+        await Start(testSet: false);
+        var off = (await Say("nine")).Xml;
+        Assert.DoesNotContain(TestSetFlow.Path, off.ToString());
+        Assert.Equal("p1", (await S.Row()).Tier);                                                                           // nine is no option: the standard line
+        _s!.Dispose();
+
+        await Start(from: Other, numbers: [Number]);
+        var stranger = (await Say("nine", from: Other)).Xml;
+        Assert.DoesNotContain(TestSetFlow.Path, stranger.ToString());
+        Assert.NotNull(stranger.Descendants("Redirect").SingleOrDefault(r => r.Value.EndsWith(VoiceEndpoints.AfterStreamPath)));
+        _s!.Dispose();
+
+        await Start();
+        foreach (var words in new[] { "to", "for", "I said nine and then one", "ninety", "" })                               // not the exact word, or two numbers: never the test set
+            Assert.DoesNotContain(TestSetFlow.Path, (await Say(words)).Xml.ToString());
     }
 
     [Fact]
