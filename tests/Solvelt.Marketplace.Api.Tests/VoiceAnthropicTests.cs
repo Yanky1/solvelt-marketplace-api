@@ -14,7 +14,7 @@ public sealed class VoiceAnthropicTests : IDisposable
 {
     private sealed class FakeApi : IDisposable
     {
-        private readonly HttpListener _l = new();
+        private HttpListener _l = new();
         public string Url { get; }
         public List<(string Path, string Body, Dictionary<string, string> Headers)> Requests { get; } = [];
         public List<Func<HttpListenerResponse, CancellationToken, Task>> Scripts { get; } = [];
@@ -26,8 +26,9 @@ public sealed class VoiceAnthropicTests : IDisposable
             for (var attempt = 0; ; attempt++)
             {
                 var port = Random.Shared.Next(20000, 60000);
-                try { _l.Prefixes.Clear(); _l.Prefixes.Add($"http://127.0.0.1:{port}/"); _l.Start(); Url = $"http://127.0.0.1:{port}"; break; }
-                catch (HttpListenerException) when (attempt < 20) { }
+                // a listener that failed to start (the port is taken) is disposed by .NET and cannot be reused: each attempt has a fresh one
+                try { _l.Prefixes.Add($"http://127.0.0.1:{port}/"); _l.Start(); Url = $"http://127.0.0.1:{port}"; break; }
+                catch (HttpListenerException) when (attempt < 20) { _l = new HttpListener(); }
             }
             _ = Task.Run(async () =>
             {
