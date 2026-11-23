@@ -14,14 +14,22 @@ buyer's browser ──https──> website (Node, PORT 3000)  ──server-to-se
 Stripe ───────────── https: POST /api/stripe/webhooks ───────────────────────────┤
 seller portal ────── https: POST /api/portal/webhooks ───────────────────────────┤
 buyer's mail app ─── https: GET  /api/v1/notifications/unsubscribe…, /api/v1/auth/phone-email ┤
-SignalWire (voice, optional) ─ https + wss: /api/v1/voice/… ──────────────────────────────┘
+SignalWire (voice, optional) ─ https + wss: /api/v1/voice/… ──────────────────────────────┤
+Sola (phone payments, optional) ─ https: POST /api/v1/voice/sola/webhook ───────────────────┘
+
+Phone card payments only (section 8), a THIRD public host, its own service and secret store:
+SignalWire <Pay> ──https + Basic auth: POST /connector──> pay connector (src/Solvelt.PayConnector) ──https──> Sola gateway
+API ─────────────── https, signed: POST /charge-token ──> pay connector
+pay connector ───── https, signed: POST /api/v1/voice/pay-connector/{expect,result,card} ──> API
 ```
 
 - The browser talks ONLY to the website. The website calls the API from the server (it is a "backend for frontend"): every page and form goes through it, and the website never proxies `/api` for the browser.
-- A few callers must reach the API **directly** over https: Stripe's webhook, the seller portal's webhook, links in mail (one-click unsubscribe, the "confirm this email" page of an account made by phone) and, if voice is on, SignalWire. So the API needs a public https address for those paths, even though everything else may be restricted to the website.
+- A few callers must reach the API **directly** over https: Stripe's webhook, the seller portal's webhook, links in mail (one-click unsubscribe, the "confirm this email" page of an account made by phone) and, if voice is on, SignalWire, Sola's webhook and the pay connector. So the API needs a public https address for those paths, even though everything else may be restricted to the website.
 - **How `/api` sits next to the website's origin: owner to decide.** Two ways work with the code as it is:
   1. **Two host names** (recommended, simplest): `https://www.<domain>` for the website and `https://api.<domain>` for the API. Set `Notifications__PublicApiBaseUrl=https://api.<domain>` and give Stripe and the portal `https://api.<domain>/api/...`.
   2. **One host name, path routing at the reverse proxy**: `https://www.<domain>/api/stripe/webhooks`, `/api/portal/webhooks`, `/api/v1/notifications/unsubscribe`, `/api/v1/auth/phone-email` and `/api/v1/voice/` (including its WebSocket stream) go to the API; everything else goes to the website. Then `Notifications__PublicApiBaseUrl=https://www.<domain>`. Do NOT route `/api/admin` or `/api/v1/staff` publicly (see section 6).
+
+  With phone card payments on, the **pay connector is a third public host** (for example `https://pay.<domain>`), never behind the website and never path-routed through the API's host: it is its own cardholder-data environment (docs/VOICE.md section 6). Only SignalWire (`POST /connector`, signature plus Basic auth) and the API (`POST /charge-token`, signed) call it; it calls the API's `/api/v1/voice/pay-connector/…` paths and Sola. Its `Connector__PublicUrl` is exactly the URL SignalWire calls, and the API's `Sola__PayConnectorUrl` points at the same origin. Its `/health` is fine for the platform's health check.
 
   Either way, the website reaches the API through `API_BASE_URL` (an internal address is fine, for example an App Service private endpoint).
 
@@ -169,7 +177,7 @@ These four pairs are the only values two services share. Changing one side means
 
 ### Outside the apps
 
-1. In SignalWire, point `<Pay>` at the connector's URL with its Basic credentials (`https://<user>:<password>@<connector>/…`, the same user and password as above).
+1. In SignalWire, point `<Pay>` at the connector's URL with its Basic credentials (`https://<user>:<password>@<connector host>/connector`, the same user and password as above).
 2. In the Sola account, point the webhook at **`https://<API public address>/api/v1/voice/sola/webhook`**, with the same PIN as `Sola__WebhookPin`.
 3. The seller portal's `SolaPaymentProvider` migration is applied on the portal side (**owner or the seller-portal team**; this repository does not change the portal).
 4. After start-up the API's log says `Sola: mode unknown`. "Not configured" or "LIVE" means a setting is wrong: do not take calls.
