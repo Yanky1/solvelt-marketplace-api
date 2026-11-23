@@ -56,6 +56,8 @@ A database made without migrations is baselined only if it is EXACTLY what the m
 `MigrationTests` (PostgreSQL) fail when the model and the migrations differ (`HasPendingModelChanges`, and a table/column/index/constraint comparison against `EnsureCreated`). The search objects EF cannot model (pg_trgm, the tsvector function and column, GIN indexes) are the frozen `InitialCreate.SearchSchema.cs`; later changes to them are new migrations.
 
 ## Configuration (environment variables, `__` for nesting)
+Setting up a deployment (both apps, secrets, TLS, the reverse proxy, PostgreSQL, Stripe and portal webhooks, the first staff admin): [docs/DEPLOY.md](docs/DEPLOY.md).
+
 | Key | Required in Production | Notes |
 |---|---|---|
 | `Portal__BaseUrl` | yes | Seller portal base URL |
@@ -68,6 +70,11 @@ A database made without migrations is baselined only if it is EXACTLY what the m
 | `Auth__PhoneCodeKey` | no; when set >= 32 chars, must differ from every other key, also from `Voice__PhoneCodeKey`, `Voice__StreamTokenKey`, `Voice__CallerHashKey` and the SignalWire secrets | HMAC of the SMS codes the web sends (decision W3-02: sign-in by phone for an account made by phone, and its step-up). Unset turns web sign-in by phone off (503). Needs the SignalWire messaging settings to deliver the texts |
 | `Auth__WebAuthnRpId`, `Auth__WebAuthnOrigins__0`... | yes in production | Passkeys (decision M1-80): the registrable domain the web site is served from (for example `solvelt.com`, no scheme or port) and the exact https origins of the site (each on that domain). A passkey is bound to the RP id for ever: changing it orphans every registered passkey. `Auth__WebAuthnRpName` (Solvelt) is shown by the browser; `Auth__PasskeyChallengeMinutes` (5), `Auth__MaxPasskeys` (10). Development and tests default to `localhost` / `http://localhost:3000` |
 | `Checkout__QuoteKey` | yes, >= 32 chars, must differ from every other key | Keys the HMAC that binds a quote (price, tax, delivery, destination) to a checkout and fixes its 15-minute expiry (decision M3-30); rotating it only makes open quotes ask the buyer to confirm again |
+| `Stripe__SecretKey` | no (unset: the in-process fake provider, development only) | **Test keys only** (`sk_test_`/`rk_test_`); a live key stops the API in every environment; differs from every other key. Secret |
+| `Stripe__PublishableKey` | no; expected when `Stripe__SecretKey` is set (a start-up warning otherwise) | `pk_test_` only; public by design (the web shows it to the browser for the Payment Element) |
+| `Stripe__WebhookSecret` | yes when `Stripe__SecretKey` is set | The signing secret (`whsec_`) of the dashboard webhook `https://<api>/api/stripe/webhooks`; >= 32 chars, differs from every other key. Secret. Events: docs/DEPLOY.md section 7 |
+| `Stripe__BaseUrl`, `Stripe__TimeoutSeconds`, `Stripe__InUseRetryDelayMs`, `Stripe__InUseRetries` | no | Defaults `https://api.stripe.com`, 20, 400, 3 |
+| `Stripe__FakeCaptureOnWebhook` | no, Development/Testing only | With the fake provider only: a verified `payment_intent.succeeded` also captures the fake's intent (the journey); refused elsewhere (M8-08) |
 | `Notifications__UnsubscribeKey` | yes, >= 32 chars, must differ from every other key | Signs the unsubscribe links in notification mail (decision M5-08) |
 | `Notifications__PublicApiBaseUrl` | yes in production, an https URL (dev: defaults to `Marketplace__PublicBaseUrl`) | The origin of the one-click `List-Unsubscribe` URL in notification mail: the public origin that reaches this API (decision M5-17) |
 | `Admin__ApiKey` | no (unset or blank disables `/api/admin/*`); when set >= 32 chars, must differ from every other key | Key for the operations endpoints (outbox list/retry) |
