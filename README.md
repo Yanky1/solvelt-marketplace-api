@@ -31,6 +31,17 @@ It runs on pushes to `main`, `feat/**`, `fix/**` and on pull requests.
 ## Buyer journey (real portal)
 `tools/journey/run.sh` starts the real seller-portal backend, this API on PostgreSQL, the web server and a mail sandbox, and runs the buyer journeys in a real browser (decisions M8-01 to M8-06, M8-16): product (ending with the buyer's verified review), booking, refund, and the staff area (a passkey enrolled from the one-time bootstrap secret, a masked buyer look-up, lock and unlock, the audit log). Needs .NET 10, Node 22, PostgreSQL (`JOURNEY_PG_*`, default `postgres:postgres@localhost:5432`), and checkouts of the portal (`PORTAL_DIR`) and the web (`WEB_DIR`); `PW_CHROMIUM_PATH` picks a Chromium. `tools/journey/stack.sh up|down|logs <name>` alone leaves the stack running (logs in `.journey/`). CI: `.github/workflows/journey.yml`. A missing portal fails the job, it never falls back to a mock.
 
+### The real-Stripe journey (opt-in job `journey-real-stripe`): what the owner adds
+
+The job is SKIPPED (a notice, never a failure) until these **repository secrets** exist (GitHub: Settings, Secrets and variables, Actions, New repository secret). Use the keys of a Stripe account in **test mode** only; both apps refuse live keys.
+
+| Secret | Value | What it turns on |
+|---|---|---|
+| `STRIPE_TEST_SECRET_KEY` | the test secret key, `sk_test_…` (or a restricted test key `rk_test_…` with write access to PaymentIntents and Refunds and read access to Events) | The job itself: an order paid through Stripe's API with the test card `pm_card_visa`, Stripe's OWN `payment_intent.succeeded` event read back from Stripe and delivered to the API signed with the webhook secret (twice: the second delivery changes nothing), then a seller refund made at Stripe and read back from Stripe and the portal ledger |
+| `STRIPE_TEST_PUBLISHABLE_KEY` | the test publishable key of the SAME account, `pk_test_…` | The 3DS step: the 3DS test card in a real browser through the real Stripe.js on the checkout page, the test challenge completed, the confirmation page reached, Stripe's own event delivered signed, and the order placed with the seller. Without it this step is skipped with a notice |
+
+No webhook endpoint is needed in the Stripe dashboard for this job: Stripe cannot reach a CI runner, so the event is fetched from Stripe's API and replayed with the webhook secret the job's API uses (decisions M8-09, W3-05). The keys are given only to the step that runs the journey; `tools/journey/test-key-scope.sh` checks that no other process of the stack sees the secret key, and nothing writes either key to a file or a log.
+
 ## Database schema (existing databases)
 Development and Testing build the schema from the model with `EnsureCreated`, which creates a database once and never alters it. A database made by an earlier build therefore lacks the tables and columns added since, and the first request that touches one answers 500. At start the API compares the database with the model and logs ONE critical line naming the differences (it does not stop). To see them and get the SQL that adds what is missing (read-only: SQLite is opened with `Mode=ReadOnly`, so a mistyped path fails instead of creating an empty database, and PostgreSQL with `default_transaction_read_only`; the connection string is taken from `MARKETPLACE_DB` or standard input, never from the command line; review the SQL and run it in a transaction on a copy first):
 ```bash

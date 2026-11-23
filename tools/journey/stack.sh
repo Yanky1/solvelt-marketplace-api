@@ -10,6 +10,11 @@ set -euo pipefail
 # mail sink never see it (review LOW-1). The API subshell below exports it as Stripe__SecretKey; env.json never holds it.
 REAL_STRIPE_KEY="${STRIPE_TEST_SECRET_KEY:-}"
 unset STRIPE_TEST_SECRET_KEY
+# The 3DS step of the opt-in job (W3-05) needs the real Stripe.js and a real TEST publishable key (not a secret: Stripe shows it to every browser). Only with JOURNEY_REAL_STRIPE=1.
+REAL_STRIPE_JS=0
+if [ "${JOURNEY_REAL_STRIPE:-0}" = "1" ] && [ -n "${STRIPE_PUBLISHABLE_KEY:-}" ]; then
+  case "$STRIPE_PUBLISHABLE_KEY" in pk_test_*) REAL_STRIPE_JS=1 ;; *) echo "STRIPE_PUBLISHABLE_KEY must be a Stripe TEST publishable key (pk_test_)" >&2; exit 1 ;; esac
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="$(cd "$HERE/../.." && pwd)"
@@ -135,7 +140,11 @@ cmd_up() {
     cd "$WEB_DIR"
     # a production BUILD that says it is the test site (like Ronald's): APP_ENV=staging lets DEMO_ENABLED through, the stand-in Stripe.js is accepted only from localhost
     export NODE_ENV=production APP_ENV=staging PORT="$WEB_PORT" API_BASE_URL="http://127.0.0.1:$API_PORT" PUBLIC_ORIGIN="http://localhost:$WEB_PORT" DEMO_ENABLED=true TRUSTED_PROXIES="127.0.0.1,::1"
-    export STRIPE_JS_URL="http://localhost:$MAIL_HTTP_PORT/__stripe/v3.js" ALLOW_STRIPE_STUB=1
+    if [ "$REAL_STRIPE_JS" = "1" ]; then
+      : # the opt-in 3DS step (W3-05): the REAL Stripe.js from js.stripe.com (the web's default) with the real pk_test_ key the API hands out
+    else
+      export STRIPE_JS_URL="http://localhost:$MAIL_HTTP_PORT/__stripe/v3.js" ALLOW_STRIPE_STUB=1
+    fi
     export SESSION_COOKIE_SECRET="$SESSION_SECRET" WEB_FORWARDING_KEY="$FWD_KEY"
     start web node server.js
   )
@@ -143,7 +152,7 @@ cmd_up() {
 
   cat >"$RUN_DIR/env.json" <<JSON
 { "portal": "http://127.0.0.1:$PORTAL_PORT", "api": "http://127.0.0.1:$API_PORT", "web": "http://localhost:$WEB_PORT", "mail": "http://127.0.0.1:$MAIL_HTTP_PORT",
-  "webDir": "$WEB_DIR", "pg": { "host": "$PG_HOST", "port": $PG_PORT, "user": "$PG_USER", "password": "$PG_PASSWORD", "db": "$DB_NAME" }, "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "voice": { "publicBase": "http://127.0.0.1:$API_PORT", "signingKey": "$VOICE_SIGNING", "upstreamPort": $VOICE_UPSTREAM_PORT, "smsPort": $VOICE_SMS_PORT }, "stripeWebhookSecret": "$STRIPE_WEBHOOK", "staffBootstrapSecret": "$STAFF_BOOT", "staffEmail": "$STAFF_EMAIL", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
+  "webDir": "$WEB_DIR", "pg": { "host": "$PG_HOST", "port": $PG_PORT, "user": "$PG_USER", "password": "$PG_PASSWORD", "db": "$DB_NAME" }, "inboundSecret": "$INBOUND", "outboundSecret": "$OUTBOUND", "voice": { "publicBase": "http://127.0.0.1:$API_PORT", "signingKey": "$VOICE_SIGNING", "upstreamPort": $VOICE_UPSTREAM_PORT, "smsPort": $VOICE_SMS_PORT }, "stripeWebhookSecret": "$STRIPE_WEBHOOK", "realStripeJs": $([ "$REAL_STRIPE_JS" = "1" ] && echo true || echo false), "staffBootstrapSecret": "$STAFF_BOOT", "staffEmail": "$STAFF_EMAIL", "adminEmail": "$ADMIN_EMAIL", "adminPassword": "$ADMIN_PASSWORD", "runDir": "$RUN_DIR" }
 JSON
   echo "stack is up: $RUN_DIR/env.json"
 }
