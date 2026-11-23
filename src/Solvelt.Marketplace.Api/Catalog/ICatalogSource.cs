@@ -13,13 +13,16 @@ public sealed record ImageDto(Guid Id, int Width, int Height, string Alt);
 public sealed record AttributeDto(string Key, string Value);
 public sealed record FaqDto(string Question, string Answer);
 
-/// <summary>One listing (product or service) with everything the read model stores. <c>SearchTerms</c> (seller keywords, optional; M2-01) feed the search index. <see cref="Version"/> is the portal's cursor.</summary>
+/// <summary>
+/// One listing (product or service) with everything the read model stores. <c>SearchTerms</c> (seller keywords, optional; M2-01) feed the search index. <see cref="Version"/> is the portal's cursor.
+/// <c>QuotePriced</c> (W3-01): a service the portal prices by quote. It has NO variants (nothing can be carted or held), and <c>QuoteAvailable</c> says whether a quote can be asked for now.
+/// </summary>
 public sealed record ListingSnapshot(
     Guid Id, long Version, string Type, string Status, string Title, string Summary, string Description,
     SellerRef Seller, BrandRef Brand, Guid CategoryId, string Currency,
     IReadOnlyList<VariantDto> Variants, IReadOnlyList<ImageDto> Images, IReadOnlyList<AttributeDto> Attributes, IReadOnlyList<FaqDto> Faqs,
     DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt,
-    IReadOnlyList<string>? SearchTerms = null, DimensionsMm? Dimensions = null, bool Demo = false);
+    IReadOnlyList<string>? SearchTerms = null, DimensionsMm? Dimensions = null, bool Demo = false, bool QuotePriced = false, bool QuoteAvailable = true);
 
 public sealed record CategoryDto(Guid Id, Guid? ParentId, string Slug, string Name, int SortOrder);
 public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, Guid? LogoImageId);
@@ -27,7 +30,7 @@ public sealed record BrandDto(Guid Id, Guid SellerId, string Slug, string Name, 
 /// <summary>A page of the feed in ascending (version, id) order. <see cref="NextCursor"/> is opaque; pass it back as <c>since</c>.</summary>
 public sealed record ListingPage(IReadOnlyList<ListingSnapshot> Items, string? NextCursor, bool HasMore, IReadOnlyList<ListingTombstone>? Tombstones = null, IReadOnlyList<UnreadableDocument>? Unreadable = null);
 
-/// <summary>A feed document that could not be read, with the SHORT CODE of why (<c>required_field</c>, <c>price</c>, <c>quote_price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>) and the id and version when they were readable. Never the document itself.</summary>
+/// <summary>A feed document that could not be read, with the SHORT CODE of why (<c>required_field</c>, <c>price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>) and the id and version when they were readable. Never the document itself.</summary>
 public sealed record UnreadableDocument(Guid? Id, long? Version, string Reason);
 
 /// <summary>

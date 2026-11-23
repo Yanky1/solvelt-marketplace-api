@@ -1048,6 +1048,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.Property<bool>("IsDemoListing")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("IsQuotePriced")
+                        .HasColumnType("boolean");
+
                     b.Property<bool>("IsStub")
                         .HasColumnType("boolean");
 

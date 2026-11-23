@@ -10,7 +10,7 @@ namespace Solvelt.Marketplace.Api.Data;
 public sealed class CatalogQuarantine
 {
     public Guid ListingId { get; set; }
-    /// <summary><c>required_field</c>, <c>price</c>, <c>quote_price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>: what could not be read.</summary>
+    /// <summary><c>required_field</c>, <c>price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>: what could not be read (<c>quote_price</c> only on rows from before W3-01, which lists quote services).</summary>
     public string Reason { get; set; } = "";
     /// <summary>The portal version of the unreadable document when it was readable far enough to say.</summary>
     public long? Version { get; set; }
