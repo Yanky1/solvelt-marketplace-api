@@ -447,6 +447,8 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     TaxCents = table.Column<long>(type: "bigint", nullable: false),
                     TotalCents = table.Column<long>(type: "bigint", nullable: false),
                     PaymentIntentId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
+                    PaymentProvider = table.Column<string>(type: "character varying(10)", maxLength: 10, nullable: false, defaultValue: "stripe"),
+                    PaymentRef = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     BuyerName = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: false),
                     RelayEmail = table.Column<string>(type: "character varying(120)", maxLength: 120, nullable: false),
                     Phone = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: true),

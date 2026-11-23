@@ -141,18 +141,18 @@ public static class PaymentKinds
         NoShowFee = "booking_no_show_fee", ExtraCharge = "booking_extra_charge";
 }
 public sealed record PaymentCapturedData(string Kind, string? MarketplaceOrderId, string? MarketplaceBookingId, string? SellerOrderNumber,
-    string PaymentRef, string Currency, long? AmountCents = null, DateTimeOffset? CapturedAt = null)
+    string PaymentRef, string Currency, long? AmountCents = null, DateTimeOffset? CapturedAt = null, string? Provider = null)
 {
     /// <summary>ISO 4217 in upper case, whatever the caller held (Stripe says "usd"; the portal refuses anything else with 422).</summary>
     public string Currency { get; init; } = Currency.Trim().ToUpperInvariant();
 }
 public sealed record RefundProcessedData(string RefundId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
-    long AmountCents, long? ShippingCents = null, string? Currency = null, string? Reason = null)
+    long AmountCents, long? ShippingCents = null, string? Currency = null, string? Reason = null, string? Provider = null)
 {
     public string? Currency { get; init; } = Currency?.Trim().ToUpperInvariant();
 }
 public sealed record DisputeData(string DisputeId, string? MarketplaceOrderId, string? SellerOrderNumber, string? MarketplaceBookingId,
-    long AmountCents, string Status, long? FeeCents = null, string? Currency = null, string? Reason = null, DateTimeOffset? EvidenceDueBy = null, DateTimeOffset? CreatedAt = null)
+    long AmountCents, string Status, long? FeeCents = null, string? Currency = null, string? Reason = null, DateTimeOffset? EvidenceDueBy = null, DateTimeOffset? CreatedAt = null, string? Provider = null)
 {
     public string? Currency { get; init; } = Currency?.Trim().ToUpperInvariant();
 }

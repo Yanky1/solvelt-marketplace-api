@@ -92,9 +92,18 @@ public sealed class PhoneOrderService(CheckoutService checkout, MarketplaceDb db
         }
         var order = await db.Orders.AsNoTracking().Where(x => x.Number == attempt.OrderNumber).Select(x => new { x.TotalCents, x.PaymentIntentId, x.Status, x.Currency }).FirstOrDefaultAsync(ct);
         if (order is null || order.TotalCents != attempt.AmountCents || order.PaymentIntentId is null) return await Close("failed", SettleStatus.Failed);
+        var sola = options.Value.PhonePaymentProvider == "sola";
+        if (sola && !SolaMoneyEvents.IsValidSolaRef(outcome.TransactionId))
+        {
+            // Sola's reference is what the portal's capture event carries (contract C19, decision V-49); money was taken, so this is for a person, never silently applied as a Stripe order
+            log.LogError("A Sola payment for order {Number} (attempt {Attempt}) has no usable transaction reference (1 to 100 characters). It is NOT applied and needs a person.", attempt.OrderNumber, attempt.Id);
+            return await Close("mismatch", SettleStatus.Mismatch);
+        }
         if (order.Status != OrderStatus.Paid)
         {
             if (!StartupValidator.IsDevLike(env) || !string.IsNullOrWhiteSpace(stripe.Value.SecretKey)) { log.LogError("A phone payment for order {Number} cannot be recorded: no phone payment provider is connected to real money.", attempt.OrderNumber); return await Close("failed", SettleStatus.NotApplied); }
+            // who holds the money (portal contract C19): a Sola payment says so on the order, with Sola's reference, BEFORE the paid event, so the capture sent to the portal names Sola. The fake provider stays a Stripe order, as before.
+            if (sola) await db.Orders.Where(x => x.Number == attempt.OrderNumber && x.Status != OrderStatus.Paid).ExecuteUpdateAsync(u => u.SetProperty(x => x.PaymentProvider, PaymentProviders.Sola).SetProperty(x => x.PaymentRef, outcome.TransactionId), ct);
             fakeStripe.TryCapture(order.PaymentIntentId);
             var evt = StripeEnvelope.Parse(System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
             {
