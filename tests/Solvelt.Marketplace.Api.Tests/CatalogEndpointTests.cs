@@ -95,9 +95,10 @@ public class CatalogEndpointTests : IAsyncLifetime
         var page = await Get($"{Base}/listings?brand=challah-corner&sort=title");
         Assert.Equal(["challah-rolls-dozen", "classic-braided-challah", "whole-wheat-challah"], Slugs(page));
         var card = page.GetProperty("items").EnumerateArray().Single(i => i.GetProperty("slug").GetString() == "classic-braided-challah");
-        Assert.Equal(["id", "slug", "type", "title", "summary", "priceFromCents", "priceToCents", "compareAtFromCents", "currency", "available", "brand", "seller", "category", "image", "demo"],
+        Assert.Equal(["id", "slug", "type", "title", "summary", "priceFromCents", "priceToCents", "compareAtFromCents", "currency", "available", "brand", "seller", "category", "image", "demo", "priceMode"],
             card.EnumerateObject().Select(p => p.Name));
-        Assert.False(card.GetProperty("demo").GetBoolean());                                                    // a fixture listing is not a demo listing (M9)
+        Assert.False(card.GetProperty("demo").GetBoolean());
+        Assert.Equal("fixed", card.GetProperty("priceMode").GetString());                                     // W3-01: a priced listing                                                    // a fixture listing is not a demo listing (M9)
         Assert.Equal(("classic-braided-challah", "product", "Classic Braided Challah", 650, 950, "USD", true),
             (card.GetProperty("slug").GetString(), card.GetProperty("type").GetString(), card.GetProperty("title").GetString(), card.GetProperty("priceFromCents").GetInt64(),
              card.GetProperty("priceToCents").GetInt64(), card.GetProperty("currency").GetString(), card.GetProperty("available").GetBoolean()));
@@ -191,7 +192,8 @@ public class CatalogEndpointTests : IAsyncLifetime
     {
         var d = await Get($"{Base}/listings/classic-braided-challah");
         Assert.Equal(["id", "slug", "type", "title", "summary", "description", "priceFromCents", "priceToCents", "compareAtFromCents", "currency", "available", "brand", "seller",
-            "categoryPath", "variants", "images", "attributes", "faqs", "createdAt", "updatedAt", "demo", "offers"], d.EnumerateObject().Select(p => p.Name));
+            "categoryPath", "variants", "images", "attributes", "faqs", "createdAt", "updatedAt", "demo", "offers", "priceMode"], d.EnumerateObject().Select(p => p.Name));
+        Assert.Equal("fixed", d.GetProperty("priceMode").GetString());                                        // W3-01
         Assert.False(d.GetProperty("demo").GetBoolean());
         Assert.Equal(["food-drink", "bakery"], d.GetProperty("categoryPath").EnumerateArray().Select(c => c.GetProperty("slug").GetString()));
         var variants = d.GetProperty("variants").EnumerateArray().ToList();
