@@ -122,6 +122,8 @@ The website holds no Stripe key of its own: it shows the API's publishable key.
 3. Copy the endpoint's signing secret (`whsec_…`) into `Stripe__WebhookSecret`, the test secret key into `Stripe__SecretKey` and the test publishable key into `Stripe__PublishableKey`.
 4. Live keys are refused by both apps. Going live is a separate decision (**owner to decide**, out of scope here).
 
+**The CI job with real Stripe test keys** (workflow `stripe-journey.yml`) is separate from the deployment: it needs the repository secrets `STRIPE_TEST_SECRET_KEY` (`sk_test_…`, recommended for the first run) and `STRIPE_TEST_PUBLISHABLE_KEY` (`pk_test_…`, for the 3DS step), set in GitHub, not in the apps. **It runs only by hand and weekly, never on push or pull request, until one manual run has passed with real test keys** (decision W3-05): several of the Stripe facts it relies on are UNVERIFIED, and a wrong one must not block merges. Its failures name the assumption that broke (A1 to A4). Details: the README, "The real-Stripe journey".
+
 ## 8. The seller portal
 
 - The portal sends its events to **`https://<API public address>/api/portal/webhooks`**, signed with the secret the API holds as `Portal__WebhookSecret`. Our calls to the portal are signed with `Portal__InboundSecret`. Both values must be set on the portal side too: **owner (or the seller-portal team) to set**; the portal's own setting names are in the portal repository's docs.
