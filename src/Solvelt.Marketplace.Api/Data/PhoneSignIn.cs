@@ -11,7 +11,7 @@ namespace Solvelt.Marketplace.Api.Data;
 public sealed class PhoneSignInChallenge
 {
     public Guid Id { get; set; }
-    /// <summary><see cref="PhoneSignInPurposes.SignIn"/> or <see cref="PhoneSignInPurposes.StepUp"/>: a code for one purpose never works for the other.</summary>
+    /// <summary><see cref="PhoneSignInPurposes.SignIn"/>, <see cref="PhoneSignInPurposes.StepUp"/> or <see cref="PhoneSignInPurposes.DeleteAccount"/>: a code for one purpose never works for another.</summary>
     public string Purpose { get; set; } = PhoneSignInPurposes.SignIn;
     public Guid? AccountId { get; set; }
     public byte[] CodeHash { get; set; } = [];
@@ -24,6 +24,8 @@ public sealed class PhoneSignInChallenge
 public static class PhoneSignInPurposes
 {
     public const string SignIn = "sign-in", StepUp = "step-up";
+    /// <summary>Deleting an account that has no password (W3 follow-up): a code texted for exactly this, so a sign-in or step-up code can never delete an account.</summary>
+    public const string DeleteAccount = "delete-account";
 }
 
 internal sealed class PhoneSignInChallengeConfiguration : IEntityTypeConfiguration<PhoneSignInChallenge>

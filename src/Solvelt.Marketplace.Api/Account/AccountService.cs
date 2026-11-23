@@ -9,7 +9,7 @@ namespace Solvelt.Marketplace.Api.Account;
 
 public sealed record ProfileView(Guid Id, string DisplayName, string Email, string? Phone);
 public sealed record AddressView(Guid Id, string FullName, string Line1, string? Line2, string City, string? Region, string PostalCode, string Country, string? Phone, double? Lat, double? Lng, bool IsDefault);
-public enum AccountOutcome { Ok, NotFound, TooMany, ReauthenticationRequired, InvalidCredentials, RateLimited, WeakPassword, Conflict, EmailRequired, AlreadySet, InvalidEmail }
+public enum AccountOutcome { Ok, NotFound, TooMany, ReauthenticationRequired, InvalidCredentials, RateLimited, WeakPassword, Conflict, EmailRequired, AlreadySet, InvalidEmail, PasswordRequired, InvalidCode, CodeExpired, Unavailable }
 /// <summary>How the signed-in buyer can sign in (W3-02): what the account page offers to add. <see cref="PhoneLast4"/> only, never the whole number.</summary>
 public sealed record SignInMethods(string? Email, bool EmailVerified, string? PendingEmail, bool HasPassword, int Passkeys, string? PhoneLast4);
 public sealed record AccountResult(AccountOutcome Outcome, string? Problem = null, int RetryAfterSeconds = 0, string? Token = null);
@@ -18,7 +18,7 @@ public sealed record AccountResult(AccountOutcome Outcome, string? Problem = nul
 /// The buyer's own data: profile, address book, password change, account deletion. Another buyer's address is simply not found. The address book keeps exactly one
 /// default under parallel requests: the database refuses a second one (partial unique index) and every writer that loses that race starts again from what it now sees.
 /// </summary>
-public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthService auth, PasswordService passwords, SignInGate gate, GateKeys gateKeys, OutboxWriter outbox, IOptions<AuthOptions> authOptions, IEnumerable<IAccountDeletionHook> deletionHooks)
+public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthService auth, PasswordService passwords, SignInGate gate, GateKeys gateKeys, OutboxWriter outbox, IOptions<AuthOptions> authOptions, IEnumerable<IAccountDeletionHook> deletionHooks, PhoneSignInService phoneCodes)
 {
     /// <summary>How recently the buyer must have proven who they are for a sensitive change (decision O-11).</summary>
     public static readonly TimeSpan RecentSignIn = TimeSpan.FromMinutes(10);
@@ -56,6 +56,7 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
     }
 
     private bool Recent(BuyerPrincipal who) => Now - who.AuthenticatedAt <= RecentSignIn;
+    public bool IsRecent(BuyerPrincipal who) => Recent(who);
 
     // ---------- profile ----------
 
@@ -318,8 +319,37 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         if (proof.Status == SignInStatus.TooManyAttempts) return new AccountResult(AccountOutcome.RateLimited, RetryAfterSeconds: proof.RetryAfterSeconds ?? 60);
         if (proof.Status != SignInStatus.Ok) return new AccountResult(AccountOutcome.InvalidCredentials);
 
+        return await DeleteCoreAsync(who, proof.CheckedHash, proof.CheckedEpoch, "password", ct);
+    }
+
+    /// <summary>
+    /// Deleting an account that has NO password (W3 follow-up): a recent sign-in AND a code texted for exactly this purpose (<see cref="PhoneSignInService.StartDeleteAsync"/>) to the account's own proven
+    /// number, typed now. The same semantics as the password path: the delete happens only if the account is still what was checked (still no password, same session epoch).
+    /// </summary>
+    public async Task<AccountResult> DeleteAccountByPhoneAsync(BuyerPrincipal who, Guid challengeId, string code, CancellationToken ct)
+    {
+        if (!Recent(who)) return new AccountResult(AccountOutcome.ReauthenticationRequired);
+        var account = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null).Select(a => new { a.PasswordHash, a.SessionEpoch }).FirstOrDefaultAsync(ct);
+        if (account is null) return new AccountResult(AccountOutcome.NotFound);
+        if (account.PasswordHash is not null) return new AccountResult(AccountOutcome.PasswordRequired);   // a text message is never a second way past a password
+        var proof = await phoneCodes.VerifyAsync(challengeId, code, PhoneSignInPurposes.DeleteAccount, who, ct);
+        switch (proof.Status)
+        {
+            case PhoneVerifyStatus.Ok: break;
+            case PhoneVerifyStatus.Expired: return new AccountResult(AccountOutcome.CodeExpired);
+            case PhoneVerifyStatus.Unavailable: return new AccountResult(AccountOutcome.Unavailable);
+            default: return new AccountResult(AccountOutcome.InvalidCode);
+        }
+        return await DeleteCoreAsync(who, null, account.SessionEpoch, "phone_code", ct);
+    }
+
+    /// <summary>
+    /// The delete itself, for both proofs. Only if the account is still what was checked: <paramref name="checkedHash"/> (null for an account with no password) and the session epoch.
+    /// Its audit entry (<c>buyer.self_delete</c>, ids and the method only) commits with it.
+    /// </summary>
+    private async Task<AccountResult> DeleteCoreAsync(BuyerPrincipal who, string? checkedHash, long checkedEpoch, string method, CancellationToken ct)
+    {
         var now = Now;
-        var checkedHash = proof.CheckedHash; var checkedEpoch = proof.CheckedEpoch;
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         // Only if the account is still what the password was checked against (a reset in between means somebody else holds the account now), and the address is
         // freed at once (L2: a sign-up for it used to be swallowed until the redaction job ran). The rest of the personal data goes in the job.
@@ -338,6 +368,9 @@ public sealed class AccountService(MarketplaceDb db, TimeProvider time, AuthServ
         await db.SavedCards.Where(c => c.AccountId == who.AccountId).ExecuteDeleteAsync(ct);   // saved cards (V-16) go at once: nothing may charge them after the account is deleted
         await db.BuyerSessions.Where(s => s.AccountId == who.AccountId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, (DateTimeOffset?)now), ct);
         await outbox.TryEnqueueAsync(AccountRedactionHandler.Type, new AccountRedactionPayload(who.AccountId), $"redact:{who.AccountId:N}", ct: ct);
+        // who deleted it and how, for staff (W3 follow-up): ids and the method only, never the address or the number
+        Staff.StaffAudit.Add(db, time, null, "buyer.self_delete", "buyer", who.AccountId.ToString("D"), "Deleted by the buyer", new { method, sessionId = who.SessionId }, role: "buyer");
+        await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return new AccountResult(AccountOutcome.Ok);
     }

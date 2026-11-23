@@ -59,14 +59,19 @@ public sealed class PhoneSignInService(MarketplaceDb db, PhoneSmsDispatcher disp
     }
 
     /// <summary>Step-up of a session (decision O-11) for an account that has no password: a code to the account's own proven number. The body names no number, so nothing else can be texted.</summary>
-    public async Task<PhoneStartResult> StartStepUpAsync(BuyerPrincipal who, string clientIp, CancellationToken ct)
+    public Task<PhoneStartResult> StartStepUpAsync(BuyerPrincipal who, string clientIp, CancellationToken ct) => StartForOwnAccountAsync(who, clientIp, PhoneSignInPurposes.StepUp, ct);
+
+    /// <summary>Deleting an account that has no password (W3 follow-up): a code for that purpose only, to the account's own proven number, with the same caps and the same send after the answer.</summary>
+    public Task<PhoneStartResult> StartDeleteAsync(BuyerPrincipal who, string clientIp, CancellationToken ct) => StartForOwnAccountAsync(who, clientIp, PhoneSignInPurposes.DeleteAccount, ct);
+
+    private async Task<PhoneStartResult> StartForOwnAccountAsync(BuyerPrincipal who, string clientIp, string purpose, CancellationToken ct)
     {
         if (!Enabled) return new(PhoneStartStatus.Unavailable);
         // only an account without a password: one with a password steps up with it (a text message is not a second way past the password)
         var e164 = await db.BuyerAccounts.AsNoTracking().Where(a => a.Id == who.AccountId && a.DeletedAt == null && a.PasswordHash == null).Select(a => a.PhoneVerifiedE164).FirstOrDefaultAsync(ct);
         if (e164 is null) return new(PhoneStartStatus.NoPhone);
         if (!limiter.TryAcquire("web-phone-ip", clientIp, MaxStartsPerIpPerHour, Hour)) return new(PhoneStartStatus.RateLimited);
-        return await SendAsync(e164, PhoneSignInPurposes.StepUp, who.AccountId, ct);
+        return await SendAsync(e164, purpose, who.AccountId, ct);
     }
 
     private async Task<PhoneStartResult> SendAsync(string e164, string purpose, Guid? accountId, CancellationToken ct)
@@ -80,9 +85,12 @@ public sealed class PhoneSignInService(MarketplaceDb db, PhoneSmsDispatcher disp
         var code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
         db.PhoneSignInChallenges.Add(new PhoneSignInChallenge { Id = id, Purpose = purpose, AccountId = accountId, CodeHash = Hash(id, purpose, code), CreatedAt = now, ExpiresAt = now + Lifetime });
         await db.SaveChangesAsync(ct);
-        var body = purpose == PhoneSignInPurposes.SignIn
-            ? $"Solvelt code: {code}. Use it to sign in on the Solvelt website. It expires in 10 minutes. Never give it to anyone."
-            : $"Solvelt code: {code}. Use it to confirm a change to your account on the Solvelt website. It expires in 10 minutes. Never give it to anyone.";
+        var body = purpose switch
+        {
+            PhoneSignInPurposes.SignIn => $"Solvelt code: {code}. Use it to sign in on the Solvelt website. It expires in 10 minutes. Never give it to anyone.",
+            PhoneSignInPurposes.DeleteAccount => $"Solvelt code: {code}. Use it ONLY to DELETE your Solvelt account on the website. If you did not ask to delete it, do not use it and ignore this message. It expires in 10 minutes.",
+            _ => $"Solvelt code: {code}. Use it to confirm a change to your account on the Solvelt website. It expires in 10 minutes. Never give it to anyone.",
+        };
         // A sign-in code is texted ONLY to a number an eligible account holds (orchestrator review of W3-02): texting any number the internet types in invites SMS pumping (toll fraud), costs money
         // and texts people who never asked. Everything else is identical for both: the caps above are counted, the code is drawn and hashed, the row is written (a null account id), and the answer
         // is the same 202. Only the send is skipped, so the answer and its timing apart from the provider call say nothing.
@@ -107,11 +115,12 @@ public sealed class PhoneSignInService(MarketplaceDb db, PhoneSmsDispatcher disp
         var row = await db.PhoneSignInChallenges.AsNoTracking().Where(c => c.Id == challengeId).Select(c => new { c.CodeHash, c.AccountId, c.Attempts }).FirstAsync(ct);
         var ok = digits.Length == Digits && CryptographicOperations.FixedTimeEquals(Hash(challengeId, purpose, digits), row.CodeHash);
         if (!ok) return new(row.Attempts >= MaxAttempts ? PhoneVerifyStatus.Expired : PhoneVerifyStatus.Wrong);
-        if (purpose == PhoneSignInPurposes.StepUp && (who is null || row.AccountId != who.AccountId)) return new(PhoneVerifyStatus.Wrong);   // a step-up code is for the session's own account only
+        if (purpose != PhoneSignInPurposes.SignIn && (who is null || row.AccountId != who.AccountId)) return new(PhoneVerifyStatus.Wrong);   // a step-up or delete code is for the session's own account only
         var consumed = await db.PhoneSignInChallenges.Where(c => c.Id == challengeId && c.UsedAt == null).ExecuteUpdateAsync(s => s.SetProperty(c => c.UsedAt, (DateTimeOffset?)now), ct);
         if (consumed != 1) return new(PhoneVerifyStatus.Expired);
         if (row.AccountId is not { } accountId) return new(PhoneVerifyStatus.NoAccount);   // the number was proven, but no account signs in with it: only its holder learns that
 
+        if (purpose == PhoneSignInPurposes.DeleteAccount) return new(PhoneVerifyStatus.Ok, AccountId: accountId);   // consumed; the caller deletes in its own transaction (AccountService)
         if (purpose == PhoneSignInPurposes.StepUp)
         {
             await db.BuyerSessions.Where(s => s.Id == who!.SessionId && s.RevokedAt == null).ExecuteUpdateAsync(s => s.SetProperty(x => x.AuthenticatedAt, now), ct);

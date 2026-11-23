@@ -139,7 +139,7 @@ public static class AuthEndpoints
     public sealed record PhoneStartBody(string? Phone);
     public sealed record PhoneCodeBody(Guid? ChallengeId, string? Code);
 
-    private static IResult StartAnswer(PhoneStartResult r, HttpContext ctx) => r.Status switch
+    internal static IResult StartAnswer(PhoneStartResult r, HttpContext ctx) => r.Status switch
     {
         PhoneStartStatus.Sent => Results.Json(new { challengeId = r.ChallengeId, expiresInSeconds = (int)PhoneSignInService.Lifetime.TotalSeconds }, statusCode: 202),
         PhoneStartStatus.Invalid => Problems.Validation(new Dictionary<string, string> { ["phone"] = "Enter a phone number, for example 718 555 0123." }),

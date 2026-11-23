@@ -34,6 +34,8 @@ public static class AccountEndpoints
         g.MapPost("/email", AddEmail).RequireRateLimiting(RateLimitPolicies.Auth);                     // W3-02: an account without an email
         g.MapPost("/password/set", SetPassword).RequireRateLimiting(RateLimitPolicies.Auth);           // W3-02: the first password of an account without one
         g.MapPost("/delete", Delete).RequireRateLimiting(RateLimitPolicies.Auth);
+        g.MapPost("/delete/phone/start", DeleteByPhoneStart).RequireRateLimiting(RateLimitPolicies.Auth);   // W3 follow-up: an account with no password
+        g.MapPost("/delete/phone", DeleteByPhone).RequireRateLimiting(RateLimitPolicies.Auth);
         // passkeys (M1-80): adding and removing one needs a recent sign-in like the password change
         g.MapGet("/passkeys", ListPasskeys);
         g.MapPost("/passkeys/options", PasskeyOptions).RequireRateLimiting(RateLimitPolicies.Auth);
@@ -194,6 +196,35 @@ public static class AccountEndpoints
             { Outcome: AccountOutcome.AlreadySet } => Problems.Json(409, "password_already_set", "This account already has a password. Use change password instead."),
             { Outcome: AccountOutcome.ReauthenticationRequired } => Problems.Json(403, "reauthentication_required", "Confirm it is you first."),
             _ => Map(r, ctx, "newPassword"),
+        };
+    }
+
+    /// <summary>
+    /// W3 follow-up, an account with NO password: <c>202 { challengeId, expiresInSeconds }</c> after a code for deleting the account is queued to its own proven number (the body names none);
+    /// <c>403 reauthentication_required</c> when the last sign-in is older than 10 minutes (step up first, by code); <c>409 no_phone</c> for an account with a password or no proven number.
+    /// </summary>
+    private static async Task<IResult> DeleteByPhoneStart(HttpContext ctx, AccountService a, PhoneSignInService phone, ClientIpResolver ips, CancellationToken ct)
+    {
+        if (!a.IsRecent(ctx.Buyer())) return Problems.Json(403, "reauthentication_required", "Confirm it is you first.");
+        return AuthEndpoints.StartAnswer(await phone.StartDeleteAsync(ctx.Buyer(), ips.Resolve(ctx), ct), ctx);
+    }
+
+    /// <summary>
+    /// <c>204</c>: the account is deleted (as with the password: soft delete, every session ends, erasure by the redaction job). <c>401 invalid_code</c>, <c>400 code_expired</c>,
+    /// <c>403 reauthentication_required</c>, <c>409 password_required</c> (an account with a password deletes with it), <c>409 account_changed</c>, <c>503</c> when codes are off.
+    /// </summary>
+    private static async Task<IResult> DeleteByPhone(AuthEndpoints.PhoneCodeBody? body, HttpContext ctx, AccountService a, CancellationToken ct)
+    {
+        if (body?.ChallengeId is not { } id || body.Code is not { Length: > 0 and <= 20 }) return Problems.Json(401, "invalid_code", "That code is not correct.");
+        var r = await a.DeleteAccountByPhoneAsync(ctx.Buyer(), id, body.Code, ct);
+        return r.Outcome switch
+        {
+            AccountOutcome.ReauthenticationRequired => Problems.Json(403, "reauthentication_required", "Confirm it is you first."),
+            AccountOutcome.PasswordRequired => Problems.Json(409, "password_required", "This account has a password. Delete it with your password."),
+            AccountOutcome.InvalidCode => Problems.Json(401, "invalid_code", "That code is not correct."),
+            AccountOutcome.CodeExpired => Problems.BadRequest("code_expired", "This code has expired or was used too many times. Ask for a new one."),
+            AccountOutcome.Unavailable => Problems.Json(503, "phone_sign_in_unavailable", "Codes by text message are not available right now."),
+            _ => Map(r, ctx, "code"),
         };
     }
 
