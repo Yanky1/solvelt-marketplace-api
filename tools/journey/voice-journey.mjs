@@ -202,8 +202,8 @@ async function main() {
     check(rb.status === "reading_back", `the order is read back (${JSON.stringify(rb).slice(0, 200)})`);
     await endStreamAfterGoodbye();
     const readBack = await hook(PATHS.afterStream);
-    const said = gatherOf(readBack.text) ?? "";
-    check(/dollars/.test(said) && /yes/i.test(said), `the platform reads the order, its total and asks for a yes (${said.slice(0, 160)})`);
+    const gathered = gatherOf(readBack.text) ?? "";
+    check(/dollars/.test(gathered) && /yes/i.test(gathered), `the platform reads the order, its total and asks for a yes (${gathered.slice(0, 160)})`);
     check(!upstream.connections.some((c) => c.received.some((m) => JSON.stringify(m).includes("To place this order, say yes or press 1"))), "the model never received the read-back text");
     kp = await hook(PATHS.keypad, { Digits: "1" });
     check(streamUrlOf(kp.text), "yes (1) resumes the call");
