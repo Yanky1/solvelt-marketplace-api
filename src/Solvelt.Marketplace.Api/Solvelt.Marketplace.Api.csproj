@@ -4,6 +4,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Anthropic" Version="13.4.0" />
+    <PackageReference Include="Azure.Identity" Version="1.21.0" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.30.2" />
     <PackageReference Include="Fido2" Version="4.3.2" />
     <!-- Pin (M1-85): Fido2 4.3.2 brings NSec 25.4.0 and libsodium 1.0.20.1; the newer NSec (and the libsodium it asks for) is used instead. Only Ed25519 passkeys reach libsodium; ES256 and RS256 use the platform's crypto. -->
     <PackageReference Include="NSec.Cryptography" Version="26.4.0" />
@@ -18,5 +20,8 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Solvelt.Marketplace.Api.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\docs\voice-testset\phrases.json" LogicalName="voice-testset-phrases.json" />
   </ItemGroup>
 </Project>
