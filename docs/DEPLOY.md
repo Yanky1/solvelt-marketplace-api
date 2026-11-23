@@ -74,10 +74,10 @@ SignalWire (voice, optional) ─ https + wss: /api/v1/voice/… ─────�
 | `Portal__PublicBaseUrl` | no | https URL; default `Portal__BaseUrl` | The only origin a return-label link may have |
 | `Admin__ApiKey` | **yes** | 32+, differs from every key; needs `Admin__Host` | Turns on `/api/admin` (outbox list and retry). Unset: off |
 | `Admin__Host` | no | a host name that is NOT the public one | The only host `/api/admin` answers on |
-| `Staff__BootstrapToken`, `Staff__BootstrapEmail`, `Staff__BootstrapName` | **token: yes** | token 32+, differs from every key; email required with it | One-time creation of the first staff admin (section 8); remove afterwards |
+| `Staff__BootstrapToken`, `Staff__BootstrapEmail`, `Staff__BootstrapName` | **token: yes** | token 32+, differs from every key; email required with it | One-time creation of the first staff admin (section 10); remove afterwards |
 | `Staff__AllowedIps__0` ... | no | addresses or CIDRs | Who may reach the staff API; unset allows all |
 | `Demo__Enabled` | no | `true` only with `ASPNETCORE_ENVIRONMENT` Development, Testing or Staging | Test mode (demo data). A test site's mail must go to a sandbox |
-| `Voice__Enabled` and the `Voice__*`, `SignalWire__*`, `Sola__*` settings | several **yes** | see docs/VOICE.md | Ordering by phone. Off by default |
+| `Voice__Enabled` and the `Voice__*`, `SignalWire__*`, `Sola__*` settings | several **yes** | section 8 and docs/VOICE.md | Ordering and paying by phone. Off by default |
 | `Database__MigrateOnStart` | no | default `true` | `false` to run migrations from a pipeline instead |
 | Tuning knobs (`Auth__*` durations, `Outbox__*`, `Portal__*` timeouts, `Catalog__*`, `RateLimits__*`, `Staff__*`, `Services__*`, `Bookings__*`, `Shipping__*`, `Tax__*`) | no | defaults in the README | Leave them unless there is a reason. **Tax rates: owner to review** (`Tax__StateRates`) |
 
@@ -124,12 +124,63 @@ The website holds no Stripe key of its own: it shows the API's publishable key.
 
 **The CI job with real Stripe test keys** (workflow `stripe-journey.yml`) is separate from the deployment: it needs the repository secrets `STRIPE_TEST_SECRET_KEY` (`sk_test_…`, recommended for the first run) and `STRIPE_TEST_PUBLISHABLE_KEY` (`pk_test_…`, for the 3DS step), set in GitHub, not in the apps. **It runs only by hand and weekly, never on push or pull request, until one manual run has passed with real test keys** (decision W3-05): several of the Stripe facts it relies on are UNVERIFIED, and a wrong one must not block merges. Its failures name the assumption that broke (A1 to A4). Details: the README, "The real-Stripe journey".
 
-## 8. The seller portal
+## 8. Ordering and paying by phone (Voice, Sola test key)
+
+Off by default. Turn it on only with every setting below. The full design, limits and the PCI checklist are in docs/VOICE.md (sections 4, 6 and 7). Settings come from the worker who owns voice and payments (decisions V-49 and V-50). **Test keys only:** a key whose value names itself live (the word "live" between separators) stops start-up, in the API and in the connector alike. Every secret must be generated separately and differ from every other secret. The only exceptions are the **EQUAL pairs** in the second table.
+
+### On the API
+
+| Setting | Secret | Rules |
+|---|---|---|
+| `Voice__Enabled` | no | `true` |
+| `Voice__PhonePaymentProvider` | no | `sola` (`none` = no payment by phone; `fake` is refused in production) |
+| `Voice__PublicBaseUrl` | no | the API's public https origin (SignalWire calls it; WebSockets must reach it, section 1) |
+| `Voice__OpenAiApiKey` | **yes** | |
+| `Voice__StreamTokenKey`, `Voice__PhoneCodeKey`, `Voice__CallerHashKey` | **yes** | 32+ characters each, all three different, and different from `Auth__PhoneCodeKey` |
+| `SignalWire__ProjectId`, `SignalWire__Space`, `SignalWire__FromNumber` | no | from the SignalWire project |
+| `SignalWire__ApiToken`, `SignalWire__SigningKey` | **yes** | from the SignalWire project |
+| `Sola__ApiKey` | **yes** | the Sola **TEST** key; required in production (refunds go through it). Start-up logs `Sola: mode unknown` |
+| `Sola__PaymentSiteUrl` | no | https (the PaymentSITE page for text-link payments) |
+| `Sola__WebhookPin` | **yes** | 15+ letters or digits |
+| `Sola__PayConnectorUrl` | no | the connector's public https URL, **no credentials in it** |
+| `Sola__PayConnectorUser` | no | |
+| `Sola__PayConnectorPassword` | **yes** | 24+ characters |
+| `Sola__PayConnectorKey` | **yes** | 32+ characters |
+| `Sola__SavedCardKey` | **yes** | 32+ characters. It encrypts saved-card tokens: **losing it makes every saved card unreadable**, so back it up like a database key |
+| `Sola__TimeoutSeconds` | no | optional, 5 to 60, default 20 |
+
+### On the pay connector host (`src/Solvelt.PayConnector`, a separate service with its own secret store)
+
+| Setting | Secret | Rules |
+|---|---|---|
+| `Connector__ApiBaseUrl` | no | the API's https origin |
+| `Connector__PublicUrl` | no | exactly the URL SignalWire calls, without credentials |
+| `Connector__BasicUser` | no | **must EQUAL the API's `Sola__PayConnectorUser`** |
+| `Connector__BasicPassword` | **yes** | **must EQUAL the API's `Sola__PayConnectorPassword`** |
+| `Connector__SharedKey` | **yes** | **must EQUAL the API's `Sola__PayConnectorKey`** |
+| `Connector__SignalWireSigningKey` | **yes** | **must EQUAL the API's `SignalWire__SigningKey`** |
+| `Connector__SolaKey` | **yes** | the Sola TEST key (xKey) |
+| `Connector__TrustForwardedProto` | no | `true` **only** behind a platform that terminates TLS and sets `X-Forwarded-Proto` (for example Azure App Service) |
+| `Connector__LedgerPath` | no | a file on a **persistent** disk. Protect it like a secret: it may briefly hold a Sola token |
+| `Connector__MaxChargeCents` | no | optional, default 50000 |
+| `Connector__SolaTimeoutSeconds` | no | optional, 5 to 60, default 25 |
+
+These four pairs are the only values two services share. Changing one side means changing the other side at the same time.
+
+### Outside the apps
+
+1. In SignalWire, point `<Pay>` at the connector's URL with its Basic credentials (`https://<user>:<password>@<connector>/…`, the same user and password as above).
+2. In the Sola account, point the webhook at **`https://<API public address>/api/v1/voice/sola/webhook`**, with the same PIN as `Sola__WebhookPin`.
+3. The seller portal's `SolaPaymentProvider` migration is applied on the portal side (**owner or the seller-portal team**; this repository does not change the portal).
+4. After start-up the API's log says `Sola: mode unknown`. "Not configured" or "LIVE" means a setting is wrong: do not take calls.
+5. Host requirements (one instance or session affinity, WebSockets on): docs/VOICE.md section 7. The connector host is its own cardholder-data environment (docs/VOICE.md section 6, PCI checklist).
+
+## 9. The seller portal
 
 - The portal sends its events to **`https://<API public address>/api/portal/webhooks`**, signed with the secret the API holds as `Portal__WebhookSecret`. Our calls to the portal are signed with `Portal__InboundSecret`. Both values must be set on the portal side too: **owner (or the seller-portal team) to set**; the portal's own setting names are in the portal repository's docs.
 - The API reads the portal's catalog feed from `Portal__BaseUrl` (`Catalog__Source` defaults to `Http` outside development).
 
-## 9. The first staff admin
+## 10. The first staff admin
 
 There is no built-in staff account or password. Once, after the first deployment:
 
@@ -138,9 +189,9 @@ There is no built-in staff account or password. Once, after the first deployment
 3. Remove `Staff__BootstrapToken` and `Staff__BootstrapEmail`; restart. The secret already stopped working when the passkey was made.
 4. Add a second passkey on another device, then invite other staff. Details: docs/STAFF.md.
 
-## 10. A short checklist
+## 11. A short checklist
 
-- [ ] Every secret generated separately; `Web__ForwardingKey` equals `WEB_FORWARDING_KEY`, and nothing else is shared.
+- [ ] Every secret generated separately; `Web__ForwardingKey` equals `WEB_FORWARDING_KEY`; with phone payments also the four connector pairs of section 8; nothing else is shared.
 - [ ] `PUBLIC_ORIGIN`, `Marketplace__PublicBaseUrl`, `Auth__WebAuthnOrigins__0` are the website's https address; `Auth__WebAuthnRpId` its domain (decided once).
 - [ ] `Notifications__PublicApiBaseUrl` is the API's public https address, and the public paths of section 1 reach the API.
 - [ ] HTTPS Only on both apps; the API restricted to the website except the public paths.
@@ -149,4 +200,5 @@ There is no built-in staff account or password. Once, after the first deployment
 - [ ] Stripe test keys and the webhook (URL and the events above).
 - [ ] The portal holds the same two portal secrets and posts to `/api/portal/webhooks`.
 - [ ] `Auth__PhoneCodeKey` set if accounts made by phone should sign in on the website (needs SignalWire messaging).
+- [ ] If phone ordering is on: every section 8 setting with TEST keys, the four EQUAL pairs, SignalWire `<Pay>` and the Sola webhook pointed correctly, the portal's Sola migration applied, and `Sola: mode unknown` in the log.
 - [ ] The first staff admin made, then the bootstrap settings removed.
