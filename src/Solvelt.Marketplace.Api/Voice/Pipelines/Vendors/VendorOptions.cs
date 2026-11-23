@@ -24,6 +24,11 @@ public sealed class P5Options : PipelineProviders
     /// words and Yiddish Labs for the voice only. TRUE: Flash's text is a second candidate and the judge picks. Only the owner turns it on, after reading the terms.
     /// </summary>
     public bool YiddishLabsInJudge { get; set; }
+    /// <summary>
+    /// TRUE adds OpenAI's transcription (decision V-47) as a candidate beside Gladia (and Flash when <see cref="YiddishLabsInJudge"/> is on) and the judge picks. FALSE (the default): OpenAI is never contacted by option 5.
+    /// It needs the judge model like the Flash switch does (a second transcript is what there is to judge).
+    /// </summary>
+    public bool OpenAiInJudge { get; set; }
 }
 
 public sealed class VoicePipelinesOptions
@@ -172,7 +177,7 @@ public static class AnthropicDefaults
 
 public static class VendorNames
 {
-    public const string Deepgram = "deepgram", ElevenLabs = "elevenlabs", Gladia = "gladia", YiddishLabs = "yiddishlabs";
+    public const string Deepgram = "deepgram", ElevenLabs = "elevenlabs", Gladia = "gladia", YiddishLabs = "yiddishlabs", OpenAi = "openai";
 }
 
 /// <summary>The fixed runtime hosts. Nothing is read from configuration as a host, so a setting can never point the line at another server.</summary>
@@ -184,4 +189,24 @@ public static class VendorHosts
     {
         "" => "api.elevenlabs.io", "us" => "api.us.elevenlabs.io", "eu" => "api.eu.residency.elevenlabs.io", "in" => "api.in.residency.elevenlabs.io", "sg" => "api.sg.residency.elevenlabs.io", _ => null,
     };
+}
+
+/// <summary>
+/// <c>Voice:OpenAiTranscribe</c>: OpenAI Realtime transcription as the recogniser of options 2 to 5 (decision V-47; <c>Voice:Pipelines:Pn:Stt</c> = <c>openai</c>). The key is the existing <c>Voice:OpenAiApiKey</c>; the host is
+/// the one of <c>Voice:OpenAiRealtimeUrl</c> (checked to be OpenAI's in production). Nothing is on by default.
+/// </summary>
+public sealed class OpenAiTranscribeOptions
+{
+    /// <summary>OpenAI's docs: "Start with gpt-live-transcribe". whisper-1 and the gpt-4o-transcribe models shut down on 2027-02-26. Configuration, so a new model needs no release; a model other than the two that need no turn detection is not supported by this adapter.</summary>
+    public string Model { get; set; } = "gpt-live-transcribe";
+    /// <summary>The spoken languages, comma separated ISO codes (the model takes a list, <c>languages</c>); empty sends none and lets the model decide. Which languages gpt-live-transcribe covers (Yiddish in particular) is NOT stated in the facts this was built from: measure it with the test set.</summary>
+    public string Languages { get; set; } = "en";
+    /// <summary>Most catalog words sent as <c>keywords</c>.</summary>
+    public int KeywordMax { get; set; } = 40;
+    /// <summary>Silence that ends the caller's turn, in milliseconds: OUR detector, because this model takes no turn detection of its own.</summary>
+    public int EndpointSilenceMs { get; set; } = 700;
+    /// <summary>The quietest loudness (RMS of the 16-bit samples) counted as speech, over the line's own noise level. NOT tuned on real calls: the test set and the replay tool are how to tune it.</summary>
+    public int MinEnergy { get; set; } = 400;
+    /// <summary>A turn is ended and sent after this long even if the caller has not paused.</summary>
+    public int MaxTurnSeconds { get; set; } = 30;
 }

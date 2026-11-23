@@ -20,9 +20,9 @@ public static class VoicePipelineVendors
 
     /// <summary>The provider pairs that have an adapter. A pair outside this list is a start-up problem, so a typo cannot silently leave an option off.</summary>
     internal static bool Supported(string option, PipelineProviders p)
-        => option == "p6" || (option == "p2" && Is(p.Stt, VendorNames.Deepgram) && Is(p.Tts, VendorNames.ElevenLabs))
-        || (option == "p3" && Is(p.Stt, VendorNames.Gladia) && Is(p.Tts, VendorNames.ElevenLabs))
-        || (option == "p4" && Is(p.Stt, VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs))
+        => option == "p6" || (option == "p2" && (Is(p.Stt, VendorNames.Deepgram) || Is(p.Stt, VendorNames.OpenAi)) && Is(p.Tts, VendorNames.ElevenLabs))
+        || (option == "p3" && (Is(p.Stt, VendorNames.Gladia) || Is(p.Stt, VendorNames.OpenAi)) && Is(p.Tts, VendorNames.ElevenLabs))
+        || (option == "p4" && (Is(p.Stt, VendorNames.YiddishLabs) || Is(p.Stt, VendorNames.OpenAi)) && Is(p.Tts, VendorNames.YiddishLabs))
         || (option == "p5" && Is(p.Stt, VendorNames.Gladia + "+" + VendorNames.YiddishLabs) && Is(p.Tts, VendorNames.YiddishLabs));
 
     private static bool Is(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
@@ -84,6 +84,16 @@ public static class VoicePipelineVendors
             if (y.SttPrompt.Length > 500) p.Add("Voice:YiddishLabs:SttPrompt must be at most 500 characters.");
             if (y.ConsentLine.Length > 600) p.Add("Voice:YiddishLabs:ConsentLine must be at most 600 characters.");
         }
+        if (configured.Any(o => UsesOpenAi(v, o)) || (configured.Contains("p5") && v.Pipelines.P5.OpenAiInJudge))
+        {
+            var t = v.OpenAiTranscribe;
+            if (t.Model.Length > 60 || t.Model.Any(c => !char.IsLetterOrDigit(c) && c is not ('-' or '_' or '.'))) p.Add("Voice:OpenAiTranscribe:Model may only hold letters, digits, . - and _ (at most 60).");
+            if (OpenAiTranscribeStt.Languages(t).Any(l => !System.Text.RegularExpressions.Regex.IsMatch(l, "^[a-z]{2,3}(-[A-Za-z]{2,4})?$")) || t.Languages.Length > 100) p.Add("Voice:OpenAiTranscribe:Languages must be comma separated language codes such as en or en,yi.");
+            if (t.KeywordMax is < 0 or > 100) p.Add("Voice:OpenAiTranscribe:KeywordMax must be between 0 and 100.");
+            if (t.EndpointSilenceMs is < 200 or > 3000) p.Add("Voice:OpenAiTranscribe:EndpointSilenceMs must be between 200 and 3000.");
+            if (t.MinEnergy is < 50 or > 5000) p.Add("Voice:OpenAiTranscribe:MinEnergy must be between 50 and 5000.");
+            if (t.MaxTurnSeconds is < 5 or > 60) p.Add("Voice:OpenAiTranscribe:MaxTurnSeconds must be between 5 and 60.");
+        }
         if (configured.Contains("p5") && v.Pipelines.P5.JudgeModel.Length > 100) p.Add("Voice:Pipelines:P5:JudgeModel must be at most 100 characters.");
         if (configured.Contains("p2") || configured.Contains("p3"))
         {
@@ -100,15 +110,23 @@ public static class VoicePipelineVendors
         switch (option)
         {
             case "p2":
-                if (string.IsNullOrWhiteSpace(v.Deepgram.ApiKey)) m.Add("Voice:Deepgram:ApiKey");
-                if (string.IsNullOrWhiteSpace(v.Deepgram.Model)) m.Add("Voice:Deepgram:Model");
-                if (string.IsNullOrWhiteSpace(v.Deepgram.Language)) m.Add("Voice:Deepgram:Language");
+                if (UsesOpenAi(v, option)) MissingOpenAi(v, m);
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(v.Deepgram.ApiKey)) m.Add("Voice:Deepgram:ApiKey");
+                    if (string.IsNullOrWhiteSpace(v.Deepgram.Model)) m.Add("Voice:Deepgram:Model");
+                    if (string.IsNullOrWhiteSpace(v.Deepgram.Language)) m.Add("Voice:Deepgram:Language");
+                }
                 MissingEleven(v, m);
                 break;
             case "p3":
-                if (string.IsNullOrWhiteSpace(v.Gladia.ApiKey)) m.Add("Voice:Gladia:ApiKey");
-                if (string.IsNullOrWhiteSpace(v.Gladia.Model)) m.Add("Voice:Gladia:Model");
-                if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
+                if (UsesOpenAi(v, option)) MissingOpenAi(v, m);
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(v.Gladia.ApiKey)) m.Add("Voice:Gladia:ApiKey");
+                    if (string.IsNullOrWhiteSpace(v.Gladia.Model)) m.Add("Voice:Gladia:Model");
+                    if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
+                }
                 MissingEleven(v, m);
                 break;
             case "p5":
@@ -116,10 +134,12 @@ public static class VoicePipelineVendors
                 if (string.IsNullOrWhiteSpace(v.Gladia.Model)) m.Add("Voice:Gladia:Model");
                 if (string.IsNullOrWhiteSpace(v.Gladia.Language)) m.Add("Voice:Gladia:Language");
                 MissingYiddishLabs(v, m);
-                if (v.Pipelines.P5.YiddishLabsInJudge) MissingJudge(v, m);
+                if (v.Pipelines.P5.YiddishLabsInJudge || v.Pipelines.P5.OpenAiInJudge) MissingJudge(v, m);
+                if (v.Pipelines.P5.OpenAiInJudge) MissingOpenAi(v, m);
                 break;
             case "p4":
                 MissingYiddishLabs(v, m);
+                if (UsesOpenAi(v, option)) MissingOpenAi(v, m);
                 break;
             case "p6":
                 if (!v.Pipelines.P6.Enabled) m.Add("Voice:Pipelines:P6:Enabled");
@@ -148,6 +168,16 @@ public static class VoicePipelineVendors
         if (LlmProviders.IsAnthropic(jp)) { if (string.IsNullOrWhiteSpace(v.Anthropic.ApiKey) && !m.Contains("Voice:Anthropic:ApiKey")) m.Add("Voice:Anthropic:ApiKey"); return; }
         if (string.IsNullOrWhiteSpace(v.OpenAiApiKey) && !m.Contains("Voice:OpenAiApiKey")) m.Add("Voice:OpenAiApiKey");
         if (string.IsNullOrWhiteSpace(v.Pipelines.P5.JudgeModel)) m.Add("Voice:Pipelines:P5:JudgeModel");
+    }
+
+    /// <summary>Whether the option's recogniser is OpenAI's transcription (decision V-47).</summary>
+    internal static bool UsesOpenAi(VoiceOptions v, string option) => string.Equals(v.Pipelines.For(option).Stt, VendorNames.OpenAi, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The OpenAI recogniser needs the existing OpenAI key and a model (V-47); a missing one makes the option unavailable, with one warning, never a start-up failure (V-26).</summary>
+    private static void MissingOpenAi(VoiceOptions v, List<string> m)
+    {
+        if (string.IsNullOrWhiteSpace(v.OpenAiApiKey) && !m.Contains("Voice:OpenAiApiKey")) m.Add("Voice:OpenAiApiKey");
+        if (string.IsNullOrWhiteSpace(v.OpenAiTranscribe.Model)) m.Add("Voice:OpenAiTranscribe:Model");
     }
 
     private static void MissingYiddishLabs(VoiceOptions v, List<string> m)
@@ -208,15 +238,17 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
             : new OpenAiVoiceLlm(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.Llm);
         if (p6) yield return new SignalWireSpeechParts(llm);
         Func<ITurnDetector> silence = () => new SilenceTurnDetector(v.PipelineMenu.EndpointMs);
+        // OpenAI transcription (V-47): our own end-of-speech detector already waited and sent the commit, so its final words end the caller's turn, as Flash's do
+        OpenAiTranscribeStt OpenAiStt() => new(v.OpenAiTranscribe, v.OpenAiApiKey ?? "", v.OpenAiRealtimeUrl, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.OpenAiTranscribe"), vocab);
         if (!p2 && !p3 && !p4 && !p5) yield break;
         if (p2 || p3)
         {
             var tts = new ElevenLabsTts(v.ElevenLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.ElevenLabs"));
-            if (p2) yield return new VendorChainedParts("p2", new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram"), vocab), tts, llm, silence);
-            if (p3) yield return new VendorChainedParts("p3", new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"), vocab), tts, llm, silence);
+            if (p2) yield return new VendorChainedParts("p2", VoicePipelineVendors.UsesOpenAi(v, "p2") ? OpenAiStt() : new DeepgramStt(v.Deepgram, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Deepgram"), vocab), tts, llm, VoicePipelineVendors.UsesOpenAi(v, "p2") ? () => new FinalTurnDetector() : silence);
+            if (p3) yield return new VendorChainedParts("p3", VoicePipelineVendors.UsesOpenAi(v, "p3") ? OpenAiStt() : new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"), vocab), tts, llm, VoicePipelineVendors.UsesOpenAi(v, "p3") ? () => new FinalTurnDetector() : silence);
         }
         if (p4)
-            yield return new VendorChainedParts("p4", new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"), vocab),
+            yield return new VendorChainedParts("p4", VoicePipelineVendors.UsesOpenAi(v, "p4") ? OpenAiStt() : new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"), vocab),
                 new YiddishLabsTts(v.YiddishLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")), llm, () => new FinalTurnDetector());   // the recogniser already waited for the end of speech
         if (p5)
         {
@@ -224,13 +256,15 @@ public sealed class VendorPartsSource(IServiceProvider sp) : IChainedPartsSource
             // Gladia for the words and Yiddish Labs for the voice only, and no audio or text of the caller goes to the Flash recogniser.
             var gladia = new GladiaStt(v.Gladia, http.CreateClient(VoicePipelineVendors.GladiaClient), sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Gladia"), vocab);
             IStreamingStt stt = gladia;
-            if (v.Pipelines.P5.YiddishLabsInJudge)
+            if (v.Pipelines.P5.YiddishLabsInJudge || v.Pipelines.P5.OpenAiInJudge)
             {
-                var flash = new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"), vocab);
+                var engines = new List<(string, IStreamingStt)> { ("gladia", gladia) };
+                if (v.Pipelines.P5.YiddishLabsInJudge) engines.Add(("yiddishlabs", new YiddishLabsFlashStt(v.YiddishLabs, http.CreateClient(VoicePipelineVendors.YiddishLabsClient), logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs"), vocab)));
+                if (v.Pipelines.P5.OpenAiInJudge) engines.Add(("openai", OpenAiStt()));   // a third candidate (V-47): one hypothesis, no confidence
                 ITranscriptJudge judge = LlmProviders.IsAnthropic(VoicePipelineVendors.JudgeProvider(v))
                     ? new AnthropicTranscriptJudge(claude!, string.IsNullOrWhiteSpace(v.Pipelines.P5.JudgeModel) ? AnthropicDefaults.JudgeModel : v.Pipelines.P5.JudgeModel.Trim())
                     : new OpenAiTranscriptJudge(http.CreateClient(VoicePipelineVendors.LlmClient), v.OpenAiApiKey ?? "", v.Pipelines.P5.JudgeModel);
-                stt = new ParallelStt([("gladia", gladia), ("yiddishlabs", flash)], [judge], v.PipelineMenu.ParallelWaitMs, v.PipelineMenu.ParallelBudgetMs, TimeProvider.System, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Parallel"));
+                stt = new ParallelStt(engines, [judge], v.PipelineMenu.ParallelWaitMs, v.PipelineMenu.ParallelBudgetMs, TimeProvider.System, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.Parallel"));
             }
             yield return new VendorChainedParts("p5", stt, new YiddishLabsTts(v.YiddishLabs, sockets, logs.CreateLogger("Solvelt.Marketplace.Api.Voice.YiddishLabs")), llm, silence);
         }

@@ -335,3 +335,9 @@ A matrix file lists variants, so a setting can be tested: `{"variants":[{"name":
 
 **Reading the numbers.** The error rate is all errors over all words (a long phrase counts for more). Case, punctuation, Hebrew points and the way a digit is written are not errors; a different word is. 40 phrases from a few speakers are enough to see a large difference and not enough to prove a small one: treat gaps of a few points as a tie.
 
+## 18. OpenAI transcription as a recogniser (decision V-47)
+
+OpenAI's Realtime transcription (`gpt-live-transcribe`) can be the listening part of options 2, 3 and 4: set `Voice__Pipelines__P2__Stt` (or `P3`, `P4`) to `openai`. It uses the existing `Voice__OpenAiApiKey`; its own settings, all optional, are `Voice__OpenAiTranscribe__Model`, `Languages` (comma separated, default `en`), `KeywordMax`, `EndpointSilenceMs` (700), `MinEnergy` (400) and `MaxTurnSeconds` (30). `Voice__Pipelines__P5__OpenAiInJudge=true` adds it as a third candidate to option 5's judge. It is off until named.
+
+What to know: it gives one reading per turn and no confidence, so Claude gets no "other readings" or "doubt" note from it; the end of the caller's turn is decided by this server's own silence detector (OpenAI's model takes none), whose numbers have not been tuned on real calls; whether it hears Yiddish is not stated by OpenAI. Compare it with the others using the recorded test set (section 17): add a variant with `"settings":{"Voice:Pipelines:P2:Stt":"openai"}` to a matrix file.
+

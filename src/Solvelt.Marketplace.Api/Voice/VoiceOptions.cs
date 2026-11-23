@@ -76,6 +76,8 @@ public sealed class VoiceOptions
     public ElevenLabsOptions ElevenLabs { get; set; } = new();
     public GladiaOptions Gladia { get; set; } = new();
     public YiddishLabsOptions YiddishLabs { get; set; } = new();
+    /// <summary>OpenAI Realtime transcription as a recogniser (decision V-47). Used only by an option whose <c>Stt</c> names <c>openai</c>.</summary>
+    public OpenAiTranscribeOptions OpenAiTranscribe { get; set; } = new();
     /// <summary>Option 6: SignalWire's own speech recognition, one <c>Gather</c> per turn (decision V-35).</summary>
     public SignalWireSpeechOptions SignalWireSpeech { get; set; } = new();
     /// <summary>The catalog words every recogniser is told to listen for (decision V-36).</summary>
