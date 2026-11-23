@@ -84,6 +84,8 @@ public sealed class VoiceOptions
     public DiagnosticsOptions Diagnostics { get; set; } = new();
     /// <summary>The recogniser's alternatives for a turn, given to the text model (decision V-42).</summary>
     public NBestOptions NBest { get; set; } = new();
+    /// <summary>The recorded recognition test set (decision V-46): where the audio is kept and whether the owner's test numbers may record it. Off by default.</summary>
+    public Solvelt.Marketplace.Api.Voice.TestSet.TestSetOptions TestSet { get; set; } = new();
 }
 
 public sealed class SignalWireOptions
@@ -125,6 +127,13 @@ public static class VoiceConfig
         // nothing real moves money by phone yet: the fake and the Sola SANDBOX are for development and tests only (the order is marked paid with the in-process fake money), until the owner decides about real money
         if (!devLike && v.PhonePaymentProvider is "fake" or "sola") p.Add($"Voice:PhonePaymentProvider={v.PhonePaymentProvider} is for development and tests only: real-money phone orders are not enabled.");
         if (v.PhonePaymentProvider == "sola") p.AddRange(SolaOptions.Problems(sola ?? new SolaOptions()));
+        // the recorded recognition test set (V-46): only the owner's test numbers may record, the audio has a private container, and a storage key (the connection string) is a development fallback only
+        if (v.TestSet.Enabled)
+        {
+            p.AddRange(v.TestSet.Problems());
+            if (!devLike && !string.IsNullOrWhiteSpace(v.TestSet.ConnectionString)) p.Add("Voice:TestSet:ConnectionString is for development only: use Voice:TestSet:StorageAccountUrl with the managed identity.");
+            if (v.PipelineMenu.TestNumbers.Count == 0) p.Add("Voice:TestSet:Enabled needs Voice:PipelineMenu:TestNumbers: only those numbers can record the test set.");
+        }
         if (!devLike && (string.IsNullOrWhiteSpace(s.ProjectId) || string.IsNullOrWhiteSpace(s.ApiToken) || string.IsNullOrWhiteSpace(s.Space) || string.IsNullOrWhiteSpace(s.FromNumber)))
             p.Add("SignalWire:ProjectId, ApiToken, Space and FromNumber (env SignalWire__...) are required in production when Voice:Enabled: login codes are sent by SMS.");
         if (!Uri.TryCreate(v.PublicBaseUrl, UriKind.Absolute, out var u) || (u.Scheme != "https" && !(devLike && u.Scheme == "http")) || u.AbsolutePath != "/")

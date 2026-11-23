@@ -1,0 +1,286 @@
+{
+ "version": 1,
+ "note": "The reference TEXT of the recognition test set (decision V-46). The audio is never in this repository: it lives in the private container named in Voice:TestSet. status draft = the wording has not been approved by a Yiddish speaker yet; the scoring tool reports draft phrases apart and can leave them out.",
+ "phrases": [
+  {
+   "id": "en-01",
+   "language": "en",
+   "kind": "plain",
+   "text": "Hello, I would like to order something.",
+   "status": "approved"
+  },
+  {
+   "id": "en-02",
+   "language": "en",
+   "kind": "shop",
+   "text": "Do you have a pewter kiddush cup?",
+   "status": "approved"
+  },
+  {
+   "id": "en-03",
+   "language": "en",
+   "kind": "shop",
+   "text": "I am looking for Shabbat candlesticks.",
+   "status": "approved"
+  },
+  {
+   "id": "en-04",
+   "language": "en",
+   "kind": "shop",
+   "text": "How much is the tallit?",
+   "status": "approved"
+  },
+  {
+   "id": "en-05",
+   "language": "en",
+   "kind": "shop",
+   "text": "Show me a challah cover and a challah board.",
+   "status": "approved"
+  },
+  {
+   "id": "en-06",
+   "language": "en",
+   "kind": "shop",
+   "text": "I need a mezuzah case for a front door.",
+   "status": "approved"
+  },
+  {
+   "id": "en-07",
+   "language": "en",
+   "kind": "shop",
+   "text": "Do you sell a havdalah set with a spice box?",
+   "status": "approved"
+  },
+  {
+   "id": "en-08",
+   "language": "en",
+   "kind": "shop",
+   "text": "Add two hand washing cups to my cart.",
+   "status": "approved"
+  },
+  {
+   "id": "en-09",
+   "language": "en",
+   "kind": "shop",
+   "text": "Is the seder plate in stock?",
+   "status": "approved"
+  },
+  {
+   "id": "en-10",
+   "language": "en",
+   "kind": "shop",
+   "text": "I want the etrog box and a lulav holder.",
+   "status": "approved"
+  },
+  {
+   "id": "en-11",
+   "language": "en",
+   "kind": "shop",
+   "text": "Do you have a matzah cover for Pesach?",
+   "status": "approved"
+  },
+  {
+   "id": "en-12",
+   "language": "en",
+   "kind": "plain",
+   "text": "What colors does it come in?",
+   "status": "approved"
+  },
+  {
+   "id": "en-13",
+   "language": "en",
+   "kind": "plain",
+   "text": "Please add three of them.",
+   "status": "approved"
+  },
+  {
+   "id": "en-14",
+   "language": "en",
+   "kind": "plain",
+   "text": "Remove the last item from my order.",
+   "status": "approved"
+  },
+  {
+   "id": "en-15",
+   "language": "en",
+   "kind": "plain",
+   "text": "Yes, that is correct.",
+   "status": "approved"
+  },
+  {
+   "id": "en-16",
+   "language": "en",
+   "kind": "plain",
+   "text": "No, I want to change something.",
+   "status": "approved"
+  },
+  {
+   "id": "en-17",
+   "language": "en",
+   "kind": "plain",
+   "text": "My name is Moshe Cohen.",
+   "status": "approved"
+  },
+  {
+   "id": "en-18",
+   "language": "en",
+   "kind": "address",
+   "text": "Send it to one hundred twenty three Kingston Avenue, Brooklyn.",
+   "status": "approved"
+  },
+  {
+   "id": "en-19",
+   "language": "en",
+   "kind": "digits",
+   "text": "My zip code is one one two zero one.",
+   "status": "approved"
+  },
+  {
+   "id": "en-20",
+   "language": "en",
+   "kind": "digits",
+   "text": "My phone number is seven one eight five five five zero one nine nine.",
+   "status": "approved"
+  },
+  {
+   "id": "en-21",
+   "language": "en",
+   "kind": "digits",
+   "text": "The code is four seven two nine one three.",
+   "status": "approved"
+  },
+  {
+   "id": "en-22",
+   "language": "en",
+   "kind": "digits",
+   "text": "Order number M P two zero two six one one two two.",
+   "status": "approved"
+  },
+  {
+   "id": "en-23",
+   "language": "en",
+   "kind": "plain",
+   "text": "Can you tell me where my order is?",
+   "status": "approved"
+  },
+  {
+   "id": "en-24",
+   "language": "en",
+   "kind": "plain",
+   "text": "I would like to speak to a person.",
+   "status": "approved"
+  },
+  {
+   "id": "en-25",
+   "language": "en",
+   "kind": "plain",
+   "text": "Thank you, have a good Shabbos.",
+   "status": "approved"
+  },
+  {
+   "id": "yi-01",
+   "language": "yi",
+   "kind": "plain",
+   "text": "איך וויל קויפן א קידוש בעכער",
+   "status": "draft"
+  },
+  {
+   "id": "yi-02",
+   "language": "yi",
+   "kind": "shop",
+   "text": "צי האט איר שבת ליכטשטענדער",
+   "status": "draft"
+  },
+  {
+   "id": "yi-03",
+   "language": "yi",
+   "kind": "shop",
+   "text": "וויפיל קאסט דער טלית",
+   "status": "draft"
+  },
+  {
+   "id": "yi-04",
+   "language": "yi",
+   "kind": "shop",
+   "text": "איך זוך א חלה דעק",
+   "status": "draft"
+  },
+  {
+   "id": "yi-05",
+   "language": "yi",
+   "kind": "plain",
+   "text": "יא, דאס איז ריכטיג",
+   "status": "draft"
+  },
+  {
+   "id": "yi-06",
+   "language": "yi",
+   "kind": "plain",
+   "text": "ניין, איך וויל עפעס ענדערן",
+   "status": "draft"
+  },
+  {
+   "id": "yi-07",
+   "language": "yi",
+   "kind": "plain",
+   "text": "מיין נאמען איז משה כהן",
+   "status": "draft"
+  },
+  {
+   "id": "yi-08",
+   "language": "yi",
+   "kind": "address",
+   "text": "איך וואוין אין ברוקלין",
+   "status": "draft"
+  },
+  {
+   "id": "yi-09",
+   "language": "yi",
+   "kind": "plain",
+   "text": "ביטע שיקט עס צו מיין הויז",
+   "status": "draft"
+  },
+  {
+   "id": "yi-10",
+   "language": "yi",
+   "kind": "plain",
+   "text": "וועלכע פארבן האט איר",
+   "status": "draft"
+  },
+  {
+   "id": "yi-11",
+   "language": "yi",
+   "kind": "plain",
+   "text": "איך וויל צוויי פון דעם",
+   "status": "draft"
+  },
+  {
+   "id": "yi-12",
+   "language": "yi",
+   "kind": "plain",
+   "text": "וואס איז דער פרייז",
+   "status": "draft"
+  },
+  {
+   "id": "yi-13",
+   "language": "yi",
+   "kind": "plain",
+   "text": "קענט איר מיר העלפן",
+   "status": "draft"
+  },
+  {
+   "id": "yi-14",
+   "language": "yi",
+   "kind": "plain",
+   "text": "איך וויל רעדן מיט א מענטש",
+   "status": "draft"
+  },
+  {
+   "id": "yi-15",
+   "language": "yi",
+   "kind": "plain",
+   "text": "א דאנק, א גוטן שבת",
+   "status": "draft"
+  }
+ ]
+}
