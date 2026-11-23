@@ -52,6 +52,9 @@ public static class StartupValidator
             warnings.Add("Stripe:SecretKey is set but Stripe:PublishableKey (env Stripe__PublishableKey) is not: the checkout page cannot show the payment form and will say \"Payments are not available right now\".");
         else if (!string.IsNullOrWhiteSpace(stripePublishable) && !System.Text.RegularExpressions.Regex.IsMatch(stripePublishable.Trim(), "^pk_test_[A-Za-z0-9]{8,200}$"))
             warnings.Add("Stripe:PublishableKey does not look like pk_test_ followed by 8 or more letters and digits: the web refuses any other value and says \"Payments are not available right now\".");
+        // V-45: every confirmation by phone is spoken now, so a consent line that tells the caller to PRESS a key contradicts the sentence the server adds after it. The owner's wording is never edited in code: one warning, not a failure.
+        if (config["Voice:YiddishLabs:ConsentLine"] is { } consent && consent.Contains("press", StringComparison.OrdinalIgnoreCase))
+            warnings.Add("Voice:YiddishLabs:ConsentLine (env Voice__YiddishLabs__ConsentLine) tells the caller to press a key, but the consent is answered by voice: rewrite it without \"press 1\" (the platform adds \"Say yes to continue, or say no to use the standard assistant.\" after it).");
         return warnings;
     }
 
