@@ -12,7 +12,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Data.Migrations
 {
     [DbContext(typeof(MarketplaceDb))]
-    [Migration("20261122210339_InitialCreate")]
+    [Migration("20261123035213_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -1049,6 +1049,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                         .HasColumnType("integer");
 
                     b.Property<bool>("IsDemoListing")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsQuotePriced")
                         .HasColumnType("boolean");
 
                     b.Property<bool>("IsStub")

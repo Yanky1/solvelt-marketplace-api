@@ -101,8 +101,9 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
     public ListingSnapshot? Map(JsonElement d, DateTimeOffset now) => MapCore(d, now).Snapshot;
 
     /// <summary>
-    /// Like <see cref="Map"/>, and says WHY when the document cannot be read: a short code (<c>required_field</c>, <c>price</c>, <c>quote_price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>) with the listing id and version when
-    /// they were readable. <c>quote_price</c> is a service the portal prices by quote (<c>service.pricingModel</c> is <c>quote</c>, so <c>price.amountMinor</c> is null): the read model has no price for it yet.
+    /// Like <see cref="Map"/>, and says WHY when the document cannot be read: a short code (<c>required_field</c>, <c>price</c>, <c>seller</c>, <c>brand</c>, <c>category</c>) with the listing id and version when
+    /// they were readable. A service the portal prices by quote (<c>service.pricingModel</c> is <c>quote</c>, so <c>price.amountMinor</c> is null) is READABLE since W3-01: it maps to a quote-priced snapshot with no
+    /// variants (the code <c>quote_price</c> is no longer produced; rows quarantined under it come back at their next fetch).
     /// </summary>
     public (ListingSnapshot? Snapshot, UnreadableDocument? Unreadable) MapCore(JsonElement d, DateTimeOffset now)
     {
@@ -116,13 +117,15 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
             var hasPrice = d.TryGetProperty("price", out var price) && price.ValueKind == JsonValueKind.Object;
             var listingAmount = hasPrice ? Long(price, "amountMinor") : null;
             var currency = hasPrice ? Str(price, "currency") : null;
-            var listingPriced = listingAmount is not null;
+            // A service the seller prices by quote has no price by design (W3-01): the pricing model wins even over a stray amount, so a quote service is never booked at a price the seller did not set for it.
+            var quote = QuotePriced(d, type);
+            var listingPriced = listingAmount is not null && !quote;
             var amount = listingAmount ?? 0L;                                           // only read when listingPriced
-            if (!listingPriced)
+            if (quote) currency ??= Solvelt.Marketplace.Api.Carts.CartLimits.Currency;  // nothing is charged on the listing itself; the quote carries its own amount and currency
+            else if (!listingPriced)
             {
-                // A quote-priced service has no price by design (its own reason). A PRODUCT can have no listing-level price too: when the seller prices only per variation the portal sends price.amountMinor null and
+                // A PRODUCT can have no listing-level price: when the seller prices only per variation the portal sends price.amountMinor null and
                 // the variants carry the resolved prices (docs/CATALOG.md): the listing is then priced by its variants, in the one currency they share. No price anywhere is still unreadable.
-                if (QuotePriced(d, type)) return Bad("quote_price");
                 if (type != "product" || !VariantPrices(d, out var variantCurrency)) return Bad("price");
                 if (currency is not null && !string.Equals(currency, variantCurrency, StringComparison.OrdinalIgnoreCase)) return Bad("price");   // the listing and its variants must agree on the currency
                 currency ??= variantCurrency;
@@ -141,7 +144,7 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
             var listingState = State(d);
             var weight = Int(d, "weightGrams") is > 0 and var wg ? wg : (int?)null;      // C7: null or a non-positive weight is "unknown", never 0 (O-15)
             var variants = new List<VariantDto>();
-            if (d.TryGetProperty("variants", out var vs) && vs.ValueKind == JsonValueKind.Array)
+            if (!quote && d.TryGetProperty("variants", out var vs) && vs.ValueKind == JsonValueKind.Array)   // a quote service has nothing to buy or hold: no variants (W3-01)
                 foreach (var v in vs.EnumerateArray())
                 {
                     if (Guid_(v, "variantId") is not { } vid) continue;
@@ -154,8 +157,8 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
                         ? string.Join(" / ", vv.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!.Trim()).Where(x => x.Length > 0)) : "";
                     variants.Add(new VariantDto(vid, values.Length > 0 ? values : "Standard", cents, was > cents ? was : null, Available(State(v) ?? listingState), WeightGrams: Int(v, "weightGrams") is > 0 and var vw ? vw : weight));   // a variant without its own weight carries the product's
                 }
-            if (variants.Count == 0 && !listingPriced) return Bad("price");               // priced by its variants, and none could be read
-            if (variants.Count == 0)                                                      // no variants: one buyable line on the listing price (IsDefault: its id is the listing id, never a portal variant id)
+            if (variants.Count == 0 && !listingPriced && !quote) return Bad("price");               // priced by its variants, and none could be read
+            if (variants.Count == 0 && !quote)                                            // no variants: one buyable line on the listing price (IsDefault: its id is the listing id, never a portal variant id)
                 variants.Add(new VariantDto(listingId, "Standard", saleAmount ?? amount, (saleAmount is not null ? Math.Max(amount, compareAt ?? 0) : compareAt) is { } w && w > (saleAmount ?? amount) ? w : null, Available(listingState), IsDefault: true, WeightGrams: weight));
 
             var images = new List<ImageDto>();
@@ -199,7 +202,8 @@ public sealed class HttpCatalogSource(ISignedPortalClient portal, TimeProvider t
             var updated = Time(d, "updatedAt") ?? now;
             return (new ListingSnapshot(listingId, version, type, "Active", title, summary, description,
                 new SellerRef(sellerId, Str(seller, "displayName") ?? "", true), new BrandRef(brandId, Str(brand, "name") ?? ""), categoryId, currency.ToUpperInvariant(),
-                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d), Dimensions(d), d.TryGetProperty("demo", out var demoFlag) && demoFlag.ValueKind == JsonValueKind.True), null);
+                variants, images, attributes, faqs, Time(d, "publishedAt") ?? updated, updated, SearchTerms(d), Dimensions(d), d.TryGetProperty("demo", out var demoFlag) && demoFlag.ValueKind == JsonValueKind.True,
+                QuotePriced: quote, QuoteAvailable: quote && Available(listingState)), null);
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
         {

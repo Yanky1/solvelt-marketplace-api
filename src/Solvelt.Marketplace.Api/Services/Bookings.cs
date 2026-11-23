@@ -113,8 +113,10 @@ public sealed class BookingService(MarketplaceDb db, ISignedPortalClient portal,
         var errors = Validate(request, now);
         if (errors.Count > 0) return new HoldResult(HoldStatus.Invalid, Errors: errors);
         var r = request!;
-        var listing = await ServiceListings.Visible(db).Where(l => l.Id == r.ListingId).Select(l => new { l.Id, l.Currency }).FirstOrDefaultAsync(ct);
+        var listing = await ServiceListings.Visible(db).Where(l => l.Id == r.ListingId).Select(l => new { l.Id, l.Currency, l.IsQuotePriced }).FirstOrDefaultAsync(ct);
         if (listing is null) return new HoldResult(HoldStatus.NotFound);
+        // A service priced by quote is never held directly (W3-01): the portal would refuse it with 422 quote_required, so we answer the same without calling it. The buyer asks for a quote instead.
+        if (listing.IsQuotePriced) return new HoldResult(HoldStatus.PortalRefused, Code: "quote_required");
 
         var hash = HashOf(r);
         var row = await db.Bookings.FirstOrDefaultAsync(b => b.AccountId == buyer.AccountId && b.IdempotencyKey == idempotencyKey, ct);

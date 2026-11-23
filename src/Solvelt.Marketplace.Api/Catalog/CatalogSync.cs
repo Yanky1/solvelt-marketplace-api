@@ -466,11 +466,21 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         listing.FetchAttempts = 0; listing.NextFetchAt = null;
         listing.Row++;
 
-        var basis = s.Variants.Any(v => v.Available) ? s.Variants.Where(v => v.Available).ToList() : s.Variants.ToList();
-        listing.PriceFromCents = basis.Min(v => v.PriceCents);
-        listing.PriceToCents = basis.Max(v => v.PriceCents);
-        listing.CompareAtFromCents = basis.Where(v => v.CompareAtCents > v.PriceCents).Select(v => v.CompareAtCents).Min();
-        listing.Available = s.Variants.Any(v => v.Available);
+        listing.IsQuotePriced = s.QuotePriced;
+        if (s.QuotePriced)
+        {
+            // W3-01: no price (the numbers are kept at 0 and never shown, sorted or filtered on), no variants; "available" means a quote can be asked for now
+            listing.PriceFromCents = 0; listing.PriceToCents = 0; listing.CompareAtFromCents = null;
+            listing.Available = s.QuoteAvailable;
+        }
+        else
+        {
+            var basis = s.Variants.Any(v => v.Available) ? s.Variants.Where(v => v.Available).ToList() : s.Variants.ToList();
+            listing.PriceFromCents = basis.Min(v => v.PriceCents);
+            listing.PriceToCents = basis.Max(v => v.PriceCents);
+            listing.CompareAtFromCents = basis.Where(v => v.CompareAtCents > v.PriceCents).Select(v => v.CompareAtCents).Min();
+            listing.Available = s.Variants.Any(v => v.Available);
+        }
         listing.RecomputeVisibility();
         // (the wishlist watch is queued after the variants are in the unit of work, below)
 
@@ -496,7 +506,9 @@ public sealed class CatalogSyncService(MarketplaceDb db, ICatalogSource source, 
         else if (string.IsNullOrWhiteSpace(s.Title)) why = "title";
         else if (string.IsNullOrWhiteSpace(s.Status)) why = "status";
         else if (s.Version < 1) why = "version";
-        else if (s.Variants.Count == 0) why = "no variants";
+        else if (s.QuotePriced && s.Type != ListingTypes.Service) why = "quote-priced product";
+        else if (s.QuotePriced && s.Variants.Count > 0) why = "quote-priced with variants";
+        else if (!s.QuotePriced && s.Variants.Count == 0) why = "no variants";
         else if (s.Variants.Count > SnapshotLimits.MaxVariants) why = "too many variants";
         else if (s.Variants.Select(v => v.Id).Distinct().Count() != s.Variants.Count) why = "duplicate variant ids";
         else if (s.Variants.Any(v => v.PriceCents < 0)) why = "negative price";
