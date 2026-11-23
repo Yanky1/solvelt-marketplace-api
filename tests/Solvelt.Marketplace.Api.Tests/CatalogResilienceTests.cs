@@ -83,6 +83,7 @@ public sealed class CatalogResilienceTests : IDisposable
         d["service"] = new { pricingModel = "quote", priceMinor = (long?)null, minMinutes = 60, maxMinutes = 240, incrementMinutes = 30, defaultDurationMinutes = 60, online = false, atCustomer = true, atSeller = false, bookingMode = "request", travelFeeMinor = 0 };
     });
     private static Dictionary<string, object?> NoPrice(int n, long version = 10) => Doc(n, version, d => d.Remove("price"));
+    private static Dictionary<string, object?> NoBrand(int n, long version = 10) => Doc(n, version, d => d.Remove("brand"));
 
     private static string Page(IEnumerable<object?> items, string cursor = "10:z") => JsonSerializer.Serialize(new { items, nextCursor = cursor, hasMore = false });
     private async Task<CatalogSyncResult> Run(OpsCounters? ops = null, int maxPending = 100)
@@ -96,14 +97,14 @@ public sealed class CatalogResilienceTests : IDisposable
     [Fact]
     public async Task A_page_with_unreadable_documents_applies_the_readable_ones_sets_the_others_aside_and_counts_them_on_health()
     {
-        _feed = Page([Doc(1), NoCategory(2), QuotePriced(3), NoPrice(4), "not even an object", Doc(5)]);
+        _feed = Page([Doc(1), NoCategory(2), NoBrand(3), NoPrice(4), "not even an object", Doc(5)]);
         var ops = _f.Services.GetRequiredService<OpsCounters>();
         var r = await Run(ops);
         Assert.True(r.Ran);
         Assert.Null(r.Error);                                                                  // the run did not fail
         Assert.Equal(2, r.Applied);                                                            // the two good ones
         Assert.Equal(4, r.Skipped);                                                            // the four it could not read
-        Assert.Equal(new[] { (G(2), "category"), (G(4), "price"), (G(3), "quote_price") }.OrderBy(x => x.Item2).ToList(), Quarantined().Select(q => (q.ListingId, q.Reason)).ToList());   // the junk item has no id: counted, nothing to record
+        Assert.Equal(new[] { (G(2), "category"), (G(4), "price"), (G(3), "brand") }.OrderBy(x => x.Item2).ToList(), Quarantined().Select(q => (q.ListingId, q.Reason)).ToList());   // the junk item has no id: counted, nothing to record
         Assert.Equal(new[] { G(1), G(5) }, WithDb(_f, db => db.CatalogListings.AsNoTracking().Where(l => l.Visible).Select(l => l.Id).OrderBy(i => i).ToList()));
         Assert.Equal("10:z", WithDb(_f, db => db.CatalogSyncStates.AsNoTracking().Single().Cursor));   // the cursor moved on
         Assert.NotNull(WithDb(_f, db => db.CatalogSyncStates.AsNoTracking().Single().LastSuccessAt));
@@ -150,7 +151,7 @@ public sealed class CatalogResilienceTests : IDisposable
     {
         _feed = Page([Doc(1, 10), Doc(2, 10)]);
         await Run();
-        _feed = Page([NoCategory(1, 11), QuotePriced(2, 11)], "11:z");
+        _feed = Page([NoCategory(1, 11), NoBrand(2, 11)], "11:z");
         var ops = _f.Services.GetRequiredService<OpsCounters>();
         await Run(ops);
         Assert.Equal(2, Quarantined().Count);
@@ -163,6 +164,41 @@ public sealed class CatalogResilienceTests : IDisposable
         var one = WithDb(_f, db => db.CatalogListings.AsNoTracking().Single(l => l.Id == G(1)));
         Assert.Equal(("Mug 1, fixed", 12L, true, "Active"), (one.Title, one.Version, one.Visible, one.Status));
         Assert.False(WithDb(_f, db => db.CatalogListings.AsNoTracking().Single(l => l.Id == G(2)).Visible));
+    }
+
+    [Fact]
+    public async Task A_service_priced_by_quote_is_applied_with_no_price_and_no_variants_and_one_set_aside_before_W3_comes_back_at_its_next_fetch()
+    {
+        _feed = Page([Doc(1), QuotePriced(2)]);
+        var r = await Run();
+        Assert.Equal((2, 0), (r.Applied, r.Skipped));
+        Assert.Empty(Quarantined());
+        var quote = WithDb(_f, db => db.CatalogListings.AsNoTracking().Include(l => l.Variants).Single(l => l.Id == G(2)));
+        Assert.Equal((true, true, true, 0L, 0L, (long?)null, 0), (quote.Visible, quote.IsQuotePriced, quote.Available, quote.PriceFromCents, quote.PriceToCents, quote.CompareAtFromCents, quote.Variants.Count));
+        Assert.False(WithDb(_f, db => db.CatalogListings.AsNoTracking().Single(l => l.Id == G(1))).IsQuotePriced);
+
+        // a listing whose version was set aside under the old reason quote_price (before W3-01) is fetched again and applied: it comes back by itself
+        using (var scope = _f.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
+            await db.CatalogListings.Where(l => l.Id == G(1)).ExecuteUpdateAsync(s => s.SetProperty(l => l.KnownVersion, 11L).SetProperty(l => l.Status, "Quarantined").SetProperty(l => l.Visible, false));
+            db.CatalogQuarantine.Add(new CatalogQuarantine { ListingId = G(1), Reason = "quote_price", Version = 11, FirstSeenAt = _clock.GetUtcNow(), LastSeenAt = _clock.GetUtcNow(), Seen = 1 });
+            await db.SaveChangesAsync();
+        }
+        _feed = Page([]);
+        _single[G(1)] = JsonSerializer.Serialize(QuotePriced(1, 11));
+        Assert.Null((await Run()).Error);
+        var back = WithDb(_f, db => db.CatalogListings.AsNoTracking().Include(l => l.Variants).Single(l => l.Id == G(1)));
+        Assert.Equal((true, true, 11L, 0), (back.Visible, back.IsQuotePriced, back.Version, back.Variants.Count));     // the old priced variant is gone: nothing left to cart
+        Assert.Empty(Quarantined());
+
+        // and a later fixed price makes it an ordinary listing again
+        await using (var scope = _f.Services.CreateAsyncScope())
+            await scope.ServiceProvider.GetRequiredService<MarketplaceDb>().CatalogListings.Where(l => l.Id == G(1)).ExecuteUpdateAsync(s => s.SetProperty(l => l.KnownVersion, 12L));
+        _single[G(1)] = JsonSerializer.Serialize(Doc(1, 12, d => d["type"] = "service"));
+        await Run();
+        var priced = WithDb(_f, db => db.CatalogListings.AsNoTracking().Single(l => l.Id == G(1)));
+        Assert.Equal((false, 2000L, 12L), (priced.IsQuotePriced, priced.PriceFromCents, priced.Version));
     }
 
     /// <summary>A product the seller prices only per variation: the portal sends price.amountMinor null and the resolved prices on the variants (docs/CATALOG.md).</summary>

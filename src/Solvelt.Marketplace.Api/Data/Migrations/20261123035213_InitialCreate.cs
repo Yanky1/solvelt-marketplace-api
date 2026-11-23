@@ -291,6 +291,7 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     PriceFromCents = table.Column<long>(type: "bigint", nullable: false),
                     PriceToCents = table.Column<long>(type: "bigint", nullable: false),
                     CompareAtFromCents = table.Column<long>(type: "bigint", nullable: true),
+                    IsQuotePriced = table.Column<bool>(type: "boolean", nullable: false),
                     Available = table.Column<bool>(type: "boolean", nullable: false),
                     Version = table.Column<long>(type: "bigint", nullable: false),
                     KnownVersion = table.Column<long>(type: "bigint", nullable: false),

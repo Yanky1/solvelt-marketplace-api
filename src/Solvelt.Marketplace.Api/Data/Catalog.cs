@@ -37,6 +37,12 @@ public sealed class CatalogCategory
     public DateTimeOffset UpdatedAt { get; set; }
 }
 
+/// <summary>How a listing is priced (decision W3-01): <see cref="Fixed"/> has a price; <see cref="Quote"/> is a service the portal prices by quote, which has no price, no variants, no cart line and no booking hold (the buyer asks for a quote).</summary>
+public static class PriceModes
+{
+    public const string Fixed = "fixed", Quote = "quote";
+}
+
 public static class ListingTypes
 {
     public const string Product = "product", Service = "service";
@@ -66,9 +72,13 @@ public sealed class CatalogListing
     /// <summary>The portal status of the last applied snapshot ("Active", "Archived", ...).</summary>
     public string Status { get; set; } = "";
     public string Currency { get; set; } = "USD";
+    /// <summary>0 when <see cref="IsQuotePriced"/>: never shown, never sorted on, never filtered on (decision W3-01).</summary>
     public long PriceFromCents { get; set; }
     public long PriceToCents { get; set; }
     public long? CompareAtFromCents { get; set; }
+    /// <summary>A service the portal prices by quote (<c>service.pricingModel: "quote"</c>): it has no price and no variants, sorts after every priced listing in both price orders, is left out of price filters and the price facet, and is asked for through the quote flow (W3-01).</summary>
+    public bool IsQuotePriced { get; set; }
+    public string PriceMode => IsQuotePriced ? PriceModes.Quote : PriceModes.Fixed;
     /// <summary>Any variant can be bought or booked now.</summary>
     public bool Available { get; set; }
     /// <summary>Version of the last applied snapshot; 0 for a stub created from an event before the snapshot was fetched.</summary>
@@ -219,6 +229,7 @@ internal sealed class CatalogConfiguration :
         b.Property(x => x.Currency).HasMaxLength(3).IsRequired();
         b.Property(x => x.Row).IsConcurrencyToken();
         b.Ignore(x => x.IsUnlisted);
+        b.Ignore(x => x.PriceMode);
         b.HasIndex(x => x.Slug).IsUnique();
         b.HasIndex(x => new { x.Visible, x.CategoryId });
         b.HasIndex(x => new { x.Visible, x.BrandId });

@@ -294,13 +294,28 @@ public class HttpCatalogSourceTests
     }
 
     [Fact]
-    public void A_listing_price_still_rules_when_there_is_one_and_a_quote_service_keeps_its_own_reason()
+    public void A_listing_price_still_rules_when_there_is_one_and_a_quote_service_maps_to_a_quote_priced_snapshot_with_nothing_to_buy()
     {
         var rig = new Rig();
         var withListing = Mapped(rig, Doc(1, 10, d => d["variants"] = new object[] { Var(11, null), Var(12, 2600) }));   // own price null: the listing's 2000; own 2600: its own
         Assert.Equal(new[] { 2000L, 2600L }, withListing.Variants.Select(v => v.PriceCents));
-        var (_, bad) = rig.Source.MapCore(El(QuoteService(2)), rig.Clock.GetUtcNow());
-        Assert.Equal("quote_price", bad!.Reason);                                                                         // a service priced by quote is not a variant-priced product
+        Assert.False(withListing.QuotePriced);
+
+        // W3-01: a service priced by quote is listed, with no variants (no cart line, no hold) and "available" from its availability state
+        var (quote, bad) = rig.Source.MapCore(El(QuoteService(2)), rig.Clock.GetUtcNow());
+        Assert.Null(bad);
+        Assert.Equal((true, true, 0, "USD", "service"), (quote!.QuotePriced, quote.QuoteAvailable, quote.Variants.Count, quote.Currency, quote.Type));
+        Assert.Contains(quote.Attributes, a => a.Key == "pricing-model" && a.Value == "quote");
+        Assert.True(Mapped(rig, QuoteService(3, "Quote")).QuotePriced);                                                    // any case
+        Assert.False(Mapped(rig, Doc(4, 10, d => { d["type"] = "service"; d["availability"] = new { state = "out_of_stock" }; d["price"] = new { amountMinor = (long?)null, currency = (string?)null };
+            d["service"] = new { pricingModel = "quote" }; })).QuoteAvailable);                                          // a paused service cannot be asked for now ...
+        Assert.Equal("USD", Mapped(rig, Doc(5, 10, d => { d["type"] = "service"; d["price"] = new { amountMinor = (long?)null, currency = (string?)null }; d["service"] = new { pricingModel = "quote" }; })).Currency);   // ... and no currency is the marketplace's
+        // the pricing model wins over a stray amount and over variants: a quote service is never bookable at a price
+        var stray = Mapped(rig, Doc(6, 10, d => { d["type"] = "service"; d["service"] = new { pricingModel = "quote" }; d["variants"] = new object[] { Var(61, 900) }; }));
+        Assert.Equal((true, 0), (stray.QuotePriced, stray.Variants.Count));
+        // a PRODUCT is never quote-priced: one with no price anywhere is still unreadable
+        var (_, product) = rig.Source.MapCore(El(Doc(7, 10, d => { d["price"] = new { amountMinor = (long?)null, currency = "USD" }; d["service"] = new { pricingModel = "quote" }; })), rig.Clock.GetUtcNow());
+        Assert.Equal("price", product!.Reason);
     }
 
     [Fact]
@@ -308,8 +323,9 @@ public class HttpCatalogSourceTests
     {
         var rig = new Rig().Feed(Page([Doc(1), Doc(2, 10, d => d["category"] = null), QuoteService(3, "Quote"), Doc(4, 10, d => d.Remove("price")), Doc(5, 10, d => d.Remove("brand")), Doc(6, 10, d => d.Remove("seller")), "junk", Doc(7)]));
         var page = await rig.Source.GetListingsAsync(null, 100, CancellationToken.None);
-        Assert.Equal(new[] { G(1), G(7) }, page.Items.Select(i => i.Id));
-        Assert.Equal(new (Guid?, long?, string)[] { (G(2), 10, "category"), (G(3), 10, "quote_price"), (G(4), 10, "price"), (G(5), 10, "brand"), (G(6), 10, "seller"), (null, null, "required_field") },
+        Assert.Equal(new[] { G(1), G(3), G(7) }, page.Items.Select(i => i.Id));                // a quote service is readable since W3-01
+        Assert.True(page.Items.Single(i => i.Id == G(3)).QuotePriced);
+        Assert.Equal(new (Guid?, long?, string)[] { (G(2), 10, "category"), (G(4), 10, "price"), (G(5), 10, "brand"), (G(6), 10, "seller"), (null, null, "required_field") },
             page.Unreadable!.Select(u => (u.Id, u.Version, u.Reason)));
         Assert.DoesNotContain(rig.Logs, l => l.Contains("Secret title"));                      // ids and codes only, never the document
     }
@@ -318,13 +334,15 @@ public class HttpCatalogSourceTests
     public async Task A_single_fetch_of_an_unreadable_document_throws_the_typed_exception_with_the_reason_and_no_document_text()
     {
         var rig = new Rig();
-        foreach (var (doc, reason) in new (Dictionary<string, object?>, string)[] { (Doc(1, 10, d => d["category"] = null), "category"), (QuoteService(1), "quote_price"), (Doc(1, 10, d => d.Remove("price")), "price") })
+        foreach (var (doc, reason) in new (Dictionary<string, object?>, string)[] { (Doc(1, 10, d => d["category"] = null), "category"), (Doc(1, 10, d => d.Remove("brand")), "brand"), (Doc(1, 10, d => d.Remove("price")), "price") })
         {
             rig.Portal.Respond(HttpStatusCode.OK, JsonSerializer.Serialize(doc));
             var ex = await Assert.ThrowsAsync<UnreadableListingException>(() => rig.Source.GetListingAsync(G(1), CancellationToken.None));
             Assert.Equal((G(1), reason), (ex.Id, ex.Reason));
             Assert.DoesNotContain("Secret title", ex.Message);
         }
+        rig.Portal.Respond(HttpStatusCode.OK, JsonSerializer.Serialize(QuoteService(1)));     // W3-01: a quote service is fetched, not set aside
+        Assert.True((await rig.Source.GetListingAsync(G(1), CancellationToken.None))!.QuotePriced);
     }
 
     [Fact]

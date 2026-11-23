@@ -171,8 +171,8 @@ public sealed class ListingQuery
         if (CategoryGiven && skip != Dim.Category) { var ids = CategoryIds; q = q.Where(l => ids.Contains(l.CategoryId)); }
         if (skip != Dim.Price)
         {
-            if (PriceMin is { } min) q = q.Where(l => l.PriceToCents >= min);     // some buyable price is at or above the minimum ...
-            if (PriceMax is { } max) q = q.Where(l => l.PriceFromCents <= max);   // ... and some is at or below the maximum
+            if (PriceMin is { } min) q = q.Where(l => !l.IsQuotePriced && l.PriceToCents >= min);     // some buyable price is at or above the minimum ...
+            if (PriceMax is { } max) q = q.Where(l => !l.IsQuotePriced && l.PriceFromCents <= max);   // ... and some is at or below the maximum (a quote-priced listing has no price to compare: W3-01)
         }
         if (AvailableOnly && skip != Dim.Availability) q = q.Where(l => l.Available);
         foreach (var (key, values) in Attrs)
@@ -203,7 +203,7 @@ public sealed class ListingQuery
             .OrderBy(x => x.V, StringComparer.Ordinal).Select(x => new CountItem(x.V, x.N)).ToList();
 
         var available = await Apply(db, visible, Dim.Availability).CountAsync(l => l.Available, ct);
-        var priced = Apply(db, visible, Dim.Price);
+        var priced = Apply(db, visible, Dim.Price).Where(l => !l.IsQuotePriced);   // the range is of real prices: a quote-priced listing's 0 is not one (no "from $0", W3-01)
         var any = await priced.AnyAsync(ct);
         var price = any ? new PriceFacet(await priced.MinAsync(l => l.PriceFromCents, ct), await priced.MaxAsync(l => l.PriceToCents, ct)) : new PriceFacet(null, null);
 
@@ -242,15 +242,18 @@ public sealed record ListingCursor(string Sort, string Key, Guid Id, string Fing
     /// <summary>A cursor is client input: its key must be a value of the right type for its sort (and of the shape we ever write), or the keyset query could not be built.</summary>
     public bool KeyIsValid() => Fingerprint.Length == 8 && Fingerprint.All(Uri.IsHexDigit) && Sort switch
     {
-        "price_asc" or "price_desc" => long.TryParse(Key, NumberStyles.None, CultureInfo.InvariantCulture, out var p) && p <= ListingQuery.MaxCents,
+        "price_asc" or "price_desc" => Key == QuoteKey || (long.TryParse(Key, NumberStyles.None, CultureInfo.InvariantCulture, out var p) && p <= ListingQuery.MaxCents),
         "title" => Key.Length <= 300 && Key.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-'),      // TitleSort is a slug: nothing else was ever written, so nothing else is read
         "relevance" => Key.Length <= 40 && Key.All(c => c is >= '0' and <= '9' or '.' or '-' or '+' or 'E') && double.TryParse(Key, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && double.IsFinite(d),
         _ => long.TryParse(Key, NumberStyles.None, CultureInfo.InvariantCulture, out var t) && t <= DateTimeOffset.MaxValue.UtcTicks,
     };
 
+    /// <summary>The price-sort key of a quote-priced listing (W3-01): it has no price, and the quote-priced tail is ordered by id alone.</summary>
+    public const string QuoteKey = "q";
+
     public static string KeyOf(string sort, CatalogListing l, double score = 0) => sort switch
     {
-        "price_asc" or "price_desc" => l.PriceFromCents.ToString(CultureInfo.InvariantCulture),
+        "price_asc" or "price_desc" => l.IsQuotePriced ? QuoteKey : l.PriceFromCents.ToString(CultureInfo.InvariantCulture),
         "title" => l.TitleSort,
         "relevance" => score.ToString("R", CultureInfo.InvariantCulture),
         _ => l.CreatedAt.UtcTicks.ToString(CultureInfo.InvariantCulture),    // newest, best_selling

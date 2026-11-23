@@ -13,8 +13,9 @@ public sealed record CategoryCard(Guid Id, string Slug, string Name);
 public sealed record ImageCard(Guid Id, int Width, int Height, string Alt);
 public sealed record CategoryNode(Guid Id, string Slug, string Name, int ListingCount, IReadOnlyList<CategoryNode> Children);
 public sealed record BrandItem(Guid Id, string Slug, string Name, SellerCard Seller, Guid? LogoImageId, int ListingCount);
+/// <summary><see cref="PriceMode"/> (W3-01): <c>fixed</c>, or <c>quote</c> for a service priced by quote, whose price fields are 0 and must not be shown ("Request a quote" instead).</summary>
 public sealed record ListingCardDto(Guid Id, string Slug, string Type, string Title, string Summary, long PriceFromCents, long PriceToCents,
-    long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, CategoryCard Category, ImageCard? Image, bool Demo = false);
+    long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, CategoryCard Category, ImageCard? Image, bool Demo = false, string PriceMode = PriceModes.Fixed);
 public sealed record Suggestion(string Kind, string Text, string Slug);
 public sealed record SuggestResponse(string Query, IReadOnlyList<Suggestion> Suggestions);
 public sealed record ListingsPage(IReadOnlyList<ListingCardDto> Items, int Page, int PageSize, int Total, int TotalPages, string? NextCursor,
@@ -25,7 +26,7 @@ public sealed record FaqItem(string Question, string Answer);
 public sealed record ListingDetailDto(Guid Id, string Slug, string Type, string Title, string Summary, string Description, long PriceFromCents, long PriceToCents,
     long? CompareAtFromCents, string Currency, bool Available, BrandCard Brand, SellerCard Seller, IReadOnlyList<CategoryCard> CategoryPath,
     IReadOnlyList<VariantItem> Variants, IReadOnlyList<ImageCard> Images, IReadOnlyList<AttributeItem> Attributes, IReadOnlyList<FaqItem> Faqs,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, bool Demo = false, IReadOnlyList<ListingOfferDto>? Offers = null);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, bool Demo = false, IReadOnlyList<ListingOfferDto>? Offers = null, string PriceMode = PriceModes.Fixed);
 /// <summary>The quantity offer that applies to this listing right now, for the badge ("20+ for $0.90 each", "free wallet from 10"; decision Q-07). At most one: the most specific wins, never stacked.</summary>
 public sealed record ListingOfferDto(Guid OfferId, string Name, IReadOnlyList<ListingOfferTier> Tiers, IReadOnlyList<ListingOfferGift> Gifts, DateTimeOffset? ActiveTo);
 public sealed record ListingOfferTier(int MinQuantity, long UnitPriceCents);
@@ -124,8 +125,9 @@ public static class CatalogEndpoints
         if (o.Cursor is { } c) q = After(q, sort, c);
         q = sort switch
         {
-            "price_asc" => q.OrderBy(l => l.PriceFromCents).ThenBy(l => l.Id),
-            "price_desc" => q.OrderByDescending(l => l.PriceFromCents).ThenBy(l => l.Id),
+            // a quote-priced listing has no price: after every priced listing in BOTH directions, in id order (W3-01)
+            "price_asc" => q.OrderBy(l => l.IsQuotePriced).ThenBy(l => l.PriceFromCents).ThenBy(l => l.Id),
+            "price_desc" => q.OrderBy(l => l.IsQuotePriced).ThenByDescending(l => l.PriceFromCents).ThenBy(l => l.Id),
             "title" => q.OrderBy(l => l.TitleSort).ThenBy(l => l.Id),
             _ => q.OrderByDescending(l => l.CreatedAt).ThenBy(l => l.Id),    // newest; best_selling is a placeholder for it until M3 records sales
         };
@@ -141,8 +143,9 @@ public static class CatalogEndpoints
         var id = c.Id;
         switch (sort)
         {
-            case "price_asc": { var p = long.Parse(c.Key, CultureInfo.InvariantCulture); return q.Where(l => l.PriceFromCents > p || (l.PriceFromCents == p && l.Id.CompareTo(id) > 0)); }
-            case "price_desc": { var p = long.Parse(c.Key, CultureInfo.InvariantCulture); return q.Where(l => l.PriceFromCents < p || (l.PriceFromCents == p && l.Id.CompareTo(id) > 0)); }
+            case "price_asc" or "price_desc" when c.Key == ListingCursor.QuoteKey: return q.Where(l => l.IsQuotePriced && l.Id.CompareTo(id) > 0);   // already among the quote-priced tail
+            case "price_asc": { var p = long.Parse(c.Key, CultureInfo.InvariantCulture); return q.Where(l => l.IsQuotePriced || l.PriceFromCents > p || (l.PriceFromCents == p && l.Id.CompareTo(id) > 0)); }
+            case "price_desc": { var p = long.Parse(c.Key, CultureInfo.InvariantCulture); return q.Where(l => l.IsQuotePriced || l.PriceFromCents < p || (l.PriceFromCents == p && l.Id.CompareTo(id) > 0)); }
             case "title": { var t = c.Key; return q.Where(l => l.TitleSort.CompareTo(t) > 0 || (l.TitleSort == t && l.Id.CompareTo(id) > 0)); }
             default: { var t = new DateTimeOffset(long.Parse(c.Key, CultureInfo.InvariantCulture), TimeSpan.Zero); return q.Where(l => l.CreatedAt < t || (l.CreatedAt == t && l.Id.CompareTo(id) > 0)); }
         }
@@ -192,7 +195,7 @@ public static class CatalogEndpoints
             l.Variants.OrderBy(v => v.SortOrder).Select(v => new VariantItem(v.Id, v.Name, v.PriceCents, v.CompareAtCents, v.Available)).ToList(),
             l.Images.OrderBy(i => i.SortOrder).Select(i => new ImageCard(i.Id, i.Width, i.Height, i.Alt)).ToList(),
             l.Attributes.OrderBy(a => a.SortOrder).Select(a => new AttributeItem(a.Key, a.Value)).ToList(),
-            l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt, l.IsDemoListing, offers));
+            l.Faqs.OrderBy(f => f.SortOrder).Select(f => new FaqItem(f.Question, f.Answer)).ToList(), l.CreatedAt, l.UpdatedAt, l.IsDemoListing, offers, l.PriceMode));
     }
 
     private static async Task<IReadOnlyList<ListingOfferDto>> ListingOffers(MarketplaceDb db, CategoryMap map, CatalogListing l, DateTimeOffset now, CancellationToken ct)
@@ -250,7 +253,7 @@ public static class CatalogEndpoints
             var img = firstImages.GetValueOrDefault(l.Id);
             return new ListingCardDto(l.Id, l.Slug, l.Type, l.Title, l.Summary, l.PriceFromCents, l.PriceToCents, l.CompareAtFromCents, l.Currency, l.Available,
                 new BrandCard(l.BrandId, b?.Slug ?? "", b?.Name ?? ""), new SellerCard(l.SellerId, s?.DisplayName ?? ""), new CategoryCard(l.CategoryId, c?.Slug ?? "", c?.Name ?? ""),
-                img is null ? null : new ImageCard(img.Id, img.Width, img.Height, img.Alt), l.IsDemoListing);
+                img is null ? null : new ImageCard(img.Id, img.Width, img.Height, img.Alt), l.IsDemoListing, l.PriceMode);
         }).ToList();
     }
 

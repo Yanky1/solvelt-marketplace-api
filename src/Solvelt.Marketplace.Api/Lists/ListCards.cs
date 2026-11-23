@@ -5,7 +5,7 @@ using Solvelt.Marketplace.Api.Data;
 namespace Solvelt.Marketplace.Api.Lists;
 
 public sealed record ListCardImage(Guid Id, int Width, int Height, string Alt);
-public sealed record ListCard(Guid Id, string Slug, string Type, string Title, long PriceFromCents, long PriceToCents, string Currency, bool Available, string BrandName, string SellerName, ListCardImage? Image);
+public sealed record ListCard(Guid Id, string Slug, string Type, string Title, long PriceFromCents, long PriceToCents, string Currency, bool Available, string BrandName, string SellerName, ListCardImage? Image, string PriceMode = PriceModes.Fixed);
 
 /// <summary>The small listing card used by wishlists and recently viewed. Only listings that are visible on the storefront now (CONTRACT.md §2) are returned: a hidden one simply drops out.</summary>
 public static class ListCards
@@ -24,7 +24,7 @@ public static class ListCards
         {
             var img = images.GetValueOrDefault(l.Id);
             return new ListCard(l.Id, l.Slug, l.Type, l.Title, l.PriceFromCents, l.PriceToCents, l.Currency, l.Available, brands.GetValueOrDefault(l.BrandId, ""), sellers.GetValueOrDefault(l.SellerId, ""),
-                img is null ? null : new ListCardImage(img.Id, img.Width, img.Height, img.Alt));
+                img is null ? null : new ListCardImage(img.Id, img.Width, img.Height, img.Alt), l.PriceMode);
         });
     }
 }
