@@ -225,6 +225,13 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         if (p.Attempt < refund.Attempt) return OutboxResult.Delivered();                // a message of an older send (the amount was cut and re-sent since): it must not send the new amount under the old key (review Q2)
         var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstAsync(o => o.Id == refund.OrderId, ct);
         if (order.PaymentIntentId is null) return OutboxResult.Dead("no_payment_intent");
+        // A Sola-paid phone order is never refunded through Stripe (portal contract C19, decision V-49): there is no Sola transaction API client here, so a person refunds it at Sola and the refund.processed
+        // for it is sent only after Sola confirmed (SolaMoneyEvents.Refund). The refund stays reserved and this message dies where an alert shows it.
+        if (order.PaymentProvider == PaymentProviders.Sola)
+        {
+            log?.LogError("Refund {Key} is for Sola-paid order {Number}: it cannot be made through Stripe and needs a person at Sola.", refund.Key, order.Number);
+            return OutboxResult.Dead("sola_refund_not_automatic");
+        }
 
         RefundResult result;
         try
@@ -254,7 +261,7 @@ public sealed class StripeRefundHandler(MarketplaceDb db, IPaymentProvider payme
         var group = refund.GroupId is { } gid ? order.Groups.FirstOrDefault(g => g.Id == gid) : null;
         if (refund.ReportToPortal && group?.SellerOrderNumber is { } sellerOrderNumber)
             outbox.EnqueuePaymentEvent($"refund-processed:{refund.Key}", PaymentEventTypes.RefundProcessed,
-                new RefundProcessedData(stripeRefundId, order.Number, sellerOrderNumber, null, refund.AmountCents - refund.ShippingCents - refund.TaxCents, refund.ShippingCents, order.Currency, refund.Reason));
+                new RefundProcessedData(stripeRefundId, order.Number, sellerOrderNumber, null, refund.AmountCents - refund.ShippingCents - refund.TaxCents, refund.ShippingCents, order.Currency, refund.Reason, SolaMoneyEvents.ProviderField(order.PaymentProvider)));
         // The buyer is told only now that Stripe has really returned the money (never on reservation: a refund Stripe refuses must not have been announced as done)
         if (refund.Reason == "order_failed") await MailFailedOrderAsync(order, refund.AmountCents, ct);
         return true;

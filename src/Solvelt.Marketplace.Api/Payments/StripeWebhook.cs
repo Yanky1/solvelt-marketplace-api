@@ -213,7 +213,8 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         var refunded = evt.Long("amount_refunded");
         if (intentId is null || refunded is null) return StripeOutcome.Unmatched;
         if (await bookingEvents.OwnsIntentAsync(intentId, ct)) return await bookingEvents.ChargeRefundedAsync(evt, ct);
-        var order = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.PaymentIntentId == intentId, ct);
+        // only a STRIPE order: Stripe's charge events can never match, change or debit a Sola payment (portal contract C19.1 rule 4, decision V-49)
+        var order = await db.Orders.AsNoTracking().FirstOrDefaultAsync(o => o.PaymentIntentId == intentId && o.PaymentProvider == PaymentProviders.Stripe, ct);
         if (order is null) return StripeOutcome.Unmatched;
         // The order's row lock (a no-op write) serialises parallel charge.refunded events: each then reads the counter the one before it left, so the recorded amounts add up to Stripe's
         // cumulative figure instead of each counting from a stale read (300 then 500 cumulative was recorded as 800).
@@ -242,7 +243,8 @@ public sealed class StripeEventProcessor(MarketplaceDb db, OutboxWriter outbox, 
         var status = evt.Str("status");
         if (intentId is null || disputeId is null || amount is null || status is null) return StripeOutcome.Unmatched;
         if (await bookingEvents.OwnsIntentAsync(intentId, ct)) return await bookingEvents.DisputeAsync(evt, ct);   // a booking's intent (M4-15); orders below are untouched
-        var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstOrDefaultAsync(o => o.PaymentIntentId == intentId, ct);
+        // only a STRIPE order (see above): a Stripe dispute naming a Sola order's intent is an unknown charge, no money moves
+        var order = await db.Orders.AsNoTracking().Include(o => o.Groups).FirstOrDefaultAsync(o => o.PaymentIntentId == intentId && o.PaymentProvider == PaymentProviders.Stripe, ct);
         if (order is null) return StripeOutcome.Unmatched;
         var portalStatus = status switch
         {
