@@ -371,7 +371,7 @@ public class VoiceSolaTests
     }
 
     [Fact]
-    public async Task Sola_and_the_fake_are_refused_in_production_so_no_real_money_path_exists()
+    public async Task Sola_is_allowed_in_production_with_a_test_key_but_the_fake_and_a_live_named_key_are_refused()
     {
         var cfg = new Dictionary<string, string?>
         {
@@ -379,8 +379,13 @@ public class VoiceSolaTests
             ["Voice:PublicBaseUrl"] = "https://api.example.com", ["SignalWire:ProjectId"] = "p", ["SignalWire:ApiToken"] = "t", ["SignalWire:Space"] = "s", ["SignalWire:FromNumber"] = "+15550002222",
             ["Voice:PhonePaymentProvider"] = "sola", ["Sola:PaymentSiteUrl"] = Site, ["Sola:WebhookPin"] = Pin,
         };
-        var problems = Solvelt.Marketplace.Api.Infrastructure.StartupValidator.VoiceProblems(new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(cfg).Build(), new ProdEnv());
-        Assert.Contains(problems, x => x.Contains("development and tests only"));
+        IReadOnlyList<string> Problems(Action<Dictionary<string, string?>> tweak) { var c = new Dictionary<string, string?>(cfg); tweak(c); return Solvelt.Marketplace.Api.Infrastructure.StartupValidator.VoiceProblems(new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(c).Build(), new ProdEnv()); }
+        // V-50 (was: Sola refused in production): allowed, but it needs its API key (refunds), and a key that names itself live is refused; the fake stays refused
+        Assert.Contains(Problems(_ => { }), x => x.Contains("Sola:ApiKey") && x.Contains("required"));
+        var ok = Problems(c => c["Sola:ApiKey"] = "xk_test_abc123");
+        Assert.DoesNotContain(ok, x => x.Contains("development and tests only") || x.Contains("Sola:ApiKey") || x.Contains("LIVE key"));
+        Assert.Contains(Problems(c => c["Sola:ApiKey"] = "acct_live_abc123"), x => x.Contains("LIVE key"));
+        Assert.Contains(Problems(c => c["Voice:PhonePaymentProvider"] = "fake"), x => x.Contains("development and tests only"));
         await Task.CompletedTask;
     }
 
