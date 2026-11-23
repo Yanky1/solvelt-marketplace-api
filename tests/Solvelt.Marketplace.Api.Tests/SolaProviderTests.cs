@@ -77,6 +77,7 @@ public sealed class SolaProviderTests : OrderFlowBase
     [InlineData(" ", false)]
     [InlineData(" 123", false)]
     [InlineData("12\n3", false)]
+    [InlineData("1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345", false)]   // 101 characters: no order row can hold it (below), so the ingest theory above cannot seed it on PostgreSQL
     public void A_sola_reference_is_one_to_a_hundred_plain_characters(string? reference, bool valid) => Assert.Equal(valid, SolaMoneyEvents.IsValidSolaRef(reference));
 
     [Fact]
@@ -130,7 +131,6 @@ public sealed class SolaProviderTests : OrderFlowBase
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    [InlineData("1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345")]   // 101 characters
     public async Task A_sola_order_without_a_usable_reference_is_never_sent_and_dies_where_a_person_sees_it(string? bad)
     {
         var o = await PaidOrder(sola: true, solaRef: bad);
@@ -139,6 +139,12 @@ public sealed class SolaProviderTests : OrderFlowBase
         var dead = await _k.Db(db => db.OutboxMessages.AsNoTracking().SingleAsync(m => m.DedupeKey == "ingest:" + o.Number));
         Assert.Equal((OutboxStatus.Dead, "invalid_payment_ref"), (dead.Status, dead.LastError));
         Assert.Contains(_k.F.Logs.Lines, l => l.Contains(o.Number) && l.Contains("Sola reference"));
+    }
+
+    [Fact]
+    public async Task The_orders_reference_column_holds_at_most_one_hundred_characters_like_the_portals_limit()
+    {
+        await _k.Db(async db => { Assert.Equal(PaymentProviders.MaxSolaRefLength, db.Model.FindEntityType(typeof(MarketplaceOrder))!.FindProperty(nameof(MarketplaceOrder.PaymentRef))!.GetMaxLength()); return 0; });
     }
 
     // ---------- the answers ----------

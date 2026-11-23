@@ -79,7 +79,7 @@ public sealed class PhoneOrderService(CheckoutService checkout, MarketplaceDb db
         var now = time.GetUtcNow();
         async Task<SettleStatus> Close(string status, SettleStatus result)
         {
-            attempt.Status = status; attempt.SettledAt = now; attempt.ProviderRef ??= outcome.TransactionId;
+            attempt.Status = status; attempt.SettledAt = now; attempt.ProviderRef ??= outcome.TransactionId is { Length: > 100 } longRef ? longRef[..100] : outcome.TransactionId;   // the column holds 100 characters: a longer reference (refused above for Sola) is kept cut, never lost to a failed save (found by the Postgres CI job)
             try { await db.SaveChangesAsync(ct); } catch (DbUpdateException) { db.ChangeTracker.Clear(); return SettleStatus.AlreadyPaid; }   // the same provider reference was already settled
             return result;
         }
