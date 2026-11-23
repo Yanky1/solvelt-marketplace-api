@@ -316,3 +316,22 @@ When a recogniser has more than one reading of a turn, Claude is told, for that 
 - **The trade-offs (recorded in V-41).** A spoken one-time code can be overheard by anyone near the caller, and it passes through the speech vendor (SignalWire) as text; the keypad tones did not. With no keypad fallback, a caller whom the recogniser cannot understand (an accent, a noisy line, a speech impairment) cannot verify by phone at all and has to ask for a person: an accessibility risk Ronald accepted.
 
 **Every confirmation is spoken too (decision V-45).** The read-back yes or no (order, cancellation, account changes, and the yes before a saved-card payment), the option 6 turns and the Yiddish Labs consent take speech only, no key. Still on the keypad: the PIN (set, confirm, enter) and the card digits on the provider's own payment step. The consent line is the owner's text in `Voice:YiddishLabs:ConsentLine`; the server adds "Say yes to continue, or say no to use the standard assistant." after it, so rewrite the configured line without "press 1".
+## 17. The recorded recognition test set and the scoring tool (decision V-46)
+
+To choose between recognisers by numbers instead of by ear, a small set of phrases is recorded once and replayed through every recogniser and setting. The reference TEXT is in `docs/voice-testset/phrases.json` (25 English phrases, 15 Yiddish phrases; the Yiddish wording is marked `draft` until a Yiddish speaker approves it). The AUDIO is a caller's voice and lives only in a private Azure Blob container: never in this repository (a test fails if an audio file is committed), never in a CI artifact, never in a log.
+
+**What the owner creates (once).**
+1. An Azure storage account and a container named `voice-test-set` with public access OFF.
+2. The settings (environment variables, as for the rest of the voice module): `Voice__TestSet__StorageAccountUrl` = `https://<account>.blob.core.windows.net` (required), `Voice__TestSet__Container` (default `voice-test-set`), `Voice__TestSet__SetName` (default `set1`; use `set2` for a second round so the first is never replaced). `Voice__TestSet__Enabled` stays `false`: it is only for recording by phone, which is not built yet. No key is stored anywhere: the person who runs the tool signs in with `az login` and needs the role **Storage Blob Data Reader** on the container (**Contributor** to upload).
+3. Speakers who agree that their voice is sent to the speech vendors being compared. A speaker label is a short code or first name (`a1`, `moshe`).
+
+**Recording (for now).** Each speaker reads the phrases of the list aloud on a phone or any recorder, one file per phrase, and exports a WAV (16-bit or mu-law). Then, for each file kept OUTSIDE the repository: `dotnet run -c Release --project tools/VoiceScoring -- upload --phrase en-02 --speaker a1 --file /path/en-02.wav`. A phone-call recording flow for the test numbers is planned (it needs the telephone provider's recording facts, which are checked first).
+
+**Scoring (on demand, never in CI).** `check` shows what is configured and contacts nothing; `list` shows what is recorded; `score` replays every recording through the recognisers of options 2 to 5 (or through the variants of a matrix file) and prints the word and character error rates overall, per language and per kind, the delay after the speaker stops, and a table of what was said and what was heard. `--out DIR` (outside the repository) also writes a CSV and a text file. It costs a little money (the vendors are paid per audio minute) and runs in real time, so a full run takes about as long as the audio.
+
+A matrix file lists variants, so a setting can be tested: `{"variants":[{"name":"dg-nova3","option":"p2"},{"name":"dg-400ms","option":"p2","settings":{"Voice:Deepgram:EndpointingMs":"400"}},{"name":"dg-words","option":"p2","vocabulary":["challah","kiddush","tallit"]}]}`. Only `Voice:...` settings can be overridden.
+
+**What cannot be replayed.** Option 1 (OpenAI's speech-to-speech line) and option 6 (SignalWire's own recogniser inside the call) take no recorded audio; the report says so. The OpenAI transcription recogniser planned for option 7 will be replayable once it exists.
+
+**Reading the numbers.** The error rate is all errors over all words (a long phrase counts for more). Case, punctuation, Hebrew points and the way a digit is written are not errors; a different word is. 40 phrases from a few speakers are enough to see a large difference and not enough to prove a small one: treat gaps of a few points as a tie.
+
