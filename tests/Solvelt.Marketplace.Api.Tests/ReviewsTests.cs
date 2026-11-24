@@ -16,7 +16,9 @@ namespace Solvelt.Marketplace.Api.Tests;
 /// <summary>Reviews and ratings (M6, decisions M6-04..): eligibility, one per line, aggregates under parallel writes, votes, reports, moderation, replies, erasure.</summary>
 public sealed class ReviewsTests : IDisposable
 {
-    private readonly AuthKit _k = new();
+    private readonly VoteBusyFault _busy = new();
+    private readonly AuthKit _k;
+    public ReviewsTests() { _k = new AuthKit(null, s => s.ConfigureDbContext<MarketplaceDb>(o => o.AddInterceptors(_busy))); }
     private bool _synced;
     private int _n;
     public void Dispose() => _k.Dispose();
@@ -181,6 +183,41 @@ public sealed class ReviewsTests : IDisposable
         a = await Login("r5a@example.com");
         Assert.Equal(HttpStatusCode.UnprocessableEntity, (await Call(HttpMethod.Patch, $"/api/v1/reviews/{id}", a, new { rating = 1, text = "Too late." })).Status);
         Assert.Equal(5, (await Agg("listing", Listing()))!.Sum);
+    }
+
+    /// <summary>Fault injection (V-53): the first <see cref="Shots"/> inserts of a helpful vote are refused with SQLITE_BUSY in the middle of the transaction, as SQLite does when it would otherwise deadlock two writers.</summary>
+    private sealed class VoteBusyFault : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        public int Shots;
+        private int _fired;
+        public int Fired => _fired;
+        private void Maybe(System.Data.Common.DbCommand c)
+        {
+            if (Shots > 0 && c.CommandText.Contains("\"review_votes\"") && c.CommandText.Contains("INSERT", StringComparison.OrdinalIgnoreCase) && Interlocked.Increment(ref _fired) <= Shots)
+                throw new Microsoft.Data.Sqlite.SqliteException("database is locked", 5);
+        }
+        public override Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> NonQueryExecuting(System.Data.Common.DbCommand c, Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData e, Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> r) { Maybe(c); return r; }
+        public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(System.Data.Common.DbCommand c, Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData e, Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> r, CancellationToken ct = default) { Maybe(c); return ValueTask.FromResult(r); }
+    }
+
+    [Fact]
+    public async Task A_helpful_vote_refused_with_busy_in_the_middle_of_its_transaction_is_run_again_and_answers_204_with_one_vote_counted()
+    {
+        var (a, ida) = await Buyer("r6x@example.com");
+        var (b, _) = await Buyer("r6y@example.com");
+        var id = await Reviewed(a, await Delivered(ida));
+        _busy.Shots = 2;                                                                                              // two refusals in a row, then it is fine
+        var r = await Call(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", b);
+        Assert.Equal(HttpStatusCode.NoContent, r.Status);                                                             // before the fix: 503 too_busy
+        Assert.Equal(3, _busy.Fired);                                                                                 // two refused attempts, one that went through
+        Assert.Equal((1, 1), (await _k.Db(db => db.Reviews.AsNoTracking().Select(x => x.HelpfulCount).SingleAsync()), await _k.Db(db => db.ReviewVotes.CountAsync())));   // counted once, not once per attempt
+        _busy.Shots = 100;                                                                                            // a lock that never clears still ends as the bounded 503, not as a hang or a 500
+        var c = await Call(HttpMethod.Delete, $"/api/v1/reviews/{id}/helpful", b);                                    // taking back inserts nothing: untouched by the fault
+        Assert.Equal(HttpStatusCode.NoContent, c.Status);
+        var d = await Call(HttpMethod.Put, $"/api/v1/reviews/{id}/helpful", b);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, d.Status);
+        Assert.Equal("too_busy", d.Body.GetProperty("code").GetString());
+        Assert.Equal(0, await _k.Db(db => db.Reviews.AsNoTracking().Select(x => x.HelpfulCount).SingleAsync()));       // nothing half-written
     }
 
     // ---------------------------------------------------------------- votes

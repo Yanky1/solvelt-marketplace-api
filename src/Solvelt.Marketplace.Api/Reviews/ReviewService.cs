@@ -183,16 +183,20 @@ public sealed class ReviewService(MarketplaceDb db, TimeProvider time)
         var r = await db.Reviews.AsNoTracking().Where(x => x.Id == reviewId && (!on || x.Status == ReviewStatus.Published)).Select(x => new { x.AccountId }).FirstOrDefaultAsync(ct);
         if (r is null) return ReviewOutcome.NotFound;
         if (r.AccountId == accountId) return ReviewOutcome.OwnReview;
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-        if (on)
+        // The whole transaction is the unit that is run again when SQLite refuses a lock part-way (V-53): the vote insert is idempotent (unique key, a duplicate is ignored) and a refused attempt was rolled back.
+        return await SqliteBusyRetry.RunTransactionAsync(async () =>
         {
-            var inserted = await InsertVoteIgnoringDuplicateAsync(reviewId, accountId, ct);
-            if (inserted) await db.Reviews.Where(x => x.Id == reviewId).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount + 1), ct);
-        }
-        else if (await db.ReviewVotes.Where(v => v.ReviewId == reviewId && v.AccountId == accountId).ExecuteDeleteAsync(ct) > 0)
-            await db.Reviews.Where(x => x.Id == reviewId).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount - 1), ct);
-        await tx.CommitAsync(ct);
-        return ReviewOutcome.Ok;
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            if (on)
+            {
+                var inserted = await InsertVoteIgnoringDuplicateAsync(reviewId, accountId, ct);
+                if (inserted) await db.Reviews.Where(x => x.Id == reviewId).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount + 1), ct);
+            }
+            else if (await db.ReviewVotes.Where(v => v.ReviewId == reviewId && v.AccountId == accountId).ExecuteDeleteAsync(ct) > 0)
+                await db.Reviews.Where(x => x.Id == reviewId).ExecuteUpdateAsync(s => s.SetProperty(x => x.HelpfulCount, x => x.HelpfulCount - 1), ct);
+            await tx.CommitAsync(ct);
+            return ReviewOutcome.Ok;
+        }, ct);
     }
 
     private async Task<bool> InsertVoteIgnoringDuplicateAsync(Guid reviewId, Guid accountId, CancellationToken ct)

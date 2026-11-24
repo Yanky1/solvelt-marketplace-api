@@ -47,6 +47,28 @@ public static class SqliteBusyRetry
         }
     }
 
+    /// <summary>
+    /// Whole-transaction attempts (V-53) and the pauses before each retry: 5 in all, 20 + 40 + 80 + 160 = 300 ms, still far under a second.
+    /// The open and begin retries above cannot help here: in SQLite's rollback-journal mode a connection that holds a read lock and then asks for the write lock while another writer is waiting for that read lock
+    /// to clear is refused AT ONCE (SQLITE_BUSY, the busy timeout is not used, because waiting would deadlock), in the middle of a transaction that has long begun. Only running the whole transaction again, after
+    /// the other writer has finished, helps.
+    /// </summary>
+    public const int TransactionAttempts = 5;
+    private static readonly int[] TransactionPauseMs = [20, 40, 80, 160];
+
+    /// <summary>
+    /// Runs a SHORT transaction (everything it does is inside <paramref name="work"/>, which must begin and end it and must be safe to run again: a refused attempt is rolled back by its disposal) again when SQLite
+    /// answers BUSY or LOCKED part-way. PostgreSQL never raises a SQLite exception, so there the work runs exactly once, as before. What still fails after the attempts is the same exception, answered 503 too_busy.
+    /// </summary>
+    public static async Task<T> RunTransactionAsync<T>(Func<Task<T>> work, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { return await work(); }
+            catch (SqliteException ex) when (IsBusy(ex) && attempt < TransactionAttempts - 1) { await Task.Delay(TransactionPauseMs[attempt], ct); }
+        }
+    }
+
     /// <summary>Opens the connection itself (with the retries) and tells EF not to.</summary>
     public sealed class Opening : DbConnectionInterceptor
     {
