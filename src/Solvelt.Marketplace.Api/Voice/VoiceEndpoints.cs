@@ -249,6 +249,7 @@ public static class VoiceEndpoints
             if (st.KeypadStep == "confirm" && st.ReadBackText is { } text) return Cxml(new XElement("Response", GatherConfirm(v, text)));
             // the payment provider's own instruction (the keypad step runs without the model; no card data touches this API or the model)
             if (st.KeypadStep == "confirm_cancel" && st.Cancel is { } cancel) return Cxml(new XElement("Response", GatherConfirm(v, cancel.Text)));
+            if (st.KeypadStep == "confirm_return" && st.Return is { } ret) return Cxml(new XElement("Response", GatherConfirm(v, ret.Text)));
             if (st.KeypadStep == "confirm_account" && st.AccountChange is { } change) return Cxml(new XElement("Response", GatherConfirm(v, change.Text)));
             if (st.KeypadStep == "confirm_card_pay" && st.CardPay is { } cardPay) return Cxml(new XElement("Response", GatherConfirm(v, cardPay.Text)));
             if (st.KeypadStep == "pay" && st.Payment?.Instruction is { } pay) return Cxml(new XElement("Response", new XElement(pay)));
@@ -315,7 +316,7 @@ public static class VoiceEndpoints
         if (!ok) return Results.StatusCode(403);
         var call = form.TryGetValue("CallSid", out var sid) ? await store.FindBySidAsync(sid, ct) : null;
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
-        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "pin" or "set_pin" or "confirm_pin" or "save_card" or "confirm_card_pay" or "confirm_cancel" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
+        if (call is null || state is not { KeypadStep: "sms_code" or "confirm" or "pay" or "pin" or "set_pin" or "confirm_pin" or "save_card" or "confirm_card_pay" or "confirm_cancel" or "confirm_return" or "confirm_account" }) return Cxml(new XElement("Response", new XElement("Hangup")));
         form.TryGetValue("Digits", out var typed);
         if (state.KeypadStep is "pin" or "set_pin" or "confirm_pin")
         {
@@ -389,6 +390,27 @@ public static class VoiceEndpoints
             state.SetKeypadOutcome(outcome);
             state.EndKeypadStep();
             return Cxml(new XElement("Response", new XElement("Say", say), Resume(v, tokens, call.Id, state)));
+        }
+        if (state.KeypadStep == "confirm_return")
+        {
+            form.TryGetValue("SpeechResult", out var spoken);
+            var verdict = ReadBackAnswer.Parse(typed, spoken);
+            if (verdict == ConfirmChoice.Unclear && state.CountConfirmFailure() < 2) return Cxml(new XElement("Response", GatherConfirm(v, VoiceScripts.ReturnRetry)));
+            string returnOutcome = "return_declined", returnSay = VoiceScripts.ReturnKept;
+            if (verdict == ConfirmChoice.Yes && state.Return is { } askedReturn && state.AccountId is { } returnAccount)
+            {
+                // the ONLY path that sends a return request: the caller heard the server's read-back and said yes (or pressed 1); the website's own buyer action applies its own rules (ownership, shipped items, quantities)
+                var returnActions = ctx.RequestServices.GetRequiredService<Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions>();
+                var returnPrincipal = new Solvelt.Marketplace.Api.Auth.BuyerPrincipal(returnAccount, Guid.Empty, "", "", state.VerifiedAt ?? time.GetUtcNow());
+                var asked = await returnActions.RequestReturnAsync(returnPrincipal, askedReturn.OrderNumber, askedReturn.SellerOrderNumber, askedReturn.Reason, null, askedReturn.Lines, "phone-" + call.Id.ToString("N") + "-" + askedReturn.OrderNumber, ct);   // one request per call and order, even if the step is repeated
+                var returnSent = asked.Status == 202;
+                returnOutcome = returnSent ? "return_sent" : "return_refused";
+                returnSay = returnSent ? VoiceScripts.ReturnSent : VoiceScripts.ReturnRefused;
+            }
+            state.SetReturn(null);
+            state.SetKeypadOutcome(returnOutcome);
+            state.EndKeypadStep();
+            return Cxml(new XElement("Response", new XElement("Say", returnSay), Resume(v, tokens, call.Id, state)));
         }
         if (state.KeypadStep == "confirm_account")
         {

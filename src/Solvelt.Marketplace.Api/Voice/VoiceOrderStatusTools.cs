@@ -232,3 +232,52 @@ public sealed class CancelOrderTool(InProcessOrders orders, TimeProvider time) :
         return new(new JsonObject { ["status"] = "reading_back", ["instruction"] = "Tell the caller in one short sentence that you will read the cancellation back now. Do not say it yourself. Then stop talking." }.ToJsonString(), EndCall: true);
     }
 }
+
+/// <summary>
+/// Asks to return items for a refund (decision V-55): ACCOUNT callers verified in this call only, their own orders only (the website's ownership rules apply: another buyer's order is not found). It uses the website's
+/// own return request (<see cref="BuyerOrderActions.RequestReturnAsync"/>, which the portal then decides: the refund follows if the seller approves). The model proposes; the SERVER chooses the items from the order, reads the
+/// request back and the call moves to the same spoken-yes step as a cancellation: only that answer sends it. An order that has not shipped is cancelled instead (cancel_order).
+/// </summary>
+public sealed class RequestRefundTool(InProcessOrders orders, TimeProvider time) : IVoiceTool
+{
+    public string Name => "request_refund";
+    public JsonObject Definition => ToolKit.Def(Name, "Start a return request, for a refund, for items of one of the caller's SHIPPED orders. The server reads it back and asks for a yes; say one short sentence that you will read it back, then stop. The seller decides; the refund follows if they approve. For an order that has not shipped use cancel_order instead.",
+        new JsonObject
+        {
+            ["position"] = ToolKit.Prop("integer", "Position in the list just read out."), ["order_number"] = ToolKit.Prop("string", "The order number, if they said it."),
+            ["seller"] = ToolKit.Prop("string", "The seller's name, only when the order has more than one seller and the caller named one."),
+            ["reason"] = ToolKit.Prop("string", "One of: " + string.Join(", ", BuyerOrderActions.ReturnReasons) + "."),
+            ["item_numbers"] = new JsonObject { ["type"] = "array", ["description"] = "Only when they want back some of the items: the numbers (1, 2, ...) of the items as the server listed them. Leave out for all returnable items.", ["items"] = new JsonObject { ["type"] = "integer" } },
+        }, "reason");
+
+    public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        var s = ctx.State;
+        if (!OrderAccess.IsAccount(s)) return ToolKit.Error("not_allowed", s.Level == CallerLevel.Guest ? "A return needs an account verified by phone: offer the link in their order email, or a person." : "A return needs the text code first: say it is a quick check, then verify.");
+        var reason = ToolKit.Str(args, "reason");
+        if (reason is null || !BuyerOrderActions.ReturnReasons.Contains(reason)) return ToolKit.Error("bad_reason", "Ask why, and pick the closest of: " + string.Join(", ", BuyerOrderActions.ReturnReasons) + ".");
+        if (OrderAccess.Pick(s, args) is not { } number) return ToolKit.Error("which_order", "Ask which order: read their orders with list_my_orders.");
+        if (s.CountReturnStart() > 3) return ToolKit.Error("too_many_attempts", "Too many return attempts in this call: offer a person.");
+        using var d = await orders.AccountDetailAsync(s.AccountId!.Value, s.VerifiedAt ?? time.GetUtcNow(), number, ct);
+        if (d is null) return ToolKit.Error("not_found", "Say you cannot find that order for this caller.");
+        var groups = d.RootElement.GetProperty("groups").EnumerateArray().ToList();
+        var seller = ToolKit.Str(args, "seller");
+        var chosen = groups.Count == 1 ? groups[0] : groups.FirstOrDefault(g => seller is not null && string.Equals(g.GetProperty("sellerName").GetString(), seller, StringComparison.OrdinalIgnoreCase));
+        if (chosen.ValueKind != JsonValueKind.Object) return ToolKit.Json(new JsonObject { ["error"] = "which_seller", ["sellers"] = new JsonArray(groups.Select(g => (JsonNode)VoiceSpeech.Plain(g.GetProperty("sellerName").GetString(), 40)).ToArray()), ["instruction"] = "The order has more than one seller: ask which seller's items to return." });
+        if (!chosen.GetProperty("canReturn").GetBoolean())
+            return ToolKit.Error("not_returnable", $"Say that part of the order is {OrderSpeech.StatusWords(chosen.GetProperty("status").GetString())}: items can be returned once they have shipped; if it has not shipped yet offer to cancel it with cancel_order, otherwise offer a person.");
+        // the items are chosen by the SERVER from what can be returned (never from words): all of them, or the numbers the caller named
+        var lines = chosen.GetProperty("lines").EnumerateArray().Select((l, i) => (Number: i + 1, Line: l)).Where(x => x.Line.GetProperty("returnableQty").GetInt32() > 0).ToList();
+        var wanted = args.TryGetProperty("item_numbers", out var nums) && nums.ValueKind == JsonValueKind.Array ? nums.EnumerateArray().Where(n => n.ValueKind == JsonValueKind.Number && n.TryGetInt32(out _)).Select(n => n.GetInt32()).ToHashSet() : null;
+        var picked = wanted is { Count: > 0 } ? lines.Where(x => wanted.Contains(x.Number)).ToList() : lines;
+        if (picked.Count == 0) return ToolKit.Error("no_items", "None of those items can be returned: read back what can be returned (the numbered items) and ask which.");
+        var input = picked.Select(x => new ReturnLineInput(x.Line.GetProperty("lineId").GetString(), x.Line.GetProperty("returnableQty").GetInt32())).ToList();
+        var items = string.Join(", ", picked.Take(4).Select(x => $"{VoiceSpeech.Number(x.Line.GetProperty("returnableQty").GetInt32())} {VoiceSpeech.Plain(x.Line.GetProperty("title").GetString(), 60)}"));
+        var text = $"You asked to return items from order {VoiceSpeech.Spelled(number)}, the part from {VoiceSpeech.Plain(chosen.GetProperty("sellerName").GetString(), 40)}: {items}. "
+            + "This sends a return request to the seller, who decides; if they approve you get a refund, and an email with the answer. To send the request, say yes. To leave it, say no.";
+        s.SetReturn(new PendingReturn(number, chosen.TryGetProperty("sellerOrderNumber", out var so) ? so.GetString() : null, reason, input, text));
+        s.SetTask("return");
+        s.BeginKeypadStep("confirm_return");
+        return new(new JsonObject { ["status"] = "reading_back", ["instruction"] = "Tell the caller in one short sentence that you will read the return request back now. Do not say it yourself. Then stop talking." }.ToJsonString(), EndCall: true);
+    }
+}
