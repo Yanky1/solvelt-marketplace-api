@@ -334,6 +334,14 @@ public class VoiceOrderStatusTests
             Assert.Equal(("damaged", ReturnStatus.Pending, jane), (ret.Reason, ret.Status, ret.AccountId));
             Assert.NotEmpty(ret.Lines);
             Assert.StartsWith("phone-", ret.ClientKey);                                              // one request per call and order
+            // THE INTENT (V-55): the model cannot move money. After a yes only a RETURN REQUEST exists: no refund row, no refund counted on the order, no call to the card processor, no refund job; the portal gets a return request and nothing else
+            Assert.Empty(await s.K.Db(db => db.OrderRefunds.AsNoTracking().ToListAsync()));
+            Assert.Equal(0, await s.K.Db(db => db.Orders.AsNoTracking().Where(o => o.Number == "MP-20261110-AAAA1111").Select(o => o.RefundedCents).SingleAsync()));
+            Assert.Empty(s.F.Services.GetRequiredService<Solvelt.Marketplace.Api.Payments.FakePaymentProvider>().Refunds);
+            var jobs = await s.K.Db(db => db.OutboxMessages.AsNoTracking().Select(m => m.Type).ToListAsync());
+            Assert.DoesNotContain(jobs, t => t.Contains("refund", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(Solvelt.Marketplace.Api.Fulfilment.BuyerOrderActions.ReturnType, jobs);
+            Assert.Empty(s.F.Services.GetRequiredService<Solvelt.Marketplace.Api.Payments.FakeSolaRefundGateway>().Calls);
             Assert.Contains("return request", (await s.Fake.Wait(n => n["type"]?.GetValue<string>() == "conversation.item.create" && n["item"]!["role"]?.GetValue<string>() == "system" && n["item"]!["content"]![0]!["text"]!.GetValue<string>().Contains("return request"))).ToJsonString());
         }
     }
