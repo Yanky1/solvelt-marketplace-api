@@ -350,7 +350,10 @@ public class VoicePayCallbackTests
             Assert.Equal(VoiceScripts.CallbackNeutral, Said((await Hook(s2, PayCallbackService.AnswerPath, token, "CAsomeoneelse")).Body).Trim()); // not the call that was placed
             Assert.Equal(PayCallbackStatus.Dialing, (await Rows(s2)).Single().Status);                                  // neither of them used the one-time start up
             s2.F.Clock.Advance(TimeSpan.FromMinutes(31));
-            Assert.Equal(HttpStatusCode.Forbidden, (await Hook(s2, PayCallbackService.AnswerPath, token, sid)).R.StatusCode);   // the token itself is past its time
+            Assert.Equal(VoiceScripts.CallbackNeutral, Said((await Hook(s2, PayCallbackService.AnswerPath, token, sid)).Body).Trim());   // answered after the 30 minutes: nothing starts
+            Assert.Equal("expired", (await Rows(s2)).Single().Status);
+            s2.F.Clock.Advance(TimeSpan.FromMinutes(20));
+            Assert.Equal(HttpStatusCode.Forbidden, (await Hook(s2, PayCallbackService.AnswerPath, token, sid)).R.StatusCode);   // and past the grace the token itself is dead
         }
     }
 
@@ -467,6 +470,89 @@ public class VoicePayCallbackTests
         }
     }
 
+    // ---------- the edge of the 30 minutes ----------
+
+    [Fact]
+    public async Task A_call_that_would_be_answered_too_late_to_finish_is_not_placed_and_the_callback_expires()
+    {
+        var (s, _) = await Ready();
+        using (s)
+        {
+            await s.Tool("schedule_pay_callback");
+            Assert.Equal(0, await Dispatch(s, 26 * 60));                                                               // 4 minutes of the 30 are left: less than the 5 it needs
+            Assert.Empty(Dialer(s).Requests);
+            var row = (await Rows(s)).Single();
+            Assert.Equal("expired", row.Status);
+            Assert.Contains(await s.K.Db(db => db.VoicePayCallbackEvents.AsNoTracking().ToListAsync()), e => e.Detail == "too_late_to_dial");
+        }
+        var (s2, _) = await Ready();
+        using (s2)
+        {
+            await s2.Tool("schedule_pay_callback");
+            Assert.Equal(1, await Dispatch(s2, 24 * 60));                                                              // 6 minutes left: placed
+        }
+    }
+
+    [Fact]
+    public async Task A_payment_that_finishes_after_the_thirty_minutes_but_inside_the_grace_is_recorded_as_paid_and_the_sweep_leaves_it_alone()
+    {
+        var (s, _) = await Ready();
+        using (s)
+        {
+            var (sid, token) = await Dialed(s);
+            s.F.Clock.Advance(TimeSpan.FromMinutes(24));                                                               // answered at minute 25
+            await Hook(s, PayCallbackService.AnswerPath, token, sid);
+            await Hook(s, PayCallbackService.ConfirmPath, token, sid, new() { ["SpeechResult"] = "yes" });
+            s.F.Clock.Advance(TimeSpan.FromMinutes(8));                                                                // the keypad step ends at minute 33, past the 30
+            using (var scope = s.F.Services.CreateScope()) Assert.Equal(0, await scope.ServiceProvider.GetRequiredService<PayCallbackService>().ExpireOldAsync(CancellationToken.None));
+            Assert.Equal(PayCallbackStatus.Paying, (await Rows(s)).Single().Status);
+            var keys = await VoiceFactory.Hook(s.C, VoiceEndpoints.KeypadPath, sid, Phone, null, new() { ["Digits"] = "1" });
+            Assert.Equal(VoiceScripts.PayThanks, string.Concat(XDocument.Parse(await keys.Content.ReadAsStringAsync()).Descendants("Say").Select(x => x.Value)));
+            Assert.Equal("paid", (await Rows(s)).Single().Status);
+            Assert.Equal(OrderStatus.Paid, (await s.K.Db(db => db.Orders.AsNoTracking().SingleAsync(o => o.Number == Order))).Status);
+        }
+    }
+
+    [Fact]
+    public async Task The_end_of_call_word_is_accepted_inside_the_grace_after_the_window_and_refused_past_it_and_the_sweep_then_settles_by_the_order()
+    {
+        var (s, _) = await Ready();
+        using (s)
+        {
+            var (sid, token) = await Dialed(s);
+            await Hook(s, PayCallbackService.AnswerPath, token, sid);
+            await Hook(s, PayCallbackService.ConfirmPath, token, sid, new() { ["SpeechResult"] = "yes" });
+            await s.K.Db(async db => { await db.Orders.Where(o => o.Number == Order).ExecuteUpdateAsync(u => u.SetProperty(o => o.Status, OrderStatus.Paid)); return 0; });   // the connector's report came in
+            s.F.Clock.Advance(TimeSpan.FromMinutes(40));                                                               // past the 30, inside the 50
+            Assert.Equal(HttpStatusCode.OK, (await Hook(s, PayCallbackService.StatusPath, token, sid, new() { ["CallStatus"] = "completed" })).R.StatusCode);
+            Assert.Equal("paid", (await Rows(s)).Single().Status);                                                     // the order was paid: that is its final word, not "expired"
+        }
+        var (s2, _) = await Ready();
+        using (s2)
+        {
+            var (sid, token) = await Dialed(s2);
+            await Hook(s2, PayCallbackService.AnswerPath, token, sid);
+            await Hook(s2, PayCallbackService.ConfirmPath, token, sid, new() { ["SpeechResult"] = "yes" });
+            s2.F.Clock.Advance(TimeSpan.FromMinutes(52));                                                              // past the grace
+            Assert.Equal(HttpStatusCode.Forbidden, (await Hook(s2, PayCallbackService.StatusPath, token, sid, new() { ["CallStatus"] = "completed" })).R.StatusCode);
+            using (var scope = s2.F.Services.CreateScope()) Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<PayCallbackService>().ExpireOldAsync(CancellationToken.None));
+            Assert.Equal("expired", (await Rows(s2)).Single().Status);                                                 // the order is not paid: expired
+            await s2.K.Db(async db => { await db.Orders.Where(o => o.Number == Order).ExecuteUpdateAsync(u => u.SetProperty(o => o.Status, OrderStatus.Paid)); return 0; });
+        }
+        var (s3, _) = await Ready();
+        using (s3)
+        {
+            var (sid, token) = await Dialed(s3);
+            await Hook(s3, PayCallbackService.AnswerPath, token, sid);
+            await Hook(s3, PayCallbackService.ConfirmPath, token, sid, new() { ["SpeechResult"] = "yes" });
+            await s3.K.Db(async db => { await db.Orders.Where(o => o.Number == Order).ExecuteUpdateAsync(u => u.SetProperty(o => o.Status, OrderStatus.Paid)); return 0; });
+            s3.F.Clock.Advance(TimeSpan.FromMinutes(52));
+            using var scope = s3.F.Services.CreateScope();
+            Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<PayCallbackService>().ExpireOldAsync(CancellationToken.None));
+            Assert.Equal("paid", (await Rows(s3)).Single().Status);                                                    // the sweep too: a paid order is never recorded as expired
+        }
+    }
+
     // ---------- staff, data and retention ----------
 
     [Fact]
@@ -534,6 +620,8 @@ public class VoicePayCallbackTests
         Assert.NotEmpty(new VoicePayCallbackOptions { ExpiryMinutes = 1 }.Problems());
         Assert.NotEmpty(new VoicePayCallbackOptions { RingSeconds = 5 }.Problems());
         Assert.NotEmpty(new VoicePayCallbackOptions { MaxPerNumberPerDay = 0 }.Problems());
+        Assert.NotEmpty(new VoicePayCallbackOptions { GraceMinutes = 1 }.Problems());
+        Assert.NotEmpty(new VoicePayCallbackOptions { MinMinutesLeftToDial = 0 }.Problems());
         var t = new PayCallbackTokens(Options.Create(new VoiceOptions { StreamTokenKey = new string('k', 40) }));
         var now = new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero);
         var id = Guid.NewGuid();

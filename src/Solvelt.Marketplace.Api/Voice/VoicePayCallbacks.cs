@@ -198,13 +198,26 @@ public sealed class PayCallbackService(MarketplaceDb db, IOptions<VoiceOptions> 
         return true;
     }
 
-    /// <summary>Callbacks past their time stop being active (so the unique index frees the order, and a late request finds nothing to start).</summary>
+    /// <summary>The end of the grace: the token, the yes, the keypad payment and the end-of-call word all still work for a call that was answered inside the window until then.</summary>
+    public DateTimeOffset GraceEnd(VoicePayCallback c) => c.ExpiresAt.AddMinutes(Math.Max(1, options.Value.PayCallback.GraceMinutes));
+
+    /// <summary>
+    /// Callbacks past their time stop being active (so the unique index frees the order, and a late request finds nothing to start). A callback not yet answered ends at <c>ExpiresAt</c>; one that was answered (the caller is
+    /// saying yes or paying) is left alone until the grace has passed, and then is <c>paid</c> if the order is paid, otherwise <c>expired</c>.
+    /// </summary>
     public async Task<int> ExpireOldAsync(CancellationToken ct)
     {
         var now = time.GetUtcNow();
-        var ids = await db.VoicePayCallbacks.AsNoTracking().Where(c => c.ExpiresAt < now && (c.Status == PayCallbackStatus.Scheduled || c.Status == PayCallbackStatus.Dialing || c.Status == PayCallbackStatus.Answered || c.Status == PayCallbackStatus.Paying)).Select(c => c.Id).ToListAsync(ct);
+        var grace = now.AddMinutes(-Math.Max(1, options.Value.PayCallback.GraceMinutes));
+        var rows = await db.VoicePayCallbacks.AsNoTracking().Where(c =>
+            ((c.Status == PayCallbackStatus.Scheduled || c.Status == PayCallbackStatus.Dialing) && c.ExpiresAt < now)
+            || ((c.Status == PayCallbackStatus.Answered || c.Status == PayCallbackStatus.Paying) && c.ExpiresAt < grace)).Select(c => new { c.Id, c.OrderNumber }).ToListAsync(ct);
         var n = 0;
-        foreach (var id in ids) if (await MoveAsync(id, PayCallbackStatus.Active, "expired", "time_ran_out", ct)) n++;
+        foreach (var r in rows)
+        {
+            var paid = await db.Orders.AsNoTracking().AnyAsync(o => o.Number == r.OrderNumber && o.Status == OrderStatus.Paid, ct);
+            if (await MoveAsync(r.Id, PayCallbackStatus.Active, paid ? "paid" : "expired", paid ? "order_is_paid" : "time_ran_out", ct)) n++;
+        }
         return n;
     }
 
@@ -218,9 +231,14 @@ public sealed class PayCallbackService(MarketplaceDb db, IOptions<VoiceOptions> 
         var placed = 0;
         foreach (var c in due)
         {
-            if (!await MoveAsync(c.Id, [PayCallbackStatus.Scheduled], PayCallbackStatus.Dialing, "ringing_now", ct)) continue;   // claimed by someone else
             var v = options.Value;
-            var token = tokens.Issue(c.Id, c.ExpiresAt);
+            if (c.ExpiresAt - now < TimeSpan.FromMinutes(Math.Max(1, v.PayCallback.MinMinutesLeftToDial)))
+            {
+                await MoveAsync(c.Id, [PayCallbackStatus.Scheduled], "expired", "too_late_to_dial", ct);   // it would be answered too late to finish: not placed
+                continue;
+            }
+            if (!await MoveAsync(c.Id, [PayCallbackStatus.Scheduled], PayCallbackStatus.Dialing, "ringing_now", ct)) continue;   // claimed by someone else
+            var token = tokens.Issue(c.Id, GraceEnd(c));   // the token outlives the window by the grace, for the steps of a call that was answered inside it
             var baseUrl = v.PublicBaseUrl!.TrimEnd('/');
             DialResult result;
             try
