@@ -8,6 +8,7 @@
     <Project Path="tools/NormalizationCheck/NormalizationCheck.csproj" />
     <Project Path="tools/MigrationsTool/MigrationsTool.csproj" />
     <Project Path="tools/VoiceScoring/VoiceScoring.csproj" />
+    <Project Path="tools/VoiceEvals/VoiceEvals.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Solvelt.Marketplace.Api.Tests/Solvelt.Marketplace.Api.Tests.csproj" />

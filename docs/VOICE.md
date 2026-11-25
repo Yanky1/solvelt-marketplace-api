@@ -376,6 +376,26 @@ General: the dead-letter and outbox lists in the staff area show anything that c
 - **`leave_support_message` (when nobody can be reached).** After `transfer_to_person` says no person is available, a verified caller (an account, or a number proven by the text code) can leave a short text message (up to 500 characters, three a call; never a card number or PIN: twelve digits in a row are refused). It is kept 90 days (`Voice:SupportMessageRetentionDays`, 1 to 400) and is deleted with the account; the buyer's data export lists their messages.
 - **Staff.** `POST /api/v1/staff/voice/support-messages` (support, finance, admin; a reason; the number masked) lists new messages (`status`: new, handled, all); `POST .../{id}/handled` marks one done; `POST .../{id}/reveal` (support, admin) shows the full number. Every action is audited and the audit never holds the text.
 
+## 21. Understanding evals: does the text model understand callers? (decision V-59)
+
+About ninety short test utterances (`docs/voice-evals/understanding.json`, embedded in the API as `voice-understanding-evals.json`), each with what the text model should do with it: call a particular tool, call none and just speak, or refuse. Nine categories: greeting, product search, cart, orders, account, PIN and code flows, off-topic, mixed (one sentence with an on-topic and an off-topic part, or a correction), and language (Yiddish and English). They cover the phone flows we have; they are test sentences, never real callers.
+
+**Run it (on demand, never in CI, costs a little money):**
+
+```
+dotnet run -c Release --project tools/VoiceEvals -- check
+export Voice__Anthropic__ApiKey=...      # or --config a-file-outside-the-repo.json
+dotnet run -c Release --project tools/VoiceEvals -- run [--category cart] [--parallel 4] [--out /dir/outside/the/repo]
+```
+
+`check` needs no key and no network: it boots the API in process (only to read the tool list), and proves every tool a fixture expects exists on the live line. `run` plays each fixture to Claude (the model of the line, `Voice:Pipelines:Llm:Model`, or the built-in default) and prints accuracy per category, overall, and each failure with the fixture id and the reason. It exits 1 when anything failed, 2 on a wrong setup, and says so when the key is missing without sending anything.
+
+**It is the live line's request.** The runner sends `VoiceScripts.Instructions` and the tool definitions read from the running app's tool registry (the same `VoiceToolRunner.Definitions()` the Realtime and the chained bridges send), the fixture's earlier turns (tool rounds included) and the caller's words. Nothing else is added or left out; a tool renamed or removed makes `check` and the CI test fail until the fixtures follow. Only the first move of the model is scored (the first tool it calls, or what it says when it calls none).
+
+**What counts as right**, per fixture: `tool` (this one first), `anyTool` (one of these), `noTool` (speech only), `args` (each named argument contains the text, case-insensitive), `mustNotSay` (a PIN, a card number or a texted code must never come back out of the model) and `mustSay` (a pattern that must appear, for example a pointer to the keypad).
+
+**Limits, stated plainly.** The tool results inside a fixture's history are hand-written approximations of what the server returns; refresh them when a tool's output changes. The fixtures are not a statistical sample of callers, and they do not test the voice, the recogniser or the tools themselves: only the text model's choice. The tools added by V-55 and V-60 (`request_refund`, `leave_support_message`, `schedule_pay_callback`) have fixtures (88 in all).
+
 ## 22. Pay callback: the caller asks to be called back to pay (decision V-60)
 
 A caller who is verified in the call (text-message code) can say "call me back so I can pay for my order". The assistant never offers it. The platform then rings **the number verified in that call** (the model never names a number) about 45 seconds later, from `SignalWire:FromNumber`, for the caller's newest **unpaid** order (or the order number they read out). The buyer's order lists show only placed and paid orders, so an unpaid one is found by the server: an account's own pending order, or, for a caller without an account, one whose payment was tried by phone from the same verified number.
