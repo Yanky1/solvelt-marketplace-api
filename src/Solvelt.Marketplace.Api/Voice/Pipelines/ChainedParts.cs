@@ -84,29 +84,36 @@ public sealed class SilenceTurnDetector(int endpointMs) : ITurnDetector
 {
     public string EndReason => "silence";
     private readonly List<string> _finals = [];
+    private readonly object _gate = new();   // OnEvent (the recogniser reader) and OnTick (the 50 ms timer) run on two threads (V-56)
     private DateTimeOffset _lastActivity;
 
     public TurnSignal OnEvent(SttEvent e, DateTimeOffset now)
     {
-        _lastActivity = now;
-        switch (e.Kind)
+        lock (_gate)
         {
-            case SttEventKind.SpeechStarted or SttEventKind.Partial:
-                return new(TurnSignalKind.UserSpeaking);
-            case SttEventKind.Final:
-                if (!string.IsNullOrWhiteSpace(e.Text)) _finals.Add(e.Text.Trim());
-                return new(TurnSignalKind.UserSpeaking);
-            default:   // SpeechEnded
-                return TurnSignal.None;
+            _lastActivity = now;
+            switch (e.Kind)
+            {
+                case SttEventKind.SpeechStarted or SttEventKind.Partial:
+                    return new(TurnSignalKind.UserSpeaking);
+                case SttEventKind.Final:
+                    if (!string.IsNullOrWhiteSpace(e.Text)) _finals.Add(e.Text.Trim());
+                    return new(TurnSignalKind.UserSpeaking);
+                default:   // SpeechEnded
+                    return TurnSignal.None;
+            }
         }
     }
 
     public TurnSignal OnTick(DateTimeOffset now)
     {
-        if (_finals.Count == 0 || now - _lastActivity < TimeSpan.FromMilliseconds(Math.Max(1, endpointMs))) return TurnSignal.None;
-        var text = string.Join(' ', _finals);
-        _finals.Clear();
-        return new(TurnSignalKind.TurnEnded, text);
+        lock (_gate)
+        {
+            if (_finals.Count == 0 || now - _lastActivity < TimeSpan.FromMilliseconds(Math.Max(1, endpointMs))) return TurnSignal.None;
+            var text = string.Join(' ', _finals);
+            _finals.Clear();
+            return new(TurnSignalKind.TurnEnded, text);
+        }
     }
 }
 
