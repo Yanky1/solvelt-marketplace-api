@@ -91,6 +91,22 @@ public class VoiceTopicTests
     }
 
     [Fact]
+    public async Task The_realtime_line_never_creates_an_assistant_item_or_instructs_a_fixed_line_so_nothing_canned_is_replayed_by_us_V54()
+    {
+        using var s = new VoiceScenario(config: new() { ["Voice:MaxOffTopicTurns"] = "5" });
+        await s.Dial();
+        await Strike(s); await Strike(s);                                                                   // two off-topic turns, as in the loop that was seen elsewhere
+        var frames = s.Fake.Received.Select(f => JsonNode.Parse(f)!).ToList();
+        var items = frames.Where(f => f["type"]?.GetValue<string>() == "conversation.item.create").Select(f => f["item"]!).ToList();
+        Assert.NotEmpty(items);
+        Assert.DoesNotContain(items, i => i["role"]?.GetValue<string>() == "assistant");                    // we never write the assistant's side of the conversation
+        Assert.All(items, i => Assert.Contains(i["type"]!.GetValue<string>() + "/" + (i["role"]?.GetValue<string>() ?? ""), new[] { "message/system", "function_call_output/" }));
+        // a response is steered only by the three instructions given TO the model, never by one of the platform's spoken lines
+        var instructions = frames.Where(f => f["type"]?.GetValue<string>() == "response.create").Select(f => f["response"]?["instructions"]?.GetValue<string>()).Where(t => t is not null).ToList();
+        Assert.All(instructions, t => Assert.False(ModelHistory.IsFixedLine(t), t));
+    }
+
+    [Fact]
     public async Task Three_off_topic_calls_end_the_AI_part_and_the_platform_says_goodbye_and_hangs_up()
     {
         using var s = new VoiceScenario();

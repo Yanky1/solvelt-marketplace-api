@@ -40,7 +40,7 @@ public sealed class SpeechTurns(VoicePipelineRegistry registry, VoiceToolRunner 
             for (var round = 0; round < Rounds; round++)
             {
                 List<LlmMessage> messages;
-                lock (state.SpeechHistory) messages = [.. state.SpeechHistory];
+                lock (state.SpeechHistory) messages = [.. ModelHistory.ForModel(state.SpeechHistory)];   // V-54: past fixed lines are not shown to the model
                 if (round == 0 && instruction is not null) messages.Add(new LlmMessage("system", instruction));
                 if (turnNote is not null) messages.Add(new LlmMessage("system", turnNote));   // V-43: this turn's doubt, not kept in the history
                 var text = new StringBuilder();

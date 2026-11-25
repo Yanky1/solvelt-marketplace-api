@@ -334,7 +334,7 @@ public sealed class ChainedBridge(WebSocket phone, VoiceCall call, VoiceCallStat
     private LlmRequest BuildRequest(string? instruction)
     {
         List<LlmMessage> messages;
-        lock (_history) messages = [.. _history];
+        lock (_history) messages = [.. ModelHistory.ForModel(_history)];   // V-54: past fixed lines are not shown to the model
         if (instruction is not null) messages.Add(new LlmMessage("system", instruction));
         string? note; lock (_history) note = _turnNote;
         if (note is not null) messages.Add(new LlmMessage("system", note));   // V-42: this turn's other readings, not kept in the history
