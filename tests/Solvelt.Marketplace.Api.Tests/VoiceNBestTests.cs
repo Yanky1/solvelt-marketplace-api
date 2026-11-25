@@ -23,9 +23,10 @@ public sealed class VoiceNBestTests : IDisposable
     private static SttCandidate C(string engine, string text, double? conf = null) => new(engine, text, "yi", conf);
     private static SttEvent Final(string text, params SttCandidate[] candidates) => new(SttEventKind.Final, text, "yi", null, candidates.Length == 0 ? null : candidates);
 
-    private async Task<FakeParts> Call(Dictionary<string, string?>? more = null)
+    private async Task<FakeParts> Call(Dictionary<string, string?>? more = null, int greetingMs = 0)
     {
-        var parts = new FakeParts("p5");
+        var parts = new FakeParts("p5") { };
+        parts.LlmFake.FirstRequestDelayMs = greetingMs;
         parts.LlmFake.Then(new LlmTextDelta("Hello."), new LlmCompleted(10, 2));
         parts.LlmFake.Default = _ => [new LlmTextDelta("Okay."), new LlmCompleted(10, 2)];
         _s = new VoiceScenario(Number, VoicePipelineMenuTests.MenuConfig(more: more), services: sv =>
@@ -49,9 +50,11 @@ public sealed class VoiceNBestTests : IDisposable
     {
         var before = p.LlmFake.Requests.Count;
         p.SttFake.Emit(new SttEvent(SttEventKind.SpeechStarted)); p.SttFake.Emit(final); p.SttFake.Emit(new SttEvent(SttEventKind.SpeechEnded));
+        // The greeting is a request to the same fake and can still be the newest one when a slow runner has not yet started the caller's turn (V-58): wait for a NEW request that carries THIS turn's words (the same words may have been said before).
+        bool Asked() { var all = p.LlmFake.Requests; return all.Count > before && all[^1].Messages.Any(m => m.Role == "user" && m.Text == final.Text); }
         var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (p.LlmFake.Requests.Count <= before && DateTime.UtcNow < deadline) await Advance(100);
-        Assert.True(p.LlmFake.Requests.Count > before, "the text model was not asked about the turn. " + Describe(p));
+        while (!Asked() && DateTime.UtcNow < deadline) await Advance(100);
+        Assert.True(Asked(), "the text model was not asked about the turn. " + Describe(p));
         await Advance(500);                                                                                       // let the reply play out before the next turn
     }
 
@@ -73,9 +76,14 @@ public sealed class VoiceNBestTests : IDisposable
     private static IEnumerable<string> Notes(LlmRequest r) => r.Messages.Where(m => m.Role == "system" && m.Text!.Contains("more than one way")).Select(m => m.Text!);
 
     [Fact]
-    public async Task Two_different_readings_reach_claude_for_that_turn_with_the_shops_words_as_untrusted_quoted_text()
+    public Task Two_different_readings_reach_claude_for_that_turn_with_the_shops_words_as_untrusted_quoted_text() => TwoReadings(0);
+
+    [Fact]
+    public Task Two_different_readings_still_reach_claude_when_the_greeting_is_slow() => TwoReadings(1500);   // fault injection
+
+    private async Task TwoReadings(int greetingMs)
     {
-        var p = await Call();
+        var p = await Call(greetingMs: greetingMs);
         await Say(p, Final("a hallah", C("gladia", "a hallah", 0.8), C("yiddishlabs", "a challah")));
         var request = p.LlmFake.Requests[^1];
         var note = OneOf(Notes(request), p, "readings");
@@ -134,9 +142,14 @@ public sealed class VoiceNBestTests : IDisposable
     private static IEnumerable<string> Doubts(LlmRequest r) => r.Messages.Where(m => m.Role == "system" && m.Text!.Contains("recogniser was unsure")).Select(m => m.Text!);
 
     [Fact]
-    public async Task A_low_confidence_turn_gets_a_note_with_the_unsure_words_and_a_confident_one_gets_none()
+    public Task A_low_confidence_turn_gets_a_note_with_the_unsure_words_and_a_confident_one_gets_none() => LowConfidence(0);
+
+    [Fact]
+    public Task A_low_confidence_turn_still_gets_its_note_when_the_greeting_is_slow() => LowConfidence(1500);   // fault injection
+
+    private async Task LowConfidence(int greetingMs)
     {
-        var p = await Call();
+        var p = await Call(greetingMs: greetingMs);
         await Say(p, Sure("two bagels and a hallah", 0.42, ("hallah", 0.31), ("bagels", 0.55), ("two", 0.97)));
         var note = OneOf(Doubts(p.LlmFake.Requests[^1]), p, "doubt");
         Assert.Contains("confidence 0.42 of 1", note);

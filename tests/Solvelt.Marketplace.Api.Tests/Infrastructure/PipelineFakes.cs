@@ -60,6 +60,9 @@ public sealed class FakeLlm : IVoiceLlm
     private readonly System.Collections.Concurrent.ConcurrentQueue<LlmRequest> _requests = new();
     private readonly Queue<Func<LlmRequest, IEnumerable<LlmEvent>>> _scripts = new();
     public IReadOnlyList<LlmRequest> Requests => _requests.ToArray();
+    /// <summary>Fault injection: the first request (the greeting) takes this many ms to finish after it has reached the model, as on a slow runner; the caller's first turn waits for it (V-57).</summary>
+    public int FirstRequestDelayMs { get; set; }
+    private int _first;
     public Func<LlmRequest, IEnumerable<LlmEvent>> Default { get; set; } = _ => [new LlmTextDelta("Okay."), new LlmCompleted(10, 2)];
     public void Then(params LlmEvent[] events) => _scripts.Enqueue(_ => events);
     public void Then(Func<LlmRequest, IEnumerable<LlmEvent>> script) => _scripts.Enqueue(script);
@@ -67,6 +70,7 @@ public sealed class FakeLlm : IVoiceLlm
     public async IAsyncEnumerable<LlmEvent> StreamAsync(LlmRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         _requests.Enqueue(request);
+        if (Interlocked.Increment(ref _first) == 1 && FirstRequestDelayMs > 0) await Task.Delay(FirstRequestDelayMs);   // not cancellable: the caller's turn must wait for it
         Func<LlmRequest, IEnumerable<LlmEvent>> script;
         lock (_scripts) script = _scripts.Count > 0 ? _scripts.Dequeue() : Default;
         foreach (var e in script(request)) { ct.ThrowIfCancellationRequested(); yield return e; await Task.Yield(); }
