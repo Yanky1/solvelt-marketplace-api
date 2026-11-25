@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Opt-in understanding evals (decision V-59). Never run by CI: it contacts Anthropic and costs a little money. It boots the real API in-process (the same host the tests use) only to read the
+       live tool definitions, so the model sees exactly what it sees on the telephone line. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>VoiceEvals</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.0" />
+    <ProjectReference Include="..\..\src\Solvelt.Marketplace.Api\Solvelt.Marketplace.Api.csproj" />
+  </ItemGroup>
+</Project>

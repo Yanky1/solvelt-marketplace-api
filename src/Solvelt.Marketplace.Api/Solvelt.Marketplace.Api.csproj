@@ -23,5 +23,6 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="..\..\docs\voice-testset\phrases.json" LogicalName="voice-testset-phrases.json" />
+    <EmbeddedResource Include="..\..\docs\voice-evals\understanding.json" LogicalName="voice-understanding-evals.json" />
   </ItemGroup>
 </Project>

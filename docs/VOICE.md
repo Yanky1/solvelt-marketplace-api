@@ -368,3 +368,23 @@ Nothing in this system has yet run against the real SignalWire, OpenAI, Anthropi
 | 12 | After the calls, open the diagnostics for a call (`POST /api/v1/staff/voice/diagnostics/calls/{callId}` with a reason) or export (`POST .../export`). | What each recogniser heard per turn, with the delays; only for calls from your test numbers. | `diagnostics` in the readiness view; `Voice:Diagnostics:Enabled`. |
 
 General: the dead-letter and outbox lists in the staff area show anything that could not be sent to the portal or to Sola; every staff action asks for a reason and is audited. To switch the whole line off: `Voice:Enabled=false` and restart.
+
+## 21. Understanding evals: does the text model understand callers? (decision V-59)
+
+About eighty short test utterances (`docs/voice-evals/understanding.json`, embedded in the API as `voice-understanding-evals.json`), each with what the text model should do with it: call a particular tool, call none and just speak, or refuse. Nine categories: greeting, product search, cart, orders, account, PIN and code flows, off-topic, mixed (one sentence with an on-topic and an off-topic part, or a correction), and language (Yiddish and English). They cover the phone flows we have; they are test sentences, never real callers.
+
+**Run it (on demand, never in CI, costs a little money):**
+
+```
+dotnet run -c Release --project tools/VoiceEvals -- check
+export Voice__Anthropic__ApiKey=...      # or --config a-file-outside-the-repo.json
+dotnet run -c Release --project tools/VoiceEvals -- run [--category cart] [--parallel 4] [--out /dir/outside/the/repo]
+```
+
+`check` needs no key and no network: it boots the API in process (only to read the tool list), and proves every tool a fixture expects exists on the live line. `run` plays each fixture to Claude (the model of the line, `Voice:Pipelines:Llm:Model`, or the built-in default) and prints accuracy per category, overall, and each failure with the fixture id and the reason. It exits 1 when anything failed, 2 on a wrong setup, and says so when the key is missing without sending anything.
+
+**It is the live line's request.** The runner sends `VoiceScripts.Instructions` and the tool definitions read from the running app's tool registry (the same `VoiceToolRunner.Definitions()` the Realtime and the chained bridges send), the fixture's earlier turns (tool rounds included) and the caller's words. Nothing else is added or left out; a tool renamed or removed makes `check` and the CI test fail until the fixtures follow. Only the first move of the model is scored (the first tool it calls, or what it says when it calls none).
+
+**What counts as right**, per fixture: `tool` (this one first), `anyTool` (one of these), `noTool` (speech only), `args` (each named argument contains the text, case-insensitive), `mustNotSay` (a PIN, a card number or a texted code must never come back out of the model) and `mustSay` (a pattern that must appear, for example a pointer to the keypad).
+
+**Limits, stated plainly.** The tool results inside a fixture's history are hand-written approximations of what the server returns; refresh them when a tool's output changes. The fixtures are not a statistical sample of callers, and they do not test the voice, the recogniser or the tools themselves: only the text model's choice. The two tools added by V-55 (`request_refund`, `leave_support_message`) have no fixtures yet.
