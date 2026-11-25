@@ -98,6 +98,27 @@ public sealed class VoiceP6SpeechTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_off_topic_redirects_in_the_history_are_not_shown_to_the_model_on_the_next_on_topic_question_V54()
+    {
+        await Choose();
+        await Post(Speech("?first=1"));
+        for (var i = 0; i < 2; i++)
+        {
+            Llm.Then(new LlmToolCallEvent(new LlmToolCall("c" + i, "off_topic", "{}")), new LlmCompleted(5, 1));
+            Llm.Then(new LlmTextDelta(VoiceScripts.OffTopicRedirect), new LlmCompleted(8, 2));     // the model says the one sentence the server gave it
+            var said = await Post(Speech(), new() { ["SpeechResult"] = "what is the weather " + i });
+            Assert.Equal(VoiceScripts.OffTopicRedirect, said.Element("Gather")!.Element("Say")!.Value);   // the caller hears it
+            Assert.Contains(Llm.Requests[^1].Messages, m => m.Role == "tool" && m.ToolCallId == "c" + i && m.Text!.Contains(VoiceScripts.OffTopicRedirect));   // and the turn it belongs to still gave it to the model
+        }
+        Llm.Then(new LlmTextDelta("We sell kitchenware."), new LlmCompleted(8, 2));
+        await Post(Speech(), new() { ["SpeechResult"] = "what do you sell" });
+        var request = Llm.Requests[^1];
+        Assert.DoesNotContain(request.Messages, m => (m.Text ?? "").Contains("I can only help with Solvelt"));      // neither redirect, in no role
+        Assert.Equal(2, request.Messages.Count(m => m.Role == "tool" && m.Text == ModelHistory.OffTopicNeutral));     // the fact stays, as a neutral note
+        Assert.Contains(request.Messages, m => m is { Role: "user", Text: "what do you sell" });
+    }
+
+    [Fact]
     public async Task An_empty_result_asks_again_twice_then_the_platform_says_goodbye_and_the_call_ends()
     {
         await Choose();
