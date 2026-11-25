@@ -130,6 +130,15 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.AccountPhoneVerifier>()
 if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBaseUrl"])) builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.InMemorySmsSender>();   // an SMS sink (the journey) makes development send over HTTP instead
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.SignalWireSmsSender>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessCatalog>(sp => new Solvelt.Marketplace.Api.Voice.InProcessCatalog(sp));
+// the pay callback the caller can ask for (decision V-60): signed tokens, the call placer (a fake in development without a SignalWire address, as for texts), the service, the dispatcher and the tool
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PayCallbackTokens>();
+if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBaseUrl"])) { builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>(); builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IOutboundCaller>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>()); }
+else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IOutboundCaller, Solvelt.Marketplace.Api.Voice.SignalWireOutboundCaller>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.PayCallbackService>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Voice.VoicePayCallbackEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Voice.VoicePayCallbackExporter>();
+if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<Solvelt.Marketplace.Api.Voice.PayCallbackDispatcher>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SchedulePayCallbackTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TransferToPersonTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.IdentifyCallerTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SetGuestNameTool>();
@@ -395,8 +404,9 @@ app.MapStaff();   // M7
 app.MapStaffBuyers();
 app.MapStaffOps();
 Solvelt.Marketplace.Api.Voice.VoiceReportEndpoints.MapStaffVoice(app);   // V
-Solvelt.Marketplace.Api.Voice.VoiceReadinessEndpoint.MapStaffVoiceReadiness(app);
-Solvelt.Marketplace.Api.Voice.VoiceSupportMessageEndpoints.MapStaffVoiceSupportMessages(app);   // V-55: messages callers left, staff only, audited   // V-51: the readiness view, staff only, audited
+Solvelt.Marketplace.Api.Voice.VoiceReadinessEndpoint.MapStaffVoiceReadiness(app);   // V-51: the readiness view, staff only, audited
+Solvelt.Marketplace.Api.Voice.VoiceSupportMessageEndpoints.MapStaffVoiceSupportMessages(app);   // V-55: messages callers left, staff only, audited
+Solvelt.Marketplace.Api.Voice.VoicePayCallbackStaff.MapStaffVoicePayCallbacks(app);   // V-60: pending pay callbacks, masked numbers, read only
 Solvelt.Marketplace.Api.Voice.VoiceDiagnosticsEndpoints.MapStaffVoiceDiagnostics(app);   // V-39: test-number diagnostics, staff only, audited
 Solvelt.Marketplace.Api.Voice.VoiceEndpoints.MapVoice(app);
 app.MapAccount();

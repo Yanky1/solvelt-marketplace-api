@@ -241,6 +241,9 @@ public sealed class VoiceCallState
     public bool ConfirmGuestEmail() { lock (_gate) { if (GuestEmailDraft is null) return false; GuestEmail = GuestEmailDraft; GuestEmailDraft = null; Version++; OrderChangedLocked(); return true; } }
     public int CountPaymentStart() { lock (_gate) return ++PaymentStarts; }
     public void SetPayment(PaymentAttempt? attempt) { lock (_gate) Payment = attempt; }
+    /// <summary>Set only on the OUTBOUND call of a pay callback (decision V-60): the keypad payment step ends the call instead of going back to the assistant.</summary>
+    public Guid? PayCallbackId { get; private set; }
+    public void SetPayCallback(Guid id) { lock (_gate) PayCallbackId = id; }
     public void SetOrderPlaced(string number) { lock (_gate) { OrderNumber = number; Task = "placed"; } }
 
     public void Connected(DateTimeOffset now) { lock (_gate) { Connections++; LastTouched = now; } }

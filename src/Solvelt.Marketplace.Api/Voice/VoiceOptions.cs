@@ -68,6 +68,8 @@ public sealed class VoiceOptions
     public int CallRetentionDays { get; set; } = 400;
     /// <summary>How long a message a caller left for staff is kept (V-55); 1 to 400 days, default 90. It is also deleted with the account.</summary>
     public int SupportMessageRetentionDays { get; set; } = 90;
+    /// <summary>The pay callback the caller can ask for (decision V-60). On by default but only ever offered when the telephone payment provider and the SignalWire call settings are all there.</summary>
+    public VoicePayCallbackOptions PayCallback { get; set; } = new();
     /// <summary>The test-line menu to compare voice pipelines (decision V-19). Off by default.</summary>
     public VoicePipelineMenuOptions PipelineMenu { get; set; } = new();
     /// <summary>Which vendors run options p2 to p5 and the text model they share (decision V-22). Nothing is on by default.</summary>
@@ -90,6 +92,35 @@ public sealed class VoiceOptions
     public NBestOptions NBest { get; set; } = new();
     /// <summary>The recorded recognition test set (decision V-46): where the audio is kept and whether the owner's test numbers may record it. Off by default.</summary>
     public Solvelt.Marketplace.Api.Voice.TestSet.TestSetOptions TestSet { get; set; } = new();
+}
+
+/// <summary><c>Voice:PayCallback</c> (decision V-60): the callback the caller asks for to pay a placed, unpaid order on the keypad.</summary>
+public sealed class VoicePayCallbackOptions
+{
+    /// <summary>Switch off to remove the feature without touching anything else.</summary>
+    public bool Enabled { get; set; } = true;
+    /// <summary>Minutes the callback (and its token) lives from the moment the caller asks. The brief: 30.</summary>
+    public int ExpiryMinutes { get; set; } = 30;
+    /// <summary>Seconds after the request before the platform dials: the caller's own call has to end first.</summary>
+    public int DialDelaySeconds { get; set; } = 45;
+    /// <summary>Seconds SignalWire lets the phone ring (the <c>Timeout</c> of the create-call request).</summary>
+    public int RingSeconds { get; set; } = 30;
+    /// <summary>Callbacks one number may be given in 24 hours, whatever the orders: the feature cannot be used to ring someone over and over.</summary>
+    public int MaxPerNumberPerDay { get; set; } = 3;
+    /// <summary>Days a finished callback is kept (the number is personal data).</summary>
+    public int RetentionDays { get; set; } = 90;
+    /// <summary>Seconds between looks for a callback that is due.</summary>
+    public int PollSeconds { get; set; } = 5;
+
+    public IEnumerable<string> Problems()
+    {
+        if (ExpiryMinutes is < 5 or > 120) yield return "Voice:PayCallback:ExpiryMinutes must be 5 to 120.";
+        if (DialDelaySeconds is < 0 or > 600) yield return "Voice:PayCallback:DialDelaySeconds must be 0 to 600.";
+        if (RingSeconds is < 10 or > 60) yield return "Voice:PayCallback:RingSeconds must be 10 to 60.";
+        if (MaxPerNumberPerDay is < 1 or > 10) yield return "Voice:PayCallback:MaxPerNumberPerDay must be 1 to 10.";
+        if (RetentionDays is < 1 or > 400) yield return "Voice:PayCallback:RetentionDays must be 1 to 400.";
+        if (PollSeconds is < 1 or > 300) yield return "Voice:PayCallback:PollSeconds must be 1 to 300.";
+    }
 }
 
 public sealed class SignalWireOptions
@@ -127,6 +158,7 @@ public static class VoiceConfig
         else if (v.PhoneCodeKey == v.StreamTokenKey || v.PhoneCodeKey == s.SigningKey || v.PhoneCodeKey == s.ApiToken) p.Add("Voice:PhoneCodeKey must differ from the stream token key and every SignalWire secret (one key per purpose).");
         if (string.IsNullOrWhiteSpace(v.CallerHashKey) || v.CallerHashKey.Length < 32) p.Add("Voice:CallerHashKey (env Voice__CallerHashKey) must be at least 32 characters when Voice:Enabled.");
         else if (v.CallerHashKey == v.PhoneCodeKey || v.CallerHashKey == v.StreamTokenKey || v.CallerHashKey == s.SigningKey || v.CallerHashKey == s.ApiToken) p.Add("Voice:CallerHashKey must differ from every other key (one key per purpose).");
+        p.AddRange(v.PayCallback.Problems());
         if (!new[] { "none", "fake", "sola" }.Contains(v.PhonePaymentProvider)) p.Add("Voice:PhonePaymentProvider must be none, fake or sola.");
         // The fake is for development and tests only. Sola is allowed everywhere (owner decision, 2026-11-23: "everything up and running", the key supplied is a test key); a key that names itself live is refused (SolaOptions.Problems).
         if (!devLike && v.PhonePaymentProvider == "fake") p.Add("Voice:PhonePaymentProvider=fake is for development and tests only.");

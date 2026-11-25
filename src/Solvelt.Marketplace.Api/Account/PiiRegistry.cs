@@ -26,6 +26,7 @@ public static class PiiRegistry
         new("reviews", "M6", [typeof(Review), typeof(ReviewVote), typeof(ReviewReport), typeof(ReviewPhoto), typeof(ReviewPhotoData)], typeof(Reviews.ReviewsAccountEraser)),   // decision M6-04
         new("product-questions", "M6", [typeof(ProductQuestion)], typeof(Reviews.QuestionsAccountEraser)),   // decision M6-06
         new("voice-support-messages", "V", [typeof(VoiceSupportMessage)], typeof(Voice.VoiceSupportMessageEraser)),   // decision V-55: text a caller left for staff, with the account id and verified number
+        new("voice-pay-callbacks", "V", [typeof(VoicePayCallback), typeof(VoicePayCallbackEvent)], typeof(Voice.VoicePayCallbackEraser)),   // decision V-60: the verified number a caller asked to be called back on, with the order and the account id
         new("bookings", "M4", [typeof(Booking), typeof(BuyerQuote)], typeof(Services.BookingsAccountEraser)),
     ];
 
