@@ -3629,6 +3629,46 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                     b.ToTable("voice_payment_attempts", (string)null);
                 });
 
+            modelBuilder.Entity("Solvelt.Marketplace.Api.Data.VoiceSupportMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("HandledAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("HandledBy")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Phone")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(12)
+                        .HasColumnType("character varying(12)");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId");
+
+                    b.HasIndex("Status", "CreatedAt");
+
+                    b.ToTable("voice_support_messages", (string)null);
+                });
+
             modelBuilder.Entity("Solvelt.Marketplace.Api.Data.WebAuthnChallenge", b =>
                 {
                     b.Property<Guid>("Id")

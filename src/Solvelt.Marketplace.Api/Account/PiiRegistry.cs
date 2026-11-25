@@ -25,6 +25,7 @@ public static class PiiRegistry
         new("wishlists-and-recently-viewed", "M6", [typeof(Wishlist), typeof(RecentlyViewedItem)], typeof(Lists.ListsAccountEraser)),   // decision M6-01; the items are children of a list
         new("reviews", "M6", [typeof(Review), typeof(ReviewVote), typeof(ReviewReport), typeof(ReviewPhoto), typeof(ReviewPhotoData)], typeof(Reviews.ReviewsAccountEraser)),   // decision M6-04
         new("product-questions", "M6", [typeof(ProductQuestion)], typeof(Reviews.QuestionsAccountEraser)),   // decision M6-06
+        new("voice-support-messages", "V", [typeof(VoiceSupportMessage)], typeof(Voice.VoiceSupportMessageEraser)),   // decision V-55: text a caller left for staff, with the account id and verified number
         new("bookings", "M4", [typeof(Booking), typeof(BuyerQuote)], typeof(Services.BookingsAccountEraser)),
     ];
 

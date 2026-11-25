@@ -1254,6 +1254,24 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "voice_support_messages",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: true),
+                    Phone = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: true),
+                    Text = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Status = table.Column<string>(type: "character varying(12)", maxLength: 12, nullable: false),
+                    HandledAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    HandledBy = table.Column<Guid>(type: "uuid", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_voice_support_messages", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "webauthn_challenges",
                 columns: table => new
                 {
@@ -2256,6 +2274,16 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
+                name: "IX_voice_support_messages_AccountId",
+                table: "voice_support_messages",
+                column: "AccountId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_support_messages_Status_CreatedAt",
+                table: "voice_support_messages",
+                columns: new[] { "Status", "CreatedAt" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_webauthn_challenges_AccountId",
                 table: "webauthn_challenges",
                 column: "AccountId");
@@ -2473,6 +2501,9 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "voice_payment_attempts");
+
+            migrationBuilder.DropTable(
+                name: "voice_support_messages");
 
             migrationBuilder.DropTable(
                 name: "webauthn_challenges");

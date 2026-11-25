@@ -166,7 +166,7 @@ public sealed class DataExportReviewTests : OrderFlowBase
         var res = await Export();
         var text = await res.Content.ReadAsStringAsync();
         var d = JsonDocument.Parse(text).RootElement.GetProperty("sections");
-        Assert.Equal(new[] { "account", "bookings", "carts", "cancellations-and-returns", "messages", "notifications", "orders", "passkeys", "questions", "recently-viewed", "reviews", "tracking", "wishlists" }.Order().ToArray(), d.EnumerateObject().Select(p => p.Name).Order().ToArray());
+        Assert.Equal(new[] { "account", "bookings", "carts", "cancellations-and-returns", "messages", "notifications", "orders", "passkeys", "questions", "recently-viewed", "reviews", "support-messages", "tracking", "wishlists" }.Order().ToArray(), d.EnumerateObject().Select(p => p.Name).Order().ToArray());
 
         var cart = Assert.Single(d.GetProperty("carts").GetProperty("carts").EnumerateArray());
         Assert.Equal(3, Assert.Single(cart.GetProperty("lines").EnumerateArray()).GetProperty("quantity").GetInt32());
@@ -235,6 +235,7 @@ public sealed class DataExportReviewTests : OrderFlowBase
         ["messaging"] = ["messages", "notifications"],
         ["orders-and-carts"] = ["orders", "carts", "tracking"],
         ["order-cancellations-and-returns"] = ["cancellations-and-returns"],
+        ["voice-support-messages"] = ["support-messages"],
         ["bookings"] = ["bookings"],
         ["wishlists-and-recently-viewed"] = ["wishlists", "recently-viewed"],
         ["reviews"] = ["reviews"],

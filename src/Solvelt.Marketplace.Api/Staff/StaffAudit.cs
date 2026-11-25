@@ -48,7 +48,7 @@ public static class StaffAudit
 /// <summary>The hourly cap on lookups (security review LOW 7): counted from the audit log under the staff row's lock, so parallel requests count each other.</summary>
 public static class StaffLookupCap
 {
-    public static readonly string[] Actions = ["buyer.lookup", "buyer.lookup_miss", "order.lookup", "order.lookup_miss", "buyer.orders"];
+    public static readonly string[] Actions = ["buyer.lookup", "buyer.lookup_miss", "order.lookup", "order.lookup_miss", "buyer.orders", "voice.support_messages_list"];
 
     /// <summary>True when the member has already used their hour. Call inside the transaction that will write the audit row.</summary>
     public static async Task<bool> ReachedAsync(MarketplaceDb db, StaffPrincipal who, DateTimeOffset now, int perHour, CancellationToken ct)

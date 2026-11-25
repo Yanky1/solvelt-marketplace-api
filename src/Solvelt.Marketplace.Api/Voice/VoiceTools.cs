@@ -51,6 +51,9 @@ public sealed class VoiceToolRunner(IServiceScopeFactory scopes)
 /// <summary>Asks for a person. Offered only inside support hours and when a support number is configured; otherwise the model is told the truth and offers help another way.</summary>
 public static class VoiceTransfer
 {
+    /// <summary>A person can be reached now: a support number is set and it is inside support hours.</summary>
+    public static bool IsAvailable(VoiceOptions o, DateTimeOffset now) => !string.IsNullOrWhiteSpace(o.SupportNumber) && SupportHours.IsOpen(o, now);
+
     public static async Task<bool> RequestAsync(VoiceCallStore store, IOptions<VoiceOptions> options, TimeProvider time, Guid callId, CancellationToken ct)
     {
         var o = options.Value;
@@ -74,7 +77,7 @@ public sealed class TransferToPersonTool(VoiceCallStore store, IOptions<VoiceOpt
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
         => await VoiceTransfer.RequestAsync(store, options, time, ctx.CallId, ct)
             ? new("""{"status":"transferring","instruction":"Tell the caller briefly that you are connecting them to a person now."}""", EndCall: true)
-            : new("""{"status":"unavailable","instruction":"Tell the caller no person is available right now, and that they can order on the web site or call back in business hours."}""");
+            : new("""{"status":"unavailable","instruction":"Tell the caller no person is available right now. Offer to take a message for the team (leave_support_message, for a caller who is verified), or they can order on the web site or call back in business hours."}""");
 }
 
 public static class VoiceScripts

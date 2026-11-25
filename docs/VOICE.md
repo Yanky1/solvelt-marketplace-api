@@ -368,3 +368,10 @@ Nothing in this system has yet run against the real SignalWire, OpenAI, Anthropi
 | 12 | After the calls, open the diagnostics for a call (`POST /api/v1/staff/voice/diagnostics/calls/{callId}` with a reason) or export (`POST .../export`). | What each recogniser heard per turn, with the delays; only for calls from your test numbers. | `diagnostics` in the readiness view; `Voice:Diagnostics:Enabled`. |
 
 General: the dead-letter and outbox lists in the staff area show anything that could not be sent to the portal or to Sola; every staff action asks for a reason and is audited. To switch the whole line off: `Voice:Enabled=false` and restart.
+
+## 20. Returns and messages for staff by phone (decision V-55)
+
+- **`request_refund` (a return request).** An account caller verified in this call asks to send items back for a refund. The assistant asks which order and why (damaged, not as described, wrong item, no longer needed, other); the SERVER picks the items from the order, reads the request back and asks for a spoken yes (the same step as a cancellation). Only a yes sends it, through the website's own return request: the seller decides and the refund follows if they approve (they email the answer). An order that has not shipped is cancelled with `cancel_order` instead.
+- **`leave_support_message` (when nobody can be reached).** After `transfer_to_person` says no person is available, a verified caller (an account, or a number proven by the text code) can leave a short text message (up to 500 characters, three a call; never a card number or PIN: twelve digits in a row are refused). It is kept 90 days (`Voice:SupportMessageRetentionDays`, 1 to 400) and is deleted with the account; the buyer's data export lists their messages.
+- **Staff.** `POST /api/v1/staff/voice/support-messages` (support, finance, admin; a reason; the number masked) lists new messages (`status`: new, handled, all); `POST .../{id}/handled` marks one done; `POST .../{id}/reveal` (support, admin) shows the full number. Every action is audited and the audit never holds the text.
+

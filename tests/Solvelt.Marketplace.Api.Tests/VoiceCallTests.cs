@@ -427,7 +427,12 @@ public class VoiceCallTests
         await phone.Start();
         var s = (await fake.Wait("session.update"))["session"]!;
         var names = s["tools"]!.AsArray().Select(t => t!["name"]!.GetValue<string>()).ToList();
-        Assert.DoesNotContain(names, n => n.Contains("refund", StringComparison.OrdinalIgnoreCase) || n.Contains("price", StringComparison.OrdinalIgnoreCase) || n.Contains("discount", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(names, n => n.Contains("price", StringComparison.OrdinalIgnoreCase) || n.Contains("discount", StringComparison.OrdinalIgnoreCase));
+        // V-55: the one tool with "refund" in its name only STARTS a return request (read back by the server, confirmed by the caller, decided by the seller): it cannot give one
+        Assert.Equal(["request_refund"], names.Where(n => n.Contains("refund", StringComparison.OrdinalIgnoreCase)).ToArray());
+        var refundTool = s["tools"]!.AsArray().Single(t => t!["name"]!.GetValue<string>() == "request_refund")!;
+        Assert.Contains("return request", refundTool["description"]!.GetValue<string>());
+        Assert.Contains("The seller decides", refundTool["description"]!.GetValue<string>());
         Assert.Contains("cannot change a price", s["instructions"]!.GetValue<string>());
     }
 

@@ -160,3 +160,37 @@ internal sealed class VoiceDiagnosticTurnConfiguration : IEntityTypeConfiguratio
         b.HasIndex(t => t.At);
     }
 }
+
+/// <summary>
+/// A text message a caller left for staff by phone when no person could be reached (decision V-55). PERSONAL DATA (PII registry module "voice-support-messages"): free text the caller chose to say, plus who left it, as
+/// the account id of a caller verified in that call and/or the phone number verified by text code in that call (E.164; never the caller-ID alone). Text only, at most 500 characters, no audio. Deleted with the account
+/// (<c>VoiceSupportMessageEraser</c>) and after <c>Voice:SupportMessageRetentionDays</c> (default 90) whatever happens. Read only by staff with <c>buyers.view</c> (support, finance, admin), every look audited; the full number
+/// only with <c>buyers.reveal</c>.
+/// </summary>
+public sealed class VoiceSupportMessage
+{
+    public Guid Id { get; set; }
+    public Guid? AccountId { get; set; }
+    public string? Phone { get; set; }
+    public string Text { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+    /// <summary><c>new</c> or <c>handled</c>.</summary>
+    public string Status { get; set; } = "new";
+    public DateTimeOffset? HandledAt { get; set; }
+    public Guid? HandledBy { get; set; }
+}
+
+internal sealed class VoiceSupportMessageConfiguration : IEntityTypeConfiguration<VoiceSupportMessage>
+{
+    public void Configure(EntityTypeBuilder<VoiceSupportMessage> b)
+    {
+        b.ToTable("voice_support_messages");
+        b.HasKey(m => m.Id);
+        b.Property(m => m.Id).ValueGeneratedNever();
+        b.Property(m => m.Phone).HasMaxLength(20);
+        b.Property(m => m.Text).HasMaxLength(500).IsRequired();
+        b.Property(m => m.Status).HasMaxLength(12).IsRequired();
+        b.HasIndex(m => new { m.Status, m.CreatedAt });
+        b.HasIndex(m => m.AccountId);
+    }
+}
