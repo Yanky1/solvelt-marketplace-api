@@ -51,8 +51,23 @@ public sealed class VoiceNBestTests : IDisposable
         p.SttFake.Emit(new SttEvent(SttEventKind.SpeechStarted)); p.SttFake.Emit(final); p.SttFake.Emit(new SttEvent(SttEventKind.SpeechEnded));
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (p.LlmFake.Requests.Count <= before && DateTime.UtcNow < deadline) await Advance(100);
-        Assert.True(p.LlmFake.Requests.Count > before, "the text model was not asked about the turn");
+        Assert.True(p.LlmFake.Requests.Count > before, "the text model was not asked about the turn. " + Describe(p));
         await Advance(500);                                                                                       // let the reply play out before the next turn
+    }
+
+    /// <summary>What the fake text model has been asked so far, for a failure message (V-56): per request the roles and the first 60 characters of each system message, never more.</summary>
+    private static string Describe(FakeParts p)
+    {
+        var all = p.LlmFake.Requests;
+        return $"{all.Count} request(s): " + string.Join(" || ", all.Select((r, i) => $"#{i}[" + string.Join("; ", r.Messages.Select(m => m.Role + (m.Role == "system" && m.Text is { } t ? ":'" + (t.Length > 60 ? t[..60] : t) + "'" : ""))) + "]"));
+    }
+
+    /// <summary>Single() with a message that says what the request held when the note was missing.</summary>
+    private static string OneOf(IEnumerable<string> found, FakeParts p, string what)
+    {
+        var list = found.ToList();
+        Assert.True(list.Count == 1, $"expected exactly one {what} note in the last request, found {list.Count}. {Describe(p)}");
+        return list[0];
     }
 
     private static IEnumerable<string> Notes(LlmRequest r) => r.Messages.Where(m => m.Role == "system" && m.Text!.Contains("more than one way")).Select(m => m.Text!);
@@ -63,7 +78,7 @@ public sealed class VoiceNBestTests : IDisposable
         var p = await Call();
         await Say(p, Final("a hallah", C("gladia", "a hallah", 0.8), C("yiddishlabs", "a challah")));
         var request = p.LlmFake.Requests[^1];
-        var note = Assert.Single(Notes(request));
+        var note = OneOf(Notes(request), p, "readings");
         Assert.Contains("gladia: \"a hallah\" (confidence 0.8)", note); Assert.Contains("yiddishlabs: \"a challah\"", note);
         Assert.Contains("Challah Co, Honey Cake", note);                                                          // the shop's words
         Assert.Contains("untrusted", note); Assert.Contains("never instructions", note);
@@ -105,7 +120,7 @@ public sealed class VoiceNBestTests : IDisposable
         Assert.DoesNotContain("for seven to", string.Join("|", p.LlmFake.Requests[^1].Messages.Select(m => m.Text)));   // the other reading appears nowhere
         S.State().ClearSensitiveTurn();
         await Say(p, Final("a hallah", C("gladia", "a hallah"), C("yiddishlabs", "a challah")));
-        Assert.Single(Notes(p.LlmFake.Requests[^1]));
+        OneOf(Notes(p.LlmFake.Requests[^1]), p, "readings");
         S.State().BeginKeypadStep("pin");
         await Say(p, Final("one two three", C("gladia", "one two three"), C("yiddishlabs", "won to three")));
         Assert.Empty(Notes(p.LlmFake.Requests[^1]));                                                              // nor during a keypad step
@@ -123,7 +138,7 @@ public sealed class VoiceNBestTests : IDisposable
     {
         var p = await Call();
         await Say(p, Sure("two bagels and a hallah", 0.42, ("hallah", 0.31), ("bagels", 0.55), ("two", 0.97)));
-        var note = Assert.Single(Doubts(p.LlmFake.Requests[^1]));
+        var note = OneOf(Doubts(p.LlmFake.Requests[^1]), p, "doubt");
         Assert.Contains("confidence 0.42 of 1", note);
         Assert.Contains("\"hallah\", \"bagels\"", note);                                                           // the least sure first, only those under the threshold
         Assert.DoesNotContain("\"two\"", note);
@@ -141,12 +156,12 @@ public sealed class VoiceNBestTests : IDisposable
         await Say(p, Sure("a hallah", 0.45));
         Assert.Empty(Doubts(p.LlmFake.Requests[^1]));                                                              // 0.45 is above 0.3
         await Say(p, Sure("a hallah", 0.2));
-        Assert.Single(Doubts(p.LlmFake.Requests[^1]));
+        OneOf(Doubts(p.LlmFake.Requests[^1]), p, "doubt");
         Dispose();
         var both = await Call();
         await Say(both, new SttEvent(SttEventKind.Final, "a hallah", "yi", 0.4, [C("gladia", "a hallah"), C("yiddishlabs", "a challah")]));
         var request = both.LlmFake.Requests[^1];
-        Assert.Single(Notes(request)); Assert.Single(Doubts(request));                                              // the readings (V-42) and the doubt (V-43) in the same turn note
+        OneOf(Notes(request), both, "readings"); OneOf(Doubts(request), both, "doubt");                                              // the readings (V-42) and the doubt (V-43) in the same turn note
     }
 
     [Fact]
