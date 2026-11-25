@@ -183,6 +183,8 @@ public sealed class VoiceCallStore(IServiceScopeFactory scopes, IOptions<VoiceOp
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MarketplaceDb>();
         await db.VoicePaymentAttempts.Where(a => a.CreatedAt < cutoff).ExecuteDeleteAsync(ct);   // payment attempts follow the call rows
+        var messageCutoff = time.GetUtcNow().AddDays(-Math.Clamp(options.Value.SupportMessageRetentionDays, 1, 400));
+        await db.VoiceSupportMessages.Where(m => m.CreatedAt < messageCutoff).ExecuteDeleteAsync(ct);   // messages left for staff (PII, V-55): their own, shorter retention
         return await db.VoiceCalls.Where(c => c.StartedAt < cutoff).ExecuteDeleteAsync(ct);
     }
 }

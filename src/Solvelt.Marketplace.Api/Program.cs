@@ -164,6 +164,9 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Mar
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.TextOrderSummaryTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CancelOrderTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.RequestRefundTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.LeaveSupportMessageTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountEraser, Solvelt.Marketplace.Api.Voice.VoiceSupportMessageEraser>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Account.IAccountDataExporter, Solvelt.Marketplace.Api.Voice.VoiceSupportMessageExporter>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.PhoneAccountService>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.OffTopicTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CreateAccountTool>();
@@ -392,7 +395,8 @@ app.MapStaff();   // M7
 app.MapStaffBuyers();
 app.MapStaffOps();
 Solvelt.Marketplace.Api.Voice.VoiceReportEndpoints.MapStaffVoice(app);   // V
-Solvelt.Marketplace.Api.Voice.VoiceReadinessEndpoint.MapStaffVoiceReadiness(app);   // V-51: the readiness view, staff only, audited
+Solvelt.Marketplace.Api.Voice.VoiceReadinessEndpoint.MapStaffVoiceReadiness(app);
+Solvelt.Marketplace.Api.Voice.VoiceSupportMessageEndpoints.MapStaffVoiceSupportMessages(app);   // V-55: messages callers left, staff only, audited   // V-51: the readiness view, staff only, audited
 Solvelt.Marketplace.Api.Voice.VoiceDiagnosticsEndpoints.MapStaffVoiceDiagnostics(app);   // V-39: test-number diagnostics, staff only, audited
 Solvelt.Marketplace.Api.Voice.VoiceEndpoints.MapVoice(app);
 app.MapAccount();

@@ -87,6 +87,8 @@ public sealed class VoiceCallState
     public int ReturnStarts { get; private set; }
     public void SetReturn(PendingReturn? r) { lock (_gate) Return = r; }
     public int CountReturnStart() { lock (_gate) return ++ReturnStarts; }
+    public int SupportMessages { get; private set; }
+    public int CountSupportMessage() { lock (_gate) return ++SupportMessages; }
     /// <summary>The account change waiting for the caller's yes (create the account, change the name, an address, or the phone number).</summary>
     public AccountChangeRequest? AccountChange { get; private set; }
     public int AccountChangeStarts { get; private set; }

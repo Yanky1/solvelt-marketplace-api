@@ -66,6 +66,8 @@ public sealed class VoiceOptions
     public int MaxSmsPerHour { get; set; } = 300;
     /// <summary>Days a call's metrics row is kept (no audio, no transcript, only a masked number).</summary>
     public int CallRetentionDays { get; set; } = 400;
+    /// <summary>How long a message a caller left for staff is kept (V-55); 1 to 400 days, default 90. It is also deleted with the account.</summary>
+    public int SupportMessageRetentionDays { get; set; } = 90;
     /// <summary>The test-line menu to compare voice pipelines (decision V-19). Off by default.</summary>
     public VoicePipelineMenuOptions PipelineMenu { get; set; } = new();
     /// <summary>Which vendors run options p2 to p5 and the text model they share (decision V-22). Nothing is on by default.</summary>
@@ -150,6 +152,7 @@ public static class VoiceConfig
             if (!devLike) p.Add("SignalWire:ApiBaseUrl is for development and the journey only (an SMS sink): it must be empty in production.");
             else if (!Uri.TryCreate(s.ApiBaseUrl, UriKind.Absolute, out var sink) || sink.Scheme is not ("http" or "https")) p.Add("SignalWire:ApiBaseUrl must be an absolute http(s) URL.");
         }
+        if (v.SupportMessageRetentionDays is < 1 or > 400) p.Add("Voice:SupportMessageRetentionDays must be between 1 and 400.");
         if (v.MaxOffTopicTurns is < 1 or > 10) p.Add("Voice:MaxOffTopicTurns must be between 1 and 10.");
         if (!new[] { "full", "mini", "split" }.Contains(v.ModelMode)) p.Add("Voice:ModelMode must be full, mini or split.");
         if (v.MiniPercent is < 0 or > 100) p.Add("Voice:MiniPercent must be between 0 and 100.");
