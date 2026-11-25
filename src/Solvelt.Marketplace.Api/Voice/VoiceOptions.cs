@@ -101,6 +101,10 @@ public sealed class VoicePayCallbackOptions
     public bool Enabled { get; set; } = true;
     /// <summary>Minutes the callback (and its token) lives from the moment the caller asks. The brief: 30.</summary>
     public int ExpiryMinutes { get; set; } = 30;
+    /// <summary>Minutes AFTER the 30 the token and the open steps (the yes, the keypad payment, the end-of-call word) still work for a call that was answered inside the window, so a payment that runs a little long is recorded, not lost.</summary>
+    public int GraceMinutes { get; set; } = 20;
+    /// <summary>A call is not placed when less than this many minutes of the window are left (it would be answered too late to finish): the callback expires instead.</summary>
+    public int MinMinutesLeftToDial { get; set; } = 5;
     /// <summary>Seconds after the request before the platform dials: the caller's own call has to end first.</summary>
     public int DialDelaySeconds { get; set; } = 45;
     /// <summary>Seconds SignalWire lets the phone ring (the <c>Timeout</c> of the create-call request).</summary>
@@ -115,6 +119,8 @@ public sealed class VoicePayCallbackOptions
     public IEnumerable<string> Problems()
     {
         if (ExpiryMinutes is < 5 or > 120) yield return "Voice:PayCallback:ExpiryMinutes must be 5 to 120.";
+        if (GraceMinutes is < 5 or > 60) yield return "Voice:PayCallback:GraceMinutes must be 5 to 60.";
+        if (MinMinutesLeftToDial is < 1 or > 20) yield return "Voice:PayCallback:MinMinutesLeftToDial must be 1 to 20.";
         if (DialDelaySeconds is < 0 or > 600) yield return "Voice:PayCallback:DialDelaySeconds must be 0 to 600.";
         if (RingSeconds is < 10 or > 60) yield return "Voice:PayCallback:RingSeconds must be 10 to 60.";
         if (MaxPerNumberPerDay is < 1 or > 10) yield return "Voice:PayCallback:MaxPerNumberPerDay must be 1 to 10.";

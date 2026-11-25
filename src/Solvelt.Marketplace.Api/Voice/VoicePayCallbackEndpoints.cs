@@ -85,7 +85,7 @@ public static class VoicePayCallbackEndpoints
         var call = await store.FindBySidAsync(sid, ct);
         var state = call is null || call.EndedAt is not null ? null : states.Find(call.Id);
         if (call is null || state is null || state.PayCallbackId != row.Id) return Neutral();
-        if (time.GetUtcNow() > row.ExpiresAt) { await svc.MoveAsync(row.Id, [PayCallbackStatus.Answered], "expired", "time_ran_out", ct); return Neutral(); }
+        if (time.GetUtcNow() > svc.GraceEnd(row)) { await svc.MoveAsync(row.Id, [PayCallbackStatus.Answered], "expired", "time_ran_out", ct); return Neutral(); }   // answered inside the window: the yes may come within the grace
         form.TryGetValue("Digits", out var typed); form.TryGetValue("SpeechResult", out var spoken);
         var answer = ReadBackAnswer.Parse(typed, spoken);
         if (answer == ConfirmChoice.Unclear)
