@@ -160,3 +160,81 @@ internal sealed class VoiceDiagnosticTurnConfiguration : IEntityTypeConfiguratio
         b.HasIndex(t => t.At);
     }
 }
+
+
+/// <summary>
+/// A callback the caller ASKED for (decision V-60): the platform rings the caller's verified number to take the card on the keypad for an order that is placed and not yet paid. One active row per order (a unique index), one
+/// signed token, 30 minutes. The number is personal data: the PII registry, the eraser, the export and the retention all know this table.
+/// </summary>
+public sealed class VoicePayCallback
+{
+    public Guid Id { get; set; }
+    public string OrderNumber { get; set; } = "";
+    public Guid? AccountId { get; set; }
+    /// <summary>The caller's verified number in E.164: the only number this row can ever dial.</summary>
+    public string Phone { get; set; } = "";
+    /// <summary>The call in which the caller asked.</summary>
+    public Guid RequestedByCallId { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    /// <summary>Not before this (the caller's own call has to end first).</summary>
+    public DateTimeOffset DueAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    /// <summary><c>scheduled</c>, <c>dialing</c>, <c>answered</c>, <c>paying</c> (active) or <c>paid</c>, <c>declined</c>, <c>unconfirmed</c>, <c>machine</c>, <c>wrong_number</c>, <c>no_answer</c>, <c>busy</c>, <c>failed</c>, <c>dial_failed</c>, <c>not_payable</c>, <c>ended_unpaid</c>, <c>expired</c>.</summary>
+    public string Status { get; set; } = PayCallbackStatus.Scheduled;
+    public string? CallSid { get; set; }
+    /// <summary>The call row of the outbound call itself, once it was answered.</summary>
+    public Guid? CallId { get; set; }
+    public Guid? AttemptId { get; set; }
+    public DateTimeOffset? DialedAt { get; set; }
+    public DateTimeOffset? EndedAt { get; set; }
+}
+
+public static class PayCallbackStatus
+{
+    public const string Scheduled = "scheduled", Dialing = "dialing", Answered = "answered", Paying = "paying";
+    public static readonly string[] Active = [Scheduled, Dialing, Answered, Paying];
+    public static bool IsActive(string status) => Array.IndexOf(Active, status) >= 0;
+}
+
+/// <summary>The audit trail of one callback: when it changed state and the fixed word for why. Never a number, a name or a vendor's text.</summary>
+public sealed class VoicePayCallbackEvent
+{
+    public Guid Id { get; set; }
+    public Guid CallbackId { get; set; }
+    public DateTimeOffset At { get; set; }
+    public string Status { get; set; } = "";
+    public string Detail { get; set; } = "";
+}
+
+internal sealed class VoicePayCallbackConfiguration : IEntityTypeConfiguration<VoicePayCallback>
+{
+    public void Configure(EntityTypeBuilder<VoicePayCallback> b)
+    {
+        b.ToTable("voice_pay_callbacks");
+        b.HasKey(c => c.Id);
+        b.Property(c => c.Id).ValueGeneratedNever();
+        b.Property(c => c.OrderNumber).HasMaxLength(40).IsRequired();
+        b.Property(c => c.Phone).HasMaxLength(20).IsRequired();
+        b.Property(c => c.Status).HasMaxLength(20).IsRequired();
+        b.Property(c => c.CallSid).HasMaxLength(64);
+        b.HasIndex(c => c.OrderNumber).IsUnique().HasFilter("\"Status\" IN ('scheduled','dialing','answered','paying')");   // at most ONE active callback per order, whatever races
+        b.HasIndex(c => c.AccountId);
+        b.HasIndex(c => c.Phone);
+        b.HasIndex(c => c.CreatedAt);
+        b.HasIndex(c => c.CallSid);
+    }
+}
+
+internal sealed class VoicePayCallbackEventConfiguration : IEntityTypeConfiguration<VoicePayCallbackEvent>
+{
+    public void Configure(EntityTypeBuilder<VoicePayCallbackEvent> b)
+    {
+        b.ToTable("voice_pay_callback_events");
+        b.HasKey(e => e.Id);
+        b.Property(e => e.Id).ValueGeneratedNever();
+        b.Property(e => e.Status).HasMaxLength(20).IsRequired();
+        b.Property(e => e.Detail).HasMaxLength(60).IsRequired();
+        b.HasIndex(e => e.CallbackId);
+        b.HasIndex(e => e.At);
+    }
+}

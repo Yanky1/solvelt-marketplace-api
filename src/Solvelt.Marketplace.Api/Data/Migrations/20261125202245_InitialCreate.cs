@@ -1234,6 +1234,45 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "voice_pay_callback_events",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    CallbackId = table.Column<Guid>(type: "uuid", nullable: false),
+                    At = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Status = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    Detail = table.Column<string>(type: "character varying(60)", maxLength: 60, nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_voice_pay_callback_events", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "voice_pay_callbacks",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    OrderNumber = table.Column<string>(type: "character varying(40)", maxLength: 40, nullable: false),
+                    AccountId = table.Column<Guid>(type: "uuid", nullable: true),
+                    Phone = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    RequestedByCallId = table.Column<Guid>(type: "uuid", nullable: false),
+                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    DueAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    Status = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false),
+                    CallSid = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: true),
+                    CallId = table.Column<Guid>(type: "uuid", nullable: true),
+                    AttemptId = table.Column<Guid>(type: "uuid", nullable: true),
+                    DialedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    EndedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_voice_pay_callbacks", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "voice_payment_attempts",
                 columns: table => new
                 {
@@ -2240,6 +2279,43 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
                 columns: new[] { "CallId", "Turn" });
 
             migrationBuilder.CreateIndex(
+                name: "IX_voice_pay_callback_events_At",
+                table: "voice_pay_callback_events",
+                column: "At");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_pay_callback_events_CallbackId",
+                table: "voice_pay_callback_events",
+                column: "CallbackId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_pay_callbacks_AccountId",
+                table: "voice_pay_callbacks",
+                column: "AccountId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_pay_callbacks_CallSid",
+                table: "voice_pay_callbacks",
+                column: "CallSid");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_pay_callbacks_CreatedAt",
+                table: "voice_pay_callbacks",
+                column: "CreatedAt");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_pay_callbacks_OrderNumber",
+                table: "voice_pay_callbacks",
+                column: "OrderNumber",
+                unique: true,
+                filter: "\"Status\" IN ('scheduled','dialing','answered','paying')");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_voice_pay_callbacks_Phone",
+                table: "voice_pay_callbacks",
+                column: "Phone");
+
+            migrationBuilder.CreateIndex(
                 name: "IX_voice_payment_attempts_CreatedAt",
                 table: "voice_payment_attempts",
                 column: "CreatedAt");
@@ -2470,6 +2546,12 @@ namespace Solvelt.Marketplace.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "voice_diagnostic_turns");
+
+            migrationBuilder.DropTable(
+                name: "voice_pay_callback_events");
+
+            migrationBuilder.DropTable(
+                name: "voice_pay_callbacks");
 
             migrationBuilder.DropTable(
                 name: "voice_payment_attempts");

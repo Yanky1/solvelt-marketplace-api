@@ -23,6 +23,7 @@ public static class VoiceEndpoints
         app.MapPost(SolaWebhookPath, SolaWebhook);
         app.MapPhoneEmail();
         app.MapPayConnector();
+        app.MapPayCallback();
         app.Map(StreamPath, Stream);
         return app;
     }
@@ -307,7 +308,7 @@ public static class VoiceEndpoints
     }
 
     private static async Task<IResult> Keypad(HttpContext ctx, IOptions<VoiceOptions> vo, IOptions<SignalWireOptions> so, VoiceCallStore store, VoiceStateStore states, PhoneCodeService codes,
-        StreamTokens tokens, IServiceScopeFactory scopes, PhonePayments phonePayments, PhoneOrderService orders, ISmsSender sms, TimeProvider time, CancellationToken ct)
+        StreamTokens tokens, IServiceScopeFactory scopes, PhonePayments phonePayments, PhoneOrderService orders, ISmsSender sms, PayCallbackService payCallbacks, TimeProvider time, CancellationToken ct)
     {
         var v = vo.Value;
         if (!v.Enabled) return Results.NotFound();
@@ -475,7 +476,15 @@ public static class VoiceEndpoints
             }
             state.SetKeypadOutcome(paid ? "paid" : pending ? "pay_pending" : "pay_failed");
             state.EndKeypadStep();
-            return Cxml(new XElement("Response", new XElement("Say", paid ? VoiceScripts.PayThanks : pending ? VoiceScripts.PayPending : VoiceScripts.PayFailed), Resume(v, tokens, call.Id, state)));
+            var line = paid ? VoiceScripts.PayThanks : pending ? VoiceScripts.PayPending : VoiceScripts.PayFailed;
+            if (state.PayCallbackId is { } callbackId)
+            {
+                // the OUTBOUND pay callback (V-60): the payment step was the whole point of the call, so it ends here (no assistant to go back to); a payment still being confirmed stays open and the call's end settles it
+                if (paid) await payCallbacks.MoveAsync(callbackId, [Data.PayCallbackStatus.Paying], "paid", "paid_on_keypad", ct);
+                else if (!pending) await payCallbacks.MoveAsync(callbackId, [Data.PayCallbackStatus.Paying], "failed", "payment_not_taken", ct);
+                return Cxml(new XElement("Response", new XElement("Say", line), new XElement("Hangup")));
+            }
+            return Cxml(new XElement("Response", new XElement("Say", line), Resume(v, tokens, call.Id, state)));
         }
         if (state.KeypadStep == "confirm")
         {

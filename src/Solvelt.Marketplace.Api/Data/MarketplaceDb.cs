@@ -71,6 +71,8 @@ public sealed class MarketplaceDb(DbContextOptions<MarketplaceDb> options) : DbC
     public DbSet<ReviewPhotoData> ReviewPhotoData => Set<ReviewPhotoData>();
     public DbSet<VoiceCall> VoiceCalls => Set<VoiceCall>();   // V
     public DbSet<VoicePaymentAttempt> VoicePaymentAttempts => Set<VoicePaymentAttempt>();
+    public DbSet<VoicePayCallback> VoicePayCallbacks => Set<VoicePayCallback>();
+    public DbSet<VoicePayCallbackEvent> VoicePayCallbackEvents => Set<VoicePayCallbackEvent>();
     public DbSet<VoiceDiagnosticTurn> VoiceDiagnosticTurns => Set<VoiceDiagnosticTurn>();
     public DbSet<SavedCard> SavedCards => Set<SavedCard>();
     public DbSet<CatalogOffer> CatalogOffers => Set<CatalogOffer>();
