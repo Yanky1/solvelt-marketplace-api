@@ -288,6 +288,94 @@ public class VoiceOrderStatusTests
         Assert.Equal("not_found", (await s.Tool("order_status", new { order_number = "MP-1" }))["error"]!.GetValue<string>());
     }
 
+    // ---------- return (refund) request (decision V-55) ----------
+
+    private static Task<List<OrderReturn>> Returns(VoiceScenario s) => s.K.Db(db => db.OrderReturns.AsNoTracking().Include(r => r.Lines).ToListAsync());
+
+    /// <summary>The seeded order has shipped all its units (what the portal's events leave for a delivered order).</summary>
+    private static async Task Shipped(VoiceScenario s, string number)
+        => await s.K.Db(async db =>
+        {
+            var orderId = await db.Orders.AsNoTracking().Where(o => o.Number == number).Select(o => o.Id).SingleAsync();
+            foreach (var l in await db.OrderLines.AsNoTracking().Where(l => l.OrderId == orderId).ToListAsync())
+                db.OrderLineFulfilments.Add(new OrderLineFulfilment { LineId = l.Id, ShippedQty = l.Quantity });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+
+    private static async Task<XElement> AskToReturn(VoiceScenario s, object args)
+    {
+        var r = await s.Tool("request_refund", args);
+        Assert.True(r["status"]?.GetValue<string>() == "reading_back", r.ToJsonString());
+        await s.EndStreamAfterGoodbye();
+        return await s.AfterStream();
+    }
+
+    [Fact]
+    public async Task A_return_request_is_read_back_by_the_server_and_only_a_yes_sends_it_through_the_websites_own_path()
+    {
+        var (s, jane) = await AccountCall();
+        using (s)
+        {
+            await Seed(s, jane, "MP-20261110-AAAA1111", state: "delivered");
+            await Shipped(s, "MP-20261110-AAAA1111");
+            await s.Dial(); await Verify(s);
+            var gather = await AskToReturn(s, new { order_number = "MP-20261110-AAAA1111", reason = "damaged" });
+            var said = gather.Element("Gather")!.Element("Say")!.Value;
+            Assert.Contains("return items from order", said); Assert.Contains("Mazel Bakery", said); Assert.Contains("the seller, who decides", said);
+            Assert.EndsWith("To leave it, say no.", said);
+            Assert.True(VoiceSpeech.IsSpeakable(said), said);
+            Assert.Empty(await Returns(s));                                                          // asking sends nothing
+            Assert.DoesNotContain(s.Fake.Received, m => m.Contains("the seller, who decides"));      // the model never wrote or heard the read-back
+            var (resume, token) = await s.Type("1");
+            Assert.Equal(VoiceScripts.ReturnSent, resume.Element("Say")!.Value);
+            await s.Attach(token);
+            var ret = Assert.Single(await Returns(s));
+            Assert.Equal(("damaged", ReturnStatus.Pending, jane), (ret.Reason, ret.Status, ret.AccountId));
+            Assert.NotEmpty(ret.Lines);
+            Assert.StartsWith("phone-", ret.ClientKey);                                              // one request per call and order
+            Assert.Contains("return request", (await s.Fake.Wait(n => n["type"]?.GetValue<string>() == "conversation.item.create" && n["item"]!["role"]?.GetValue<string>() == "system" && n["item"]!["content"]![0]!["text"]!.GetValue<string>().Contains("return request"))).ToJsonString());
+        }
+    }
+
+    [Fact]
+    public async Task A_no_leaves_the_return_unsent_and_an_order_that_has_not_shipped_is_pointed_to_cancellation()
+    {
+        var (s, jane) = await AccountCall();
+        using (s)
+        {
+            await Seed(s, jane, "MP-20261110-AAAA1111", state: "delivered");
+            await Shipped(s, "MP-20261110-AAAA1111");
+            await Seed(s, jane, "MP-20261111-BBBB2222", state: "new");
+            await s.Dial(); await Verify(s);
+            await AskToReturn(s, new { order_number = "MP-20261110-AAAA1111", reason = "no_longer_needed" });
+            var (resume, back) = await s.Type("2");
+            Assert.Equal(VoiceScripts.ReturnKept, resume.Element("Say")!.Value);
+            await s.Attach(back);
+            Assert.Empty(await Returns(s));
+            // an order that has not shipped cannot be returned: the model is told to offer cancel_order
+            var notYet = await s.Tool("request_refund", new { order_number = "MP-20261111-BBBB2222", reason = "damaged" });
+            Assert.Equal("not_returnable", notYet["error"]!.GetValue<string>());
+            Assert.Contains("cancel_order", notYet["instruction"]!.GetValue<string>());
+        }
+    }
+
+    [Fact]
+    public async Task A_return_needs_a_verified_account_a_known_reason_and_the_callers_own_order()
+    {
+        var (s, jane) = await AccountCall();
+        using (s)
+        {
+            await s.Dial();
+            Assert.Equal("not_allowed", (await s.Tool("request_refund", new { order_number = "MP-1", reason = "damaged" }))["error"]!.GetValue<string>());      // not verified yet
+            await Verify(s);
+            Assert.Equal("bad_reason", (await s.Tool("request_refund", new { order_number = "MP-20261110-AAAA1111", reason = "because" }))["error"]!.GetValue<string>());
+            Assert.Equal("bad_reason", (await s.Tool("request_refund", new { order_number = "MP-20261110-AAAA1111" }))["error"]!.GetValue<string>());
+            Assert.Equal("not_found", (await s.Tool("request_refund", new { order_number = "MP-20261116-CCCC3333", reason = "damaged" }))["error"]!.GetValue<string>());   // nobody's order: the same answer as for a stranger's
+            Assert.Empty(await Returns(s));
+        }
+    }
+
     // ---------- a guest who ordered by phone ----------
 
     private static async Task GuestOrder(VoiceScenario s)

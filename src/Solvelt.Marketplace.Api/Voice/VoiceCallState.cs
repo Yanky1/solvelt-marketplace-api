@@ -12,6 +12,8 @@ public sealed record VariantRef(Guid VariantId, string Name, long PriceCents, bo
 /// <summary>An account change the server has read back and is waiting for the caller's yes on (slice 6, decision V-09). The model proposes; only the keypad answer applies it.</summary>
 public sealed record AccountChangeRequest(string Kind, string Text, string? Name = null, string? Phone = null, Guid? AddressId = null, Solvelt.Marketplace.Api.Account.AddressBody? Body = null, string? Email = null, bool PhoneProved = false, Guid? CardId = null);
 public sealed record PendingCancel(string OrderNumber, string? SellerOrderNumber, string Reason, string Text);
+/// <summary>A return (refund) request waiting for the caller's yes: the lines are the website's own <see cref="Solvelt.Marketplace.Api.Fulfilment.ReturnLineInput"/>s, chosen by the SERVER from the order (decision V-55).</summary>
+public sealed record PendingReturn(string OrderNumber, string? SellerOrderNumber, string Reason, IReadOnlyList<Solvelt.Marketplace.Api.Fulfilment.ReturnLineInput> Lines, string Text);
 
 /// <summary>A saved-card payment waiting for the caller's yes (V-16): the card id (the server's, never the model's) and the sentence the SERVER reads back.</summary>
 /// <summary>What the PIN flow of this call is doing (V-18): <c>set</c> or <c>remove</c>, and the hash of the first entry while the caller types it again. The digits are never kept.</summary>
@@ -80,6 +82,11 @@ public sealed class VoiceCallState
     public PendingCancel? Cancel { get; private set; }
     public int CancelStarts { get; private set; }
     public void SetCancel(PendingCancel? c) { lock (_gate) Cancel = c; }
+    /// <summary>A return request waiting for the caller's yes (V-55), read back by the server like a cancellation.</summary>
+    public PendingReturn? Return { get; private set; }
+    public int ReturnStarts { get; private set; }
+    public void SetReturn(PendingReturn? r) { lock (_gate) Return = r; }
+    public int CountReturnStart() { lock (_gate) return ++ReturnStarts; }
     /// <summary>The account change waiting for the caller's yes (create the account, change the name, an address, or the phone number).</summary>
     public AccountChangeRequest? AccountChange { get; private set; }
     public int AccountChangeStarts { get; private set; }
@@ -289,6 +296,9 @@ public sealed class VoiceCallState
             if (LastKeypadOutcome == "account_refused") sb.Append("The account change could not be saved (a rule refused it, or the number is already in use): say so and offer a person or the web site. ");
             if (LastKeypadOutcome == "cancel_sent") sb.Append("The caller just confirmed a cancellation request and it was sent to the seller; they are told by email what the seller decides. ");
             if (LastKeypadOutcome == "cancel_refused") sb.Append("The cancellation could not be requested (the order can no longer be cancelled, or something went wrong). ");
+            if (LastKeypadOutcome == "return_sent") sb.Append("The caller just confirmed a return request and it was sent to the seller; the seller decides, and they are told by email. ");
+            if (LastKeypadOutcome == "return_refused") sb.Append("The return could not be requested (the items cannot be returned, or something went wrong). ");
+            if (LastKeypadOutcome == "return_declined") sb.Append("The caller decided not to send the return request: nothing was sent. ");
             if (LastKeypadOutcome == "cancel_declined") sb.Append("The caller decided to keep the order: nothing was cancelled. ");
             if (OrderNumber is not null) sb.Append("An order has been placed and paid for in this call: its number is ").Append(VoiceSpeech.Spelled(OrderNumber)).Append(". Do not discuss card details. ");
             else if (Payment is { Status: "pending" }) sb.Append("A payment is in progress for the order. ");
