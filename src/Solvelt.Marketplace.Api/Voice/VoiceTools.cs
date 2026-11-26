@@ -22,6 +22,12 @@ public interface IVoiceTool
     Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct);
 }
 
+/// <summary>A tool that exists only while its backing service is configured (decision V-63): while it is not, it is not in the list the model sees and a call to it is refused as unknown.</summary>
+public interface IConditionalVoiceTool : IVoiceTool
+{
+    bool IsAvailable { get; }
+}
+
 /// <summary>Resolves tools per call in a scope of their own. A name that is not registered is refused: the model cannot invent a tool.</summary>
 public sealed class VoiceToolRunner(IServiceScopeFactory scopes)
 {
@@ -29,14 +35,14 @@ public sealed class VoiceToolRunner(IServiceScopeFactory scopes)
     {
         using var scope = scopes.CreateScope();
         var a = new JsonArray();
-        foreach (var t in scope.ServiceProvider.GetServices<IVoiceTool>()) a.Add(t.Definition.DeepClone());
+        foreach (var t in scope.ServiceProvider.GetServices<IVoiceTool>().Where(t => t is not IConditionalVoiceTool { IsAvailable: false })) a.Add(t.Definition.DeepClone());
         return a;
     }
 
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, string name, string? argumentsJson, CancellationToken ct)
     {
         using var scope = scopes.CreateScope();
-        var tool = scope.ServiceProvider.GetServices<IVoiceTool>().FirstOrDefault(t => t.Name == name);
+        var tool = scope.ServiceProvider.GetServices<IVoiceTool>().FirstOrDefault(t => t.Name == name && t is not IConditionalVoiceTool { IsAvailable: false });
         if (tool is null) return new("""{"error":"unknown_tool"}""");
         JsonElement args;
         try { using var d = JsonDocument.Parse(string.IsNullOrWhiteSpace(argumentsJson) ? "{}" : argumentsJson); args = d.RootElement.Clone(); }

@@ -147,7 +147,7 @@ public sealed class UseSavedAddressTool(AccountService accounts) : IVoiceTool
     }
 }
 
-public sealed class SetDeliveryAddressTool(MarketplaceDb db) : IVoiceTool
+public sealed class SetDeliveryAddressTool(MarketplaceDb db, ZipResolver zips, IPostcodeLookup postcode, ILogger<SetDeliveryAddressTool> log) : IVoiceTool
 {
     public string Name => "set_delivery_address";
     public JsonObject Definition => ToolKit.Def(Name, "Take a new delivery address as the caller spelled it. The server validates it and gives you the text to read back; then call confirm_address once the caller agrees.",
@@ -169,9 +169,14 @@ public sealed class SetDeliveryAddressTool(MarketplaceDb db) : IVoiceTool
         var errors = CheckoutService.Validate(addr, null);
         if (errors.Count == 0 && addr.Country == "US" && !UsStates.Codes.Contains(addr.Region ?? "")) errors = new Dictionary<string, string> { ["address.region"] = "state" };
         if (errors.Count > 0) return ToolKit.Json(new JsonObject { ["error"] = "invalid_address", ["problems"] = new JsonArray(CheckoutAccess.Problems(errors).Select(p => (JsonNode)p).ToArray()), ["instruction"] = "Ask the caller again for the parts that are wrong, one at a time." });
+        var gate = await AddressGate.RunAsync(s, addr, zips, postcode, log, ct);   // V-63: complete? does the ZIP agree? never saved without the caller's yes
+        if (gate.Refusal is not null) return gate.Refusal;
+        addr = gate.Address!;
         s.SetDeliveryAddress(addr, confirmed: false, CheckoutAccess.AddressLabel(addr));
         s.SetTask("delivery");
-        return ToolKit.Json(new JsonObject { ["status"] = "read_back_needed", ["read_back"] = VoiceSpeech.Address(addr), ["instruction"] = "Read the address back exactly as in read_back and ask if it is right. If they correct anything, call set_delivery_address again with the whole corrected address. When they say it is right, call confirm_address." });
+        var readBack = new JsonObject { ["status"] = "read_back_needed", ["read_back"] = VoiceSpeech.Address(addr),  ["instruction"] = "Read the address back exactly as in read_back and ask if it is right. If they correct anything, call set_delivery_address again with the whole corrected address. When they say it is right, call confirm_address." };
+        if (gate.Message is not null) readBack["message"] = gate.Message;
+        return ToolKit.Json(readBack);
     }
 }
 

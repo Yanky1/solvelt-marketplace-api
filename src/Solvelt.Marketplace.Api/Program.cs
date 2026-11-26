@@ -131,6 +131,13 @@ if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBa
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.SignalWireSmsSender>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessCatalog>(sp => new Solvelt.Marketplace.Api.Voice.InProcessCatalog(sp));
 // the pay callback the caller can ask for (decision V-60): signed tokens, the call placer (a fake in development without a SignalWire address, as for texts), the service, the dispatcher and the tool
+// the street search and the ZIP code check (decision V-63): always registered, each decides when used whether the Google key is set; without it they are off with one warning and addresses are taken the usual way
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.ZipViewportCache>();
+builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IPostcodeLookup, Solvelt.Marketplace.Api.Voice.GoogleGeocoder>(c => c.Timeout = TimeSpan.FromSeconds(5));   // a bounded wait; no retry (a caller is waiting)
+builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IStreetSuggest, Solvelt.Marketplace.Api.Voice.GoogleStreetSuggest>(c => c.Timeout = TimeSpan.FromSeconds(5));
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.ZipResolver>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.FindStreetTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.CheckAddressTool>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PayCallbackTokens>();
 if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBaseUrl"])) { builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>(); builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IOutboundCaller>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>()); }
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IOutboundCaller, Solvelt.Marketplace.Api.Voice.SignalWireOutboundCaller>();
@@ -331,6 +338,7 @@ builder.Services.AddDbContext<MarketplaceDb>(o =>
 });
 
 var app = builder.Build();
+Solvelt.Marketplace.Api.Voice.AddressLookupStartup.WarnOnce(app.Services.GetRequiredService<Solvelt.Marketplace.Api.Voice.IPostcodeLookup>(), app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Voice.VoiceOptions>>().Value.Enabled, app.Logger);   // V-63: one warning when the Google key is not set
 foreach (var warning in startupWarnings) app.Logger.LogWarning("{Warning}", warning);
 
 // Carts, checkouts, sign-in and the account are personal: never stored by a shared cache or the browser (also on 401 and 429, which is why this runs before the rate limiter).

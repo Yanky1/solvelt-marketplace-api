@@ -163,7 +163,7 @@ public sealed class ChangeNameTool : IVoiceTool
 }
 
 /// <summary>Add, edit, remove or set the default of a saved address. The saved list must have been read out first (the model names a position; the server holds the ids, and only the account's own ids).</summary>
-public sealed class ManageSavedAddressTool(AccountService accounts) : IVoiceTool
+public sealed class ManageSavedAddressTool(AccountService accounts, ZipResolver zips, IPostcodeLookup postcode, ILogger<ManageSavedAddressTool> log) : IVoiceTool
 {
     public string Name => "manage_saved_address";
     public JsonObject Definition => ToolKit.Def(Name, "Add, edit, remove or make default one of the caller's saved addresses. Only for a caller verified by text message in this call. For edit, remove and set_default read the list first with list_saved_addresses and give the position. The server reads the change back and asks for a yes on the keypad; say one short sentence that you will read it back, then stop talking.",
@@ -200,6 +200,13 @@ public sealed class ManageSavedAddressTool(AccountService accounts) : IVoiceTool
         if (errors.Count == 0 && addr.Country == "US" && !UsStates.Codes.Contains(addr.Region ?? "")) errors = new Dictionary<string, string> { ["address.region"] = "state" };
         if (errors.Count > 0) return ToolKit.Json(new JsonObject { ["error"] = "invalid_address", ["problems"] = new JsonArray(CheckoutAccess.Problems(errors).Select(p => (JsonNode)p).ToArray()), ["instruction"] = "Ask the caller again for the parts that are wrong, then call this tool again." });
         var changed = ToolKit.Str(args, "street") is not null || ToolKit.Str(args, "city") is not null || ToolKit.Str(args, "postal_code") is not null || ToolKit.Str(args, "state") is not null;
+        if (changed)
+        {
+            // V-63: the same check as for a delivery address, only when the address itself changes (an apartment alone is not re-checked); Google's city and state are what is read back
+            var gate = await AddressGate.RunAsync(s, addr, zips, postcode, log, ct);
+            if (gate.Refusal is not null) return gate.Refusal;
+            addr = gate.Address!;
+        }
         var body = new AddressBody(addr.Name, addr.Line1, addr.Line2, addr.City, addr.Region, addr.PostalCode, addr.Country, addr.Phone, changed ? null : current?.Lat, changed ? null : current?.Lng);
         var say = VoiceSpeech.Address(addr);
         return action == "add"

@@ -156,6 +156,9 @@ Off by default. Turn it on only with every setting below. The full design, limit
 | `Sola__PayConnectorKey` | **yes** | 32+ characters |
 | `Sola__SavedCardKey` | **yes** | 32+ characters. It encrypts saved-card tokens: **losing it makes every saved card unreadable**, so back it up like a database key |
 | `Sola__TimeoutSeconds` | no | optional, 5 to 60, default 20 |
+| `Voice__Google__MapsApiKey` | **yes** | optional: turns on the street search and the ZIP code check for addresses by phone. One server-side key for a Google Cloud project with billing and **Geocoding API + Places API (New)** enabled; restrict it to this server's IP addresses and to those two APIs (Google's recommendation); never in a web client. **The Geocoding key is part of the request URL: the code never logs a URL, and the key is also the reason not to log HTTP client traces in production.** Without it the street search and the ZIP check are off with one warning and addresses are taken the usual way |
+
+**Street search and ZIP check (Google).** Off until `Voice__Google__MapsApiKey` is set. It asks Google two things only: the ZIP code (Geocoding API: city, state and the ZIP's box) and the first letters of the street name (Places API (New) Autocomplete, restricted to that box, street names only). No address, name, number or order goes to Google; nothing of Google's answers is stored except the ZIP's box, kept in memory for seven days. Open owner/legal points (not decided in code): whether spoken use needs Google attribution (the design never names the vendor to the caller) and whether the street name and the city and state the caller confirmed after hearing them may be stored in the order; customers with an EEA billing address have different terms. Sources and the open points: docs/agent-briefs/google-places-facts.md.
 
 ### On the pay connector host (`src/Solvelt.PayConnector`, a separate service with its own secret store)
 
