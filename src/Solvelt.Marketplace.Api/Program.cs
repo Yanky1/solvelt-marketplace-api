@@ -131,6 +131,11 @@ if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBa
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.SignalWireSmsSender>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessCatalog>(sp => new Solvelt.Marketplace.Api.Voice.InProcessCatalog(sp));
 // the pay callback the caller can ask for (decision V-60): signed tokens, the call placer (a fake in development without a SignalWire address, as for texts), the service, the dispatcher and the tool
+// address help for the telephone line (decision V-61): vendor-neutral lookup; the Google adapter is a stub awaiting vendor facts, so address help stays off (one warning) and the address flow is unchanged
+if (string.IsNullOrWhiteSpace(builder.Configuration["Voice:Google:MapsApiKey"])) builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IAddressLookup, Solvelt.Marketplace.Api.Voice.NotConfiguredAddressLookup>();
+else builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IAddressLookup, Solvelt.Marketplace.Api.Voice.GoogleAddressLookup>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SuggestAddressTool>();
+builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.UseSuggestedAddressTool>();
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PayCallbackTokens>();
 if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBaseUrl"])) { builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>(); builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IOutboundCaller>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>()); }
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IOutboundCaller, Solvelt.Marketplace.Api.Voice.SignalWireOutboundCaller>();
@@ -331,6 +336,7 @@ builder.Services.AddDbContext<MarketplaceDb>(o =>
 });
 
 var app = builder.Build();
+Solvelt.Marketplace.Api.Voice.AddressHelpStartup.WarnOnce(app.Services.GetRequiredService<Solvelt.Marketplace.Api.Voice.IAddressLookup>(), app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<Solvelt.Marketplace.Api.Voice.VoiceOptions>>().Value.Enabled, app.Logger);   // V-61: one warning when address help is off
 foreach (var warning in startupWarnings) app.Logger.LogWarning("{Warning}", warning);
 
 // Carts, checkouts, sign-in and the account are personal: never stored by a shared cache or the browser (also on 401 and 429, which is why this runs before the rate limiter).

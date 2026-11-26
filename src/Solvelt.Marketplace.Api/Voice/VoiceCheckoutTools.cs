@@ -158,14 +158,20 @@ public sealed class SetDeliveryAddressTool(MarketplaceDb db) : IVoiceTool
             ["recipient_name"] = ToolKit.Prop("string", "Only if the delivery is for someone other than the caller."),
         }, "street", "city", "state", "postal_code");
 
-    public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
+    public Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
+        => TakeAsync(ctx.State, db, ToolKit.Str(args, "street"), ToolKit.Str(args, "apartment"), ToolKit.Str(args, "city"), ToolKit.Str(args, "state"), ToolKit.Str(args, "postal_code"), ToolKit.Str(args, "country"), ToolKit.Str(args, "recipient_name"), ct);
+
+    /// <summary>
+    /// Takes an address, validates it and starts the read-back. The caller's confirmation is NEVER implied: the address is held unconfirmed until <c>confirm_address</c>. Used by the spelled-out path above and by the
+    /// suggested-address path (decision V-61), so a suggestion goes through exactly the same checks and the same yes.
+    /// </summary>
+    public static async Task<VoiceToolResult> TakeAsync(VoiceCallState s, MarketplaceDb db, string? street, string? apartment, string? city, string? state, string? postal, string? country, string? recipient, CancellationToken ct)
     {
-        var s = ctx.State;
-        if (s.Level == CallerLevel.Anonymous) return ToolKit.Error("need_identity", "Before taking an address, verify the caller with identify_caller (a guest is fine).");
-        var name = await CheckoutAccess.NameAsync(s, db, ToolKit.Str(args, "recipient_name"), ct);
+                if (s.Level == CallerLevel.Anonymous) return ToolKit.Error("need_identity", "Before taking an address, verify the caller with identify_caller (a guest is fine).");
+        var name = await CheckoutAccess.NameAsync(s, db, recipient, ct);
         if (name is null) return ToolKit.Error("need_name", "Ask the caller's name and record it with set_guest_name first.");
-        var addr = new CheckoutAddress(name, ToolKit.Str(args, "street"), ToolKit.Str(args, "apartment"), ToolKit.Str(args, "city"), ToolKit.Str(args, "state")?.Trim().ToUpperInvariant(),
-            ToolKit.Str(args, "postal_code"), (ToolKit.Str(args, "country") ?? "US").Trim().ToUpperInvariant(), s.VerifiedPhone);
+        var addr = new CheckoutAddress(name, street, apartment, city, state?.Trim().ToUpperInvariant(),
+            postal, (country ?? "US").Trim().ToUpperInvariant(), s.VerifiedPhone);
         var errors = CheckoutService.Validate(addr, null);
         if (errors.Count == 0 && addr.Country == "US" && !UsStates.Codes.Contains(addr.Region ?? "")) errors = new Dictionary<string, string> { ["address.region"] = "state" };
         if (errors.Count > 0) return ToolKit.Json(new JsonObject { ["error"] = "invalid_address", ["problems"] = new JsonArray(CheckoutAccess.Problems(errors).Select(p => (JsonNode)p).ToArray()), ["instruction"] = "Ask the caller again for the parts that are wrong, one at a time." });

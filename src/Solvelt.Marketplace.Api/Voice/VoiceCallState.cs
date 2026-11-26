@@ -198,6 +198,11 @@ public sealed class VoiceCallState
         lock (_gate) { DeliveryAddress = address; AddressConfirmed = confirmed; Selections = []; Choices = []; Quote = null; AddressLabel = label; Version++; OrderChangedLocked(); }
     }
 
+    /// <summary>The address suggestions last read out (decision V-61): opaque ids from the lookup and what was said about each. In this call's memory only; never stored, logged or given to the model.</summary>
+    public IReadOnlyList<AddressSuggestion> AddressSuggestions { get; private set; } = [];
+    public int AddressLookups { get; private set; }
+    public void SetAddressSuggestions(IReadOnlyList<AddressSuggestion> suggestions) { lock (_gate) AddressSuggestions = suggestions; }
+    public int CountAddressLookup() { lock (_gate) return ++AddressLookups; }
     public void ConfirmAddress() { lock (_gate) { if (DeliveryAddress is not null) AddressConfirmed = true; } }
 
     public void SetChoices(IReadOnlyList<DeliveryChoice> choices) { lock (_gate) Choices = choices; }
