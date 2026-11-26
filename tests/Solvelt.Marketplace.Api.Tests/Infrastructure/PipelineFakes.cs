@@ -12,7 +12,13 @@ public sealed class FakeStt : IStreamingStt
     public IReadOnlyList<byte[]> Audio => _audio.ToArray();
     public bool Opened { get; private set; }
     public bool FailOnSend { get; set; }
-    public void Emit(SttEvent e) => _events.Writer.TryWrite(e);
+    private int _emitted, _handled;
+    public void Emit(SttEvent e) { Interlocked.Increment(ref _emitted); _events.Writer.TryWrite(e); }
+    /// <summary>
+    /// Waits until the pipeline has taken in and handled every event emitted so far (an event counts as handled when the pipeline asks for the next one). A test that lets fake time run to end a turn
+    /// calls this first: the end-of-turn engine stamps a final with the fake time at ITS arrival, so time that runs before the final is in is time the turn's silence is never measured over.
+    /// </summary>
+    public Task Settled(int seconds = 5) => FakeRealtime.Poll(() => Volatile.Read(ref _handled) == Volatile.Read(ref _emitted) ? "x" : null, seconds);
     public void Say(string text) { Emit(new SttEvent(SttEventKind.SpeechStarted)); Emit(new SttEvent(SttEventKind.Final, text)); Emit(new SttEvent(SttEventKind.SpeechEnded)); }
 
     public Task<ISttSession> OpenAsync(CancellationToken ct) { Opened = true; return Task.FromResult<ISttSession>(new Session(this)); }
@@ -27,7 +33,7 @@ public sealed class FakeStt : IStreamingStt
         }
         public async IAsyncEnumerable<SttEvent> Events([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
         {
-            while (await o._events.Reader.WaitToReadAsync(ct)) while (o._events.Reader.TryRead(out var e)) yield return e;
+            while (await o._events.Reader.WaitToReadAsync(ct)) while (o._events.Reader.TryRead(out var e)) { yield return e; Interlocked.Increment(ref o._handled); }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

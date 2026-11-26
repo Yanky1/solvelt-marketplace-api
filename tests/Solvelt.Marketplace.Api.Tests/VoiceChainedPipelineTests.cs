@@ -45,21 +45,6 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         for (var i = 0; i < ms / 50; i++) { S.F.Clock.Advance(TimeSpan.FromMilliseconds(50)); await Task.Delay(3); }
     }
 
-    /// <summary>
-    /// After the caller has spoken: lets fake time run until <paramref name="done"/> holds. A fixed <c>Advance(1000)</c> is a race: the recogniser's events reach the end-of-turn engine on their own thread, and the engine
-    /// stamps a final with the fake time at ITS arrival, so a final that arrives after the fixed span has run out never sees the silence it waits for and the turn never ends (main CI run 637).
-    /// </summary>
-    private async Task AdvanceUntil(Func<bool> done, int seconds = 5)
-    {
-        var end = DateTime.UtcNow.AddSeconds(seconds);
-        while (!done())
-        {
-            if (DateTime.UtcNow >= end) throw new TimeoutException("the expected event did not arrive");
-            S.F.Clock.Advance(TimeSpan.FromMilliseconds(50));
-            await Task.Delay(3);
-        }
-    }
-
     private static async Task Until(Func<bool> done, int seconds = 5) => await FakeRealtime.Poll(() => done() ? "x" : null, seconds);
 
     private IEnumerable<JsonNode> Frames(string name) => _phone!.Got.Where(n => n["event"]?.GetValue<string>() == name);
@@ -96,9 +81,11 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         await Until(() => p.SttFake.Audio.Count == 1);
         Assert.Equal(new byte[] { 1, 2, 3, 4 }, p.SttFake.Audio[0]);
         p.SttFake.Say("I would like a challah");
+        await p.SttFake.Settled();   // the engine has the final (and stamped it) before fake time runs
         await Advance(300);
         Assert.Single(p.LlmFake.Requests);                                                                   // 300 ms of silence is not the end of the turn yet
-        await AdvanceUntil(() => p.LlmFake.Requests.Count == 2);
+        await Advance(700);
+        await Until(() => p.LlmFake.Requests.Count == 2);
         var second = p.LlmFake.Requests[1];
         Assert.Contains(second.Messages, m => m is { Role: "user", Text: "I would like a challah" });
         await Until(() => p.TtsFake.Texts.Contains("Sure, one challah coming up."));
@@ -119,7 +106,9 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         var p = await Call(more: more, script: p => p.LlmFake.Then(new LlmTextDelta("Okay, noted."), new LlmCompleted(100, 15)));
         await Until(() => Frames("media").Count() >= 6);
         p.SttFake.Say("hello there");
-        await AdvanceUntil(() => p.LlmFake.Requests.Count == 2);
+        await p.SttFake.Settled();   // the engine has the final (and stamped it) before fake time runs
+        await Advance(1000);
+        await Until(() => p.LlmFake.Requests.Count == 2);
         await Until(() => p.TtsFake.Texts.Contains("Okay, noted."));
         await _phone!.Send(new { @event = "stop" });                                                          // the caller hangs up
         await FakeRealtime.Poll(() => S.Row().Result.EndedAt is not null ? "x" : null, 5);
@@ -140,7 +129,9 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         p.SttFake.Emit(new SttEvent(SttEventKind.SpeechStarted));
         await _phone!.Wait("clear");                                                                          // the phone's queue was flushed
         p.SttFake.Emit(new SttEvent(SttEventKind.Final, "never mind"));
-        await AdvanceUntil(() => p.LlmFake.Requests.Count == 2);
+        await p.SttFake.Settled();   // the engine has the final (and stamped it) before fake time runs
+        await Advance(800);
+        await Until(() => p.LlmFake.Requests.Count == 2);
         var history = p.LlmFake.Requests[1].Messages;
         var heard = history.Single(m => m.Role == "assistant").Text!;
         Assert.StartsWith("Hello", heard);
@@ -179,7 +170,9 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         for (var i = 1; i <= 3; i++)
         {
             p.SttFake.Say("what is the weather " + i);
-            await AdvanceUntil(() => p.LlmFake.Requests.Count >= 1 + i * 2 - (i == 3 ? 1 : 0));
+            await p.SttFake.Settled();   // the engine has the final (and stamped it) before fake time runs
+            await Advance(1000);
+            await Until(() => p.LlmFake.Requests.Count >= 1 + i * 2 - (i == 3 ? 1 : 0));
         }
         var end = await _phone!.Wait(n => n["event"]?.GetValue<string>() == "mark" && n["mark"]?["name"]?.GetValue<string>() == "end");   // the SERVER ends the AI part: the hand-off mark
         Assert.NotNull(end);
@@ -200,7 +193,9 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         });
         await Until(() => Frames("media").Count() >= 6);
         p.SttFake.Say("please sign me in");
-        await AdvanceUntil(() => S.Sms.Sent.Count == 1);
+        await p.SttFake.Settled();   // the engine has the final (and stamped it) before fake time runs
+        await Advance(1000);
+        await Until(() => S.Sms.Sent.Count == 1);
         var code = S.LastCode();
         await Until(() => Frames("mark").Any(m => m["mark"]!["name"]!.GetValue<string>() == "end"));
         await _phone!.Send(new { @event = "mark", streamSid = "MZ1", mark = new { name = "end" } });
@@ -243,7 +238,9 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         var p = await Call(script: p => p.LlmFake.Then(new LlmTextDelta(answer), new LlmCompleted(50, 10)));
         await Until(() => Frames("media").Count() >= 6);
         p.SttFake.Say(said);
-        await AdvanceUntil(() => p.TtsFake.Texts.Contains(answer));
+        await p.SttFake.Settled();   // the engine has the final (and stamped it) before fake time runs
+        await Advance(1000);
+        await Until(() => p.TtsFake.Texts.Contains(answer));
         await _phone!.Send(new { @event = "stop" });
         await FakeRealtime.Poll(() => S.Row().Result.EndedAt is not null ? "x" : null, 5);
         var row = await S.Row();
@@ -265,7 +262,9 @@ public sealed class VoiceChainedPipelineTests : IDisposable
         // the greeting's script (queued first in Call) plays; the next script throws in the turn after the caller speaks
         await Until(() => Frames("media").Count() >= 6);
         p.SttFake.Say("hello");
-        await AdvanceUntil(() => p.LlmFake.Requests.Count == 2);
+        await p.SttFake.Settled();   // the engine has the final (and stamped it) before fake time runs
+        await Advance(1000);
+        await Until(() => p.LlmFake.Requests.Count == 2);
         await Task.Delay(150);
         Assert.DoesNotContain(S.F.Logs.Lines, l => l.Contains("the secret in the error text"));
         Assert.Contains(S.F.Logs.Lines, l => l.Contains("a turn failed"));                                    // the type is logged, never the message
