@@ -40,14 +40,12 @@ public sealed record AddressCorrection(string Field, string Submitted, string Su
 /// </summary>
 public static class AddressShape
 {
-    /// <summary>"12 Mazel Lane" is the house number 12 and the street "Mazel Lane"; a line that does not start with a number has no house number.</summary>
-    public static (string House, string Street) SplitLine(string? line1)
-    {
-        var t = (line1 ?? "").Trim();
-        var space = t.IndexOf(' ');
-        var first = space < 0 ? t : t[..space];
-        return first.Length > 0 && first.Any(char.IsDigit) && first.All(c => char.IsLetterOrDigit(c) || c is '-' or '/') ? (first, space < 0 ? "" : t[(space + 1)..].Trim()) : ("", t);
-    }
+    /// <summary>
+    /// The one street line that is stored: "{house_number} {street}". The two are taken as SEPARATE arguments, never split out of one line (decision V-63): "123-45 Main St" (Queens), "12B", "1/2" and "One Main St"
+    /// have no number that a rule on the first word could find.
+    /// </summary>
+    public static string Line1(string? houseNumber, string? street)
+        => string.Join(' ', $"{houseNumber} {street}".Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     /// <summary>The first five digits of a ZIP code, or null when there are fewer than five digits (a ZIP+4 passes).</summary>
     public static string? ZipFive(string? zip)
@@ -68,10 +66,19 @@ public static class AddressShape
         return missing;
     }
 
-    public static IReadOnlyList<AddressMissing> Check(CheckoutAddress a)
+    /// <summary>
+    /// The check for an address. When the caller gave the house number or the street, BOTH must be there. When neither was given (an edit that leaves the street as it is), the stored line only has to exist:
+    /// it passed this check when it was saved, and no line is ever taken apart to find a number.
+    /// </summary>
+    public static IReadOnlyList<AddressMissing> Check(CheckoutAddress a, string? houseNumber, string? street)
     {
-        var (house, street) = SplitLine(a.Line1);
-        return Check(house, street, a.City, a.Region, a.PostalCode);
+        if (houseNumber is null && street is null)
+        {
+            var rest = Check("-", "-", a.City, a.Region, a.PostalCode).ToList();
+            if (string.IsNullOrWhiteSpace(a.Line1)) rest.Insert(0, new("street", "missing"));
+            return rest;
+        }
+        return Check(houseNumber, street, a.City, a.Region, a.PostalCode);
     }
 
     /// <summary>The missing parts as a person says them: "the house number and the ZIP code".</summary>
@@ -101,9 +108,9 @@ public static class AddressValidator
     /// <summary>Corrections or inconsistencies a call may have before the address is taken as given.</summary>
     public const int MaxAttempts = 2;
 
-    public static async Task<AddressValidation> ValidateAsync(CheckoutAddress address, int priorRetries, bool lookupConfigured, Func<string, CancellationToken, Task<ZipInfo?>> findZip, CancellationToken ct)
+    public static async Task<AddressValidation> ValidateAsync(CheckoutAddress address, string? houseNumber, string? street, int priorRetries, bool lookupConfigured, Func<string, CancellationToken, Task<ZipInfo?>> findZip, CancellationToken ct)
     {
-        var missing = AddressShape.Check(address);
+        var missing = AddressShape.Check(address, houseNumber, street);
         if (missing.Count > 0) return new(AddressStatus.Incomplete, "Still needed: " + AddressShape.Say(missing) + ".", null, [], missing);
         if (address.Country != "US" || !lookupConfigured) return new(AddressStatus.Unverified, "", address, [], []);
         var zip = AddressShape.ZipFive(address.PostalCode)!;

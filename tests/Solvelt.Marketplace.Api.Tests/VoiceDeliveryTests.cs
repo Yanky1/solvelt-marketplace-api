@@ -16,7 +16,7 @@ public class VoiceDeliveryTests
 {
     private const string Number = "+15551234567", Email = "jane@example.com";
 
-    private static object NewAddress(string? city = "Brooklyn", string state = "NY") => new { street = "1 Main St", apartment = "4B", city, state, postal_code = "11201" };
+    private static object NewAddress(string? city = "Brooklyn", string state = "NY") => new { house_number = "1", street = "Main St", apartment = "4B", city, state, postal_code = "11201" };
 
     /// <summary>A guest call with two small challah in the cart, verified by SMS code, named.</summary>
     private static async Task<VoiceScenario> GuestWithCart(Dictionary<string, string?>? config = null, int qty = 2)

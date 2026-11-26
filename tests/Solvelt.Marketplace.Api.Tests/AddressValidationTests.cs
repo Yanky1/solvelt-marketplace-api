@@ -8,26 +8,29 @@ namespace Solvelt.Marketplace.Api.Tests;
 /// <summary>The save-time address check (decision V-63), ported from the telephone system's own tests without the carrier half: missing parts, a bad ZIP, a ZIP that disagrees, an unknown ZIP, an unavailable check, Google's spelling.</summary>
 public class AddressValidationTests
 {
-    private static CheckoutAddress Addr(string line1 = "12 Mazel Lane", string? city = "Albany", string? state = "NY", string? zip = "12207", string country = "US")
-        => new("Dana Levi", line1, null, city, state, zip, country, null);
+    /// <summary>An address as the tools take it: the house number and the street are SEPARATE arguments, the stored line is their join.</summary>
+    private sealed record Case(CheckoutAddress A, string House, string Street);
 
-    private static Task<AddressValidation> Run(CheckoutAddress a, FakePostcodeLookup? lookup = null, int priorRetries = 0)
+    private static Case Addr(string house = "12", string street = "Mazel Lane", string? city = "Albany", string? state = "NY", string? zip = "12207", string country = "US")
+        => new(new("Dana Levi", AddressShape.Line1(house, street), null, city, state, zip, country, null), house, street);
+
+    private static Task<AddressValidation> Run(Case c, FakePostcodeLookup? lookup = null, int priorRetries = 0)
     {
         var l = lookup ?? new FakePostcodeLookup();
-        return AddressValidator.ValidateAsync(a, priorRetries, l.IsConfigured, (z, ct) => l.FindAsync(z, ct), CancellationToken.None);
+        return AddressValidator.ValidateAsync(c.A, c.House, c.Street, priorRetries, l.IsConfigured, (z, ct) => l.FindAsync(z, ct), CancellationToken.None);
     }
 
     [Fact]
     public async Task Missing_parts_are_reported_before_any_network_call()
     {
         var l = new FakePostcodeLookup();
-        var v = await Run(Addr(line1: "Mazel Lane", city: "", state: " "), l);
+        var v = await Run(Addr(house: "", city: "", state: " "), l);
         Assert.Equal(AddressStatus.Incomplete, v.Status);
         Assert.Equal(["house_number", "city", "state"], v.Missing.Select(m => m.Field));
         Assert.Equal("Still needed: the house number, the city and the state.", v.Message);
         Assert.Empty(l.Calls);                                                                                        // not a single lookup
         Assert.False(v.CanSaveWithoutConfirmation);
-        Assert.Equal(["street", "zip"], (await Run(Addr(line1: "12", zip: null), l)).Missing.Select(m => m.Field));    // a line with only a number has no street
+        Assert.Equal(["street", "zip"], (await Run(Addr(street: "", zip: null), l)).Missing.Select(m => m.Field));    // a number with no street has no street
         Assert.Empty(l.Calls);
     }
 
@@ -150,21 +153,38 @@ public class AddressValidationTests
         Assert.Equal("Brooklyn", third.Normalized!.City); Assert.Equal("", third.Message);
         var unknown = await Run(Addr(zip: "00001"), priorRetries: 2);
         Assert.True(unknown.ProceededAfterRetries); Assert.Equal(AddressStatus.Inconsistent, unknown.Status); Assert.Equal("12 Mazel Lane", unknown.Normalized!.Line1);
-        var incomplete = await Run(Addr(line1: "Mazel Lane"), priorRetries: 9);
+        var incomplete = await Run(Addr(house: ""), priorRetries: 9);
         Assert.False(incomplete.ProceededAfterRetries); Assert.Equal(AddressStatus.Incomplete, incomplete.Status);   // never for an incomplete address
     }
 
-    [Fact]
-    public void The_shape_rule_is_one_function_a_line_is_split_into_house_number_and_street()
+    [Theory]
+    [InlineData("12", "Mazel Lane", "12 Mazel Lane")]
+    [InlineData("123-45", "Main St", "123-45 Main St")]      // Queens
+    [InlineData("12B", "Oak Ave", "12B Oak Ave")]
+    [InlineData("1/2", "Elm St", "1/2 Elm St")]
+    [InlineData("One", "Main St", "One Main St")]          // spelled out
+    [InlineData("  12 ", "  Mazel   Lane ", "12 Mazel Lane")]
+    public async Task The_house_number_and_the_street_are_separate_arguments_every_form_of_number_is_complete_and_is_stored_as_one_line(string house, string street, string stored)
     {
-        Assert.Equal(("12", "Mazel Lane"), AddressShape.SplitLine("12 Mazel Lane"));
-        Assert.Equal(("12B", "Oak Ave"), AddressShape.SplitLine("12B Oak Ave"));
-        Assert.Equal(("", "Mazel Lane"), AddressShape.SplitLine("Mazel Lane"));
-        Assert.Equal(("12", ""), AddressShape.SplitLine("12"));
-        Assert.Equal(("", ""), AddressShape.SplitLine(null));
+        Assert.Equal(stored, AddressShape.Line1(house, street));
+        var c = Addr(house, street);
+        Assert.Empty(AddressShape.Check(c.A, c.House, c.Street));
+        Assert.Equal(AddressStatus.Valid, (await Run(c)).Status);
+        Assert.Equal(stored, (await Run(c)).Normalized!.Line1);
+    }
+
+    [Fact]
+    public void The_shape_rule_is_one_function_and_a_missing_house_number_or_street_is_named()
+    {
         Assert.Empty(AddressShape.Check("12", "Mazel Lane", "Albany", "NY", "12207"));
         Assert.Equal(["house_number", "street", "city", "state", "zip"], AddressShape.Check(null, "", " ", null, "").Select(m => m.Field));
         Assert.Equal("must be five digits", Assert.Single(AddressShape.Check("12", "Mazel Lane", "Albany", "NY", "1220")).Problem);
+        // an edit that gives neither keeps the stored line, which only has to exist; giving one of the two needs the other
+        var stored = Addr().A;
+        Assert.Empty(AddressShape.Check(stored, null, null));
+        Assert.Equal(["street"], AddressShape.Check(stored with { Line1 = " " }, null, null).Select(m => m.Field));
+        Assert.Equal(["house_number"], AddressShape.Check(stored, null, "Mazel Lane").Select(m => m.Field));
+        Assert.Equal(["street"], AddressShape.Check(stored, "12", null).Select(m => m.Field));
     }
 
     [Fact]
@@ -173,7 +193,7 @@ public class AddressValidationTests
         string[] forbidden = ["api", "database", "lookup", "endpoint", "google", "geocod", "places", "shippo", "tool", "system", "server", "vendor"];
         var l = new FakePostcodeLookup();
         var messages = new List<string>();
-        foreach (var a in new[] { Addr(line1: "Mazel Lane"), Addr(city: ""), Addr(state: ""), Addr(zip: ""), Addr(zip: "123"), Addr(line1: "12"), Addr(city: "x", zip: "33034"), Addr(zip: "00001"), Addr(city: "Brooklyn") })
+        foreach (var a in new[] { Addr(house: ""), Addr(city: ""), Addr(state: ""), Addr(zip: ""), Addr(zip: "123"), Addr(street: ""), Addr(city: "x", zip: "33034"), Addr(zip: "00001"), Addr(city: "Brooklyn") })
             messages.Add((await Run(a, l)).Message);
         foreach (var m in AddressShape.Check(null, null, null, null, "12").Concat(AddressShape.Check("1", "a", "b", "c", null))) messages.Add(AddressShape.Say([m]));
         Assert.Contains(messages, m => m.Length > 0);

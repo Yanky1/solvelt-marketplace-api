@@ -153,10 +153,10 @@ public sealed class SetDeliveryAddressTool(MarketplaceDb db, ZipResolver zips, I
     public JsonObject Definition => ToolKit.Def(Name, "Take a new delivery address as the caller spelled it. The server validates it and gives you the text to read back; then call confirm_address once the caller agrees.",
         new JsonObject
         {
-            ["street"] = ToolKit.Prop("string", "House number and street."), ["apartment"] = ToolKit.Prop("string", "Apartment, suite or floor, if any."), ["city"] = ToolKit.Prop("string", "City."),
+            ["house_number"] = ToolKit.Prop("string", "The house number alone, exactly as said: 12, 123-45, 12B, 1/2 or One."), ["street"] = ToolKit.Prop("string", "The street name alone, without the house number, for example Main St."), ["apartment"] = ToolKit.Prop("string", "Apartment, suite or floor, if any."), ["city"] = ToolKit.Prop("string", "City."),
             ["state"] = ToolKit.Prop("string", "Two-letter state code, for example NY."), ["postal_code"] = ToolKit.Prop("string", "ZIP or postal code."), ["country"] = ToolKit.Prop("string", "Two-letter country code; US if the caller did not say."),
             ["recipient_name"] = ToolKit.Prop("string", "Only if the delivery is for someone other than the caller."),
-        }, "street", "city", "state", "postal_code");
+        }, "house_number", "street", "city", "state", "postal_code");
 
     public async Task<VoiceToolResult> RunAsync(VoiceToolContext ctx, JsonElement args, CancellationToken ct)
     {
@@ -164,12 +164,14 @@ public sealed class SetDeliveryAddressTool(MarketplaceDb db, ZipResolver zips, I
         if (s.Level == CallerLevel.Anonymous) return ToolKit.Error("need_identity", "Before taking an address, verify the caller with identify_caller (a guest is fine).");
         var name = await CheckoutAccess.NameAsync(s, db, ToolKit.Str(args, "recipient_name"), ct);
         if (name is null) return ToolKit.Error("need_name", "Ask the caller's name and record it with set_guest_name first.");
-        var addr = new CheckoutAddress(name, ToolKit.Str(args, "street"), ToolKit.Str(args, "apartment"), ToolKit.Str(args, "city"), ToolKit.Str(args, "state")?.Trim().ToUpperInvariant(),
+        var house = ToolKit.Str(args, "house_number") ?? "";   // separate arguments (V-63): a line is never split to find a number
+        var street = ToolKit.Str(args, "street") ?? "";
+        var addr = new CheckoutAddress(name, AddressShape.Line1(house, street), ToolKit.Str(args, "apartment"), ToolKit.Str(args, "city"), ToolKit.Str(args, "state")?.Trim().ToUpperInvariant(),
             ToolKit.Str(args, "postal_code"), (ToolKit.Str(args, "country") ?? "US").Trim().ToUpperInvariant(), s.VerifiedPhone);
         var errors = CheckoutService.Validate(addr, null);
         if (errors.Count == 0 && addr.Country == "US" && !UsStates.Codes.Contains(addr.Region ?? "")) errors = new Dictionary<string, string> { ["address.region"] = "state" };
         if (errors.Count > 0) return ToolKit.Json(new JsonObject { ["error"] = "invalid_address", ["problems"] = new JsonArray(CheckoutAccess.Problems(errors).Select(p => (JsonNode)p).ToArray()), ["instruction"] = "Ask the caller again for the parts that are wrong, one at a time." });
-        var gate = await AddressGate.RunAsync(s, addr, zips, postcode, log, ct);   // V-63: complete? does the ZIP agree? never saved without the caller's yes
+        var gate = await AddressGate.RunAsync(s, addr, house, street, zips, postcode, log, ct);   // V-63: complete? does the ZIP agree? never saved without the caller's yes
         if (gate.Refusal is not null) return gate.Refusal;
         addr = gate.Address!;
         s.SetDeliveryAddress(addr, confirmed: false, CheckoutAccess.AddressLabel(addr));

@@ -394,7 +394,7 @@ public class VoiceOrderStatusTests
         await Verify(s);
         await s.Tool("set_guest_name", new { name = "Dana Levi" });
         await s.Tool("set_guest_email", new { email = "dana.levi@example.com" }); await s.Tool("confirm_guest_email");
-        await s.Tool("set_delivery_address", new { street = "1 Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }); await s.Tool("confirm_address");
+        await s.Tool("set_delivery_address", new { house_number = "1", street = "Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }); await s.Tool("confirm_address");
         await s.Tool("read_back_order"); await s.EndStreamAfterGoodbye(); await s.AfterStream();
         var (_, token) = await s.Type("1"); await s.Attach(token);
         await s.Tool("pay_for_order"); await s.EndStreamAfterGoodbye(); await s.AfterStream();

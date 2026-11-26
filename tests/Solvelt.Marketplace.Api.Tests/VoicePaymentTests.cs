@@ -10,7 +10,7 @@ namespace Solvelt.Marketplace.Api.Tests;
 /// <summary>Order placement and payment by phone through the fake provider (slice 4, decision V-06). Nothing real is connected: the fake takes no card.</summary>
 public class VoicePaymentTests
 {
-    private static object Address => new { street = "1 Main St", apartment = "4B", city = "Brooklyn", state = "NY", postal_code = "11201" };
+    private static object Address => new { house_number = "1", street = "Main St", apartment = "4B", city = "Brooklyn", state = "NY", postal_code = "11201" };
 
     private static Dictionary<string, string?> Fake(Dictionary<string, string?>? extra = null)
     {

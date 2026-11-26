@@ -83,7 +83,7 @@ public class VoiceSavedCardPayTests
         var (_, t1) = await s.Type(s.LastCode()); await s.Attach(t1);
         await s.Tool("search_products", new { query = "classic braided challah" });
         await s.Tool("add_to_cart", new { position = 1, option_position = 1, quantity = 2 });
-        await s.Tool("set_delivery_address", new { street = "1 Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }); await s.Tool("confirm_address");
+        await s.Tool("set_delivery_address", new { house_number = "1", street = "Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }); await s.Tool("confirm_address");
         Assert.Equal("reading_back", (await s.Tool("read_back_order"))["status"]!.GetValue<string>());
         await s.EndStreamAfterGoodbye(); await s.AfterStream();
         var (_, t2) = await s.Type("1"); await s.Attach(t2);
