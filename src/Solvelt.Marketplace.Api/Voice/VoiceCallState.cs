@@ -198,6 +198,16 @@ public sealed class VoiceCallState
         lock (_gate) { DeliveryAddress = address; AddressConfirmed = confirmed; Selections = []; Choices = []; Quote = null; AddressLabel = label; Version++; OrderChangedLocked(); }
     }
 
+    /// <summary>The address checks of this call (decision V-63): corrections or inconsistencies so far (the cap is <see cref="AddressValidator.MaxAttempts"/>), whether an address was taken as given after them, the street searches made, and the ZIP codes asked about (city and state, this call only).</summary>
+    public int AddressRetries { get; private set; }
+    public bool AddressProceededAfterRetries { get; private set; }
+    public int StreetLookups { get; private set; }
+    private readonly Dictionary<string, ZipInfo> _zips = new();
+    public int CountAddressRetry() { lock (_gate) return ++AddressRetries; }
+    public void SetAddressProceeded() { lock (_gate) AddressProceededAfterRetries = true; }
+    public int CountStreetLookup() { lock (_gate) return ++StreetLookups; }
+    public ZipInfo? Zip(string zip5) { lock (_gate) return _zips.GetValueOrDefault(zip5); }
+    public void RememberZip(string zip5, ZipInfo info) { lock (_gate) { if (_zips.Count < 20) _zips[zip5] = info; } }
     public void ConfirmAddress() { lock (_gate) { if (DeliveryAddress is not null) AddressConfirmed = true; } }
 
     public void SetChoices(IReadOnlyList<DeliveryChoice> choices) { lock (_gate) Choices = choices; }

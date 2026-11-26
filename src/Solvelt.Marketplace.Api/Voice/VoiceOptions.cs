@@ -70,6 +70,8 @@ public sealed class VoiceOptions
     public int SupportMessageRetentionDays { get; set; } = 90;
     /// <summary>The pay callback the caller can ask for (decision V-60). On by default but only ever offered when the telephone payment provider and the SignalWire call settings are all there.</summary>
     public VoicePayCallbackOptions PayCallback { get; set; } = new();
+    /// <summary><c>Voice:Google</c>: the key for the street search and the ZIP code check (decision V-63). Secret: environment only (<c>Voice__Google__MapsApiKey</c>).</summary>
+    public GoogleVoiceOptions Google { get; set; } = new();
     /// <summary>The test-line menu to compare voice pipelines (decision V-19). Off by default.</summary>
     public VoicePipelineMenuOptions PipelineMenu { get; set; } = new();
     /// <summary>Which vendors run options p2 to p5 and the text model they share (decision V-22). Nothing is on by default.</summary>
@@ -92,6 +94,11 @@ public sealed class VoiceOptions
     public NBestOptions NBest { get; set; } = new();
     /// <summary>The recorded recognition test set (decision V-46): where the audio is kept and whether the owner's test numbers may record it. Off by default.</summary>
     public Solvelt.Marketplace.Api.Voice.TestSet.TestSetOptions TestSet { get; set; } = new();
+}
+
+public sealed class GoogleVoiceOptions
+{
+    public string MapsApiKey { get; set; } = "";     // secret
 }
 
 /// <summary><c>Voice:PayCallback</c> (decision V-60): the callback the caller asks for to pay a placed, unpaid order on the keypad.</summary>
