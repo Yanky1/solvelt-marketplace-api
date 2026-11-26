@@ -108,7 +108,7 @@ public class ReplayFollowUpTests
     {
         const int cap = 262144;
         using var f = new TestFactory();
-        f.UseKestrel();                                   // a real Kestrel server, a real socket: there is no declared length for the early check to see
+        f.UseKestrel(0);                                  // (port 0: the system picks a free port, so no other test can hold it) a real Kestrel server, a real socket: there is no declared length for the early check to see
         f.StartServer();
         var address = f.CreateClient().BaseAddress!;
         var baseLen = Encoding.UTF8.GetByteCount(Body("chunkA", "big.type", T0, new { pad = "" }));

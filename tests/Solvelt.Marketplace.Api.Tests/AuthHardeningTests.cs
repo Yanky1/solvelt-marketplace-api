@@ -508,7 +508,7 @@ public class AuthHardeningTests
     public async Task A_chunked_body_over_the_cap_is_cut_off_while_it_is_read_over_a_real_socket()
     {
         using var f = new TestFactory(new() { ["Auth:PasswordIterations"] = "1000", ["RateLimits:AuthPerMinute"] = "10000" });
-        f.UseKestrel();
+        f.UseKestrel(0);   // port 0: the system picks a free port, so no other test can hold it
         f.StartServer();
         var address = f.CreateClient().BaseAddress!;
         async Task<int> Post(int bytes)
