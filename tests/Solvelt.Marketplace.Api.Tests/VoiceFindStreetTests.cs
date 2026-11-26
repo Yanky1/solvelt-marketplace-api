@@ -30,7 +30,7 @@ public class VoiceFindStreetTests
 
     private static string Code(JsonNode n) => n["error"]?.GetValue<string>() ?? n["status"]?.GetValue<string>() ?? n.ToJsonString();
     private static IReadOnlyList<string> Names(VoiceScenario s) => s.F.Services.GetRequiredService<VoiceToolRunner>().Definitions().Select(t => t!["name"]!.GetValue<string>()).ToList();
-    private static object Take(string line = "12 Mazel Lane", string city = "Albany", string zip = "12207", string state = "NY") => new { street = line, city, state, postal_code = zip };
+    private static object Take(string house = "12", string street = "Mazel Lane", string city = "Albany", string zip = "12207", string state = "NY") => new { house_number = house, street, city, state, postal_code = zip };
 
     [Fact]
     public async Task Without_the_key_find_street_is_not_offered_and_is_refused_but_check_address_and_the_usual_flow_work()
@@ -152,6 +152,38 @@ public class VoiceFindStreetTests
         Assert.Null(plain["message"]);
     }
 
+    [Theory]
+    [InlineData("123-45", "Main St", "123-45 Main St")]      // Queens: a hyphenated number
+    [InlineData("12B", "Oak Ave", "12B Oak Ave")]
+    [InlineData("1/2", "Elm St", "1/2 Elm St")]
+    [InlineData("One", "Main St", "One Main St")]          // a number said in words
+    public async Task Every_form_of_house_number_is_taken_as_given_and_stored_with_the_street_as_one_line(string house, string street, string stored)
+    {
+        using var s = await Guest(new FakePostcodeLookup(), null);
+        var r = await s.Tool("set_delivery_address", Take(house, street));
+        Assert.Equal("read_back_needed", Code(r));
+        Assert.Null(r["message"]);                                                                                      // nothing was "corrected": the line was never split
+        Assert.Equal(stored, s.State().DeliveryAddress!.Line1);
+        Assert.Equal("confirmed", Code(await s.Tool("confirm_address")));
+        Assert.Equal("incomplete_address", Code(await s.Tool("set_delivery_address", Take("", street))));              // the number alone is what is missing
+        Assert.Equal("incomplete_address", Code(await s.Tool("set_delivery_address", Take(house, ""))));
+        Assert.Equal(stored, s.State().DeliveryAddress!.Line1);                                                         // a refused address changes nothing
+    }
+
+    [Fact]
+    public async Task The_tool_definitions_take_house_number_and_street_separately()
+    {
+        using var s = await Guest(new FakePostcodeLookup(), null);
+        foreach (var name in new[] { "set_delivery_address", "manage_saved_address" })
+        {
+            var d = s.F.Services.GetRequiredService<VoiceToolRunner>().Definitions().Single(t => t!["name"]!.GetValue<string>() == name)!;
+            var props = d["parameters"]!["properties"]!.AsObject();
+            Assert.True(props.ContainsKey("house_number")); Assert.True(props.ContainsKey("street"));
+        }
+        var req = s.F.Services.GetRequiredService<VoiceToolRunner>().Definitions().Single(t => t!["name"]!.GetValue<string>() == "set_delivery_address")!["parameters"]!["required"]!.AsArray().Select(x => x!.GetValue<string>());
+        Assert.Contains("house_number", req); Assert.Contains("street", req);
+    }
+
     [Fact]
     public async Task An_unknown_zip_is_not_saved_and_after_two_tries_the_address_as_given_goes_on_to_the_read_back_but_an_incomplete_one_never_does()
     {
@@ -193,8 +225,8 @@ public class VoiceFindStreetTests
         await s.Tool("identify_caller"); await s.EndStreamAfterGoodbye(); await s.AfterStream();
         var (_, token) = await s.Type(s.LastCode()); await s.Attach(token);
         Assert.Equal("incomplete_address", Code(await s.Tool("manage_saved_address", new { action = "add", street = "Mazel Lane", city = "Albany", state = "NY", postal_code = "12207" })));
-        Assert.Equal("inconsistent_address", Code(await s.Tool("manage_saved_address", new { action = "add", street = "12 Mazel Lane", city = "Albany", state = "NY", postal_code = "00001" })));
-        var r = await s.Tool("manage_saved_address", new { action = "add", street = "12 Mazel Lane", city = "Brooklyn", state = "NY", postal_code = "12207" });
+        Assert.Equal("inconsistent_address", Code(await s.Tool("manage_saved_address", new { action = "add", house_number = "12", street = "Mazel Lane", city = "Albany", state = "NY", postal_code = "00001" })));
+        var r = await s.Tool("manage_saved_address", new { action = "add", house_number = "12", street = "Mazel Lane", city = "Brooklyn", state = "NY", postal_code = "12207" });
         Assert.Equal("reading_back", Code(r));
         await s.EndStreamAfterGoodbye();
         var said = (await s.AfterStream()).Element("Gather")!.Element("Say")!.Value;

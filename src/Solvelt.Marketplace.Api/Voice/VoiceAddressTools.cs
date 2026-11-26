@@ -25,9 +25,9 @@ public static class AddressGate
     /// Runs the check (decision V-63). Incomplete and inconsistent addresses are refused (and the latter counted); a corrected one goes on with Google's city and state, to be read back and confirmed; after
     /// <see cref="AddressValidator.MaxAttempts"/> corrections the address as given goes on (recorded as <c>proceeded_after_retries</c>; never for an incomplete one). Nothing here saves anything: the caller's yes does.
     /// </summary>
-    public static async Task<AddressGateResult> RunAsync(VoiceCallState s, CheckoutAddress address, ZipResolver zips, IPostcodeLookup postcode, ILogger log, CancellationToken ct)
+    public static async Task<AddressGateResult> RunAsync(VoiceCallState s, CheckoutAddress address, string? houseNumber, string? street, ZipResolver zips, IPostcodeLookup postcode, ILogger log, CancellationToken ct)
     {
-        var v = await AddressValidator.ValidateAsync(address, s.AddressRetries, postcode.IsConfigured, (zip, c) => zips.ResolveAsync(s, zip, c), ct);
+        var v = await AddressValidator.ValidateAsync(address, houseNumber, street, s.AddressRetries, postcode.IsConfigured, (zip, c) => zips.ResolveAsync(s, zip, c), ct);
         if (v.ProceededAfterRetries)
         {
             s.SetAddressProceeded();

@@ -14,7 +14,7 @@ namespace Solvelt.Marketplace.Api.Tests;
 public class VoiceAccountTests
 {
     private const string Email = "jane@example.com", Number = "+15551234567", Other = "+15557654321";
-    private static object Address => new { street = "1 Main St", apartment = "4B", city = "Brooklyn", state = "NY", postal_code = "11201" };
+    private static object Address => new { house_number = "1", street = "Main St", apartment = "4B", city = "Brooklyn", state = "NY", postal_code = "11201" };
 
     private static async Task Verify(VoiceScenario s)
     {
@@ -105,10 +105,10 @@ public class VoiceAccountTests
     {
         using var s = new VoiceScenario();
         await s.Dial();                                                                                    // anonymous: nothing proven yet
-        foreach (var (tool, args) in new (string, object)[] { ("create_account", new { name = "Dana Levi" }), ("change_my_name", new { name = "Dana Levi" }), ("manage_saved_address", new { action = "add", street = "1 Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }), ("change_my_phone", new { new_number = Other }), ("text_me_account_link", new { topic = "password" }) })
+        foreach (var (tool, args) in new (string, object)[] { ("create_account", new { name = "Dana Levi" }), ("change_my_name", new { name = "Dana Levi" }), ("manage_saved_address", new { action = "add", house_number = "1", street = "Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }), ("change_my_phone", new { new_number = Other }), ("text_me_account_link", new { topic = "password" }) })
             Assert.Equal("need_verification", (await s.Tool(tool, args))["error"]!.GetValue<string>());
         await Verify(s);                                                                                   // a verified GUEST has no account to edit
-        foreach (var (tool, args) in new (string, object)[] { ("change_my_name", new { name = "Dana Levi" }), ("manage_saved_address", new { action = "add", street = "1 Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }), ("change_my_phone", new { new_number = Other }) })
+        foreach (var (tool, args) in new (string, object)[] { ("change_my_name", new { name = "Dana Levi" }), ("manage_saved_address", new { action = "add", house_number = "1", street = "Main St", city = "Brooklyn", state = "NY", postal_code = "11201" }), ("change_my_phone", new { new_number = Other }) })
             Assert.Equal("need_verification", (await s.Tool(tool, args))["error"]!.GetValue<string>());
         Assert.Empty(await s.K.Db(db => db.BuyerAccounts.AsNoTracking().ToListAsync()));
         Assert.Null(s.State().KeypadStep);
@@ -204,11 +204,11 @@ public class VoiceAccountTests
         var (s, jane) = await AccountCall();
         using (s)
         {
-            var add = await ReadBack(s, "manage_saved_address", new { action = "add", street = "1 Main St", apartment = "4B", city = "Brooklyn", state = "NY", postal_code = "11201" });
+            var add = await ReadBack(s, "manage_saved_address", new { action = "add", house_number = "1", street = "Main St", apartment = "4B", city = "Brooklyn", state = "NY", postal_code = "11201" });
             Assert.Contains("add this address", add); Assert.Contains("Brooklyn", add);
             Assert.Empty(await Addresses(s, jane));
             Assert.Equal(VoiceScripts.AccountSaved, await Answer(s, "1"));
-            await ReadBack(s, "manage_saved_address", new { action = "add", street = "20 Elm St", city = "Albany", state = "NY", postal_code = "12207" });
+            await ReadBack(s, "manage_saved_address", new { action = "add", house_number = "20", street = "Elm St", city = "Albany", state = "NY", postal_code = "12207" });
             await Answer(s, "1");
             var saved = await Addresses(s, jane);
             Assert.Equal(new[] { "1 Main St", "20 Elm St" }, saved.Select(a => a.Line1).ToArray());
@@ -242,7 +242,7 @@ public class VoiceAccountTests
         var (s, jane) = await AccountCall();
         using (s)
         {
-            var r = await s.Tool("manage_saved_address", new { action = "add", street = "1 Main St", city = "Brooklyn", state = "ZZ", postal_code = "11201" });
+            var r = await s.Tool("manage_saved_address", new { action = "add", house_number = "1", street = "Main St", city = "Brooklyn", state = "ZZ", postal_code = "11201" });
             Assert.Equal("invalid_address", r["error"]!.GetValue<string>());
             Assert.Null(s.State().KeypadStep);
             Assert.Empty(await Addresses(s, jane));
@@ -406,7 +406,7 @@ public class VoiceAccountTests
         using (s)
         {
             await ConfirmReadBack(s);
-            await s.Tool("set_delivery_address", new { street = "9 Oak Ave", city = "Brooklyn", state = "NY", postal_code = "11201" });
+            await s.Tool("set_delivery_address", new { house_number = "9", street = "Oak Ave", city = "Brooklyn", state = "NY", postal_code = "11201" });
             await s.Tool("confirm_address");
             Assert.NotEqual(ConfirmationStatus.Confirmed, s.State().Confirmation);
             Assert.True((await s.Tool("pay_for_order", new { method = "keypad" }))["error"] is not null);   // not payable on the old read-back
@@ -428,7 +428,7 @@ public class VoiceAccountTests
             await s.Tool("list_saved_addresses");
             await s.Tool("change_cart", new { line_position = 1, quantity = 1 });                          // "go back": fewer
             await s.Tool("change_cart", new { line_position = 1, quantity = 2 });                          // "actually 2"
-            await ReadBack(s, "manage_saved_address", new { action = "add", street = "20 Elm St", city = "Albany", state = "NY", postal_code = "12207" }); await Answer(s, "2");   // started, then "cancel that"
+            await ReadBack(s, "manage_saved_address", new { action = "add", house_number = "20", street = "Elm St", city = "Albany", state = "NY", postal_code = "12207" }); await Answer(s, "2");   // started, then "cancel that"
             Assert.Empty(await Addresses(s, jane));
             await s.Tool("set_delivery_address", Address); await s.Tool("confirm_address");                // switch back to delivery
             var total = (await s.Tool("get_delivery_options")).ToJsonString();

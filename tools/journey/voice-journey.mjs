@@ -190,7 +190,7 @@ async function main() {
     const email = `voice-${run}@example.test`;
     check(!(await tool("set_guest_email", { email })).error, "the email is taken");
     check(!(await tool("confirm_guest_email")).error, "the email is confirmed");
-    const addr = await tool("set_delivery_address", { street: "1 Main St", apartment: "4B", city: "Brooklyn", state: "NY", postal_code: "11201" });
+    const addr = await tool("set_delivery_address", { house_number: "1", street: "Main St", apartment: "4B", city: "Brooklyn", state: "NY", postal_code: "11201" });
     check(addr.status === "read_back_needed", `the address needs a read-back (${JSON.stringify(addr).slice(0, 160)})`);
     check(!(await tool("confirm_address")).error, "the address is confirmed");
     const options = await tool("get_delivery_options");

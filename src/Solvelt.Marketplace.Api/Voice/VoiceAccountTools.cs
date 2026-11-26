@@ -170,7 +170,7 @@ public sealed class ManageSavedAddressTool(AccountService accounts, ZipResolver 
         new JsonObject
         {
             ["action"] = ToolKit.Prop("string", "One of: add, edit, remove, set_default."), ["position"] = ToolKit.Prop("integer", "Position in the list just read out (edit, remove, set_default)."),
-            ["street"] = ToolKit.Prop("string", "House number and street (add, edit)."), ["apartment"] = ToolKit.Prop("string", "Apartment, suite or floor."), ["city"] = ToolKit.Prop("string", "City."),
+            ["house_number"] = ToolKit.Prop("string", "The house number alone, exactly as said: 12, 123-45, 12B, 1/2 or One (add, edit)."), ["street"] = ToolKit.Prop("string", "The street name alone, without the house number (add, edit). Give both together when the street changes."), ["apartment"] = ToolKit.Prop("string", "Apartment, suite or floor."), ["city"] = ToolKit.Prop("string", "City."),
             ["state"] = ToolKit.Prop("string", "Two-letter state code."), ["postal_code"] = ToolKit.Prop("string", "ZIP or postal code."), ["country"] = ToolKit.Prop("string", "Two-letter country code; US if not said."),
         }, "action");
 
@@ -194,16 +194,19 @@ public sealed class ManageSavedAddressTool(AccountService accounts, ZipResolver 
         if (action == "set_default") return AccountTalk.ReadingBack(s, new AccountChangeRequest("address_default", $"I will make the saved address {spoken} your default." + AccountTalk.Ask, AddressId: current!.Id));
 
         var profile = await accounts.GetProfileAsync(id, ct);
-        var addr = new CheckoutAddress(current?.FullName ?? profile?.DisplayName, ToolKit.Str(args, "street") ?? current?.Line1, ToolKit.Str(args, "apartment") ?? current?.Line2, ToolKit.Str(args, "city") ?? current?.City,
+        var house = ToolKit.Str(args, "house_number");   // separate arguments (V-63): both or neither; neither keeps the stored line as it is
+        var street = ToolKit.Str(args, "street");
+        var line1 = house is null && street is null ? current?.Line1 : AddressShape.Line1(house, street);
+        var addr = new CheckoutAddress(current?.FullName ?? profile?.DisplayName, line1, ToolKit.Str(args, "apartment") ?? current?.Line2, ToolKit.Str(args, "city") ?? current?.City,
             (ToolKit.Str(args, "state") ?? current?.Region)?.Trim().ToUpperInvariant(), ToolKit.Str(args, "postal_code") ?? current?.PostalCode, (ToolKit.Str(args, "country") ?? current?.Country ?? "US").Trim().ToUpperInvariant(), current?.Phone ?? s.VerifiedPhone);
         var errors = CheckoutService.Validate(addr, null);
         if (errors.Count == 0 && addr.Country == "US" && !UsStates.Codes.Contains(addr.Region ?? "")) errors = new Dictionary<string, string> { ["address.region"] = "state" };
         if (errors.Count > 0) return ToolKit.Json(new JsonObject { ["error"] = "invalid_address", ["problems"] = new JsonArray(CheckoutAccess.Problems(errors).Select(p => (JsonNode)p).ToArray()), ["instruction"] = "Ask the caller again for the parts that are wrong, then call this tool again." });
-        var changed = ToolKit.Str(args, "street") is not null || ToolKit.Str(args, "city") is not null || ToolKit.Str(args, "postal_code") is not null || ToolKit.Str(args, "state") is not null;
+        var changed = house is not null || street is not null || ToolKit.Str(args, "city") is not null || ToolKit.Str(args, "postal_code") is not null || ToolKit.Str(args, "state") is not null;
         if (changed)
         {
             // V-63: the same check as for a delivery address, only when the address itself changes (an apartment alone is not re-checked); Google's city and state are what is read back
-            var gate = await AddressGate.RunAsync(s, addr, zips, postcode, log, ct);
+            var gate = await AddressGate.RunAsync(s, addr, house, street, zips, postcode, log, ct);
             if (gate.Refusal is not null) return gate.Refusal;
             addr = gate.Address!;
         }
