@@ -360,8 +360,9 @@ public sealed class PhoneSmsAfterTheAnswerTests : IDisposable
     private sealed class BlockingSms : ISmsSender
     {
         public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Calls;
-        public async Task<bool> SendAsync(string toE164, string body, CancellationToken ct) { Interlocked.Increment(ref Calls); await Release.Task.WaitAsync(ct); return true; }
+        public async Task<bool> SendAsync(string toE164, string body, CancellationToken ct) { Interlocked.Increment(ref Calls); Entered.TrySetResult(); await Release.Task.WaitAsync(ct); return true; }
     }
     private readonly BlockingSms _sms = new();
     private readonly AuthKit _k;
@@ -374,6 +375,9 @@ public sealed class PhoneSmsAfterTheAnswerTests : IDisposable
         using (var scope = _k.F.Services.CreateScope())
             await scope.ServiceProvider.GetRequiredService<PhoneAccountService>().CreateAsync("Dana Levi", "+17185550142", default);
         var start = _k.Post("/api/v1/auth/phone/start", new { phone = "+17185550142" });
+        // The window below measures only what this test is about: the answer after the provider call began. The time a start takes to REACH the sender (a cold host, a busy runner) is not the property
+        // and is not timed against it: main CI run 636 failed here with the request still on its way to the database after 10 s, long before any send.
+        await _sms.Entered.Task.WaitAsync(TimeSpan.FromMinutes(2));
         var done = await Task.WhenAny(start, Task.Delay(TimeSpan.FromSeconds(10)));
         Assert.Same(start, done);                                       // answered although the sender is still blocked
         Assert.Equal(HttpStatusCode.Accepted, (await start).StatusCode);
