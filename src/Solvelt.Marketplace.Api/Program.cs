@@ -130,12 +130,13 @@ builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.AccountPhoneVerifier>()
 if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBaseUrl"])) builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.InMemorySmsSender>();   // an SMS sink (the journey) makes development send over HTTP instead
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.ISmsSender, Solvelt.Marketplace.Api.Voice.SignalWireSmsSender>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.InProcessCatalog>(sp => new Solvelt.Marketplace.Api.Voice.InProcessCatalog(sp));
-// the pay callback the caller can ask for (decision V-60): signed tokens, the call placer (a fake in development without a SignalWire address, as for texts), the service, the dispatcher and the tool
-// address help for the telephone line (decision V-61): vendor-neutral lookup; the Google adapter is a stub awaiting vendor facts, so address help stays off (one warning) and the address flow is unchanged
-if (string.IsNullOrWhiteSpace(builder.Configuration["Voice:Google:MapsApiKey"])) builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IAddressLookup, Solvelt.Marketplace.Api.Voice.NotConfiguredAddressLookup>();
-else builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IAddressLookup, Solvelt.Marketplace.Api.Voice.GoogleAddressLookup>();
+// address help for the telephone line (decision V-61): vendor-neutral lookup; the Google adapter (V-62) needs Voice:Google:MapsApiKey; without it address help stays off (one warning) and the address flow is unchanged
+// always registered: whether it is configured is decided when it is used (the key is read from the options then, so a key added by any configuration source counts); without a key address help is off with one warning
+builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.AddressLookupState>();
+builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IAddressLookup, Solvelt.Marketplace.Api.Voice.GoogleAddressLookup>(c => c.Timeout = TimeSpan.FromSeconds(5));   // a bounded wait; no retry (a caller is waiting)
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.SuggestAddressTool>();
 builder.Services.AddScoped<Solvelt.Marketplace.Api.Voice.IVoiceTool, Solvelt.Marketplace.Api.Voice.UseSuggestedAddressTool>();
+// the pay callback the caller can ask for (decision V-60): signed tokens, the call placer (a fake in development without a SignalWire address, as for texts), the service, the dispatcher and the tool
 builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.PayCallbackTokens>();
 if (devLike && string.IsNullOrWhiteSpace(builder.Configuration["SignalWire:ApiBaseUrl"])) { builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>(); builder.Services.AddSingleton<Solvelt.Marketplace.Api.Voice.IOutboundCaller>(sp => sp.GetRequiredService<Solvelt.Marketplace.Api.Voice.FakeOutboundCaller>()); }
 else builder.Services.AddHttpClient<Solvelt.Marketplace.Api.Voice.IOutboundCaller, Solvelt.Marketplace.Api.Voice.SignalWireOutboundCaller>();

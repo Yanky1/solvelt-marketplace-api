@@ -8,11 +8,11 @@ namespace Solvelt.Marketplace.Api.Voice;
 /// <summary>The parts of an address as a lookup gives them back. Any part can be empty in a suggestion; a resolved address has the street, city, state and ZIP.</summary>
 public sealed record AddressParts(string Line1, string City, string Region, string PostalCode, string Country = "US");
 
-/// <summary>One suggestion: an opaque id that only the lookup that made it understands (never given to the model) and what is known about the address so far.</summary>
-public sealed record AddressSuggestion(string Id, AddressParts Preview);
+/// <summary>One suggestion: <see cref="Secondary"/> is the rest of how the lookup describes it (for example the city and state) when it gave no separate parts; an opaque id that only the lookup that made it understands (never given to the model) and what is known about the address so far.</summary>
+public sealed record AddressSuggestion(string Id, AddressParts Preview, string? Secondary = null);
 
 /// <summary>What the caller said so far, and the ZIP if they gave one. Nothing else about the caller (no name, number, account or order) is ever part of a lookup.</summary>
-public sealed record AddressQuery(string Text, string? PostalCode);
+public sealed record AddressQuery(string Text, string? PostalCode, string? Session = null);
 
 /// <summary>
 /// Address help for the telephone line (decision V-61), independent of any vendor: suggest addresses from a few spoken words and resolve a chosen suggestion to its parts. An adapter must send nothing but the
@@ -25,8 +25,12 @@ public interface IAddressLookup
     bool IsConfigured { get; }
     /// <summary>Why it is not configured, for the one start-up warning. Never holds a key.</summary>
     string? UnavailableReason { get; }
+    /// <summary>What the assistant must say before the first suggestion because of the vendor's terms (for example "According to Google Maps"), or null.</summary>
+    string? Attribution { get; }
+    /// <summary><paramref name="query"/>'s <see cref="AddressQuery.Session"/> is an opaque key for ONE capture attempt in one call; the adapter may use it to group requests (and must not send it to the vendor).</summary>
     Task<IReadOnlyList<AddressSuggestion>> SuggestAsync(AddressQuery query, CancellationToken ct);
-    Task<AddressParts?> ResolveAsync(string suggestionId, CancellationToken ct);
+    /// <summary>The full parts of a chosen suggestion; <paramref name="session"/> is the same key, and the attempt ends here.</summary>
+    Task<AddressParts?> ResolveAsync(string suggestionId, string? session, CancellationToken ct);
 }
 
 /// <summary>The default: no lookup. Address help is off and the line takes addresses the usual way.</summary>
@@ -34,21 +38,9 @@ public sealed class NotConfiguredAddressLookup : IAddressLookup
 {
     public bool IsConfigured => false;
     public string? UnavailableReason => "Voice:Google:MapsApiKey is not set";
+    public string? Attribution => null;
     public Task<IReadOnlyList<AddressSuggestion>> SuggestAsync(AddressQuery query, CancellationToken ct) => throw new InvalidOperationException("Address help is not configured.");
-    public Task<AddressParts?> ResolveAsync(string suggestionId, CancellationToken ct) => throw new InvalidOperationException("Address help is not configured.");
-}
-
-/// <summary>
-/// The Google adapter, NOT BUILT YET: awaiting vendor facts. The request and response shapes, endpoints, field names, session rules, billing and terms of use (what may be shown or stored) are to be taken from Google's
-/// own documentation, which could not be read when this was written (developers.google.com was refused by the network), and are not written from memory. Until then a key being set changes nothing: the lookup reports
-/// itself unavailable and says why in the one start-up warning.
-/// </summary>
-public sealed class GoogleAddressLookup : IAddressLookup
-{
-    public bool IsConfigured => false;
-    public string? UnavailableReason => "Voice:Google:MapsApiKey is set but the Google adapter is not built yet (awaiting vendor facts)";
-    public Task<IReadOnlyList<AddressSuggestion>> SuggestAsync(AddressQuery query, CancellationToken ct) => throw new NotSupportedException("Awaiting vendor facts.");
-    public Task<AddressParts?> ResolveAsync(string suggestionId, CancellationToken ct) => throw new NotSupportedException("Awaiting vendor facts.");
+    public Task<AddressParts?> ResolveAsync(string suggestionId, string? session, CancellationToken ct) => throw new InvalidOperationException("Address help is not configured.");
 }
 
 /// <summary>The one warning, once per process (the V-26 rule: a missing piece makes a feature unavailable with one warning, never a start-up failure).</summary>
@@ -80,6 +72,13 @@ public static class AddressHelp
     public static AddressParts Clean(AddressParts p) => new(Clean(p.Line1), Clean(p.City, 60), Clean(p.Region, 2).ToUpperInvariant(), new string(Clean(p.PostalCode, 10).Where(c => char.IsAsciiDigit(c) || c == '-').ToArray()), Clean(p.Country, 2).ToUpperInvariant());
 
     /// <summary>How a suggestion is said aloud: the same speech rules as every other address read-back (numbers as words, the state by name).</summary>
+    public static string SpokenSuggestion(AddressSuggestion s)
+    {
+        if (s.Preview.City.Length > 0) return Spoken(s.Preview);
+        var tail = (s.Secondary ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(x => VoiceSpeech.Street(Clean(x, 60))).Where(x => x.Length > 0);
+        return string.Join(", ", new[] { VoiceSpeech.Street(s.Preview.Line1) }.Concat(tail));
+    }
+
     public static string Spoken(AddressParts p) => VoiceSpeech.Address(new CheckoutAddress(null, p.Line1, null, p.City, p.Region, p.PostalCode, p.Country, null));
 
     public static string? CleanPostal(string? postal)
@@ -109,22 +108,24 @@ public sealed class SuggestAddressTool(IAddressLookup lookup, ILogger<SuggestAdd
         if (text.Length < 3) return ToolKit.Error("too_short", "Ask the caller for a little more of the address: the house number and the start of the street.");
         if (s.CountAddressLookup() > AddressHelp.MaxLookupsPerCall) return Fallback("too_many", "That is enough tries: take the address the usual way with set_delivery_address.");
         IReadOnlyList<AddressSuggestion> found;
-        try { found = await lookup.SuggestAsync(new AddressQuery(text, AddressHelp.CleanPostal(ToolKit.Str(args, "postal_code"))), ct); }
+        try { found = await lookup.SuggestAsync(new AddressQuery(text, AddressHelp.CleanPostal(ToolKit.Str(args, "postal_code")), ctx.CallId.ToString("N")), ct); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning("An address lookup failed ({Type}).", ex.GetType().Name);   // the type only: never the query, never the vendor's words
             return Fallback("address_help_failed", "Address help is not available just now: take the address the usual way with set_delivery_address.");
         }
-        var kept = found.Where(f => !string.IsNullOrWhiteSpace(f.Id) && f.Id.Length <= 400).Take(AddressHelp.MaxSuggestions).Select(f => new AddressSuggestion(f.Id, AddressHelp.Clean(f.Preview))).Where(f => f.Preview.Line1.Length > 0).ToList();
+        var kept = found.Where(f => !string.IsNullOrWhiteSpace(f.Id) && f.Id.Length <= 400).Take(AddressHelp.MaxSuggestions).Select(f => new AddressSuggestion(f.Id, AddressHelp.Clean(f.Preview), f.Secondary is null ? null : AddressHelp.Clean(f.Secondary, 80))).Where(f => f.Preview.Line1.Length > 0).ToList();
         s.SetAddressSuggestions(kept);
         if (kept.Count == 0) return ToolKit.Json(new JsonObject { ["status"] = "none_found", ["instruction"] = "Say you could not find it, and take the address the usual way with set_delivery_address." });
         var arr = new JsonArray();
-        for (var i = 0; i < kept.Count; i++) arr.Add(new JsonObject { ["position"] = i + 1, ["spoken"] = AddressHelp.Spoken(kept[i].Preview) });
-        return ToolKit.Json(new JsonObject
+        for (var i = 0; i < kept.Count; i++) arr.Add(new JsonObject { ["position"] = i + 1, ["spoken"] = AddressHelp.SpokenSuggestion(kept[i]) });
+        var result = new JsonObject
         {
             ["status"] = "found", ["suggestions"] = arr,
             ["instruction"] = "Read the first one only, exactly as in spoken, and ask if that is the address. If the caller says no, read the next. When the caller says yes, call use_suggested_address with its position (and the apartment if they have one). If none is right, take the address the usual way with set_delivery_address. Never say an address that is not in this list.",
-        });
+        };
+        if (lookup.Attribution is { } credit) { result["attribution"] = credit; result["instruction"] = result["instruction"]!.GetValue<string>() + $" Before the first one say \"{credit}\"."; }
+        return ToolKit.Json(result);
     }
 
     private static VoiceToolResult Fallback(string code, string instruction) => ToolKit.Error(code, instruction);
@@ -134,7 +135,7 @@ public sealed class SuggestAddressTool(IAddressLookup lookup, ILogger<SuggestAdd
 /// <c>use_suggested_address</c> (decision V-61): the caller said yes to one of the suggestions just read out. The lookup gives its full parts and they go through EXACTLY the same checks as an address the caller spelled,
 /// and are held UNCONFIRMED: the caller still hears the whole address read back and must agree (<c>confirm_address</c>) before anything depends on it. An address the caller did not agree to is never kept as confirmed.
 /// </summary>
-public sealed class UseSuggestedAddressTool(IAddressLookup lookup, MarketplaceDb db, ILogger<UseSuggestedAddressTool> log) : IConditionalVoiceTool
+public sealed class UseSuggestedAddressTool(IAddressLookup lookup, MarketplaceDb db, Microsoft.Extensions.Options.IOptions<VoiceOptions> options, ILogger<UseSuggestedAddressTool> log) : IConditionalVoiceTool
 {
     public bool IsAvailable => lookup.IsConfigured;
     public string Name => "use_suggested_address";
@@ -149,7 +150,7 @@ public sealed class UseSuggestedAddressTool(IAddressLookup lookup, MarketplaceDb
         var pos = ToolKit.Int(args, "position", 0);
         if (pos < 1 || pos > suggestions.Count) return ToolKit.Error("no_such_position", "Read the suggestions first with suggest_address, then use the one the caller said yes to.");
         AddressParts? parts;
-        try { parts = await lookup.ResolveAsync(suggestions[pos - 1].Id, ct); }
+        try { parts = await lookup.ResolveAsync(suggestions[pos - 1].Id, ctx.CallId.ToString("N"), ct); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning("An address lookup failed ({Type}).", ex.GetType().Name);
@@ -158,6 +159,15 @@ public sealed class UseSuggestedAddressTool(IAddressLookup lookup, MarketplaceDb
         if (parts is null) return ToolKit.Error("address_help_failed", "That address could not be completed: take it the usual way with set_delivery_address.");
         var clean = AddressHelp.Clean(parts);
         s.SetAddressSuggestions([]);   // a suggestion is used once
+        if (!options.Value.Google.AllowSaveConfirmedAddress)
+        {
+            // OWNER / LEGAL DECISION not yet made (V-62): the lookup only HELPS. The server does not copy the lookup's address into the order; the assistant reads it, and only the caller's yes lets the assistant enter it the usual way.
+            return ToolKit.Json(new JsonObject
+            {
+                ["status"] = "confirm_with_caller", ["spoken"] = AddressHelp.Spoken(clean), ["street"] = clean.Line1, ["city"] = clean.City, ["state"] = clean.Region, ["postal_code"] = clean.PostalCode,
+                ["instruction"] = "Read the address to the caller exactly as in spoken and ask if that is right (and for an apartment). Only if they say yes, take it the usual way: call set_delivery_address with exactly these parts, plus the apartment. If they correct anything, use what THEY say. Then the usual read-back and confirm_address.",
+            });
+        }
         return await SetDeliveryAddressTool.TakeAsync(s, db, clean.Line1, ToolKit.Str(args, "apartment"), clean.City, clean.Region, clean.PostalCode, clean.Country, ToolKit.Str(args, "recipient_name"), ct);
     }
 }

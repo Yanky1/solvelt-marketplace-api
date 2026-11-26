@@ -19,9 +19,9 @@ public class VoiceAddressHelpTests
         return f;
     }
 
-    private static async Task<VoiceScenario> Guest(IAddressLookup? lookup)
+    private static async Task<VoiceScenario> Guest(IAddressLookup? lookup, bool allowSave = true)
     {
-        var s = new VoiceScenario(services: sv => { if (lookup is not null) { sv.RemoveAll<IAddressLookup>(); sv.AddSingleton(lookup); } });
+        var s = new VoiceScenario(config: new() { ["Voice:Google:AllowSaveConfirmedAddress"] = allowSave ? "true" : "false" }, services: sv => { if (lookup is not null) { sv.RemoveAll<IAddressLookup>(); sv.AddSingleton(lookup); } });
         await s.SyncCatalog(); s.PortalShipping();
         await s.Dial();
         await s.Tool("search_products", new { query = "classic braided challah" });
@@ -52,14 +52,13 @@ public class VoiceAddressHelpTests
     }
 
     [Fact]
-    public void A_missing_or_unbuilt_lookup_makes_one_warning_once_and_only_when_the_voice_line_is_on()
+    public void A_missing_lookup_makes_one_warning_once_and_only_when_the_voice_line_is_on()
     {
         AddressHelpStartup.Reset();
         var log = new ListLogger();
         AddressHelpStartup.WarnOnce(new NotConfiguredAddressLookup(), voiceEnabled: false, log);
         Assert.Empty(log.Lines);
         AddressHelpStartup.WarnOnce(new NotConfiguredAddressLookup(), voiceEnabled: true, log);
-        AddressHelpStartup.WarnOnce(new GoogleAddressLookup(), voiceEnabled: true, log);
         AddressHelpStartup.WarnOnce(new NotConfiguredAddressLookup(), voiceEnabled: true, log);
         var line = Assert.Single(log.Lines);
         Assert.Contains("not available", line); Assert.Contains("Voice:Google:MapsApiKey", line);
@@ -67,11 +66,6 @@ public class VoiceAddressHelpTests
         var configured = new ListLogger();
         AddressHelpStartup.WarnOnce(new FakeAddressLookup(), voiceEnabled: true, configured);
         Assert.Empty(configured.Lines);
-        AddressHelpStartup.Reset();
-        var google = new ListLogger();
-        AddressHelpStartup.WarnOnce(new GoogleAddressLookup(), voiceEnabled: true, google);
-        Assert.Contains("awaiting vendor facts", Assert.Single(google.Lines));                                        // a key without the adapter says so, and still changes nothing
-        Assert.False(new GoogleAddressLookup().IsConfigured);
         AddressHelpStartup.Reset();
     }
 
@@ -115,6 +109,39 @@ public class VoiceAddressHelpTests
         Assert.Equal("confirmed", Err(await s.Tool("confirm_address")));                                              // only the caller's agreement to the read-back
         Assert.True(s.State().AddressConfirmed);
         Assert.Equal("no_such_position", Err(await s.Tool("use_suggested_address", new { position = 1 })));           // a suggestion is used once
+    }
+
+    [Fact]
+    public async Task With_the_save_decision_not_taken_the_lookup_only_helps_the_server_copies_nothing_and_the_caller_enters_the_confirmed_address_the_usual_way()
+    {
+        var fake = Lookup(Main);
+        fake.Attribution = "According to Google Maps";
+        using var s = await Guest(fake, allowSave: false);
+        var found = await s.Tool("suggest_address", new { text = "12 Mazel" });
+        Assert.Equal("According to Google Maps", found["attribution"]!.GetValue<string>());                              // the credit, spoken before the first suggestion
+        Assert.Contains("According to Google Maps", found["instruction"]!.GetValue<string>());
+        var used = await s.Tool("use_suggested_address", new { position = 1 });
+        Assert.Equal("confirm_with_caller", used["status"]!.GetValue<string>());
+        Assert.Equal(("12 Mazel Lane", "Brooklyn", "NY", "11201"), (used["street"]!.GetValue<string>(), used["city"]!.GetValue<string>(), used["state"]!.GetValue<string>(), used["postal_code"]!.GetValue<string>()));
+        Assert.Contains("set_delivery_address", used["instruction"]!.GetValue<string>());
+        Assert.Null(s.State().DeliveryAddress);                                                                           // the server stored nothing from the lookup
+        Assert.False(s.State().AddressConfirmed);
+        Assert.Equal("read_back_needed", Err(await s.Tool("set_delivery_address", new { street = "12 Mazel Lane", apartment = "4B", city = "Brooklyn", state = "NY", postal_code = "11201" })));   // the caller's own confirmed entry, the usual path
+        Assert.Equal("address_not_confirmed", Err(await s.Tool("get_delivery_options")));
+        Assert.Equal("no_such_position", Err(await s.Tool("use_suggested_address", new { position = 1 })));                // still used once
+        var plain = Lookup(Main);                                                                                          // no credit configured: none said
+        using var s2 = await Guest(plain);
+        Assert.Null((await s2.Tool("suggest_address", new { text = "12 Mazel" }))["attribution"]);
+    }
+
+    [Fact]
+    public async Task A_google_style_suggestion_is_read_as_the_street_then_the_rest_with_numbers_as_words()
+    {
+        var fake = new FakeAddressLookup { Suggestions = _ => [new AddressSuggestion("g1", new AddressParts("1245 Main Street", "", "", ""), "Brooklyn, NY 11201, USA")] };
+        using var s = await Guest(fake);
+        var spoken = (await s.Tool("suggest_address", new { text = "1245 main" }))["suggestions"]![0]!["spoken"]!.GetValue<string>();
+        Assert.Equal("twelve forty-five Main Street, Brooklyn, NY one one two zero one, USA", spoken);
+        Assert.DoesNotMatch(@"\d", spoken);
     }
 
     [Fact]

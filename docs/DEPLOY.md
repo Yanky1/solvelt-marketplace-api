@@ -156,6 +156,11 @@ Off by default. Turn it on only with every setting below. The full design, limit
 | `Sola__PayConnectorKey` | **yes** | 32+ characters |
 | `Sola__SavedCardKey` | **yes** | 32+ characters. It encrypts saved-card tokens: **losing it makes every saved card unreadable**, so back it up like a database key |
 | `Sola__TimeoutSeconds` | no | optional, 5 to 60, default 20 |
+| `Voice__Google__MapsApiKey` | **yes** | optional: turns on address help (suggestions for the delivery address). A key for a Google Cloud project with billing and **Places API (New)** enabled; restrict it to this server's IP addresses and to Places API (New) only (Google's recommendation); never in a web client. Without it address help is off with one warning. See the paragraph below |
+| `Voice__Google__AllowSaveConfirmedAddress` | no | `false` (default) until the owner/legal confirm Google's terms allow saving the caller-confirmed address; see below |
+| `Voice__Google__SpokenAttribution` | no | `true` (default): the first suggestion is introduced with "According to Google Maps" |
+
+**Address help (Google Places).** Off until `Voice__Google__MapsApiKey` is set. It uses the Places API (New) only (the legacy API cannot be enabled for new projects). Two owner decisions are open and are NOT made in code: (1) Google's terms say Places content must not be stored beyond the allowed exceptions and the pages read do not say whether the caller-confirmed street address may be saved into an order or account (the Service Specific Terms decide: ask counsel); until you say so `AllowSaveConfirmedAddress` stays `false`, and the suggestion only helps the caller (the assistant reads it, the caller says yes, and the address is entered the usual way); (2) whether spoken use needs the attribution. Billing: each address attempt in a call is one session of autocomplete requests ending in one Place Details request for Essentials fields only. Customers with an EEA billing address have different terms: check them. The facts and the open points are in docs/agent-briefs/google-places-facts.md.
 
 ### On the pay connector host (`src/Solvelt.PayConnector`, a separate service with its own secret store)
 

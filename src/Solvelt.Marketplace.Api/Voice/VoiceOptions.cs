@@ -99,6 +99,10 @@ public sealed class VoiceOptions
 public sealed class GoogleVoiceOptions
 {
     public string MapsApiKey { get; set; } = "";     // secret
+    /// <summary>OWNER / LEGAL DECISION (V-62), default false. Google's terms say Places content must not be stored beyond stated exceptions, and whether the caller-confirmed street address may be saved is not stated on the pages read ("consult your legal counsel"). False: the lookup only HELPS the caller (the assistant reads the address, the caller says yes, and the assistant takes it through the usual set_delivery_address like any address the caller gives). True: the server copies the confirmed address from the lookup into the order itself.</summary>
+    public bool AllowSaveConfirmedAddress { get; set; }
+    /// <summary>OWNER DECISION (V-62), default true: the first suggestion is introduced with "According to Google Maps" (the terms require attribution where Places data is shown; for spoken use the pages say nothing, so the conservative choice).</summary>
+    public bool SpokenAttribution { get; set; } = true;
 }
 
 /// <summary><c>Voice:PayCallback</c> (decision V-60): the callback the caller asks for to pay a placed, unpaid order on the keypad.</summary>
